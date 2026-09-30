@@ -2189,6 +2189,8 @@ app.post('/api/v1/bookings/:id/start', requireAuth, asyncHandler(async (req, res
         [booking.passenger_id], { journey_id: linkedLeg.rows[0].journey_id, journey_leg_id: linkedLeg.rows[0].id, state: 'ACTIVE' });
       await insertRealtimeOutbox(client, 'journey.leg.started', `journey.leg.started:${linkedLeg.rows[0].id}`,
         [booking.passenger_id], { journey_id: linkedLeg.rows[0].journey_id, journey_leg_id: linkedLeg.rows[0].id, booking_id: booking.id, state: 'ACTIVE' });
+      await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:start:${linkedLeg.rows[0].id}`,
+        [booking.passenger_id], { journey_id: linkedLeg.rows[0].journey_id, journey_leg_id: linkedLeg.rows[0].id, booking_id: booking.id, state: 'ACTIVE' });
     }
     await client.query('COMMIT');
     res.json({ data: { id: booking.id, status: 'in_progress' } });
@@ -2247,6 +2249,10 @@ app.post('/api/v1/bookings/:id/complete', requireAuth, asyncHandler(async (req, 
           nextLeg.rows[0] ? `journey.transfer:${currentLeg.journey_id}:${nextLeg.rows[0].id}` : `journey.completed:${currentLeg.journey_id}`,
           [booking.passenger_id], { journey_id: currentLeg.journey_id, journey_leg_id: nextLeg.rows[0]?.id ?? currentLeg.id,
             booking_id: booking.id, state: nextLeg.rows[0] ? 'TRANSFER' : 'COMPLETED' });
+        if (!nextLeg.rows[0]) {
+          await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:completed:${currentLeg.journey_id}`,
+            [booking.passenger_id], { journey_id: currentLeg.journey_id, journey_leg_id: currentLeg.id, booking_id: booking.id, state: 'COMPLETED' });
+        }
       }
     } else {
       await insertRealtimeOutbox(client, 'booking.changed', `booking.changed:${booking.id}:completion-confirmed:${req.userId}`,

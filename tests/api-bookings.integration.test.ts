@@ -329,6 +329,11 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(completedJourney.rows[0].leg_state, 'COMPLETED');
     assert.ok(completedJourney.rows[0].completed_at);
     assert.ok(completedJourney.rows[0].actual_arrival_at);
+    const completionUpdates = await pool.query<{ state: string }>(
+      `SELECT payload->>'state' AS state FROM realtime_outbox WHERE event_type='journey.updated'
+       AND payload->>'journey_id'=$1 ORDER BY created_at,id`, [completionJourney.id],
+    );
+    assert.deepEqual(completionUpdates.rows.map((row) => row.state), ['READY','ACTIVE','COMPLETED']);
 
     const disabledCommunity = await fetch(`${apiUrl}/api/v1/journeys/search`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
