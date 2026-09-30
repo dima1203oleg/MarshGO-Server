@@ -11,6 +11,7 @@ The PostgreSQL schema is managed by ordered SQL migrations in `server/migrations
 | Marketplace | `offers`, `bookings`, `booking_events`, `booking_completion_confirmations`, `reviews` | Offer points and optional road LineString use SRID 4326; prices are integer minor units; capacity is checked; booking idempotency is unique per passenger; state transitions and two-party completion confirmations are persisted; reviews require completed bookings. |
 | Demand | `passenger_demands`, `proposals`, `proposal_revisions` | Time window and passenger bounds; total/per-seat budget basis, notes, JSON requirements; immutable price/time and driver-agreement revisions; one accepted proposal per demand. |
 | Navigation | `navigation_sessions`, `navigation_match_candidates`, `navigation_waypoints` | Owner-only current GPS and road route; opt-in candidates; candidate-bound proposal provenance; agreed pickup/dropoff persisted in order with booking and route version. One matched passenger per route session. |
+| Journeys | `journeys`, `journey_legs`, `journey_preferences` | Owner-scoped persistent plans; PostGIS WGS84 endpoints; checked strategy/state/mode/price status; ordered legs may reference existing Offer/Booking/Demand/NavigationCandidate records; ETA uncertainty and unknown reliability remain nullable; provider freshness and preference bounds are persisted. Initial API planner only creates direct Community-offer legs. |
 | Messaging | `conversations`, `conversation_members`, `messages` | Conversation membership binds access to booking participants; message bodies have length constraints. |
 | Realtime delivery | `realtime_outbox` | Chat, booking and proposal event plus recipient snapshot commit in the corresponding domain transaction; unique dedupe key; leased `SKIP LOCKED` delivery, exponential retry and published state; published payloads are pruned after seven days. |
 | Safety | `moderation_cases` | Private booking-linked report, derived counterpart, reviewer, bounded resolution action/note, terminal state and queue indexes; partial uniqueness prevents duplicate open reports for one booking. |
@@ -28,6 +29,8 @@ The PostgreSQL schema is managed by ordered SQL migrations in `server/migrations
 * `008_demand_details.sql` — passenger budget basis, notes, and JSON requirement flags.
 * `014_realtime_outbox.sql` — transactional realtime event outbox with recipient IDs, deduplication, worker lease/retry state, and retention index.
 * `015_moderation_cases.sql` — private booking-scoped reports, reviewer assignment, decision constraints, and queue indexes.
+* `019_booking_fee_snapshot.sql` — immutable Community fee classification/snapshot on bookings.
+* `020_journeys.sql` — Journey plans, ordered multimodal leg contract, route/transfer freshness, and persisted planning preferences.
 
 ## Not yet modeled or incomplete
 

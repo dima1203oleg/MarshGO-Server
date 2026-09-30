@@ -45,11 +45,12 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       SELECT user_id, 'passenger' FROM unnest($1::uuid[]) AS user_id`, [ids.passengers]);
     await pool.query(`INSERT INTO vehicles(id,owner_id,make,model,model_year,seat_count)
       VALUES ($1,$2,'Test','Vehicle',2024,4)`, [ids.vehicle, ids.driver]);
-    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,departure_at,price_per_seat_minor,total_seats,available_seats)
+    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
       VALUES ($1,$2,$3,'API Test Origin','API Test Destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
         ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
-        now()+interval '10 days',15000,1,1)`, [ids.offer, ids.driver, ids.vehicle]);
+        ST_MakeLine(ST_SetSRID(ST_MakePoint(24.0,49.0),4326),ST_SetSRID(ST_MakePoint(25.0,50.0),4326)),
+        now()+interval '10 days',now()+interval '10 days 1 hour',140000,3600,'osrm',15000,1,1)`, [ids.offer, ids.driver, ids.vehicle]);
     await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,departure_at,price_per_seat_minor,total_seats,available_seats)
       VALUES ($1,$2,$3,'Expired API Test Origin','Expired API Test Destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
@@ -62,6 +63,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     await pool.query('DELETE FROM vehicles WHERE owner_id IN (SELECT id FROM users WHERE phone_e164 LIKE $1)', [`+38099${process.pid}%`]);
     await pool.query('DELETE FROM users WHERE phone_e164 LIKE $1', [`+38099${process.pid}%`]);
     await pool.query('DELETE FROM sessions WHERE user_id = ANY($1::uuid[])', [[ids.driver, ...ids.passengers]]);
+    await pool.query('DELETE FROM journeys WHERE user_id = ANY($1::uuid[])', [[ids.driver, ...ids.passengers]]);
     await pool.query('DELETE FROM verification_records WHERE user_id = ANY($1::uuid[]) OR id=ANY($2::uuid[])', [[ids.driver, ...ids.passengers, ids.admin], verificationIds]);
     await pool.query('DELETE FROM otp_challenges WHERE phone_e164 LIKE $1', [`+38099${process.pid}%`]);
     await pool.query("DELETE FROM audit_events WHERE actor_id = ANY($1::uuid[]) AND action IN ('vehicle.created','offer.created','demand.created','demand.cancelled','proposal.created','proposal.countered','proposal.agreed','proposal.accepted','user.blocked','user.unblocked')", [[ids.driver, ...ids.passengers]]);
@@ -154,6 +156,52 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(oldRefresh.status, 401);
     const oldAccess = await fetch(`${apiUrl}/api/v1/users/me`, { headers: { authorization: `Bearer ${refreshBody.data.accessToken}` } });
     assert.equal(oldAccess.status, 401);
+  });
+
+  it('searches real Community offer snapshots and persists representative Journey alternatives', async () => {
+    const body = {
+      origin: { name: 'API Test Origin', coordinates: [24, 49] },
+      destination: { name: 'API Test Destination', coordinates: [25, 50] },
+      departureAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000 - 60_000).toISOString(),
+      passengers: 1,
+      strategy: 'CHEAPEST',
+      preferences: { allowCommunity: true, maxPriceMinor: 20000 },
+    };
+    const unauthorized = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const response = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA }, body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 200);
+    const result = await response.json() as { data: { partial: boolean; blockedProviders: string[]; journeys: Array<{ id: string; offerId: string; strategy: string; confirmedPriceMinor: number | null; totalPriceMinor: number; legs: Array<{ mode: string; priceStatus: string; availabilityStatus: string }> }> } };
+    assert.equal(result.data.partial, true);
+    assert.ok(result.data.blockedProviders.includes('bus'));
+    assert.equal(result.data.journeys.length, 1);
+    const [journey] = result.data.journeys;
+    assert.equal(journey.offerId, ids.offer);
+    assert.equal(journey.strategy, 'CHEAPEST');
+    assert.equal(journey.confirmedPriceMinor, null);
+    assert.equal(journey.totalPriceMinor, 15000);
+    assert.deepEqual(journey.legs.map((leg) => [leg.mode, leg.priceStatus, leg.availabilityStatus]), [['COMMUNITY', 'ESTIMATED', 'AVAILABLE']]);
+    const stored = await pool.query<{ state: string; price_minor: number; offer_id: string }>(
+      `SELECT j.state,l.price_minor,l.offer_id FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 AND j.user_id=$2`, [journey.id, passengerA],
+    );
+    assert.deepEqual(stored.rows[0], { state: 'PLANNED', price_minor: 15000, offer_id: ids.offer });
+    const history = await fetch(`${apiUrl}/api/v1/journeys/me`, { headers: { 'x-dev-user-id': passengerA } });
+    assert.equal((await history.json() as { data: Array<{ id: string }> }).data[0].id, journey.id);
+    const owned = await fetch(`${apiUrl}/api/v1/journeys/${journey.id}`, { headers: { 'x-dev-user-id': passengerA } });
+    assert.equal(owned.status, 200);
+    const privateJourney = await fetch(`${apiUrl}/api/v1/journeys/${journey.id}`, { headers: { 'x-dev-user-id': passengerB } });
+    assert.equal(privateJourney.status, 404);
+
+    const disabledCommunity = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
+      body: JSON.stringify({ ...body, preferences: { allowCommunity: false } }),
+    });
+    assert.equal((await disabledCommunity.json() as { data: { journeys: unknown[] } }).data.journeys.length, 0);
   });
 
   it('allows exactly one of 20 concurrent accounts to book the last seat and cancels idempotently', async () => {

@@ -17,6 +17,14 @@ Offer search and `/offers/mine` include `vehicle_photo_url` only when the primar
 
 `GET /api/v1/offers/mine` requires the driver role and returns only the caller's own offers with current seat counts and statuses.
 
+## Journeys (initial Community-only slice)
+
+* `POST /api/v1/journeys/search` requires authentication and accepts named WGS84 origin/destination points, a future timezone-aware `departureAt`, passenger count, strategy (`FASTEST`, `CHEAPEST`, `BALANCED`, `PREMIUM`, `RELIABLE`, or `CUSTOM`), and bounded preferences. It persists owner-scoped Journey records and representative JourneyLegs from actual, published Community offers whose stored road geometry, duration, distance, route source, future schedule, and seat inventory are present. The search uses PostGIS endpoint proximity and server-side strategy scoring. It excludes the caller's own offer, inactive/expired offers, missing or development-only routes, insufficient seats, offers beyond the two-hour departure window, and options outside the price/time/rating preferences.
+* The response reports door-to-door elapsed time from requested departure through offer arrival, current offer price as an estimate, `confirmedPriceMinor: null` until a booking exists, last checked inventory time, and `partial: true` with blocked provider modes. It does not fabricate bus, taxi, rail, walking, transfer, or public-transport inventory. Unknown journey reliability/comfort and unmeasured ETA uncertainty remain null rather than being presented as scores.
+* `GET /api/v1/journeys/me` lists the caller's persisted plans; `GET /api/v1/journeys/:id` returns a single plan only to its owner (404 for another user's plan). Booking remains an explicit call to the existing Offer booking flow; a planned Journey does not reserve a seat.
+
+The provider interface, Journey strategy scorer, route similarity suppression, and transfer uncertainty engine are server modules. This first search joins only one direct Community leg per result; it does not yet optimize walks, transfers, future community matches, provider calls, or live re-planning. Commercial providers remain external blockers.
+
 `POST /api/v1/vehicles` (driver role) creates a vehicle record without accepting or returning a full license plate. The first car becomes active; later cars do not replace it. New vehicles remain pending until the authorized verification workflow approves both registration and driver licence evidence.
 
 `GET /api/v1/vehicles` lists only the caller's non-archived vehicles. `PATCH /api/v1/vehicles/:id` edits only an owned vehicle. `POST /api/v1/vehicles/:id/activate` atomically switches the active vehicle. `DELETE /api/v1/vehicles/:id` archives only when it has no future published trip.

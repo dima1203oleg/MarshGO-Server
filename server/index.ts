@@ -11,6 +11,9 @@ import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
 import { calculatePlatformFee } from './fees';
 import { validateRuntimeConfig } from './config';
+import { parseJourneySearchRequest } from './journey/search';
+import { selectRepresentativeJourneys } from './journey/scoring';
+import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { GeocodingUnavailableError, suggestPlaces } from './geocoding';
 import {
   createVehiclePhotoUpload, createVerificationEvidenceUpload, deleteStoredVehiclePhoto, getVehiclePhotoUrl,
@@ -1107,6 +1110,169 @@ app.get('/api/v1/offers', asyncHandler(async (req, res) => {
   res.json({ data: await Promise.all(rows.map(async ({ vehicle_photo_key, ...offer }) => ({
     ...offer, vehicle_photo_url: vehicle_photo_key ? await getVehiclePhotoUrl(vehicle_photo_key).catch(() => null) : null,
   }))) });
+}));
+
+const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
+       json_build_array(ST_X(j.origin::geometry),ST_Y(j.origin::geometry)) AS origin_coordinates,
+       json_build_array(ST_X(j.destination::geometry),ST_Y(j.destination::geometry)) AS destination_coordinates,
+       j.requested_departure_at,j.requested_arrival_at,j.strategy,j.state,j.passenger_count,j.total_price_minor,
+       j.confirmed_price_minor,j.estimated_price_min_minor,j.estimated_price_max_minor,j.total_duration_s,
+       j.walking_distance_m,j.transfer_count,j.reliability_score,j.comfort_score,j.current_leg_id,j.created_at,j.updated_at,
+       COALESCE(json_agg(json_build_object(
+         'id',l.id,'ordinal',l.ordinal,'mode',l.mode,'originName',l.origin_name,'originCoordinates',
+         json_build_array(ST_X(l.origin::geometry),ST_Y(l.origin::geometry)),'destinationName',l.destination_name,
+         'destinationCoordinates',json_build_array(ST_X(l.destination::geometry),ST_Y(l.destination::geometry)),
+         'departureAt',l.scheduled_departure_at,'arrivalAt',l.scheduled_arrival_at,'durationSeconds',l.duration_s,
+         'distanceMeters',l.distance_m,'priceMinor',l.price_minor,'priceMinMinor',l.price_min_minor,
+         'priceMaxMinor',l.price_max_minor,'currency',l.currency,'priceStatus',l.price_status,
+         'availabilityStatus',l.availability_status,'providerType',l.provider_type,'offerId',l.offer_id,
+         'bookingId',l.booking_id,'demandId',l.demand_id,'state',l.state,'dataSource',l.data_source,
+         'lastUpdatedAt',l.last_updated_at,'metadata',l.metadata
+       ) ORDER BY l.ordinal) FILTER (WHERE l.id IS NOT NULL),'[]'::json) AS legs
+  FROM journeys j LEFT JOIN journey_legs l ON l.journey_id=j.id`;
+
+app.get('/api/v1/journeys/me', requireAuth, asyncHandler(async (req, res) => {
+  const { rows } = await pool.query(`${journeySelect} WHERE j.user_id=$1 GROUP BY j.id ORDER BY j.updated_at DESC LIMIT 50`, [req.userId]);
+  res.json({ data: rows });
+}));
+
+app.get('/api/v1/journeys/:id', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid Journey ID', 'invalid_journey_id');
+  }
+  const { rows } = await pool.query(`${journeySelect} WHERE j.user_id=$1 AND j.id=$2 GROUP BY j.id`, [req.userId, req.params.id]);
+  if (!rows[0]) throw new ApiError(404, 'Journey not found');
+  res.json({ data: rows[0] });
+}));
+
+app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) => {
+  let search;
+  try {
+    search = parseJourneySearchRequest(req.body);
+  } catch (error) {
+    if (error instanceof TypeError) throw new ApiError(400, error.message, 'invalid_journey_search');
+    throw error;
+  }
+  if (search.preferences.allowCommunity === false) {
+    res.json({ data: { journeys: [], partial: true, blockedProviders: ['community-disabled','taxi','bus','minibus','rail','public-transport','carsharing','transfer'], providerErrors: [] } });
+    return;
+  }
+
+  const { rows } = await pool.query<{
+    offer_id: string; driver_id: string; driver_name: string; vehicle_id: string;
+    origin_name: string; destination_name: string; origin_lon: number; origin_lat: number;
+    destination_lon: number; destination_lat: number; departure_at: Date; arrival_at: Date | null;
+    duration_s: number; distance_m: number; route_source: string; price_per_seat_minor: number;
+    currency: string; available_seats: number; average_rating: number | null; review_count: number;
+    vehicle_make: string; vehicle_model: string; created_at: Date; snapshot_at: Date;
+  }>(
+    `SELECT o.id AS offer_id,o.driver_id,u.display_name AS driver_name,o.vehicle_id,
+            o.origin_name,o.destination_name,ST_X(o.origin::geometry) AS origin_lon,ST_Y(o.origin::geometry) AS origin_lat,
+            ST_X(o.destination::geometry) AS destination_lon,ST_Y(o.destination::geometry) AS destination_lat,
+            o.departure_at,o.arrival_at,o.duration_s,o.distance_m,o.route_source,o.price_per_seat_minor,o.currency,o.available_seats,
+            ratings.average_rating,ratings.review_count,v.make AS vehicle_make,v.model AS vehicle_model,o.created_at,now() AS snapshot_at
+       FROM offers o JOIN users u ON u.id=o.driver_id JOIN vehicles v ON v.id=o.vehicle_id
+       LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true
+      WHERE o.status='published' AND o.departure_at >= $5 AND o.departure_at <= $5::timestamptz+interval '120 minutes'
+        AND o.available_seats >= $6 AND o.driver_id<>$7 AND o.route IS NOT NULL
+        AND o.duration_s IS NOT NULL AND o.duration_s>0 AND o.distance_m IS NOT NULL AND o.distance_m>0
+        AND o.route_source IS NOT NULL AND o.route_source<>'development_unrouted'
+        AND ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,25000)
+        AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,25000)
+        AND o.departure_at>now()
+      ORDER BY o.departure_at ASC LIMIT 100`,
+    [search.origin.coordinates[0], search.origin.coordinates[1], search.destination.coordinates[0], search.destination.coordinates[1], search.departureAt, search.passengers, req.userId],
+  );
+
+  const candidates = rows.flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number }> => {
+    if (search.preferences.preferredVehicleClass) return [];
+    const arrivalAt = offer.arrival_at ?? new Date(offer.departure_at.getTime() + offer.duration_s * 1000);
+    const durationSeconds = Math.ceil((arrivalAt.getTime() - search.departureAt.getTime()) / 1000);
+    const totalPriceMinor = Number(offer.price_per_seat_minor) * search.passengers;
+    const rating = offer.average_rating === null ? null : Number(offer.average_rating);
+    if (!Number.isSafeInteger(totalPriceMinor) || totalPriceMinor < 0 || durationSeconds <= 0) return [];
+    if (search.preferences.maxPriceMinor !== undefined && totalPriceMinor > search.preferences.maxPriceMinor) return [];
+    if (search.preferences.maxTotalDurationSeconds !== undefined && durationSeconds > search.preferences.maxTotalDurationSeconds) return [];
+    if (search.preferences.minDriverRating !== undefined && search.preferences.minDriverRating > 0
+      && (rating === null || offer.review_count < 1 || rating < search.preferences.minDriverRating)) return [];
+    return [{
+      id: offer.offer_id, source: offer, departureAt: offer.departure_at, arrivalAt,
+      durationSeconds, priceMinor: totalPriceMinor, transfers: 0, walkingMeters: 0,
+      reliability: null, transferRisk: 0, comfort: null, legs: [{ mode: 'COMMUNITY' }], totalPriceMinor,
+    }];
+  });
+
+  const strategies: JourneyStrategy[] = [search.strategy, ...JOURNEY_STRATEGIES.filter((strategy) => strategy !== search.strategy)];
+  const representatives = selectRepresentativeJourneys(candidates, strategies);
+  const preferenceValues = search.preferences;
+  const client = await pool.connect();
+  const journeys: Array<Record<string, unknown>> = [];
+  try {
+    await client.query('BEGIN');
+    for (const representative of representatives) {
+      const candidate = representative.journey;
+      const offer = candidate.source;
+      const stored = await client.query<{ id: string }>(
+        `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
+         VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$11,$11,$11,$12,0,0,NULL,NULL)
+         RETURNING id`,
+        [req.userId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
+          search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
+          search.departureAt, representative.strategy, search.passengers, candidate.totalPriceMinor, candidate.durationSeconds],
+      );
+      const journeyId = stored.rows[0].id;
+      await client.query(
+        `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
+          preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
+          preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
+          preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
+          preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
+          preferenceValues.minimumTransferBufferSeconds ?? 600, preferenceValues.maxCommunityDetourSeconds ?? 900,
+          preferenceValues.maxCommunityDetourMeters ?? 10000],
+      );
+      const leg = await client.query<{ id: string }>(
+        `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,eta_uncertainty_seconds,distance_m,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_type,offer_id,reliability_score,transfer_risk_score,state,data_source,data_freshness_seconds,last_updated_at,metadata)
+         VALUES($1,0,'COMMUNITY',ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,NULL,NULL,$10,NULL,$11,$12,$12,$12,$13,'ESTIMATED','AVAILABLE','community',$14,NULL,NULL,'SELECTED','community-offer',0,$15,$16::jsonb)
+         RETURNING id`,
+        [journeyId, offer.origin_lon, offer.origin_lat, offer.origin_name, offer.destination_lon, offer.destination_lat,
+          offer.destination_name, offer.departure_at, candidate.arrivalAt, offer.duration_s, offer.distance_m,
+          candidate.totalPriceMinor, offer.currency, offer.offer_id, offer.snapshot_at,
+          JSON.stringify({ driverId: offer.driver_id, driverName: offer.driver_name, vehicleId: offer.vehicle_id,
+            vehicleMake: offer.vehicle_make, vehicleModel: offer.vehicle_model, rating: offer.average_rating,
+            reviewCount: offer.review_count, availableSeatsAtSearch: offer.available_seats, offerCreatedAt: offer.created_at })],
+      );
+      await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, leg.rows[0].id]);
+      journeys.push({
+        id: journeyId, offerId: offer.offer_id, strategy: representative.strategy, score: representative.score, state: 'PLANNED',
+        totalDurationSeconds: candidate.durationSeconds, totalPriceMinor: candidate.totalPriceMinor,
+        confirmedPriceMinor: null, estimatedPriceMinMinor: candidate.totalPriceMinor, estimatedPriceMaxMinor: candidate.totalPriceMinor,
+        walkingMeters: 0, transfers: 0, reliabilityScore: null,
+        legs: [{ id: leg.rows[0].id, mode: 'COMMUNITY', offerId: offer.offer_id,
+          origin: { name: offer.origin_name, coordinates: [offer.origin_lon, offer.origin_lat] },
+          destination: { name: offer.destination_name, coordinates: [offer.destination_lon, offer.destination_lat] },
+          departureAt: offer.departure_at, arrivalAt: candidate.arrivalAt, durationSeconds: offer.duration_s,
+          distanceMeters: offer.distance_m, priceMinor: candidate.totalPriceMinor, priceStatus: 'ESTIMATED',
+          availabilityStatus: 'AVAILABLE', source: 'community-offer', lastUpdatedAt: offer.snapshot_at,
+          driver: { id: offer.driver_id, name: offer.driver_name, averageRating: offer.average_rating, reviewCount: offer.review_count },
+          vehicle: { id: offer.vehicle_id, make: offer.vehicle_make, model: offer.vehicle_model } }],
+      });
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+  res.json({ data: {
+    journeys,
+    partial: true,
+    blockedProviders: ['taxi','bus','minibus','rail','public-transport','carsharing','transfer','walking'],
+    unsupportedPreferences: search.preferences.preferredVehicleClass ? ['preferredVehicleClass'] : [],
+    providerErrors: [],
+  } });
 }));
 
 app.get('/api/v1/vehicles', requireAuth, asyncHandler(async (req, res) => {

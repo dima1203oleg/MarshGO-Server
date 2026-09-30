@@ -26,6 +26,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+JOURNEY_TEST_DATABASE_URL="$DATABASE_URL" npm run test:integration:journey
+
 start_api() {
   local routing_url="${1:-}"
   env NODE_ENV=development AUTH_DEV_BYPASS=true AUTH_DEV_OTP=true \
