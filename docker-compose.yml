@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    # The upstream postgis/postgis image currently publishes amd64 only.
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: marshgo
+      POSTGRES_USER: marshgo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_only_change_me}
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - marshgo-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marshgo -d marshgo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:6380:6379"
+    volumes:
+      - marshgo-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  marshgo-postgres:
+  marshgo-redis:

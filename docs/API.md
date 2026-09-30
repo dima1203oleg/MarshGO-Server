@@ -1,0 +1,105 @@
+# API v1 (current implementation)
+
+Base URL: the API server, default `http://localhost:3002`.
+
+## Health
+
+* `GET /healthz` — process liveness; does not imply database readiness.
+* `GET /readyz` — checks PostgreSQL connectivity.
+
+## Offers
+
+`GET /api/v1/offers?origin=Стрий&destination=Львів`
+
+Returns published, future offers with available seats from PostgreSQL. Optional `date=YYYY-MM-DD` is interpreted in `Europe/Kyiv`; `seats` defaults to 1 and filters out offers without enough seats. It does not return seed data. Supplying all four origin/destination WGS84 coordinate parameters selects PostGIS geosearch with a 20 km endpoint radius. If coordinates are omitted, legacy clients use exact city-name matching. The UI requires geocoder-selected route points.
+
+Offer search and `/offers/mine` include `vehicle_photo_url` only when the primary photo's private object can be signed. Raw object keys are never returned; an unavailable photo store does not suppress otherwise valid offers.
+
+`GET /api/v1/offers/mine` requires the driver role and returns only the caller's own offers with current seat counts and statuses.
+
+`POST /api/v1/vehicles` (driver role) creates a vehicle record without accepting or returning a full license plate. The first car becomes active; later cars do not replace it. New vehicles remain pending until the authorized verification workflow approves both registration and driver licence evidence.
+
+`GET /api/v1/vehicles` lists only the caller's non-archived vehicles. `PATCH /api/v1/vehicles/:id` edits only an owned vehicle. `POST /api/v1/vehicles/:id/activate` atomically switches the active vehicle. `DELETE /api/v1/vehicles/:id` archives only when it has no future published trip.
+
+`POST /api/v1/vehicles/:id/photos/upload-url` returns an S3-compatible presigned POST, restricted to JPEG/PNG/WebP and 10 MiB. The browser uploads directly to the private object bucket, then `POST /api/v1/vehicles/:id/photos` verifies object size, declared media type, and file signature before recording it. `GET /api/v1/vehicles/:id/photos` returns short-lived private read URLs to the owner. `PATCH /api/v1/vehicles/:id/photos/:photoId/primary` selects the primary image; `DELETE /api/v1/vehicles/:id/photos/:photoId` removes the object and record. Bucket CORS, credentials, and `S3_BUCKET`/`S3_REGION` are external configuration; without them upload requests return 503.
+
+`POST /api/v1/vehicles/:id/verification/evidence/upload-url` issues a 5-minute presigned upload for an owned vehicle, only for JPEG, PNG, or PDF and at most 8 MiB. `POST /api/v1/vehicles/:id/verification` accepts one registration document and one driver licence after server-side object size, declared content type, and file-signature checks. A pending duplicate is rejected; raw object keys are never returned to the owner after submission. `GET /api/v1/users/me/verification` returns the caller's status history without evidence references.
+
+`GET /api/v1/admin/verification`, `GET /api/v1/admin/verification/:id/evidence`, and `POST /api/v1/admin/verification/:id/decision` require a persisted `admin` or `moderator` role. The staff queue omits phone numbers and evidence keys. Evidence URLs expire after 180 seconds; evidence access attempts and decisions are audit logged. A reviewer must request the document before deciding and cannot review their own submission. A vehicle is marked verified only after the latest registration and driver-licence records are both approved. Rejecting either closes the paired pending record. The UI is linked from the profile only for staff roles. Initial staff role assignment is an owner/DBA operation; roles cannot be self-enabled.
+
+Verification uploads are not operational until a private S3-compatible bucket, credentials, encryption-at-rest controls, access policy, and Capacitor/web CORS are configured. No live documents were uploaded in local tests.
+
+`POST /api/v1/offers` (driver role) publishes a future offer with named endpoints, WGS84 coordinates, departure time, price in minor currency units, seat count, and an owned verified vehicle with at least one server-verified photo. An offer without a vehicle photo is rejected with 409 `vehicle_photo_required`. `GET /api/v1/offers/mine` returns the authenticated driver's offers and inventory only.
+
+`POST /api/v1/routing/route` (authenticated) returns an OSRM-compatible road geometry, distance, and duration. `ROUTING_ENGINE_URL` must point to a configured private or contracted OSRM-compatible endpoint. In production, offer creation requires a successful route and persists the returned geometry, distance, duration, source, and computed arrival time; missing or failed routing returns 503. Local development can create explicitly marked `development_unrouted` fixtures for tests only.
+
+Foreground driver navigation is owner-scoped and requires the driver role:
+
+* `POST /api/v1/navigation/sessions` builds a real route from the current GPS point to a selected geocoded destination; an active session must be ended before starting another. Missing routing returns 503.
+* `GET /api/v1/navigation/sessions/active` restores the current driver's active session; `GET /api/v1/navigation/sessions/:id` is available only to its owner.
+* `POST /api/v1/navigation/sessions/:id/location` accepts fresh WGS84 samples with accuracy ≤100 m, rejects out-of-order/implausible movement, and reports whether the sample is within 500 m of the stored road geometry.
+* `PATCH /api/v1/navigation/sessions/:id/matching` explicitly enables/disables demand matching (default false); opt-in requires the driver's verified active vehicle and opt-out expires candidate interests. `POST .../:id/pause` and `POST .../:id/resume` expose safe stationary interaction states.
+* `POST /api/v1/navigation/sessions/:id/matches/refresh` performs a PostGIS corridor prefilter on the remaining road line, then validates candidate pickup/dropoff using ordered road-routing waypoints and real detour duration/distance. `GET /api/v1/navigation/sessions/:id/matches` returns only candidates for the owning driver. The driver's interest can be sent with `POST .../:id/matches/:candidateId/interest` only while paused with a fresh GPS fix.
+* `GET /api/v1/demands/mine/navigation-matches` returns candidate summaries for the passenger; driver identity is withheld until `POST /api/v1/navigation/matches/:candidateId/passenger-confirm`. Confirmation is idempotent and does not create a proposal, price agreement, or booking.
+* `POST /api/v1/navigation/sessions/:id/end` is idempotent and clears the destination label/point, exact coordinates, and route geometry immediately. An API cleanup task also ends sessions with no GPS update for five minutes (including after restart) and removes their location and route data.
+
+The location feed runs only while the foreground PWA screen is visible. Matching is opt-in and produces route-detour candidates from persisted demands. Once both sides confirm interest, the paused driver's UI can open that demand in the existing proposal/price negotiation flow; sending a proposal is a separate explicit action. Navigation-match alerts do not yet have live WebSocket/push delivery, and automatic rerouting/waypoint insertion is absent. Booking chat has a separate authenticated WebSocket channel. `ROUTING_ENGINE_URL`, `GEOCODING_ENGINE_URL`, `VITE_MAP_TILE_URL` and `VITE_MAP_TILE_ATTRIBUTION` require approved contracted/self-hosted providers before public use. With no tile provider configured, the UI clearly shows that the road geometry is displayed without a street-map layer.
+
+`GET /api/v1/places/suggest?q=Стрий` (authenticated) requests up to six Ukrainian suggestions from a configured Nominatim-compatible `GEOCODING_ENGINE_URL`. The API validates coordinates and returns provider identifiers and labels. Production refuses non-HTTPS geocoder URLs. Without a contracted/self-hosted provider the route returns 503; the client does not substitute guessed coordinates. Search is rate limited separately.
+
+`POST /api/v1/auth/otp/request` and `POST /api/v1/auth/otp/verify` implement phone challenge enrollment. OTP codes are hashed, expire after five minutes, permit five attempts, and have a one-minute resend cooldown plus a per-phone hourly cap. The no-network OTP provider is allowed only with `NODE_ENV=development` and `AUTH_DEV_OTP=true`; production Twilio delivery requires account credentials and a verified sender. Verify returns a short-lived opaque bearer token and an HttpOnly refresh cookie. `POST /api/v1/auth/refresh` rotates refresh credentials and revokes a token family on reuse; `POST /api/v1/auth/logout` and `/logout-all` revoke sessions.
+
+`GET|PATCH /api/v1/users/me` reads and updates the authenticated profile. `POST /api/v1/users/me/roles` permits self-enabling only passenger/driver roles without changing user identity. `GET /api/v1/users/me/export` exports account records; `POST /api/v1/users/me/deletion-requests` creates a pending request without immediately disabling the account. `GET /api/v1/bookings` returns bookings where the caller is a passenger or driver.
+
+`GET /api/v1/users/me/blocks` lists accounts blocked by the signed-in user. `POST /api/v1/users/:id/block` and `DELETE /api/v1/users/:id/block` add/remove a private user-ID block; both directions are denied access to the blocked pair's demand proposals, booking chat history/messages, and navigation matches. Blocks do not cancel an existing booking; users must use booking cancellation rules separately.
+`POST /api/v1/bookings/:id/block-other` lets either authorized booking participant block the other without exposing the counterpart's user ID to the client.
+
+## Reverse marketplace
+
+`POST /api/v1/demands` (passenger role) stores a passenger request with coordinates selected from the place geocoder, a maximum seven-day time window, passenger count, optional budget basis (`total_all` or `per_seat`), notes, and boolean requirements. `GET /api/v1/demands/mine` returns the caller's requests and pending proposal counts. `GET /api/v1/demands` (driver role) returns open requests other than the driver's own. `POST /api/v1/demands/:id/cancel` is owner-only and idempotent while cancelled. Driver demand results are not yet ranked by route compatibility.
+
+`GET /api/v1/demands/:id/proposals` returns proposals to the passenger who owns the demand, or only the caller's own proposal to a participating driver. An eligible driver may call `POST /api/v1/proposals/:id/agree` after a passenger counter-offer; it records an immutable driver revision at that price and does not create a booking. A passenger must still call `POST /api/v1/proposals/:id/accept`. That final endpoint rejects a passenger's unconfirmed counter-offer.
+
+`POST /api/v1/demands/:id/proposals` (driver role) creates a price/time proposal using the caller's verified vehicle. The proposal price is the total agreed amount in minor UAH units. It expires no later than the demand's time window.
+
+`POST /api/v1/proposals/:id/counter` lets only a participant counter; turns must alternate between driver and passenger. Each revision is persisted, and positive amounts are required. `GET /api/v1/proposals/:id/revisions` exposes the history only to negotiation participants.
+
+`POST /api/v1/proposals/:id/accept` is passenger-only. In one database transaction it resolves the demand, rejects competing proposals, creates the matched offer and booking, consumes seats, opens the conversation and writes an audit event. Repeated acceptance is rejected after the first commit.
+
+## Bookings
+
+All booking routes require `Authorization: Bearer <session-token>`. Access and refresh tokens are stored only as SHA-256 hashes in `sessions`. Real OTP delivery is still a launch blocker. Local development can opt into `x-dev-user-id` only when both `NODE_ENV=development` and `AUTH_DEV_BYPASS=true`.
+
+`POST /api/v1/bookings`
+
+Headers: `Idempotency-Key` (16–128 characters). JSON body: `{ "offerId": "<uuid>", "seats": 1 }`. The backend prices from the offer row and uses a row lock and transaction to prevent overselling. Repeated requests with the same key return the original booking.
+
+`POST /api/v1/bookings/:id/cancel`
+
+Cancels a confirmed booking owned by the caller and restores its seats exactly once. Other booking states cannot be cancelled through this endpoint.
+
+## Realtime events
+
+Authenticated WebSocket clients connect through a single-use ticket from `POST /api/v1/realtime/ticket` to `/api/v1/realtime?ticket=...`. The server sends `{ "type": "...", "data": { ... } }` only to the persisted user IDs captured by the domain transaction. The PostgreSQL outbox commits atomically with chat messages, offer bookings/cancellations, booking lifecycle transitions, proposal create/counter/agree/accept, competing-proposal closure, and proposal closure when a passenger cancels demand. Event types include `conversation.message.created`, `booking.confirmed`, `booking.cancelled`, `booking.changed`, `proposal.created`, `proposal.countered`, `proposal.updated`, `proposal.accepted`, and `proposal.closed`.
+
+Realtime is an invalidation/delivery channel, not a query or a durable client inbox. On connect/reconnect, clients must use the authenticated REST endpoints to reload canonical booking, demand, proposal or message state; Web Push and missed-event replay are not implemented. Redis Pub/Sub fanout is at-least-once around worker acknowledgements, so consumers must tolerate duplicates.
+
+## Safety reports and moderation
+
+`POST /api/v1/reports` requires an authenticated passenger or driver who is a participant in the referenced booking. Body: `{ "bookingId": "<uuid>", "category": "safety|harassment|fraud|service|other", "details": "..." }`; details must contain 10–2000 characters. The API derives the reported participant from the booking and does not accept a client-supplied target user ID. A reporter may create at most 10 cases in a rolling 24-hour period; only one open/in-review case per reporter and booking is allowed. Private case content is not returned to either booking participant.
+
+`GET /api/v1/admin/moderation?status=open|in_review|resolved|dismissed|all` and `POST /api/v1/admin/moderation/:id/decision` require a persisted moderator or administrator role. Decisions transition an open case to `in_review`, then to `resolved` or `dismissed` with an audited 3–1000 character note. Only the assigned reviewer or an administrator may update a case in review. Account suspension is administrator-only, rejects staff targets, revokes stored sessions, and closes active realtime sockets. A reviewer is excluded from a case if they are its reporter or target.
+
+`GET /api/v1/admin/ops/realtime` requires a persisted moderator or administrator role. It returns pending/retrying outbox counts, the highest pending attempt count, oldest pending and active lease ages, latest publish time, and Redis connection state; raw provider errors and message payloads are intentionally omitted. `/readyz` includes realtime dependency state and returns `503` if configured Redis is disconnected.
+
+`GET /api/v1/bookings` includes the server-derived completion confirmation count and whether the current participant has confirmed. `GET /api/v1/bookings/:id/ticket` issues a short-lived HMAC-signed, PII-free ticket to a booking participant. The driver posts the token to `POST /api/v1/bookings/:id/boarding`; driver-only `POST /api/v1/bookings/:id/start` advances a boarded booking to `in_progress`. Driver and passenger must each confirm `POST /api/v1/bookings/:id/complete` before state becomes `completed`; the first confirmation is also written to the transactional outbox so the other participant's UI refreshes. `GET /api/v1/bookings/:id/events` returns the participant-scoped transition history. Reviews are accepted at `POST /api/v1/bookings/:id/reviews` only after both completion confirmations; one review per participant, rating 1–5. Offer search returns the server aggregate rating and count; new drivers have zero reviews rather than a seeded rating.
+
+## Conversations
+
+`GET /api/v1/bookings/:id/conversation` returns the conversation only to a booking participant. `GET /api/v1/conversations/:id/messages` returns persisted participant-only history. `POST /api/v1/conversations/:id/messages` checks membership/block status and inserts the message plus a deduplicated `realtime_outbox` event in one PostgreSQL transaction. Booking confirmation/cancellation/lifecycle and proposal negotiation/closure mutations also insert participant-scoped outbox records within their database transaction. A background lease worker retries Redis publication with exponential backoff; active API instances deliver the event to local participant sockets. Published outbox records are pruned after seven days. The REST response does not claim the socket event was delivered; history stays available from PostgreSQL.
+
+`POST /api/v1/realtime/ticket` requires a valid bearer access session and returns a random, single-use ticket with a 30-second lifetime. With `REDIS_URL` configured, tickets are stored with Redis expiry and consumed atomically with `GETDEL`, so a ticket issued by one API instance can be consumed by another only once. Connect to `ws(s)://<api-host>/api/v1/realtime?ticket=...`; the server checks the allowlisted browser origin, consumes the ticket, and revalidates its database session before upgrading. The channel is server-to-client only, sends `connection.ready` and participant-authorized events, enforces a 1 KiB frame limit, sends ping/pong heartbeats, and closes sockets when their session logs out. Logout events publish through Redis so active sockets on other API processes also close. PostgreSQL outbox events publish through Redis Pub/Sub; active API instances deliver to their local participant sockets. The PWA gets a fresh ticket after disconnect and reloads persisted history/state after reconnect; REST/PostgreSQL remains the source of truth. A local two-process integration test verifies ticket consumption/replay, booking and message outbox publication, cross-instance cancellation delivery, and cross-instance logout. Web Push, missed-event cursor/replay and delivery/read receipts remain unimplemented. Production startup requires Redis; only local development may use the single-process fallback.
+
+Responses use `{ "data": ... }`; errors use `{ "error": { "code", "message", "requestId" } }`. This is the current API surface, not a claim of full OpenAPI coverage. OpenAPI generation remains unimplemented.
+
+The production PWA uses OTP sign-in, server offer search/booking, booking history and participant chat, profile/vehicle CRUD, vehicle-document submission, staff review, and reverse-marketplace demand/proposal endpoints. Place search needs `GEOCODING_ENGINE_URL`; without it, the demand form cannot publish a request. Driver proposals require an authorized verified vehicle; the review workflow is implemented but private storage and operational staff provisioning remain blockers. The foreground navigation UI now supports explicit opt-in road-corridor candidate matching and passenger confirmation of mutual interest. It does not yet convert that handshake into the existing proposal/price workflow, send realtime alerts, insert waypoints, or recalculate the driver's route.

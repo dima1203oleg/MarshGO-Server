@@ -1,0 +1,48 @@
+export type PlaceSuggestion = {
+  label: string;
+  latitude: number;
+  longitude: number;
+  providerId: string;
+};
+
+export class GeocodingUnavailableError extends Error {
+  constructor(message = 'Geocoding service is not configured') { super(message); }
+}
+
+export function parseNominatimSuggestions(payload: unknown): PlaceSuggestion[] {
+  if (!Array.isArray(payload)) throw new GeocodingUnavailableError('Geocoder returned an invalid response');
+  return payload.flatMap((item): PlaceSuggestion[] => {
+    if (!item || typeof item !== 'object') return [];
+    const record = item as Record<string, unknown>;
+    const label = typeof record.display_name === 'string' ? record.display_name.trim() : '';
+    const latitude = typeof record.lat === 'string' || typeof record.lat === 'number' ? Number(record.lat) : NaN;
+    const longitude = typeof record.lon === 'string' || typeof record.lon === 'number' ? Number(record.lon) : NaN;
+    const providerId = record.place_id === undefined ? '' : String(record.place_id);
+    if (!label || !providerId || !Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+        Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return [];
+    return [{ label, latitude, longitude, providerId }];
+  });
+}
+
+export async function suggestPlaces(query: string): Promise<PlaceSuggestion[]> {
+  const endpoint = process.env.GEOCODING_ENGINE_URL;
+  if (!endpoint) throw new GeocodingUnavailableError();
+  let url: URL;
+  try { url = new URL(endpoint); }
+  catch { throw new GeocodingUnavailableError('Geocoder endpoint is invalid'); }
+  if (url.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
+    throw new GeocodingUnavailableError('Production geocoder must use HTTPS');
+  }
+  url.searchParams.set('q', query);
+  url.searchParams.set('format', 'jsonv2');
+  url.searchParams.set('countrycodes', 'ua');
+  url.searchParams.set('accept-language', 'uk');
+  url.searchParams.set('limit', '6');
+
+  const headers = new Headers({ accept: 'application/json', 'user-agent': 'MARSHGO/1.0 (place search)' });
+  const apiKey = process.env.GEOCODING_API_KEY;
+  if (apiKey) headers.set('authorization', `Bearer ${apiKey}`);
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) }).catch(() => null);
+  if (!response?.ok) throw new GeocodingUnavailableError('Geocoder request failed');
+  return parseNominatimSuggestions(await response.json());
+}
