@@ -19,6 +19,7 @@ API health endpoints: `GET /healthz` and `GET /readyz`. The versioned REST API i
 ## Verification
 
 ```sh
+npm run lint:all
 npm run typecheck
 npm test
 npm run test:integration
