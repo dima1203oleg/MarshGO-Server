@@ -20,6 +20,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     vehicle: crypto.randomUUID(),
     offer: crypto.randomUUID(),
     journeyOffer: crypto.randomUUID(),
+    rendezvousOffer: crypto.randomUUID(),
     expiredOffer: crypto.randomUUID(),
   };
   const keys = Array.from({ length: 20 }, () => `api-test-${crypto.randomUUID()}`);
@@ -58,6 +59,12 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         ST_SetSRID(ST_MakePoint(24.0297,49.8397),4326)::geography,
         ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[23.8561,49.2567],[24.0297,49.8397]]}'),4326),
         now()+interval '10 days',now()+interval '10 days 1 hour',78000,3600,'osrm',15000,1,1)`, [ids.journeyOffer, ids.driver, ids.vehicle]);
+    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
+      VALUES ($1,$2,$3,'Pickup point','Rendezvous destination',
+        ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
+        ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
+        ST_MakeLine(ST_SetSRID(ST_MakePoint(24.0,49.0),4326),ST_SetSRID(ST_MakePoint(25.0,50.0),4326)),
+        now()+interval '5 minutes',now()+interval '65 minutes',78000,3600,'osrm',15000,2,2)`, [ids.rendezvousOffer, ids.driver, ids.vehicle]);
     await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,departure_at,price_per_seat_minor,total_seats,available_seats)
       VALUES ($1,$2,$3,'Expired API Test Origin','Expired API Test Destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
@@ -340,6 +347,77 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       body: JSON.stringify({ ...body, preferences: { allowCommunity: false } }),
     });
     assert.equal((await disabledCommunity.json() as { data: { journeys: unknown[] } }).data.journeys.length, 0);
+  });
+
+  it('shares confirmed rendezvous locations ephemerally and requires both users to confirm arrival', async () => {
+    const booked = await fetch(`${apiUrl}/api/v1/bookings`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `rendezvous-book-${crypto.randomUUID()}` },
+      body: JSON.stringify({ offerId: ids.rendezvousOffer, seats: 1 }),
+    });
+    assert.equal(booked.status, 201);
+    const booking = await booked.json() as { data: { id: string } };
+    const passengerHeaders = { 'content-type': 'application/json', 'x-dev-user-id': passengerA };
+    const driverHeaders = { 'content-type': 'application/json', 'x-dev-user-id': ids.driver };
+    const outsider = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous`, { headers: { 'x-dev-user-id': passengerB } });
+    assert.equal(outsider.status, 404);
+
+    const sessionResponse = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous`, { headers: passengerHeaders });
+    assert.equal(sessionResponse.status, 200);
+    const initial = await sessionResponse.json() as { data: { id: string; state: string; locationSharingEnabled: boolean } };
+    assert.equal(initial.data.state, 'SCHEDULED');
+    assert.equal(initial.data.locationSharingEnabled, false);
+    const prematureLocation = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: passengerHeaders,
+      body: JSON.stringify({ longitude: 24, latitude: 49, accuracyMeters: 5, capturedAt: new Date().toISOString() }),
+    });
+    assert.equal(prematureLocation.status, 409);
+
+    const activate = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous/activate`, { method: 'POST', headers: driverHeaders });
+    assert.equal(activate.status, 200);
+    const active = await activate.json() as { data: { state: string; locationSharingEnabled: boolean } };
+    assert.deepEqual({ state: active.data.state, sharing: active.data.locationSharingEnabled }, { state: 'ACTIVE', sharing: true });
+
+    const capturedAt = new Date().toISOString();
+    const location = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: passengerHeaders,
+      body: JSON.stringify({ longitude: 24, latitude: 49, accuracyMeters: 5, capturedAt }),
+    });
+    assert.equal(location.status, 200);
+    const locationBody = await location.json() as { data: { nearPickup: boolean; storedEphemerally: boolean } };
+    assert.equal(locationBody.data.nearPickup, true);
+    assert.equal(locationBody.data.storedEphemerally, true);
+    const outOfOrder = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: passengerHeaders,
+      body: JSON.stringify({ longitude: 24.01, latitude: 49.01, accuracyMeters: 5, capturedAt: new Date(Date.parse(capturedAt) - 1_000).toISOString() }),
+    });
+    assert.equal(outOfOrder.status, 409);
+    const driverView = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous`, { headers: driverHeaders });
+    const driverState = await driverView.json() as { data: { locations: { passenger: { freshness: string; coordinates: number[] } | null } } };
+    assert.deepEqual(driverState.data.locations.passenger?.coordinates, [24, 49]);
+    assert.equal(driverState.data.locations.passenger?.freshness, 'LIVE');
+
+    const driverArrived = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/status`, {
+      method: 'POST', headers: driverHeaders, body: JSON.stringify({ action: 'arrived' }),
+    });
+    assert.equal(driverArrived.status, 200);
+    assert.equal((await driverArrived.json() as { data: { state: string } }).data.state, 'DRIVER_WAITING');
+    const passengerArrived = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/status`, {
+      method: 'POST', headers: passengerHeaders, body: JSON.stringify({ action: 'arrived' }),
+    });
+    assert.equal(passengerArrived.status, 200);
+    assert.equal((await passengerArrived.json() as { data: { state: string } }).data.state, 'BOTH_NEARBY');
+    const boarding = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/boarding`, { method: 'POST', headers: driverHeaders });
+    assert.equal(boarding.status, 200);
+    assert.equal((await boarding.json() as { data: { state: string } }).data.state, 'BOARDING');
+    const ended = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/end`, { method: 'POST', headers: passengerHeaders });
+    assert.equal(ended.status, 200);
+    const final = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous`, { headers: passengerHeaders });
+    const finalState = await final.json() as { data: { state: string; locationSharingEnabled: boolean; locations: { passenger: unknown } } };
+    assert.equal(finalState.data.state, 'CANCELLED');
+    assert.equal(finalState.data.locationSharingEnabled, false);
+    assert.equal(finalState.data.locations.passenger, null);
+    const persistedLocation = await pool.query("SELECT count(*)::int AS n FROM rendezvous_events WHERE metadata ? 'coordinates'");
+    assert.equal(persistedLocation.rows[0].n, 0);
   });
 
   it('allows exactly one of 20 concurrent accounts to book the last seat and cancels idempotently', async () => {

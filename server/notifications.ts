@@ -22,11 +22,21 @@ const notificationText: Record<string, Pick<NotificationProjection, 'title' | 'b
   'journey.leg.started': { title: 'Відрізок маршруту розпочато', body: 'MARSHGO оновив стан вашої подорожі.' },
   'journey.leg.completed': { title: 'Відрізок маршруту завершено', body: 'Перевірте час і стан наступної пересадки.' },
   'journey.completed': { title: 'Подорож завершено', body: 'Усі відрізки маршруту завершені.' },
+  'rendezvous.activated': { title: 'Зустріч активна', body: 'Обмін поточним місцем доступний лише учасникам бронювання.' },
+  'rendezvous.driver.arrived': { title: 'Водій на місці', body: 'Водій підтвердив прибуття до точки посадки.' },
+  'rendezvous.passenger.arrived': { title: 'Пасажир на місці', body: 'Пасажир підтвердив прибуття до точки посадки.' },
+  'rendezvous.driver.delayed': { title: 'Затримка водія', body: 'Водій повідомив про затримку зустрічі.' },
+  'rendezvous.passenger.delayed': { title: 'Затримка пасажира', body: 'Пасажир повідомив про затримку зустрічі.' },
+  'rendezvous.driver.will-arrive': { title: 'Водій оновив час прибуття', body: 'Перевірте статус зустрічі перед посадкою.' },
+  'rendezvous.passenger.will-arrive': { title: 'Пасажир оновив час прибуття', body: 'Перевірте статус зустрічі перед посадкою.' },
+  'rendezvous.both-nearby': { title: 'Ви поруч із точкою посадки', body: 'Обидва учасники підтвердили, що прибули.' },
+  'rendezvous.boarding': { title: 'Починається посадка', body: 'Підтвердіть поїздку через бронювання та квиток.' },
+  'rendezvous.cancelled': { title: 'Зустріч завершена', body: 'Обмін геолокацією для цієї зустрічі вимкнено.' },
 };
 
 const identifierKeys = new Set([
   'booking_id', 'offer_id', 'journey_id', 'journey_leg_id', 'proposal_id', 'demand_id',
-  'candidate_id', 'navigation_session_id', 'conversation_id',
+  'candidate_id', 'navigation_session_id', 'conversation_id', 'rendezvous_id',
 ]);
 const statusKeys = new Set(['status', 'state']);
 
