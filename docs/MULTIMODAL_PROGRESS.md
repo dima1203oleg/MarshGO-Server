@@ -200,4 +200,29 @@
 - SMS/APNs, public HTTPS staging, contracted routing/geocoding/tiles, production signing and two physical iPhones are external/operational blockers.
 
 **NEXT**
-- Add Journey event/monitor contracts and scheduled leg observations; cascade measured Rendezvous delay through the Transfer Engine. Then implement the booking-scoped Site UI and iOS bridge without claiming background tracking until device-tested.
+- Feed provider options into the planner only after real, geocoded provider results and walking-route connectors are available; then persist genuine multi-leg alternatives.
+
+## Phase 2 continuation — time-dependent multi-leg planner core
+
+**Status:** PARTIAL.
+
+**DONE**
+- Added a server-only composer for provider options with stable origin/destination node IDs, exact chronology, maximum wait/leg bounds, and measured transfer connectors.
+- Transfer feasibility includes upstream ETA uncertainty, routed walking time, configured transfer buffer and boarding grace. Missing connector evidence, unavailable inventory, unknown availability, and paths that do not reach the requested destination fail closed.
+- Aggregate Journey summaries preserve unknown prices, add known per-leg estimate bounds, include waiting in door-to-door elapsed time and rank complete paths with the existing server-side scoring strategies.
+- Added three deterministic unit tests for complete multi-leg construction, rejected/missing connectors, unknown fares and FASTEST ranking.
+
+**CHANGED FILES**
+- `server/journey/planner.ts`, `server/providers/types.ts`, `tests/journey-planner.test.ts`, `docs/MULTIMODAL_PROGRESS.md`
+
+**TESTS**
+- `npx tsx --test tests/journey-planner.test.ts`: 3/3 passed.
+- `npm run typecheck`: passed.
+- The existing Journey Search API is still direct-Community-only; this planning core is not presented as active inventory or a production multi-leg user flow.
+
+**LIMITATIONS / BLOCKED_EXTERNAL**
+- No contracted GTFS static/Realtime feed, GTFS-Realtime protobuf source, walking route provider or transit/taxi inventory is configured. No real provider results are currently fed to this composer.
+- Consequently future transit-to-Community matching, live vehicle map, Journey monitor, delay cascade and predictive rescue remain unavailable. The current planner cannot create bookings or claim that a SOFT_MATCH is reserved.
+
+**NEXT**
+- Implement a GTFS static/Realtime provider and feed-status/expiry handling behind explicit feed configuration; keep production results disabled until an authorized regional feed and routed walking connectors are configured. Then connect verified provider options to this composer and add future Community availability matching.
