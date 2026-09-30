@@ -109,6 +109,7 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
       const arrivalAt = previous.arrivalAt!;
       if (previous.destinationNodeId === input.destinationNodeId) {
         routes.push(summarize(legs));
+        return;
       }
       if (legs.length >= maximumLegs) return;
       for (const next of options) {

@@ -210,13 +210,13 @@
 - Added a server-only composer for provider options with stable origin/destination node IDs, exact chronology, maximum wait/leg bounds, and measured transfer connectors.
 - Transfer feasibility includes upstream ETA uncertainty, routed walking time, configured transfer buffer and boarding grace. Missing connector evidence, unavailable inventory, unknown availability, and paths that do not reach the requested destination fail closed.
 - Aggregate Journey summaries preserve unknown prices, add known per-leg estimate bounds, include waiting in door-to-door elapsed time and rank complete paths with the existing server-side scoring strategies.
-- Added three deterministic unit tests for complete multi-leg construction, rejected/missing connectors, unknown fares and FASTEST ranking.
+- Added four deterministic unit tests for complete multi-leg construction, rejected/missing connectors, unknown fares/FASTEST ranking and stopping at the requested destination.
 
 **CHANGED FILES**
 - `server/journey/planner.ts`, `server/providers/types.ts`, `tests/journey-planner.test.ts`, `docs/MULTIMODAL_PROGRESS.md`
 
 **TESTS**
-- `npx tsx --test tests/journey-planner.test.ts`: 3/3 passed.
+- `npx tsx --test tests/journey-planner.test.ts`: 4/4 passed.
 - `npm run typecheck`: passed.
 - The existing Journey Search API is still direct-Community-only; this planning core is not presented as active inventory or a production multi-leg user flow.
 

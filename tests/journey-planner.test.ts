@@ -80,3 +80,15 @@ test('preserves unknown price and ranks a faster connected itinerary ahead of a 
   assert.equal(routes[0].priceMaxMinor, 34000);
   assert.equal(routes[1].priceMinor, 10000);
 });
+
+test('does not continue past the requested destination to append extra legs', () => {
+  const direct = option('direct', 'A', 'B', 0, 3600, 5000);
+  const onward = option('onward', 'B', 'C', 3900, 5000, 1000);
+  const routes = planJourneys({
+    options: [direct, onward], originNodeId: 'A', destinationNodeId: 'B', departureAt: at(0),
+    strategy: 'CHEAPEST', minimumTransferBufferSeconds: 0,
+    connections: createConnectionMap([{ fromNodeId: 'B', toNodeId: 'B', connection: connection(0, 0) }]),
+  });
+  assert.equal(routes.length, 1);
+  assert.deepEqual(routes[0].legs.map((leg) => leg.id), ['direct']);
+});
