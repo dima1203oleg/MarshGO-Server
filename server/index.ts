@@ -56,7 +56,7 @@ function deliverRealtime(userIds: string[], event: string) {
 const supportedOutboxEvents = new Set([
   'conversation.message.created', 'booking.confirmed', 'booking.cancelled', 'booking.changed',
   'proposal.created', 'proposal.countered', 'proposal.updated', 'proposal.accepted', 'proposal.closed',
-  'navigation.match.driver-interested',
+  'navigation.match.driver-interested', 'navigation.match.passenger-confirmed',
 ]);
 async function insertRealtimeOutbox(
   client: PoolClient,
@@ -643,6 +643,8 @@ app.post('/api/v1/navigation/matches/:candidateId/passenger-confirm', requireAut
     if (candidate.status !== 'driver_interested' || new Date(candidate.expires_at) <= new Date()) throw new ApiError(409, 'The driver has not expressed current interest in this match');
     await client.query("UPDATE navigation_match_candidates SET status='passenger_confirmed' WHERE id=$1", [candidate.id]);
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES($1,$2,$3,$4)', [req.userId, 'navigation.match.passenger_confirmed', 'navigation_match', candidate.id]);
+    await insertRealtimeOutbox(client, 'navigation.match.passenger-confirmed', `navigation.match.passenger-confirmed:${candidate.id}`,
+      [candidate.driver_id], { candidate_id: candidate.id, demand_id: candidate.demand_id, status: 'passenger_confirmed' });
     await client.query('COMMIT');
     res.json({ data: { id: candidate.id, demandId: candidate.demand_id, status: 'passenger_confirmed', nextStep: 'price_negotiation' } });
   } catch (error) {

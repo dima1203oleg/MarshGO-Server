@@ -97,8 +97,10 @@ describe('Redis-backed realtime across API instances', { skip: !enabled }, () =>
   let navigationSessionId = '';
   let navigationDemandId = '';
   let socket: WebSocket | undefined;
+  let driverSocket: WebSocket | undefined;
   let usedTicketUrl = '';
   let passengerAccessToken = '';
+  let driverAccessToken = '';
 
   before(async () => {
     assert.ok(primaryUrl && secondaryUrl && databaseUrl);
@@ -109,6 +111,7 @@ describe('Redis-backed realtime across API instances', { skip: !enabled }, () =>
     driverId = driverAuth.data.user.id;
     passengerId = passengerAuth.data.user.id;
     passengerAccessToken = passengerAuth.data.accessToken;
+    driverAccessToken = driverAuth.data.accessToken;
     const inserted = await pool.query<{ id: string }>(
       `INSERT INTO vehicles(owner_id,make,model,model_year,seat_count) VALUES($1,'Test','Realtime',2024,2) RETURNING id`, [driverId],
     );
@@ -150,6 +153,7 @@ describe('Redis-backed realtime across API instances', { skip: !enabled }, () =>
 
   after(async () => {
     socket?.close();
+    driverSocket?.close();
     if (navigationSessionId) await pool.query('DELETE FROM navigation_sessions WHERE id=$1', [navigationSessionId]);
     if (navigationDemandId) await pool.query('DELETE FROM passenger_demands WHERE id=$1', [navigationDemandId]);
     if (conversationId) await pool.query('DELETE FROM conversations WHERE id=$1', [conversationId]);
@@ -250,6 +254,36 @@ describe('Redis-backed realtime across API instances', { skip: !enabled }, () =>
     assert.equal(passengerCandidates.status, 200);
     const passengerCandidateBody = await passengerCandidates.json() as ApiResult<Array<{ candidate_id: string; status: string }>>;
     assert.ok(passengerCandidateBody.data.some((item) => item.candidate_id === candidate.rows[0].id && item.status === 'driver_interested'));
+
+    const driverTicketResponse = await fetch(`${primaryUrl}/api/v1/realtime/ticket`, {
+      method: 'POST', headers: { authorization: `Bearer ${driverAccessToken}` },
+    });
+    assert.equal(driverTicketResponse.status, 201);
+    const driverTicket = (await driverTicketResponse.json() as ApiResult<{ ticket: string }>).data.ticket;
+    driverSocket = new WebSocket(`${secondaryUrl!.replace(/^http/, 'ws')}/api/v1/realtime?ticket=${encodeURIComponent(driverTicket)}`);
+    trackRealtimeSocket(driverSocket);
+    const driverReady = waitForSocketEvent(driverSocket, 'connection.ready');
+    await new Promise<void>((resolve, reject) => {
+      driverSocket!.once('open', resolve);
+      driverSocket!.once('error', reject);
+    });
+    await driverReady;
+    const passengerConfirmedWait = waitForSocketEvent(driverSocket, 'navigation.match.passenger-confirmed');
+    const passengerConfirmation = await fetch(`${primaryUrl}/api/v1/navigation/matches/${candidate.rows[0].id}/passenger-confirm`, {
+      method: 'POST', headers: { authorization: `Bearer ${passengerAccessToken}` },
+    });
+    assert.equal(passengerConfirmation.status, 200, await passengerConfirmation.text());
+    assert.ok(await waitForPublished(pool, `navigation.match.passenger-confirmed:${candidate.rows[0].id}`));
+    const passengerConfirmedEvent = await passengerConfirmedWait;
+    assert.deepEqual(passengerConfirmedEvent.data, {
+      candidate_id: candidate.rows[0].id, demand_id: navigationDemandId, status: 'passenger_confirmed',
+    });
+    const driverCandidates = await fetch(`${primaryUrl}/api/v1/navigation/sessions/${navigationSessionId}/matches`, {
+      headers: { authorization: `Bearer ${driverAccessToken}` },
+    });
+    assert.equal(driverCandidates.status, 200);
+    const driverCandidateBody = await driverCandidates.json() as ApiResult<Array<{ id: string; status: string }>>;
+    assert.ok(driverCandidateBody.data.some((item) => item.id === candidate.rows[0].id && item.status === 'passenger_confirmed'));
 
     const bookingCreated = await pool.query<{ event_type: string; published_at: Date | null; payload: { status: string; booking_id: string } }>(
       'SELECT event_type,published_at,payload FROM realtime_outbox WHERE dedupe_key=$1', [`booking.confirmed:${bookingId}`],
