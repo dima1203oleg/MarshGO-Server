@@ -44,6 +44,13 @@ stop_api() {
   wait "$API_PID" 2>/dev/null || true
   API_PID=""
 }
+stop_secondary_api() {
+  if [[ -n "$SECONDARY_API_PID" ]]; then
+    kill "$SECONDARY_API_PID" 2>/dev/null || true
+    wait "$SECONDARY_API_PID" 2>/dev/null || true
+    SECONDARY_API_PID=""
+  fi
+}
 start_secondary_api() {
   env NODE_ENV=development AUTH_DEV_OTP=true DATABASE_URL="$DATABASE_URL" \
     API_HOST=127.0.0.1 API_PORT="$SECONDARY_API_PORT" REDIS_URL="$REDIS_URL" \
@@ -74,3 +81,7 @@ start_api
 start_secondary_api
 API_TEST_URL="$API_URL" API_TEST_SECONDARY_URL="$SECONDARY_API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:realtime
+stop_secondary_api
+stop_api
+API_TEST_DATABASE_URL="$DATABASE_URL" API_TEST_RESTART=true API_TEST_RESTART_PORT=3308 \
+  npm run test:integration:restart
