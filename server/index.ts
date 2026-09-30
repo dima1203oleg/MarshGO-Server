@@ -63,6 +63,7 @@ const supportedOutboxEvents = new Set([
   'conversation.message.created', 'booking.confirmed', 'booking.cancelled', 'booking.changed',
   'proposal.created', 'proposal.countered', 'proposal.updated', 'proposal.accepted', 'proposal.closed',
   'navigation.match.driver-interested', 'navigation.match.passenger-confirmed', 'navigation.route-updated',
+  'journey.updated',
 ]);
 async function insertRealtimeOutbox(
   client: PoolClient,
@@ -1837,9 +1838,16 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
   const userId = req.userId!;
   const offerId = req.body?.offerId;
   const seats = req.body?.seats;
+  const journeyId = req.body?.journeyId;
+  const journeyLegId = req.body?.journeyLegId;
+  const hasJourneyReference = journeyId !== undefined || journeyLegId !== undefined;
   const key = req.get('idempotency-key');
   if (typeof offerId !== 'string' || !/^[0-9a-f-]{36}$/i.test(offerId)) throw new ApiError(400, 'valid offerId is required');
   if (!Number.isInteger(seats) || seats < 1 || seats > 20) throw new ApiError(400, 'seats must be an integer from 1 to 20');
+  if (hasJourneyReference && (typeof journeyId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(journeyId)
+      || typeof journeyLegId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(journeyLegId))) {
+    throw new ApiError(400, 'journeyId and journeyLegId must be supplied together');
+  }
   if (!key || key.length < 16 || key.length > 128) throw new ApiError(400, 'Idempotency-Key must be 16–128 characters');
 
   const client = await pool.connect();
@@ -1857,6 +1865,14 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     );
     if (prior.rows[0]) {
       if (prior.rows[0].offer_id !== offerId || Number(prior.rows[0].seat_count) !== seats) throw new ApiError(409, 'idempotency key already used for another request');
+      const priorJourney = await client.query<{ id: string }>(
+        'SELECT id FROM journey_legs WHERE booking_id=$1 AND journey_id=$2 AND id=$3',
+        [prior.rows[0].id, journeyId ?? null, journeyLegId ?? null],
+      );
+      const bookingHasJourney = await client.query<{ id: string }>('SELECT id FROM journey_legs WHERE booking_id=$1', [prior.rows[0].id]);
+      if ((hasJourneyReference && !priorJourney.rows[0]) || (!hasJourneyReference && bookingHasJourney.rows[0])) {
+        throw new ApiError(409, 'idempotency key already used with another Journey association');
+      }
       await client.query('COMMIT');
       res.status(200).json({ data: prior.rows[0], replayed: true });
       return;
@@ -1866,6 +1882,21 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     }
     if (currentOffer.driver_id === userId) throw new ApiError(400, 'drivers cannot book their own offer');
     if (Number(currentOffer.available_seats) < seats) throw new ApiError(409, 'not enough available seats');
+
+    if (hasJourneyReference) {
+      const selected = await client.query<{ passenger_count: number; journey_state: string; leg_state: string; offer_id: string; booking_id: string | null; leg_count: number }>(
+        `SELECT j.passenger_count,j.state AS journey_state,l.state AS leg_state,l.offer_id,l.booking_id,
+                (SELECT count(*)::int FROM journey_legs all_legs WHERE all_legs.journey_id=j.id) AS leg_count
+           FROM journeys j JOIN journey_legs l ON l.journey_id=j.id
+          WHERE j.id=$1 AND l.id=$2 AND j.user_id=$3 FOR UPDATE OF j,l`, [journeyId, journeyLegId, userId],
+      );
+      const journeySelection = selected.rows[0];
+      if (!journeySelection || journeySelection.offer_id !== offerId || journeySelection.leg_state !== 'SELECTED'
+          || journeySelection.booking_id || journeySelection.journey_state !== 'PLANNED' || journeySelection.leg_count !== 1
+          || Number(journeySelection.passenger_count) !== seats) {
+        throw new ApiError(409, 'Journey leg is no longer bookable or does not match this offer and passenger count', 'journey_leg_unavailable');
+      }
+    }
 
     const total = Number(currentOffer.price_per_seat_minor) * seats;
     const fee = calculatePlatformFee(total, 'community');
@@ -1886,6 +1917,19 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
         booking_id: booking.rows[0].id, offer_id: offerId, status: 'confirmed', seat_count: seats,
         available_seats: Number(currentOffer.available_seats) - seats,
       });
+    if (hasJourneyReference) {
+      await client.query(
+        `UPDATE journey_legs SET booking_id=$2,state='CONFIRMED',price_status='LOCKED',price_minor=$3,
+           price_min_minor=$3,price_max_minor=$3,updated_at=now() WHERE id=$1`, [journeyLegId, booking.rows[0].id, total],
+      );
+      await client.query(
+        `UPDATE journeys SET confirmed_price_minor=$2,total_price_minor=$2,estimated_price_min_minor=$2,
+           estimated_price_max_minor=$2,state='READY',updated_at=now() WHERE id=$1`, [journeyId, total],
+      );
+      await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [userId, 'journey.leg.booked', 'journey', journeyId]);
+      await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:booking:${booking.rows[0].id}`,
+        [userId], { journey_id: journeyId, journey_leg_id: journeyLegId, booking_id: booking.rows[0].id, state: 'READY' });
+    }
     await client.query('COMMIT');
     res.status(201).json({ data: booking.rows[0], replayed: false });
   } catch (error) {
@@ -1920,6 +1964,14 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
         booking_id: booking.id, offer_id: booking.offer_id, status: 'cancelled', seat_count: booking.seat_count,
         available_seats: inventory.rows[0]?.available_seats ?? null,
       });
+    const linkedLeg = await client.query<{ id: string; journey_id: string }>('SELECT id,journey_id FROM journey_legs WHERE booking_id=$1 FOR UPDATE', [booking.id]);
+    if (linkedLeg.rows[0]) {
+      await client.query("UPDATE journey_legs SET state='CANCELLED',updated_at=now() WHERE id=$1", [linkedLeg.rows[0].id]);
+      await client.query("UPDATE journeys SET state='REPLANNING',confirmed_price_minor=NULL,updated_at=now() WHERE id=$1", [linkedLeg.rows[0].journey_id]);
+      await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'journey.replanning', 'journey', linkedLeg.rows[0].journey_id]);
+      await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:cancel:${booking.id}`,
+        [booking.passenger_id], { journey_id: linkedLeg.rows[0].journey_id, journey_leg_id: linkedLeg.rows[0].id, booking_id: booking.id, state: 'REPLANNING' });
+    }
     await client.query('COMMIT');
     res.json({ data: { id: booking.id, status: 'cancelled' }, replayed: false });
   } catch (error) {
