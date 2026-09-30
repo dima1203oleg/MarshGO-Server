@@ -5,6 +5,7 @@ import { rateLimit } from 'express-rate-limit';
 import { Pool, PoolClient } from 'pg';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createClient } from 'redis';
+import { RedisRateLimitStore } from './redisRateLimitStore';
 import type { Duplex } from 'node:stream';
 import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
@@ -132,7 +133,17 @@ const allowedOrigins = new Set((process.env.CORS_ORIGINS || 'http://localhost:30
 const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const accessLifetimeMs = 15 * 60 * 1000;
 const refreshLifetimeMs = 30 * 24 * 60 * 60 * 1000;
-const placeSearchLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false });
+const rateLimitPrefix = process.env.API_RATE_LIMIT_PREFIX || 'marshgo:rate-limit:v1:';
+const placeSearchLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 60,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  ...(process.env.REDIS_URL ? { store: new RedisRateLimitStore(() => realtimeRedis, `${rateLimitPrefix}place-search:`) } : {}),
+});
+const apiRateLimitWindowMs = Number(process.env.API_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
+const apiRateLimitLimit = Number(process.env.API_RATE_LIMIT_LIMIT) || 300;
+const apiRateLimitStore = process.env.REDIS_URL ? new RedisRateLimitStore(() => realtimeRedis, rateLimitPrefix) : undefined;
 
 app.disable('x-powered-by');
 app.use((req, res, next) => {
@@ -159,8 +170,9 @@ app.use((req, res, next) => {
 });
 app.use(express.json({ limit: '32kb', strict: true }));
 app.use('/api', rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 300,
+  windowMs: apiRateLimitWindowMs,
+  limit: apiRateLimitLimit,
+  ...(apiRateLimitStore ? { store: apiRateLimitStore } : {}),
   standardHeaders: 'draft-8',
   legacyHeaders: false,
   handler: (_req, res) => res.status(429).json({ error: { code: 'rate_limit_exceeded', message: 'Too many requests', requestId: res.locals.requestId } }),

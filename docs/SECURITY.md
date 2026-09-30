@@ -11,12 +11,12 @@
 * Verification evidence accepts only JPEG/PNG/PDF up to 8 MiB, remains outside public DTOs, and is reachable only through a staff-guarded, short-lived URL. Admin/moderator decisions require separate persisted roles, a document-open request, transactional state updates, and audit events. Driver self-review is denied; vehicle verification requires both vehicle-registration and driver-licence approval.
 * Booking participants can file private, rate-limited safety reports without choosing the reported user ID. Staff queue and case decisions are role-guarded, conflict-checked, reviewer-assigned, and audited. Account suspension is administrator-only, revokes sessions, and closes active realtime sockets.
 * Boarding tickets contain no PII and use HMAC signatures; the server checks ticket expiry, booking ID, driver ownership, and current booking state before marking boarding.
-* API requests have a JSON body limit, an allowlisted CORS policy, baseline security headers, request IDs, and per-process rate limits.
+* API requests have a JSON body limit, an allowlisted CORS policy, baseline security headers, request IDs, and fixed-window request limits coordinated through Redis when configured. The general API and place-search limiters use distinct Redis key prefixes; development without Redis uses express-rate-limit's in-process store.
 * Errors return structured codes/messages/request IDs; server logs do not include request bodies or OTP values.
 
 ## Open security work
 
-* Replace per-process rate limiting with shared Redis coordination; configure trusted proxy hops behind deployment ingress before relying on source IP throttles.
+* Configure trusted proxy hops behind deployment ingress before relying on source IP throttles; the limiter fails closed when Redis is unavailable, but operators still need an outage recovery/alerting drill.
 * Add a security review and automated dependency/static/security checks; CI currently runs lint, typecheck, unit tests, and build.
 * Configure production SMS credentials, secret management, HTTPS, same-site API routing, and account recovery policy.
 * Configure private object storage and bucket CORS, add retention controls and anti-malware scanning before accepting real vehicle documents/photos.

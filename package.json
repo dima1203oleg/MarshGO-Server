@@ -12,6 +12,7 @@
     "test:integration:bookings": "tsx --test tests/api-bookings.integration.test.ts",
     "test:integration:navigation": "tsx --test tests/navigation.integration.test.ts",
     "test:integration:realtime": "tsx --test tests/realtime-cluster.integration.test.ts",
+    "test:integration:rate-limit": "tsx --test tests/redis-rate-limit.integration.test.ts",
     "test:integration:restart": "tsx --test tests/booking-restart.integration.test.ts",
     "test:integration": "bash scripts/run-integration-tests.sh"
   },
