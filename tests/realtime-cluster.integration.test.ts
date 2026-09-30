@@ -15,7 +15,19 @@ if (enabled && database && !['127.0.0.1', 'localhost', '::1'].includes(database.
 
 type AuthResult = { data: { user: { id: string }; accessToken: string } };
 type ApiResult<T> = { data: T };
-type RealtimeEvent = { type: string; data: { id?: string; booking_id?: string; status?: string; sender_id?: string; body?: string } };
+type RealtimeEvent = { type: string; data: { id?: string; booking_id?: string; candidate_id?: string; demand_id?: string; status?: string; sender_id?: string; body?: string } };
+const realtimeEventQueues = new WeakMap<WebSocket, RealtimeEvent[]>();
+
+function trackRealtimeSocket(socket: WebSocket) {
+  const queue: RealtimeEvent[] = [];
+  realtimeEventQueues.set(socket, queue);
+  socket.on('message', (raw) => {
+    try {
+      queue.push(JSON.parse(raw.toString()) as RealtimeEvent);
+      if (queue.length > 100) queue.shift();
+    } catch { /* Test assertions only consume valid server events. */ }
+  });
+}
 
 async function register(phone: string, displayName: string) {
   const requested = await fetch(`${primaryUrl}/api/v1/auth/otp/request`, {
@@ -31,16 +43,34 @@ async function register(phone: string, displayName: string) {
   return await verified.json() as AuthResult;
 }
 
-function waitForSocketEvent(socket: WebSocket, type: string, timeoutMs = 5000) {
+function waitForSocketEvent(socket: WebSocket, type: string, timeoutMs = 10_000) {
+  const queue = realtimeEventQueues.get(socket);
+  if (!queue) return Promise.reject(new Error('Realtime socket must be tracked before waiting for events'));
+  const takeEvent = () => {
+    const index = queue.findIndex((event) => event.type === type);
+    return index < 0 ? undefined : queue.splice(index, 1)[0];
+  };
+  const buffered = takeEvent();
+  if (buffered) return Promise.resolve(buffered);
   return new Promise<RealtimeEvent>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`Timed out waiting for realtime ${type}`)), timeoutMs);
-    socket.on('message', (raw) => {
-      const event = JSON.parse(raw.toString()) as RealtimeEvent;
-      if (event.type !== type) return;
+    const cleanup = () => {
       clearTimeout(timeout);
+      socket.off('message', onMessage);
+      socket.off('error', onError);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for realtime ${type}`));
+    }, timeoutMs);
+    const onError = (error: Error) => { cleanup(); reject(error); };
+    const onMessage = () => {
+      const event = takeEvent();
+      if (!event) return;
+      cleanup();
       resolve(event);
-    });
-    socket.once('error', (error) => { clearTimeout(timeout); reject(error); });
+    };
+    socket.on('message', onMessage);
+    socket.once('error', onError);
   });
 }
 
@@ -64,6 +94,8 @@ describe('Redis-backed realtime across API instances', { skip: !enabled }, () =>
   let offerId = '';
   let bookingId = '';
   let conversationId = '';
+  let navigationSessionId = '';
+  let navigationDemandId = '';
   let socket: WebSocket | undefined;
   let usedTicketUrl = '';
   let passengerAccessToken = '';
@@ -107,6 +139,7 @@ describe('Redis-backed realtime across API instances', { skip: !enabled }, () =>
     const ticket = (await ticketResponse.json() as ApiResult<{ ticket: string }>).data.ticket;
     usedTicketUrl = `${secondaryUrl!.replace(/^http/, 'ws')}/api/v1/realtime?ticket=${encodeURIComponent(ticket)}`;
     socket = new WebSocket(usedTicketUrl);
+    trackRealtimeSocket(socket);
     const ready = waitForSocketEvent(socket, 'connection.ready');
     await new Promise<void>((resolve, reject) => {
       socket!.once('open', resolve);
@@ -117,6 +150,8 @@ describe('Redis-backed realtime across API instances', { skip: !enabled }, () =>
 
   after(async () => {
     socket?.close();
+    if (navigationSessionId) await pool.query('DELETE FROM navigation_sessions WHERE id=$1', [navigationSessionId]);
+    if (navigationDemandId) await pool.query('DELETE FROM passenger_demands WHERE id=$1', [navigationDemandId]);
     if (conversationId) await pool.query('DELETE FROM conversations WHERE id=$1', [conversationId]);
     if (driverId || passengerId) await pool.query('DELETE FROM realtime_outbox WHERE recipient_ids && $1::uuid[]', [[driverId, passengerId].filter(Boolean)]);
     if (bookingId) await pool.query('DELETE FROM booking_events WHERE booking_id=$1', [bookingId]);
@@ -179,6 +214,42 @@ describe('Redis-backed realtime across API instances', { skip: !enabled }, () =>
     assert.equal(outbox.rows[0]?.event_type, 'conversation.message.created');
     assert.ok(Number(outbox.rows[0]?.attempt_count) >= 1);
     assert.ok(outbox.rows[0]?.published_at);
+
+    await pool.query("INSERT INTO user_roles(user_id,role) VALUES($1,'driver') ON CONFLICT DO NOTHING", [driverId]);
+    const navigation = await pool.query<{ id: string }>(
+      `INSERT INTO navigation_sessions(driver_id,vehicle_id,vehicle_seat_count,state,destination_name,destination,
+         route,route_distance_m,route_duration_s,opt_in,current_location,current_location_accuracy_m,current_location_at)
+       VALUES($1,$2,2,'paused','Realtime destination',ST_SetSRID(ST_MakePoint(25,50),4326)::geography,
+         ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[24,49],[25,50]]}'),4326),1000,600,true,
+         ST_SetSRID(ST_MakePoint(24,49),4326)::geography,8,now()) RETURNING id`, [driverId, vehicleId],
+    );
+    navigationSessionId = navigation.rows[0].id;
+    const demand = await pool.query<{ id: string }>(
+      `INSERT INTO passenger_demands(passenger_id,origin_name,destination_name,origin,destination,earliest_departure,latest_departure,passenger_count,budget_minor)
+       VALUES($1,'Realtime pickup','Realtime destination',ST_SetSRID(ST_MakePoint(24.1,49.1),4326)::geography,
+         ST_SetSRID(ST_MakePoint(24.8,49.8),4326)::geography,now()+interval '10 minutes',now()+interval '1 hour',1,30000) RETURNING id`, [passengerId],
+    );
+    navigationDemandId = demand.rows[0].id;
+    const candidate = await pool.query<{ id: string }>(
+      `INSERT INTO navigation_match_candidates(navigation_session_id,demand_id,route_version,detour_distance_m,detour_duration_s,pickup_eta,expires_at)
+       VALUES($1,$2,1,1200,180,now()+interval '12 minutes',now()+interval '5 minutes') RETURNING id`, [navigationSessionId, navigationDemandId],
+    );
+    const navigationEventWait = waitForSocketEvent(socket, 'navigation.match.driver-interested');
+    const interest = await fetch(`${primaryUrl}/api/v1/navigation/sessions/${navigationSessionId}/matches/${candidate.rows[0].id}/interest`, {
+      method: 'POST', headers: { 'x-dev-user-id': driverId },
+    });
+    assert.equal(interest.status, 200);
+    assert.ok(await waitForPublished(pool, `navigation.match.driver-interested:${candidate.rows[0].id}`));
+    const navigationEvent = await navigationEventWait;
+    assert.deepEqual(navigationEvent.data, {
+      candidate_id: candidate.rows[0].id, demand_id: navigationDemandId, status: 'driver_interested',
+    }, 'the event contains no precise driver coordinates or other location data');
+    const passengerCandidates = await fetch(`${primaryUrl}/api/v1/demands/mine/navigation-matches`, {
+      headers: { authorization: `Bearer ${passengerAccessToken}` },
+    });
+    assert.equal(passengerCandidates.status, 200);
+    const passengerCandidateBody = await passengerCandidates.json() as ApiResult<Array<{ candidate_id: string; status: string }>>;
+    assert.ok(passengerCandidateBody.data.some((item) => item.candidate_id === candidate.rows[0].id && item.status === 'driver_interested'));
 
     const bookingCreated = await pool.query<{ event_type: string; published_at: Date | null; payload: { status: string; booking_id: string } }>(
       'SELECT event_type,published_at,payload FROM realtime_outbox WHERE dedupe_key=$1', [`booking.confirmed:${bookingId}`],

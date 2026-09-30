@@ -56,6 +56,7 @@ function deliverRealtime(userIds: string[], event: string) {
 const supportedOutboxEvents = new Set([
   'conversation.message.created', 'booking.confirmed', 'booking.cancelled', 'booking.changed',
   'proposal.created', 'proposal.countered', 'proposal.updated', 'proposal.accepted', 'proposal.closed',
+  'navigation.match.driver-interested',
 ]);
 async function insertRealtimeOutbox(
   client: PoolClient,
@@ -572,18 +573,34 @@ app.post('/api/v1/navigation/sessions/:id/matches/refresh', requireAuth, require
 }));
 
 app.post('/api/v1/navigation/sessions/:id/matches/:candidateId/interest', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
-  const { rows } = await pool.query(
-    `UPDATE navigation_match_candidates c SET status='driver_interested'
-     FROM navigation_sessions s,passenger_demands d
-     WHERE c.id=$1 AND c.navigation_session_id=$2 AND s.id=c.navigation_session_id AND s.driver_id=$3
-       AND s.state='paused' AND s.opt_in=true AND s.current_location_at>now()-interval '2 minutes'
-       AND d.id=c.demand_id AND d.status='open' AND c.status='suggested' AND c.expires_at>now()
-       AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.blocker_id=d.passenger_id AND b.blocked_id=s.driver_id) OR (b.blocker_id=s.driver_id AND b.blocked_id=d.passenger_id))
-     RETURNING c.id,c.demand_id,c.status,c.pickup_eta,c.detour_distance_m,c.detour_duration_s`,
-    [req.params.candidateId, req.params.id, req.userId],
-  );
-  if (!rows[0]) throw new ApiError(409, 'Candidate expired or unavailable. Pause the car and refresh matches.', 'candidate_unavailable');
-  res.json({ data: rows[0] });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ id: string; demand_id: string; passenger_id: string; status: string; pickup_eta: Date; detour_distance_m: number; detour_duration_s: number }>(
+      `UPDATE navigation_match_candidates c SET status='driver_interested'
+       FROM navigation_sessions s,passenger_demands d
+       WHERE c.id=$1 AND c.navigation_session_id=$2 AND s.id=c.navigation_session_id AND s.driver_id=$3
+         AND s.state='paused' AND s.opt_in=true AND s.current_location_at>now()-interval '2 minutes'
+         AND d.id=c.demand_id AND d.status='open' AND c.status='suggested' AND c.expires_at>now()
+         AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.blocker_id=d.passenger_id AND b.blocked_id=s.driver_id) OR (b.blocker_id=s.driver_id AND b.blocked_id=d.passenger_id))
+       RETURNING c.id,c.demand_id,d.passenger_id,c.status,c.pickup_eta,c.detour_distance_m,c.detour_duration_s`,
+      [req.params.candidateId, req.params.id, req.userId],
+    );
+    const candidate = rows[0];
+    if (!candidate) throw new ApiError(409, 'Candidate expired or unavailable. Pause the car and refresh matches.', 'candidate_unavailable');
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES($1,$2,$3,$4)',
+      [req.userId, 'navigation.match.driver_interested', 'navigation_match', candidate.id]);
+    await insertRealtimeOutbox(client, 'navigation.match.driver-interested', `navigation.match.driver-interested:${candidate.id}`,
+      [candidate.passenger_id], { candidate_id: candidate.id, demand_id: candidate.demand_id, status: candidate.status });
+    await client.query('COMMIT');
+    res.json({ data: {
+      id: candidate.id, demand_id: candidate.demand_id, status: candidate.status, pickup_eta: candidate.pickup_eta,
+      detour_distance_m: candidate.detour_distance_m, detour_duration_s: candidate.detour_duration_s,
+    } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
 }));
 
 app.get('/api/v1/demands/mine/navigation-matches', requireAuth, requireRole('passenger'), asyncHandler(async (req, res) => {

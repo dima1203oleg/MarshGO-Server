@@ -86,7 +86,9 @@ Passenger-only lookup available after cancelling the booking. Returns currently 
 
 Authenticated WebSocket clients connect through a single-use ticket from `POST /api/v1/realtime/ticket` to `/api/v1/realtime?ticket=...`. The server sends `{ "type": "...", "data": { ... } }` only to the persisted user IDs captured by the domain transaction. The PostgreSQL outbox commits atomically with chat messages, offer bookings/cancellations, booking lifecycle transitions, proposal create/counter/agree/accept, competing-proposal closure, and proposal closure when a passenger cancels demand. Event types include `conversation.message.created`, `booking.confirmed`, `booking.cancelled`, `booking.changed`, `proposal.created`, `proposal.countered`, `proposal.updated`, `proposal.accepted`, and `proposal.closed`.
 
-Realtime is an invalidation/delivery channel, not a query or a durable client inbox. On connect/reconnect, clients must use the authenticated REST endpoints to reload canonical booking, demand, proposal or message state; Web Push and missed-event replay are not implemented. Redis Pub/Sub fanout is at-least-once around worker acknowledgements, so consumers must tolerate duplicates.
+`POST /api/v1/navigation/sessions/:id/matches/:candidateId/interest` records the driver-interest transition, audit event, and passenger-only `navigation.match.driver-interested` event in one PostgreSQL transaction. Its payload includes only the candidate ID, demand ID and status. The passenger reloads their own authorized navigation-match list through REST; no precise driver location is disclosed.
+
+Realtime is an invalidation/delivery channel, not a query or a durable client inbox. On connect/reconnect, clients must use the authenticated REST endpoints to reload canonical booking, demand, proposal, navigation-match or message state; Web Push and missed-event replay are not implemented. Redis Pub/Sub fanout is at-least-once around worker acknowledgements, so consumers must tolerate duplicates.
 
 ## Safety reports and moderation
 
