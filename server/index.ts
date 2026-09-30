@@ -75,8 +75,8 @@ async function insertRealtimeOutbox(
 ) {
   if (!supportedOutboxEvents.has(eventType) || recipientIds.length === 0) throw new Error('invalid realtime outbox event');
   await client.query(
-    `INSERT INTO realtime_outbox(event_type,dedupe_key,recipient_ids,payload)
-     VALUES($1,$2,$3,$4::jsonb)`,
+    `INSERT INTO realtime_outbox(event_type,dedupe_key,recipient_ids,payload,created_at)
+     VALUES($1,$2,$3,$4::jsonb,clock_timestamp())`,
     [eventType, dedupeKey, [...new Set(recipientIds)], JSON.stringify(payload)],
   );
 }
@@ -88,7 +88,7 @@ async function broadcastRealtime(userIds: string[], type: string, data: unknown)
   }
   deliverRealtime(userIds, event);
 }
-type RealtimeOutboxRow = { id: string; event_type: string; recipient_ids: string[]; payload: unknown; attempt_count: number };
+type RealtimeOutboxRow = { id: string; event_type: string; recipient_ids: string[]; payload: unknown; attempt_count: number; created_at: Date };
 let lastRealtimeOutboxCleanupAt = 0;
 async function dispatchRealtimeOutbox() {
   if (process.env.REDIS_URL && !realtimeRedis?.isReady) throw new Error('Redis is not ready for realtime outbox delivery');
@@ -112,7 +112,7 @@ async function dispatchRealtimeOutbox() {
        )
        UPDATE realtime_outbox o SET locked_until=now()+interval '30 seconds',attempt_count=o.attempt_count+1
         FROM available WHERE o.id=available.id
-       RETURNING o.id,o.event_type,o.recipient_ids::text[] AS recipient_ids,o.payload,o.attempt_count`,
+       RETURNING o.id,o.event_type,o.recipient_ids::text[] AS recipient_ids,o.payload,o.attempt_count,o.created_at`,
     );
     rows = claimed.rows;
     await client.query('COMMIT');
@@ -129,9 +129,9 @@ async function dispatchRealtimeOutbox() {
       if (notification) {
         for (const userId of row.recipient_ids) {
           await pool.query(
-            `INSERT INTO user_notifications(user_id,source_dedupe_key,event_type,title,body,payload)
-             VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(user_id,source_dedupe_key) DO NOTHING`,
-            [userId, `${row.id}:${row.event_type}`, row.event_type, notification.title, notification.body, JSON.stringify(notification.payload)],
+            `INSERT INTO user_notifications(user_id,source_dedupe_key,event_type,title,body,payload,created_at)
+             VALUES($1,$2,$3,$4,$5,$6::jsonb,$7) ON CONFLICT(user_id,source_dedupe_key) DO NOTHING`,
+            [userId, `${row.id}:${row.event_type}`, row.event_type, notification.title, notification.body, JSON.stringify(notification.payload), row.created_at],
           );
         }
       }
