@@ -178,6 +178,10 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(accepted.data.total_price_minor, 15000);
     assert.deepEqual({ feeClass: accepted.data.fee_class, feeMinor: accepted.data.platform_fee_minor, rule: accepted.data.fee_rule_version },
       { feeClass: 'community', feeMinor: 0, rule: 'community-0pct-v1' });
+    await assert.rejects(
+      pool.query('UPDATE bookings SET platform_fee_minor = 1 WHERE id = $1', [accepted.data.id]),
+      { code: '23514', message: /booking fee snapshot is immutable/ },
+    );
 
     const replay = await book(acceptedUser, acceptedKey);
     assert.equal(replay.status, 200);
