@@ -18,6 +18,10 @@ const notificationText: Record<string, Pick<NotificationProjection, 'title' | 'b
   'navigation.match.passenger-confirmed': { title: 'Пасажир підтвердив інтерес', body: 'Продовжіть узгодження після безпечної зупинки.' },
   'navigation.route-updated': { title: 'Маршрут водія оновлено', body: 'Підтверджену поїздку додано до маршруту.' },
   'journey.updated': { title: 'План маршруту оновлено', body: 'Відкрийте поїздки, щоб переглянути актуальний стан.' },
+  'journey.started': { title: 'Подорож розпочато', body: 'Стежте за актуальним станом наступного відрізка.' },
+  'journey.leg.started': { title: 'Відрізок маршруту розпочато', body: 'MARSHGO оновив стан вашої подорожі.' },
+  'journey.leg.completed': { title: 'Відрізок маршруту завершено', body: 'Перевірте час і стан наступної пересадки.' },
+  'journey.completed': { title: 'Подорож завершено', body: 'Усі відрізки маршруту завершені.' },
 };
 
 const identifierKeys = new Set([

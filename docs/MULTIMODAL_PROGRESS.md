@@ -146,3 +146,27 @@
 
 **NEXT**
 - Add dynamic Journey/leg event monitoring and future Community transfer matching using real scheduled predecessor legs plus explicit ETA uncertainty. Until a live transit schedule feed exists, do not show a future bus-to-Community match as available.
+
+## Phase D continuation — Journey leg lifecycle events
+
+**Status:** PARTIAL.
+
+**DONE**
+- Linked Journey legs now follow the server booking lifecycle: the driver starting a boarded booking moves its leg and Journey to `ACTIVE` and stores the actual start timestamp.
+- Completion still requires both passenger and driver confirmation. Once the booking becomes completed, its Journey leg stores actual arrival and becomes `COMPLETED`; the parent Journey moves to the next `TRANSFER` leg or `COMPLETED` when no leg remains.
+- Journey lifecycle changes are persisted in the same PostgreSQL transaction as booking transitions and published through the existing outbox/WebSocket and persistent inbox projector. Payloads contain IDs/state only, never location or route details.
+- Added a real API integration scenario covering search → Journey-bound booking → signed ticket/boarding → start → two-party completion, and DB assertions for Journey/leg states and actual timestamps.
+
+**CHANGED FILES**
+- `server/index.ts`, `server/notifications.ts`, `tests/api-bookings.integration.test.ts`, `tests/notifications.test.ts`, `docs/API.md`, `docs/MULTIMODAL_PROGRESS.md`
+
+**TESTS**
+- Root typecheck and unit tests passed: 37 passed, one opt-in DB integration skipped.
+- Isolated PostGIS/Redis integration passed: Journey schema 1/1; booking/search/Journey lifecycle 10/10; navigation 1/1; cross-instance realtime 1/1; restart 1/1; rate limit 1/1.
+
+**LIMITATIONS / BLOCKED_EXTERNAL**
+- Journey search still persists only a direct Community offer leg. No live predecessor schedule, GTFS feed or partner availability exists, so transfer alerts and predictive multi-leg replanning are not active.
+- No physical device or background GPS test was performed for these server lifecycle transitions.
+
+**NEXT**
+- Add a monitor that evaluates real provider/vehicle ETA observations against subsequent Journey leg windows. Activate it only for legs with verified schedule and uncertainty data; provider feeds remain the gating external dependency.

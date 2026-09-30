@@ -289,6 +289,47 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const unreadData = await unreadAfterRead.json() as { data: { unreadCount: number } };
     assert.equal(unreadData.data.unreadCount, 3);
 
+    const completionSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
+      body: JSON.stringify({ origin: { name: 'Journey Test Origin', coordinates: [23.8561, 49.2567] },
+        destination: { name: 'Journey Test Destination', coordinates: [24.0297, 49.8397] },
+        departureAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000 - 60_000).toISOString(), passengers: 1, strategy: 'FASTEST' }),
+    });
+    assert.equal(completionSearch.status, 200);
+    const completionJourney = (await completionSearch.json() as { data: { journeys: Array<{ id: string; legs: Array<{ id: string }> }> } }).data.journeys[0];
+    const completionBookingResponse = await fetch(`${apiUrl}/api/v1/bookings`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `journey-complete-${crypto.randomUUID()}` },
+      body: JSON.stringify({ offerId: ids.journeyOffer, seats: 1, journeyId: completionJourney.id, journeyLegId: completionJourney.legs[0].id }),
+    });
+    assert.equal(completionBookingResponse.status, 201);
+    const completionBooking = (await completionBookingResponse.json() as { data: { id: string } }).data;
+    const ticketResponse = await fetch(`${apiUrl}/api/v1/bookings/${completionBooking.id}/ticket`, { headers: { 'x-dev-user-id': ids.driver } });
+    assert.equal(ticketResponse.status, 200);
+    const ticket = (await ticketResponse.json() as { data: { token: string } }).data;
+    const boarding = await fetch(`${apiUrl}/api/v1/bookings/${completionBooking.id}/boarding`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.driver }, body: JSON.stringify({ ticket: ticket.token }),
+    });
+    assert.equal(boarding.status, 200);
+    const start = await fetch(`${apiUrl}/api/v1/bookings/${completionBooking.id}/start`, { method: 'POST', headers: { 'x-dev-user-id': ids.driver } });
+    assert.equal(start.status, 200);
+    const activeJourney = await pool.query<{ journey_state: string; leg_state: string; started_at: Date | null }>(
+      `SELECT j.state AS journey_state,l.state AS leg_state,j.started_at FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1`, [completionJourney.id],
+    );
+    assert.equal(activeJourney.rows[0].journey_state, 'ACTIVE');
+    assert.equal(activeJourney.rows[0].leg_state, 'ACTIVE');
+    assert.ok(activeJourney.rows[0].started_at);
+    const firstCompletion = await fetch(`${apiUrl}/api/v1/bookings/${completionBooking.id}/complete`, { method: 'POST', headers: { 'x-dev-user-id': passengerA } });
+    assert.equal((await firstCompletion.json() as { data: { confirmations: number } }).data.confirmations, 1);
+    const secondCompletion = await fetch(`${apiUrl}/api/v1/bookings/${completionBooking.id}/complete`, { method: 'POST', headers: { 'x-dev-user-id': ids.driver } });
+    assert.equal((await secondCompletion.json() as { data: { status: string } }).data.status, 'completed');
+    const completedJourney = await pool.query<{ journey_state: string; leg_state: string; completed_at: Date | null; actual_arrival_at: Date | null }>(
+      `SELECT j.state AS journey_state,l.state AS leg_state,j.completed_at,l.actual_arrival_at FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1`, [completionJourney.id],
+    );
+    assert.equal(completedJourney.rows[0].journey_state, 'COMPLETED');
+    assert.equal(completedJourney.rows[0].leg_state, 'COMPLETED');
+    assert.ok(completedJourney.rows[0].completed_at);
+    assert.ok(completedJourney.rows[0].actual_arrival_at);
+
     const disabledCommunity = await fetch(`${apiUrl}/api/v1/journeys/search`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
       body: JSON.stringify({ ...body, preferences: { allowCommunity: false } }),

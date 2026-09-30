@@ -1254,6 +1254,24 @@ The local Capacitor bundle was also installed and launched on iPhone 15 Pro Max 
 
 **Next implementation step:** Journey live monitor and multi-leg predictive replanning; future community-leg matching remains unavailable until a real predecessor schedule and ETA uncertainty source exist.
 
+## Multimodal expansion — persisted Journey lifecycle
+
+**Phase:** D (partial).
+
+**Completed:** Journey-bound bookings now propagate the signed boarding/start/completion flow to Journey and leg states. Start records actual departure and publishes `journey.started` and `journey.leg.started`. Completion after both parties confirm records actual arrival, completes the leg, and moves the Journey to the next waiting transfer leg or `COMPLETED`. Lifecycle notifications use the persistent inbox and contain no GPS details.
+
+**Changed files:** `server/index.ts`, `server/notifications.ts`, `tests/api-bookings.integration.test.ts`, `tests/notifications.test.ts`, `docs/API.md`, `docs/MULTIMODAL_PROGRESS.md`.
+
+**Database/API changes:** No migration or new endpoint. Existing booking lifecycle endpoints now update linked Journey records in the same transaction.
+
+**Tests:** Root typecheck/unit passed (37 passed, one optional integration skip). Isolated PostGIS/Redis integration passed Journey schema 1/1, booking/Journey lifecycle 10/10, navigation 1/1, Redis realtime 1/1, restart 1/1, rate limit 1/1.
+
+**Demo/truth status:** Lifecycle was verified against persisted PostgreSQL Journey/booking data and a signed local test ticket. It does not validate a live transit ETA feed or physical GPS.
+
+**External dependencies:** Live transit/taxi/rail/GTFS and contracted routing services, staging infrastructure and physical-device/TestFlight acceptance remain outstanding.
+
+**Next implementation step:** Build the Journey monitor around real and freshness-bounded leg ETA observations, then evaluate downstream transfer risk and safe re-planning. Until an external schedule source is connected, no future bus-to-Community candidate is exposed.
+
 **Verification update:** Created fresh loopback database `marshgo_e2e_notifications` and applied migrations 001–021 successfully. Full `E2E_DATABASE_URL=postgres://…/marshgo_e2e_notifications REDIS_URL=redis://127.0.0.1:6380 npm run test:integration` passed: Journey schema 1/1, booking/search/negotiation/Journey inbox 10/10, navigation 1/1, Redis cross-instance realtime 1/1, restart durability 1/1, and rate limiting 1/1. Root unit tests/typecheck/lint/build and standalone Site typecheck/lint/build passed. Playwright E2E passed 4/4; the Journey test opens the inbox, checks saved booking/replanning events, and marks an item read. One test expectation was corrected from three to four notifications because the lifecycle emits booking confirmed/cancelled plus Journey READY/REPLANNING events; final rerun passed.
 
 **CI correction:** The first GitHub run exposed equal `created_at` values for realtime events inserted within the same DB transaction, which made same-transaction inbox ordering unstable. Outbox creation now uses `clock_timestamp()` and the durable inbox stores that source timestamp, preserving READY → cancellation → REPLANNING event order. The CI check is rerun with this fix.

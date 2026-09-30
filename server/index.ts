@@ -65,7 +65,7 @@ const supportedOutboxEvents = new Set([
   'conversation.message.created', 'booking.confirmed', 'booking.cancelled', 'booking.changed',
   'proposal.created', 'proposal.countered', 'proposal.updated', 'proposal.accepted', 'proposal.closed',
   'navigation.match.driver-interested', 'navigation.match.passenger-confirmed', 'navigation.route-updated',
-  'journey.updated',
+  'journey.updated', 'journey.started', 'journey.leg.started', 'journey.leg.completed', 'journey.completed',
 ]);
 async function insertRealtimeOutbox(
   client: PoolClient,
@@ -2178,6 +2178,18 @@ app.post('/api/v1/bookings/:id/start', requireAuth, asyncHandler(async (req, res
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'booking.started', 'booking', booking.id]);
     await insertRealtimeOutbox(client, 'booking.changed', `booking.changed:${booking.id}:in_progress`,
       [booking.driver_id, booking.passenger_id], { booking_id: booking.id, status: 'in_progress' });
+    const linkedLeg = await client.query<{ id: string; journey_id: string }>(
+      `SELECT l.id,l.journey_id FROM journey_legs l JOIN journeys j ON j.id=l.journey_id
+       WHERE l.booking_id=$1 AND j.user_id=$2 FOR UPDATE OF j,l`, [booking.id, booking.passenger_id],
+    );
+    if (linkedLeg.rows[0]) {
+      await client.query("UPDATE journey_legs SET state='ACTIVE',actual_departure_at=COALESCE(actual_departure_at,now()),updated_at=now() WHERE id=$1", [linkedLeg.rows[0].id]);
+      await client.query("UPDATE journeys SET state='ACTIVE',started_at=COALESCE(started_at,now()),current_leg_id=$2,updated_at=now() WHERE id=$1", [linkedLeg.rows[0].journey_id, linkedLeg.rows[0].id]);
+      await insertRealtimeOutbox(client, 'journey.started', `journey.started:${linkedLeg.rows[0].journey_id}`,
+        [booking.passenger_id], { journey_id: linkedLeg.rows[0].journey_id, journey_leg_id: linkedLeg.rows[0].id, state: 'ACTIVE' });
+      await insertRealtimeOutbox(client, 'journey.leg.started', `journey.leg.started:${linkedLeg.rows[0].id}`,
+        [booking.passenger_id], { journey_id: linkedLeg.rows[0].journey_id, journey_leg_id: linkedLeg.rows[0].id, booking_id: booking.id, state: 'ACTIVE' });
+    }
     await client.query('COMMIT');
     res.json({ data: { id: booking.id, status: 'in_progress' } });
   } catch (error) {
@@ -2212,6 +2224,30 @@ app.post('/api/v1/bookings/:id/complete', requireAuth, asyncHandler(async (req, 
       await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'booking.completed', 'booking', booking.id]);
       await insertRealtimeOutbox(client, 'booking.changed', `booking.changed:${booking.id}:completed`,
         [booking.driver_id, booking.passenger_id], { booking_id: booking.id, status: 'completed' });
+      const linkedLeg = await client.query<{ id: string; journey_id: string; ordinal: number }>(
+        `SELECT l.id,l.journey_id,l.ordinal FROM journey_legs l JOIN journeys j ON j.id=l.journey_id
+         WHERE l.booking_id=$1 AND j.user_id=$2 FOR UPDATE OF j,l`, [booking.id, booking.passenger_id],
+      );
+      if (linkedLeg.rows[0]) {
+        const currentLeg = linkedLeg.rows[0];
+        await client.query("UPDATE journey_legs SET state='COMPLETED',actual_arrival_at=now(),updated_at=now() WHERE id=$1", [currentLeg.id]);
+        const nextLeg = await client.query<{ id: string }>(
+          `SELECT id FROM journey_legs WHERE journey_id=$1 AND ordinal>$2 AND state IN ('SELECTED','CONFIRMED','WAITING') ORDER BY ordinal LIMIT 1 FOR UPDATE`,
+          [currentLeg.journey_id, currentLeg.ordinal],
+        );
+        if (nextLeg.rows[0]) {
+          await client.query("UPDATE journey_legs SET state='WAITING',updated_at=now() WHERE id=$1", [nextLeg.rows[0].id]);
+          await client.query("UPDATE journeys SET state='TRANSFER',current_leg_id=$2,updated_at=now() WHERE id=$1", [currentLeg.journey_id, nextLeg.rows[0].id]);
+        } else {
+          await client.query("UPDATE journeys SET state='COMPLETED',completed_at=now(),updated_at=now() WHERE id=$1", [currentLeg.journey_id]);
+        }
+        await insertRealtimeOutbox(client, 'journey.leg.completed', `journey.leg.completed:${currentLeg.id}`,
+          [booking.passenger_id], { journey_id: currentLeg.journey_id, journey_leg_id: currentLeg.id, booking_id: booking.id, state: 'COMPLETED' });
+        await insertRealtimeOutbox(client, nextLeg.rows[0] ? 'journey.updated' : 'journey.completed',
+          nextLeg.rows[0] ? `journey.transfer:${currentLeg.journey_id}:${nextLeg.rows[0].id}` : `journey.completed:${currentLeg.journey_id}`,
+          [booking.passenger_id], { journey_id: currentLeg.journey_id, journey_leg_id: nextLeg.rows[0]?.id ?? currentLeg.id,
+            booking_id: booking.id, state: nextLeg.rows[0] ? 'TRANSFER' : 'COMPLETED' });
+      }
     } else {
       await insertRealtimeOutbox(client, 'booking.changed', `booking.changed:${booking.id}:completion-confirmed:${req.userId}`,
         [booking.driver_id, booking.passenger_id], { booking_id: booking.id, status: 'in_progress', completion_confirmation_count: count });

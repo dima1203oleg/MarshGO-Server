@@ -24,4 +24,16 @@ describe('persistent notification projection', () => {
       eventType: 'journey.updated', journey_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', state: 'REPLANNING',
     });
   });
+
+  it('projects lifecycle notifications without route or location details', () => {
+    const projected = projectNotification('journey.leg.completed', {
+      journey_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', journey_leg_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      state: 'COMPLETED', coordinates: [24, 49], origin_name: 'Private address',
+    });
+    assert.equal(projected?.title, 'Відрізок маршруту завершено');
+    assert.deepEqual(projected?.payload, {
+      eventType: 'journey.leg.completed', journey_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      journey_leg_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', state: 'COMPLETED',
+    });
+  });
 });
