@@ -186,6 +186,14 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(journey.confirmedPriceMinor, null);
     assert.equal(journey.totalPriceMinor, 15000);
     assert.deepEqual(journey.legs.map((leg) => [leg.mode, leg.priceStatus, leg.availabilityStatus]), [['COMMUNITY', 'ESTIMATED', 'AVAILABLE']]);
+    const sourceOffer = await fetch(`${apiUrl}/api/v1/offers/${ids.offer}`);
+    assert.equal(sourceOffer.status, 200);
+    const offerDetails = await sourceOffer.json() as { data: { id: string; available_seats: number; driver_name: string; vehicle_photo_url: string | null } };
+    assert.equal(offerDetails.data.id, ids.offer);
+    assert.equal(offerDetails.data.available_seats, 1);
+    assert.equal(offerDetails.data.driver_name, 'API test driver');
+    assert.equal(offerDetails.data.vehicle_photo_url, null);
+    assert.equal((await fetch(`${apiUrl}/api/v1/offers/not-a-uuid`)).status, 400);
     const stored = await pool.query<{ state: string; price_minor: number; offer_id: string }>(
       `SELECT j.state,l.price_minor,l.offer_id FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 AND j.user_id=$2`, [journey.id, passengerA],
     );

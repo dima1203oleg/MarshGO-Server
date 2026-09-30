@@ -1112,6 +1112,25 @@ app.get('/api/v1/offers', asyncHandler(async (req, res) => {
   }))) });
 }));
 
+app.get('/api/v1/offers/:id', asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid offer ID', 'invalid_offer_id');
+  }
+  const { rows } = await pool.query(
+    `SELECT o.id,o.origin_name,o.destination_name,o.departure_at,o.arrival_at,o.distance_m,o.duration_s,o.route_source,
+            o.price_per_seat_minor,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
+            ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key
+       FROM offers o JOIN users u ON u.id=o.driver_id
+       LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
+       LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true
+      WHERE o.id=$1 AND o.status='published' AND o.departure_at>now() AND o.available_seats>0`, [req.params.id],
+  );
+  const offer = rows[0];
+  if (!offer) throw new ApiError(404, 'Offer not found');
+  const { vehicle_photo_key, ...publicOffer } = offer;
+  res.json({ data: { ...publicOffer, vehicle_photo_url: vehicle_photo_key ? await getVehiclePhotoUrl(vehicle_photo_key).catch(() => null) : null } });
+}));
+
 const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
        json_build_array(ST_X(j.origin::geometry),ST_Y(j.origin::geometry)) AS origin_coordinates,
        json_build_array(ST_X(j.destination::geometry),ST_Y(j.destination::geometry)) AS destination_coordinates,
