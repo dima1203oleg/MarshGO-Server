@@ -16,6 +16,7 @@ import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { selectRepresentativeJourneys } from './journey/scoring';
 import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
+import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { GeocodingUnavailableError, suggestPlaces } from './geocoding';
 import {
   createVehiclePhotoUpload, createVerificationEvidenceUpload, deleteStoredVehiclePhoto, getVehiclePhotoUrl,
@@ -25,6 +26,7 @@ import {
 
 const app = express();
 validateRuntimeConfig(process.env);
+const rendezvousSettings = getRendezvousSettings(process.env);
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 12, idleTimeoutMillis: 30_000 });
 type RealtimeTicket = { userId: string; sessionId: string; expiresAt: number };
@@ -66,6 +68,10 @@ const supportedOutboxEvents = new Set([
   'proposal.created', 'proposal.countered', 'proposal.updated', 'proposal.accepted', 'proposal.closed',
   'navigation.match.driver-interested', 'navigation.match.passenger-confirmed', 'navigation.route-updated',
   'journey.updated', 'journey.started', 'journey.leg.started', 'journey.leg.completed', 'journey.completed',
+  'rendezvous.activated', 'rendezvous.driver.approaching', 'rendezvous.passenger.approaching',
+  'rendezvous.driver.arrived', 'rendezvous.passenger.arrived', 'rendezvous.driver.delayed', 'rendezvous.passenger.delayed',
+  'rendezvous.driver.will-arrive', 'rendezvous.passenger.will-arrive', 'rendezvous.driver.cannot-make-it', 'rendezvous.passenger.cannot-make-it',
+  'rendezvous.both-nearby', 'rendezvous.boarding', 'rendezvous.completed', 'rendezvous.cancelled',
 ]);
 async function insertRealtimeOutbox(
   client: PoolClient,
@@ -2057,6 +2063,17 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
         booking_id: booking.id, offer_id: booking.offer_id, status: 'cancelled', seat_count: booking.seat_count,
         available_seats: inventory.rows[0]?.available_seats ?? null,
       });
+    const closedRendezvous = await client.query<{ id: string }>(
+      `UPDATE rendezvous_sessions SET state='CANCELLED',location_sharing_enabled=false,
+          cancelled_at=COALESCE(cancelled_at,now()),updated_at=now()
+        WHERE booking_id=$1 AND state NOT IN ('COMPLETED','CANCELLED','EXPIRED') RETURNING id`, [booking.id],
+    );
+    for (const session of closedRendezvous.rows) {
+      await client.query('INSERT INTO rendezvous_events(rendezvous_id,actor_id,event_type) VALUES($1,$2,$3)',
+        [session.id, req.userId, 'rendezvous.cancelled']);
+      await insertRealtimeOutbox(client, 'rendezvous.cancelled', `rendezvous.cancelled:${session.id}`,
+        [booking.passenger_id, booking.driver_id], { rendezvous_id: session.id, state: 'CANCELLED' });
+    }
     const linkedLeg = await client.query<{ id: string; journey_id: string }>('SELECT id,journey_id FROM journey_legs WHERE booking_id=$1 FOR UPDATE', [booking.id]);
     if (linkedLeg.rows[0]) {
       await client.query("UPDATE journey_legs SET state='CANCELLED',updated_at=now() WHERE id=$1", [linkedLeg.rows[0].id]);
@@ -2072,6 +2089,10 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
     throw error;
   } finally {
     client.release();
+  }
+  if (realtimeRedis?.isReady) {
+    const sessions = await pool.query<{ id: string }>('SELECT id FROM rendezvous_sessions WHERE booking_id=$1 AND state IN (\'CANCELLED\',\'COMPLETED\')', [req.params.id]);
+    for (const session of sessions.rows) await realtimeRedis.del([rendezvousLocationKey(session.id, 'driver'), rendezvousLocationKey(session.id, 'passenger')]);
   }
 }));
 
@@ -2121,6 +2142,274 @@ app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res
       vehicle_photo_url: vehicle_photo_key ? await getVehiclePhotoUrl(vehicle_photo_key).catch(() => null) : null,
     }))),
   } });
+}));
+
+type RendezvousDbRow = {
+  id: string; booking_id: string; journey_leg_id: string | null; driver_id: string; passenger_id: string;
+  pickup_lon: number; pickup_lat: number; pickup_label: string; planned_pickup_at: Date; predicted_pickup_at: Date | null;
+  state: RendezvousState; location_sharing_enabled: boolean; activation_at: Date; driver_arrived_at: Date | null;
+  passenger_arrived_at: Date | null; boarding_started_at: Date | null; completed_at: Date | null; cancelled_at: Date | null;
+  booking_status: string;
+};
+
+const rendezvousLocationKey = (id: string, participant: 'driver' | 'passenger') => `marshgo:rendezvous:${id}:${participant}`;
+const rendezvousTtlSeconds = 300;
+
+async function getOrCreateRendezvous(bookingId: string, userId: string): Promise<RendezvousDbRow> {
+  const booking = await pool.query<{ id: string; driver_id: string; passenger_id: string; status: string }>(
+    `SELECT b.id,o.driver_id,b.passenger_id,b.status FROM bookings b JOIN offers o ON o.id=b.offer_id
+      WHERE b.id=$1 AND (o.driver_id=$2 OR b.passenger_id=$2)`, [bookingId, userId],
+  );
+  const bookingRow = booking.rows[0];
+  if (!bookingRow) throw new ApiError(404, 'booking unavailable');
+  if (!['confirmed', 'boarding', 'in_progress'].includes(bookingRow.status)) {
+    const existing = await pool.query('SELECT 1 FROM rendezvous_sessions WHERE booking_id=$1', [bookingId]);
+    if (!existing.rows[0]) throw new ApiError(409, 'rendezvous is only available for an active confirmed booking');
+  }
+  await pool.query(
+    `INSERT INTO rendezvous_sessions(booking_id,journey_leg_id,pickup_point,pickup_label,planned_pickup_at,predicted_pickup_at,activation_at)
+     SELECT b.id,l.id,o.origin,o.origin_name,o.departure_at,o.departure_at,o.departure_at-($2 * interval '1 minute')
+       FROM bookings b JOIN offers o ON o.id=b.offer_id
+       LEFT JOIN LATERAL (SELECT id FROM journey_legs WHERE booking_id=b.id ORDER BY ordinal LIMIT 1) l ON true
+      WHERE b.id=$1 AND b.status IN ('confirmed','boarding','in_progress')
+     ON CONFLICT(booking_id) DO NOTHING`, [bookingId, rendezvousSettings.leadMinutes],
+  );
+  const { rows } = await pool.query<RendezvousDbRow>(
+    `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
+       ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
+       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+       r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
+      FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+     WHERE r.booking_id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2)`, [bookingId, userId],
+  );
+  if (!rows[0]) throw new ApiError(404, 'rendezvous unavailable');
+  return rows[0];
+}
+
+async function rendezvousResponse(row: RendezvousDbRow, viewerId: string) {
+  let locations: Record<string, unknown> = { driver: null, passenger: null };
+  if (row.location_sharing_enabled && realtimeRedis?.isReady) {
+    const [driverValue, passengerValue] = await Promise.all([
+      realtimeRedis.get(rendezvousLocationKey(row.id, 'driver')),
+      realtimeRedis.get(rendezvousLocationKey(row.id, 'passenger')),
+    ]);
+    const now = Date.now();
+    const parseLocation = (raw: string | null) => {
+      if (!raw) return null;
+      try {
+        const value = JSON.parse(raw) as { coordinates: [number, number]; accuracyMeters: number; capturedAt: string };
+        const captured = new Date(value.capturedAt).getTime();
+        if (!Array.isArray(value.coordinates) || value.coordinates.length !== 2 || !Number.isFinite(captured)) return null;
+        return { coordinates: value.coordinates, accuracyMeters: value.accuracyMeters, capturedAt: value.capturedAt,
+          freshness: now - captured <= 90_000 ? 'LIVE' : 'STALE' };
+      } catch { return null; }
+    };
+    locations = { driver: parseLocation(driverValue), passenger: parseLocation(passengerValue) };
+  }
+  return {
+    id: row.id, bookingId: row.booking_id, journeyLegId: row.journey_leg_id, state: row.state,
+    pickup: { label: row.pickup_label, coordinates: [row.pickup_lon, row.pickup_lat] },
+    plannedPickupAt: row.planned_pickup_at, predictedPickupAt: row.predicted_pickup_at,
+    activationAt: row.activation_at, locationSharingEnabled: row.location_sharing_enabled,
+    driverArrivedAt: row.driver_arrived_at, passengerArrivedAt: row.passenger_arrived_at,
+    boardingStartedAt: row.boarding_started_at, completedAt: row.completed_at, cancelledAt: row.cancelled_at,
+    currentParticipant: viewerId === row.driver_id ? 'driver' : 'passenger', locations,
+  };
+}
+
+app.get('/api/v1/bookings/:bookingId/rendezvous', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.bookingId)) throw new ApiError(400, 'invalid booking ID');
+  const rendezvous = await getOrCreateRendezvous(req.params.bookingId, req.userId!);
+  res.json({ data: await rendezvousResponse(rendezvous, req.userId!) });
+}));
+
+app.post('/api/v1/bookings/:bookingId/rendezvous/activate', requireAuth, asyncHandler(async (req, res) => {
+  const rendezvous = await getOrCreateRendezvous(req.params.bookingId, req.userId!);
+  if (rendezvous.state === 'CANCELLED' || rendezvous.state === 'EXPIRED' || rendezvous.state === 'COMPLETED') {
+    throw new ApiError(409, 'rendezvous is already closed', 'rendezvous_closed');
+  }
+  if (new Date(rendezvous.activation_at).getTime() > Date.now()) {
+    throw new ApiError(409, `location sharing activates ${rendezvousSettings.leadMinutes} minutes before pickup`, 'rendezvous_not_active');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<RendezvousDbRow>(
+      `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
+         ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
+         r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+         r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
+        FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+       WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF r,b`, [rendezvous.id, req.userId],
+    );
+    const current = rows[0];
+    if (!current) throw new ApiError(404, 'rendezvous unavailable');
+    if (!['confirmed', 'boarding', 'in_progress'].includes(current.booking_status)) throw new ApiError(409, 'booking is no longer active');
+    if (current.state === 'SCHEDULED' || current.state === 'ACTIVATING') {
+      await client.query("UPDATE rendezvous_sessions SET state='ACTIVE',location_sharing_enabled=true,updated_at=now() WHERE id=$1", [current.id]);
+      await client.query('INSERT INTO rendezvous_events(rendezvous_id,actor_id,event_type) VALUES($1,$2,$3)', [current.id, req.userId, 'rendezvous.activated']);
+      await insertRealtimeOutbox(client, 'rendezvous.activated', `rendezvous.activated:${current.id}`,
+        [current.driver_id, current.passenger_id], { rendezvous_id: current.id, state: 'ACTIVE' });
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  const updated = await getOrCreateRendezvous(req.params.bookingId, req.userId!);
+  res.json({ data: await rendezvousResponse(updated, req.userId!) });
+}));
+
+app.post('/api/v1/rendezvous/:id/location', requireAuth, asyncHandler(async (req, res) => {
+  const { longitude, latitude, accuracyMeters, capturedAt = new Date().toISOString() } = req.body ?? {};
+  if (![longitude, latitude, accuracyMeters].every((value) => typeof value === 'number' && Number.isFinite(value))
+    || Math.abs(longitude) > 180 || Math.abs(latitude) > 90 || accuracyMeters < 0 || accuracyMeters > 1000
+    || typeof capturedAt !== 'string' || !Number.isFinite(new Date(capturedAt).getTime())
+    || new Date(capturedAt).getTime() > Date.now() + 30_000 || Date.now() - new Date(capturedAt).getTime() > 120_000) {
+    throw new ApiError(400, 'location requires valid coordinates, accuracy and a recent capture timestamp', 'invalid_location');
+  }
+  const { rows } = await pool.query<RendezvousDbRow>(
+    `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
+       ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
+       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+       r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
+      FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+     WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2)`, [req.params.id, req.userId],
+  );
+  const rendezvous = rows[0];
+  if (!rendezvous) throw new ApiError(404, 'rendezvous unavailable');
+  if (!rendezvous.location_sharing_enabled || rendezvous.state === 'CANCELLED' || rendezvous.state === 'EXPIRED' || rendezvous.state === 'COMPLETED') {
+    throw new ApiError(409, 'location sharing is not active for this rendezvous', 'location_sharing_inactive');
+  }
+  if (!realtimeRedis?.isReady) throw new ApiError(503, 'ephemeral location service is unavailable', 'location_service_unavailable');
+  const participant = req.userId === rendezvous.driver_id ? 'driver' : 'passenger';
+  const recipientId = participant === 'driver' ? rendezvous.passenger_id : rendezvous.driver_id;
+  const locationKey = rendezvousLocationKey(rendezvous.id, participant);
+  const priorLocation = await realtimeRedis.get(locationKey);
+  if (priorLocation) {
+    try {
+      const priorCapturedAt = new Date((JSON.parse(priorLocation) as { capturedAt?: string }).capturedAt ?? '').getTime();
+      if (Number.isFinite(priorCapturedAt) && new Date(capturedAt).getTime() < priorCapturedAt) {
+        throw new ApiError(409, 'older location samples cannot replace a newer participant location', 'location_out_of_order');
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+    }
+  }
+  const value = { coordinates: [longitude, latitude], accuracyMeters, capturedAt };
+  await realtimeRedis.set(locationKey, JSON.stringify(value), { EX: rendezvousTtlSeconds });
+  const { rows: distanceRows } = await pool.query<{ distance_m: number }>(
+    `SELECT ST_Distance(pickup_point,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography) AS distance_m
+       FROM rendezvous_sessions WHERE id=$1`, [rendezvous.id, longitude, latitude],
+  );
+  const nearPickup = isWithinPickupGeofence(Number(distanceRows[0]?.distance_m), accuracyMeters, rendezvousSettings.geofenceMeters);
+  await broadcastRealtime([recipientId], 'rendezvous.location.updated', {
+    rendezvous_id: rendezvous.id, participant, ...value, near_pickup: nearPickup,
+  });
+  res.json({ data: { rendezvousId: rendezvous.id, storedEphemerally: true, expiresInSeconds: rendezvousTtlSeconds,
+    nearPickup, arrivalRequiresUserConfirmation: true } });
+}));
+
+app.post('/api/v1/rendezvous/:id/status', requireAuth, asyncHandler(async (req, res) => {
+  const action = req.body?.action as RendezvousAction;
+  if (!['approaching', 'arrived', 'delayed', 'will_arrive', 'cannot_make_it'].includes(action)) throw new ApiError(400, 'unsupported rendezvous action');
+  const client = await pool.connect();
+  let participantKeys: string[] = [];
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<RendezvousDbRow>(
+      `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
+         ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
+         r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+         r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
+        FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+       WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF r,b`, [req.params.id, req.userId],
+    );
+    const current = rows[0];
+    if (!current) throw new ApiError(404, 'rendezvous unavailable');
+    const actor = req.userId === current.driver_id ? 'driver' : 'passenger';
+    const transition = resolveRendezvousAction(actor, action, current.state);
+    if (!current.location_sharing_enabled && action !== 'cannot_make_it') throw new ApiError(409, 'rendezvous is not active');
+    if (action === 'arrived') {
+      await client.query(`UPDATE rendezvous_sessions SET state=$2,${transition.arrivalField}=COALESCE(${transition.arrivalField},now()),updated_at=now() WHERE id=$1`, [current.id, transition.state]);
+    } else if (transition.terminal) {
+      await client.query("UPDATE rendezvous_sessions SET state='CANCELLED',location_sharing_enabled=false,cancelled_at=now(),updated_at=now() WHERE id=$1", [current.id]);
+    } else {
+      await client.query('UPDATE rendezvous_sessions SET state=$2,updated_at=now() WHERE id=$1', [current.id, transition.state]);
+    }
+    const eventType = transition.state === 'BOTH_NEARBY' ? 'rendezvous.both-nearby' : transition.eventType;
+    const safeMetadata = action === 'will_arrive' && Number.isInteger(req.body?.minutes) && req.body.minutes >= 1 && req.body.minutes <= 120
+      ? { estimated_minutes: req.body.minutes } : {};
+    await client.query('INSERT INTO rendezvous_events(rendezvous_id,actor_id,event_type,metadata) VALUES($1,$2,$3,$4::jsonb)',
+      [current.id, req.userId, eventType, JSON.stringify(safeMetadata)]);
+    await insertRealtimeOutbox(client, eventType, `${eventType}:${current.id}:${req.userId}:${crypto.randomUUID()}`,
+      [current.driver_id, current.passenger_id], { rendezvous_id: current.id, state: transition.terminal ? 'CANCELLED' : transition.state, action });
+    if (transition.terminal) participantKeys = [rendezvousLocationKey(current.id, 'driver'), rendezvousLocationKey(current.id, 'passenger')];
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  if (participantKeys.length && realtimeRedis?.isReady) await realtimeRedis.del(participantKeys);
+  const current = await pool.query<RendezvousDbRow>(
+    `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
+       ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
+       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+       r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
+      FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id WHERE r.id=$1`, [req.params.id],
+  );
+  res.json({ data: await rendezvousResponse(current.rows[0], req.userId!) });
+}));
+
+app.post('/api/v1/rendezvous/:id/boarding', requireAuth, asyncHandler(async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ id: string; driver_id: string; passenger_id: string; state: string; booking_status: string; location_sharing_enabled: boolean }>(
+      `SELECT r.id,o.driver_id,b.passenger_id,r.state,b.status AS booking_status,r.location_sharing_enabled
+         FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+        WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF r,b`, [req.params.id, req.userId],
+    );
+    const current = rows[0];
+    if (!current) throw new ApiError(404, 'rendezvous unavailable');
+    if (current.state !== 'BOTH_NEARBY' || !current.location_sharing_enabled || !['confirmed','boarding'].includes(current.booking_status)) {
+      throw new ApiError(409, 'both participants must confirm arrival before rendezvous boarding', 'rendezvous_not_ready');
+    }
+    await client.query("UPDATE rendezvous_sessions SET state='BOARDING',boarding_started_at=COALESCE(boarding_started_at,now()),updated_at=now() WHERE id=$1", [current.id]);
+    await client.query('INSERT INTO rendezvous_events(rendezvous_id,actor_id,event_type) VALUES($1,$2,$3)', [current.id, req.userId, 'rendezvous.boarding']);
+    await insertRealtimeOutbox(client, 'rendezvous.boarding', `rendezvous.boarding:${current.id}`,
+      [current.driver_id,current.passenger_id], { rendezvous_id: current.id, state: 'BOARDING' });
+    await client.query('COMMIT');
+    res.json({ data: { id: current.id, state: 'BOARDING', bookingLifecycleRemainsServerControlled: true } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}));
+
+app.post('/api/v1/rendezvous/:id/end', requireAuth, asyncHandler(async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ id: string; driver_id: string; passenger_id: string; state: RendezvousState }>(
+      `SELECT r.id,o.driver_id,b.passenger_id,r.state FROM rendezvous_sessions r
+         JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+        WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF r`, [req.params.id, req.userId],
+    );
+    const session = rows[0];
+    if (!session) throw new ApiError(404, 'rendezvous unavailable');
+    if (['COMPLETED','CANCELLED','EXPIRED'].includes(session.state)) throw new ApiError(409, 'rendezvous is already closed');
+    await client.query("UPDATE rendezvous_sessions SET state='CANCELLED',location_sharing_enabled=false,cancelled_at=now(),updated_at=now() WHERE id=$1", [session.id]);
+    await client.query('INSERT INTO rendezvous_events(rendezvous_id,actor_id,event_type) VALUES($1,$2,$3)', [session.id, req.userId, 'rendezvous.cancelled']);
+    await insertRealtimeOutbox(client, 'rendezvous.cancelled', `rendezvous.cancelled:${session.id}`,
+      [session.driver_id, session.passenger_id], { rendezvous_id: session.id, state: 'CANCELLED' });
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  if (realtimeRedis?.isReady) await realtimeRedis.del([rendezvousLocationKey(req.params.id, 'driver'), rendezvousLocationKey(req.params.id, 'passenger')]);
+  res.json({ data: { id: req.params.id, state: 'CANCELLED' } });
 }));
 
 app.get('/api/v1/bookings/:id/ticket', requireAuth, asyncHandler(async (req, res) => {
@@ -2202,6 +2491,7 @@ app.post('/api/v1/bookings/:id/start', requireAuth, asyncHandler(async (req, res
 
 app.post('/api/v1/bookings/:id/complete', requireAuth, asyncHandler(async (req, res) => {
   const client = await pool.connect();
+  let completionFinalized = false;
   try {
     await client.query('BEGIN');
     const { rows } = await client.query<{ id: string; driver_id: string; passenger_id: string; status: string }>(
@@ -2211,6 +2501,7 @@ app.post('/api/v1/bookings/:id/complete', requireAuth, asyncHandler(async (req, 
     if (!booking || (booking.driver_id !== req.userId && booking.passenger_id !== req.userId)) throw new ApiError(404, 'booking unavailable');
     if (booking.status === 'completed') {
       await client.query('COMMIT');
+      completionFinalized = true;
       res.json({ data: { id: booking.id, status: 'completed', confirmations: 2 }, replayed: true });
       return;
     }
@@ -2221,11 +2512,23 @@ app.post('/api/v1/bookings/:id/complete', requireAuth, asyncHandler(async (req, 
     let status = 'in_progress';
     if (count >= 2) {
       status = 'completed';
+      completionFinalized = true;
       await client.query("UPDATE bookings SET status='completed',completed_at=now() WHERE id=$1 AND status='in_progress'", [booking.id]);
       await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id) VALUES ($1,'in_progress','completed',$2)", [booking.id, req.userId]);
       await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'booking.completed', 'booking', booking.id]);
       await insertRealtimeOutbox(client, 'booking.changed', `booking.changed:${booking.id}:completed`,
         [booking.driver_id, booking.passenger_id], { booking_id: booking.id, status: 'completed' });
+      const completedRendezvous = await client.query<{ id: string }>(
+        `UPDATE rendezvous_sessions SET state='COMPLETED',location_sharing_enabled=false,
+            completed_at=COALESCE(completed_at,now()),updated_at=now()
+          WHERE booking_id=$1 AND state NOT IN ('COMPLETED','CANCELLED','EXPIRED') RETURNING id`, [booking.id],
+      );
+      for (const session of completedRendezvous.rows) {
+        await client.query('INSERT INTO rendezvous_events(rendezvous_id,actor_id,event_type) VALUES($1,$2,$3)',
+          [session.id, req.userId, 'rendezvous.completed']);
+        await insertRealtimeOutbox(client, 'rendezvous.completed', `rendezvous.completed:${session.id}`,
+          [booking.passenger_id, booking.driver_id], { rendezvous_id: session.id, state: 'COMPLETED' });
+      }
       const linkedLeg = await client.query<{ id: string; journey_id: string; ordinal: number }>(
         `SELECT l.id,l.journey_id,l.ordinal FROM journey_legs l JOIN journeys j ON j.id=l.journey_id
          WHERE l.booking_id=$1 AND j.user_id=$2 FOR UPDATE OF j,l`, [booking.id, booking.passenger_id],
@@ -2264,6 +2567,10 @@ app.post('/api/v1/bookings/:id/complete', requireAuth, asyncHandler(async (req, 
     await client.query('ROLLBACK');
     throw error;
   } finally { client.release(); }
+  if (completionFinalized && realtimeRedis?.isReady) {
+    const sessions = await pool.query<{ id: string }>('SELECT id FROM rendezvous_sessions WHERE booking_id=$1 AND state=\'COMPLETED\'', [req.params.id]);
+    for (const session of sessions.rows) await realtimeRedis.del([rendezvousLocationKey(session.id, 'driver'), rendezvousLocationKey(session.id, 'passenger')]);
+  }
 }));
 
 app.post('/api/v1/bookings/:id/reviews', requireAuth, asyncHandler(async (req, res) => {

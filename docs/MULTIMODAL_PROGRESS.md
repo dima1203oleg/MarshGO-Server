@@ -144,6 +144,8 @@
 - This does not add JourneyLeg orchestration for future bus/transit legs, cumulative ETA uncertainty, predictive transfer rescue, provider outage handling or multi-leg replanning.
 - Physical iOS location accuracy, stop arrival acknowledgement and background tracking remain unverified. PWA GPS remains foreground-only.
 
+**Verification follow-up:** The root GitHub PR workflow passed, while its push workflow exposed an E2E timing race: the UI's navigation pause request could still be in flight when the test immediately requested driver interest. The test now waits for the persisted session state to become `paused` before that action. Local Playwright rerun against isolated `marshgo_e2e_multinav` (migrations 001–022) passed 4/4, including two-account live matching and both iPhone Pro Max viewport checks. The first local retry was run against an older isolated database at migration 021 and failed because it lacked the new waypoint `state` column; that run is excluded from passing evidence.
+
 **NEXT**
 - Add dynamic Journey/leg event monitoring and future Community transfer matching using real scheduled predecessor legs plus explicit ETA uncertainty. Until a live transit schedule feed exists, do not show a future bus-to-Community match as available.
 
@@ -170,3 +172,57 @@
 
 **NEXT**
 - Add a monitor that evaluates real provider/vehicle ETA observations against subsequent Journey leg windows. Activate it only for legs with verified schedule and uncertainty data; provider feeds remain the gating external dependency.
+
+## Phase 6 continuation — Live Rendezvous backend foundation
+
+**Status:** PARTIAL.
+
+**DONE**
+- Added additive migration `023_rendezvous_sessions.sql`; the existing Journey/booking/navigation tables were not recreated or rewritten.
+- Added participant-authorized APIs to read/create the rendezvous session, activate sharing, submit ephemeral location, report approaching/delay/arrival, complete the two-party pickup handshake, and end sharing. Added a booking-scoped Production Site panel for these actions.
+- Sharing defaults to activation 15 minutes before pickup and an accuracy-aware 75 m geofence. Both are bounded server settings. GPS proximity is advisory; users explicitly confirm arrival.
+- Latest coordinates use Redis keys scoped to rendezvous and participant with a 5-minute TTL. Location updates go only through ephemeral Redis/WebSocket delivery; no coordinate is written to PostgreSQL, outbox, or inbox. Stale points are labelled and booking cancel/completion clears sharing transactionally.
+- Status transitions are persisted in `rendezvous_events` and the transactional outbox. Both booking participants receive state changes; unrelated users receive 404.
+- Added deterministic unit tests and a two-account booking API integration flow for activation, privacy, arrival, boarding and end-of-sharing.
+
+**CHANGED FILES**
+- `server/migrations/023_rendezvous_sessions.sql`, `server/rendezvous.ts`, `server/index.ts`, `server/notifications.ts`, `src/services/productionApi.ts`, `src/views/ProductionMarketplace.tsx`, `tests/rendezvous.test.ts`, `tests/api-bookings.integration.test.ts`
+- `docs/API.md`, `docs/DATA_MODEL.md`, `docs/MULTIMODAL_PROGRESS.md`, `docs/RENDEZVOUS_PROGRESS.md`, `.env.example`
+
+**TESTS**
+- Fresh isolated loopback/PostGIS DB `marshgo_e2e_rendezvous`: migrations 001–023 applied; Journey schema 1/1; booking/search/proposal/rendezvous API 11/11; navigation 1/1; Redis realtime 1/1; restart durability 1/1; rate limits 1/1.
+- Unit tests 42 passed before adding settings validation; root typecheck passed. ESLint initially found one unused helper, which was removed. Re-run complete check after the final docs/config edits.
+- This integration test uses two independent development-auth accounts and local Redis/PostGIS, not physical iPhones or production credentials.
+
+**LIMITATIONS / BLOCKED_EXTERNAL**
+- No automatic activation worker/push, road ETA for either participant, live rendezvous map, native background location, or physical two-device acceptance yet.
+- No Journey Monitor consumes Rendezvous delays/arrival to cascade ETA into later legs or run predictive replan. This remains the next backend feature.
+- SMS/APNs, public HTTPS staging, contracted routing/geocoding/tiles, production signing and two physical iPhones are external/operational blockers.
+
+**NEXT**
+- Feed provider options into the planner only after real, geocoded provider results and walking-route connectors are available; then persist genuine multi-leg alternatives.
+
+## Phase 2 continuation — time-dependent multi-leg planner core
+
+**Status:** PARTIAL.
+
+**DONE**
+- Added a server-only composer for provider options with stable origin/destination node IDs, exact chronology, maximum wait/leg bounds, and measured transfer connectors.
+- Transfer feasibility includes upstream ETA uncertainty, routed walking time, configured transfer buffer and boarding grace. Missing connector evidence, unavailable inventory, unknown availability, and paths that do not reach the requested destination fail closed.
+- Aggregate Journey summaries preserve unknown prices, add known per-leg estimate bounds, include waiting in door-to-door elapsed time and rank complete paths with the existing server-side scoring strategies.
+- Added four deterministic unit tests for complete multi-leg construction, rejected/missing connectors, unknown fares/FASTEST ranking and stopping at the requested destination.
+
+**CHANGED FILES**
+- `server/journey/planner.ts`, `server/providers/types.ts`, `tests/journey-planner.test.ts`, `docs/MULTIMODAL_PROGRESS.md`
+
+**TESTS**
+- `npx tsx --test tests/journey-planner.test.ts`: 4/4 passed.
+- `npm run typecheck`: passed.
+- The existing Journey Search API is still direct-Community-only; this planning core is not presented as active inventory or a production multi-leg user flow.
+
+**LIMITATIONS / BLOCKED_EXTERNAL**
+- No contracted GTFS static/Realtime feed, GTFS-Realtime protobuf source, walking route provider or transit/taxi inventory is configured. No real provider results are currently fed to this composer.
+- Consequently future transit-to-Community matching, live vehicle map, Journey monitor, delay cascade and predictive rescue remain unavailable. The current planner cannot create bookings or claim that a SOFT_MATCH is reserved.
+
+**NEXT**
+- Implement a GTFS static/Realtime provider and feed-status/expiry handling behind explicit feed configuration; keep production results disabled until an authorized regional feed and routed walking connectors are configured. Then connect verified provider options to this composer and add future Community availability matching.

@@ -27,6 +27,18 @@ Offer search and `/offers/mine` include `vehicle_photo_url` only when the primar
 
 The provider interface, Journey strategy scorer, route similarity suppression, and transfer uncertainty engine are server modules. This first search joins only one direct Community leg per result; it does not yet optimize walks, transfers, future community matches, provider calls, or live re-planning. Commercial providers remain external blockers.
 
+## Confirmed-booking rendezvous (partial backend slice)
+
+* `GET /api/v1/bookings/:bookingId/rendezvous` creates or returns a rendezvous for an active confirmed booking, visible only to the passenger and driver.
+* `POST /api/v1/bookings/:bookingId/rendezvous/activate` enables location sharing after the server-configured activation time (default: 15 minutes before pickup).
+* `POST /api/v1/rendezvous/:id/location` accepts `{ longitude, latitude, accuracyMeters, capturedAt }`. Latest participant points are stored in Redis for 5 minutes and broadcast ephemerally to the other booking participant; exact coordinates never enter PostgreSQL or the durable event outbox. A proximity result is advisory and never changes arrival state.
+* `POST /api/v1/rendezvous/:id/status` accepts `{ action: approaching|arrived|delayed|will_arrive|cannot_make_it, minutes? }`. Participant confirmations and machine-readable status events are persisted and sent through the transactional outbox.
+* `POST /api/v1/rendezvous/:id/boarding` records the rendezvous handshake once both parties confirmed arrival. Existing booking ticket and lifecycle APIs remain authoritative for boarding the ride. `POST /api/v1/rendezvous/:id/end` ends the location-sharing session.
+
+`RENDEZVOUS_GEOFENCE_METERS` is bounded to 50–100 meters (default 75); `RENDEZVOUS_LEAD_MINUTES` is bounded to 1–60 (default 15). Incoming points older than 120 seconds or more than 30 seconds in the future are rejected; points older than 90 seconds are marked stale. Booking cancellation/completion turns off sharing in the same database transaction and Redis points are deleted after commit.
+
+The Production Site has a booking-scoped control panel for checking the state, explicitly activating sharing when eligible, sending a one-shot current GPS fix, reporting approaching/arrival and ending sharing. It does not yet provide a live map, continuous foreground updates, driver/passenger road ETAs, downstream Journey timing, or an activation worker. Activation is participant-triggered after the returned activation time. iOS background tracking is not implemented.
+
 `POST /api/v1/vehicles` (driver role) creates a vehicle record without accepting or returning a full license plate. The first car becomes active; later cars do not replace it. New vehicles remain pending until the authorized verification workflow approves both registration and driver licence evidence.
 
 `GET /api/v1/vehicles` lists only the caller's non-archived vehicles. `PATCH /api/v1/vehicles/:id` edits only an owned vehicle. `POST /api/v1/vehicles/:id/activate` atomically switches the active vehicle. `DELETE /api/v1/vehicles/:id` archives only when it has no future published trip.
@@ -92,7 +104,7 @@ Cancels a confirmed booking owned by the caller and restores its seats exactly o
 
 Authenticated WebSocket clients connect through a single-use ticket from `POST /api/v1/realtime/ticket` to `/api/v1/realtime?ticket=...`. The server sends `{ "type": "...", "data": { ... } }` only to the persisted user IDs captured by the domain transaction. The PostgreSQL outbox commits atomically with chat messages, offer bookings/cancellations, booking lifecycle transitions, proposal create/counter/agree/accept, competing-proposal closure, demand-cancellation closure, navigation-match consent transitions and Journey leg lifecycle changes. Event types include `conversation.message.created`, `booking.confirmed`, `booking.cancelled`, `booking.changed`, `proposal.created`, `proposal.countered`, `proposal.updated`, `proposal.accepted`, `proposal.closed`, `navigation.match.driver-interested`, `navigation.match.passenger-confirmed`, `journey.started`, `journey.leg.started`, `journey.leg.completed`, `journey.updated` and `journey.completed`. Navigation events contain only candidate ID, demand ID and status; Journey events contain authorized resource IDs and state, never route coordinates or location trails.
 
-Realtime is an invalidation/delivery channel, not a query or a durable client inbox. On connect/reconnect, clients must use the authenticated REST endpoints to reload canonical booking, demand, proposal or message state; Web Push and missed-event replay are not implemented. Redis Pub/Sub fanout is at-least-once around worker acknowledgements, so consumers must tolerate duplicates.
+Realtime is an invalidation/delivery channel, not a query. On connect/reconnect, clients must use authenticated REST endpoints to reload canonical booking, demand, proposal, rendezvous status or message state; Web Push and missed-event replay are not implemented. Redis Pub/Sub fanout is at-least-once around worker acknowledgements, so consumers must tolerate duplicates. `rendezvous.location.updated` is the exception to durable delivery: its exact coordinates are a Redis-only ephemeral event and are not persisted to the outbox or inbox.
 
 ## Safety reports and moderation
 

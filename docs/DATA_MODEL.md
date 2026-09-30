@@ -15,6 +15,7 @@ The PostgreSQL schema is managed by ordered SQL migrations in `server/migrations
 | Messaging | `conversations`, `conversation_members`, `messages` | Conversation membership binds access to booking participants; message bodies have length constraints. |
 | Realtime delivery | `realtime_outbox` | Chat, booking and proposal event plus recipient snapshot commit in the corresponding domain transaction; unique dedupe key; leased `SKIP LOCKED` delivery, exponential retry and published state; published payloads are pruned after seven days. |
 | Safety | `moderation_cases` | Private booking-linked report, derived counterpart, reviewer, bounded resolution action/note, terminal state and queue indexes; partial uniqueness prevents duplicate open reports for one booking. |
+| Live pickup | `rendezvous_sessions`, `rendezvous_events` | One session per confirmed booking; pickup geography and planned/predicted times; explicit participant arrival and terminal timestamps. Durable events contain status and bounded ETA notes only. Exact live coordinates live ephemerally in Redis with a 5-minute TTL and never enter PostgreSQL/outbox. |
 | Operations | `audit_events` | Critical backend actions are recorded with actor, entity, action, and timestamp. |
 
 ## Migration history
@@ -31,6 +32,7 @@ The PostgreSQL schema is managed by ordered SQL migrations in `server/migrations
 * `015_moderation_cases.sql` — private booking-scoped reports, reviewer assignment, decision constraints, and queue indexes.
 * `019_booking_fee_snapshot.sql` — immutable Community fee classification/snapshot on bookings.
 * `020_journeys.sql` — Journey plans, ordered multimodal leg contract, route/transfer freshness, and persisted planning preferences.
+* `023_rendezvous_sessions.sql` — confirmed-booking rendezvous state, pickup point, lifecycle timestamps, and status-only event log.
 
 ## Not yet modeled or incomplete
 
