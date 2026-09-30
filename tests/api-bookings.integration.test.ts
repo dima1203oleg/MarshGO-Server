@@ -577,6 +577,39 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.ok(negotiationEvents.rows.every((event) => event.recipient_ids.includes(passengerA) && event.recipient_ids.includes(ids.driver)));
     assert.ok(negotiationEvents.rows.every((event) => event.payload.proposal_id === proposal.data.id));
 
+    const raceDemandResponse = await fetch(`${apiUrl}/api/v1/demands`, {
+      method: 'POST', headers: headers(passengerA),
+      body: JSON.stringify({
+        originName: 'Acceptance Race Origin', destinationName: 'Acceptance Race Destination',
+        origin: [23.86, 49.25], destination: [24.03, 49.84],
+        earliestDeparture: earliest.toISOString(), latestDeparture: latest.toISOString(), passengers: 1,
+      }),
+    });
+    assert.equal(raceDemandResponse.status, 201);
+    const raceDemand = await raceDemandResponse.json() as { data: { id: string } };
+    const competingProposalIds: string[] = [];
+    for (const priceMinor of [8000, 9000]) {
+      const competingProposalResponse: Response = await fetch(`${apiUrl}/api/v1/demands/${raceDemand.data.id}/proposals`, {
+        method: 'POST', headers: headers(ids.driver),
+        body: JSON.stringify({ vehicleId: apiCreatedVehicleId, priceMinor, departureAt: earliest.toISOString() }),
+      });
+      assert.equal(competingProposalResponse.status, 201);
+      competingProposalIds.push((await competingProposalResponse.json() as { data: { id: string } }).data.id);
+    }
+    const simultaneousAccepts = await Promise.all(competingProposalIds.map(proposalId => fetch(`${apiUrl}/api/v1/proposals/${proposalId}/accept`, {
+      method: 'POST', headers: headers(passengerA),
+    })));
+    assert.deepEqual(simultaneousAccepts.map(response => response.status).sort(), [201, 409]);
+    const raceState = await pool.query<{ demand_status: string; accepted_count: string; rejected_count: string; booking_count: string }>(
+      `SELECT d.status AS demand_status,
+              (SELECT count(*) FROM proposals p WHERE p.demand_id=d.id AND p.status='accepted') AS accepted_count,
+              (SELECT count(*) FROM proposals p WHERE p.demand_id=d.id AND p.status='rejected') AS rejected_count,
+              (SELECT count(*) FROM bookings b JOIN offers o ON o.id=b.offer_id
+                WHERE o.origin_name=d.origin_name AND o.destination_name=d.destination_name AND o.driver_id=$2) AS booking_count
+         FROM passenger_demands d WHERE d.id=$1`, [raceDemand.data.id, ids.driver],
+    );
+    assert.deepEqual(raceState.rows[0], { demand_status: 'matched', accepted_count: '1', rejected_count: '1', booking_count: '1' });
+
     const cancellationDemand = await fetch(`${apiUrl}/api/v1/demands`, {
       method: 'POST', headers: headers(passengerA),
       body: JSON.stringify({
