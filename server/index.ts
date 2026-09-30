@@ -1967,7 +1967,7 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
     const linkedLeg = await client.query<{ id: string; journey_id: string }>('SELECT id,journey_id FROM journey_legs WHERE booking_id=$1 FOR UPDATE', [booking.id]);
     if (linkedLeg.rows[0]) {
       await client.query("UPDATE journey_legs SET state='CANCELLED',updated_at=now() WHERE id=$1", [linkedLeg.rows[0].id]);
-      await client.query("UPDATE journeys SET state='REPLANNING',confirmed_price_minor=NULL,updated_at=now() WHERE id=$1", [linkedLeg.rows[0].journey_id]);
+      await client.query("UPDATE journeys SET state='REPLANNING',total_price_minor=NULL,confirmed_price_minor=NULL,estimated_price_min_minor=NULL,estimated_price_max_minor=NULL,updated_at=now() WHERE id=$1", [linkedLeg.rows[0].journey_id]);
       await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'journey.replanning', 'journey', linkedLeg.rows[0].journey_id]);
       await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:cancel:${booking.id}`,
         [booking.passenger_id], { journey_id: linkedLeg.rows[0].journey_id, journey_leg_id: linkedLeg.rows[0].id, booking_id: booking.id, state: 'REPLANNING' });

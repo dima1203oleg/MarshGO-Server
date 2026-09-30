@@ -241,11 +241,11 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal((await cancelLinkedBooking()).status, 200);
     assert.equal((await cancelLinkedBooking()).status, 200);
-    const replanningJourney = await pool.query<{ state: string; confirmed_price_minor: number | null; leg_state: string; booking_id: string }>(
-      `SELECT j.state,j.confirmed_price_minor,l.state AS leg_state,l.booking_id
+    const replanningJourney = await pool.query<{ state: string; total_price_minor: number | null; confirmed_price_minor: number | null; estimated_price_min_minor: number | null; estimated_price_max_minor: number | null; leg_state: string; booking_id: string }>(
+      `SELECT j.state,j.total_price_minor,j.confirmed_price_minor,j.estimated_price_min_minor,j.estimated_price_max_minor,l.state AS leg_state,l.booking_id
          FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1`, [journey.id],
     );
-    assert.deepEqual(replanningJourney.rows[0], { state: 'REPLANNING', confirmed_price_minor: null, leg_state: 'CANCELLED', booking_id: linkedBooking.data.id });
+    assert.deepEqual(replanningJourney.rows[0], { state: 'REPLANNING', total_price_minor: null, confirmed_price_minor: null, estimated_price_min_minor: null, estimated_price_max_minor: null, leg_state: 'CANCELLED', booking_id: linkedBooking.data.id });
     const journeyEvents = await pool.query<{ recipient_ids: string[]; payload: { state: string; journey_id: string } }>(
       `SELECT recipient_ids,payload FROM realtime_outbox WHERE event_type='journey.updated' AND payload->>'journey_id'=$1 ORDER BY created_at,id`, [journey.id],
     );

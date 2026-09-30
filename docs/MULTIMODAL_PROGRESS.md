@@ -64,8 +64,8 @@
 **DONE**
 - The existing booking endpoint accepts optional paired Journey/leg IDs. In the same transaction as the existing seat lock, it checks Journey ownership, selected state, single-leg scope, offer identity and passenger count, then stores the booking link, changes the leg to `CONFIRMED` / `LOCKED`, freezes the actual fare and marks the Journey `READY`.
 - Idempotency replay validates the original Journey association as well as offer and seat count. A conflicting association returns 409.
-- Cancelling a linked booking updates its leg to `CANCELLED`, transitions the Journey to `REPLANNING`, clears confirmed price and emits an owner-only `journey.updated` event. Existing booking cancellation still returns inventory at most once.
-- The Site carries Journey and leg IDs from a selected result into its existing booking flow and reports the server-confirmed Journey state.
+- Cancelling a linked booking updates its leg to `CANCELLED`, transitions the Journey to `REPLANNING`, clears confirmed and estimated Journey totals so a stale fare is not shown as valid, and emits an owner-only `journey.updated` event. Existing booking cancellation still returns inventory at most once.
+- The Site carries Journey and leg IDs from a selected result into its existing booking flow and reports the server-confirmed Journey state. Trips loads the owner-scoped Journey history and refreshes it from `journey.updated`.
 
 **CHANGED FILES**
 - `server/index.ts`
