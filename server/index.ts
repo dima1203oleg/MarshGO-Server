@@ -13,6 +13,7 @@ import { calculatePlatformFee } from './fees';
 import { validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest } from './journey/search';
 import { projectNotification } from './notifications';
+import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { selectRepresentativeJourneys } from './journey/scoring';
 import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { GeocodingUnavailableError, suggestPlaces } from './geocoding';
@@ -405,12 +406,12 @@ app.post('/api/v1/routing/route', requireAuth, asyncHandler(async (req, res) => 
 
 type NavigationMatch = {
   demandId: string; pickupEta: Date; detourDistanceM: number; detourDurationS: number;
-  expiresAt: Date;
+  expiresAt: Date; pickupOrdinal: number; dropoffOrdinal: number;
 };
 
 async function listNavigationMatches(sessionId: string, driverId: string) {
   const { rows } = await pool.query(
-    `SELECT c.id,c.demand_id,c.status,c.detour_distance_m,c.detour_duration_s,c.pickup_eta,c.computed_at,c.expires_at,
+    `SELECT c.id,c.demand_id,c.status,c.detour_distance_m,c.detour_duration_s,c.pickup_eta,c.computed_at,c.expires_at,c.pickup_ordinal,c.dropoff_ordinal,
        d.origin_name,d.destination_name,d.earliest_departure,d.latest_departure,d.passenger_count,d.budget_minor,d.budget_type,d.notes,d.requirements,
        v.make AS vehicle_make,v.model AS vehicle_model
      FROM navigation_match_candidates c
@@ -463,7 +464,6 @@ async function refreshNavigationMatches(sessionId: string, driverId: string) {
      WHERE s.driver_id=$2 AND s.state='active' AND s.opt_in=true AND d.status='open' AND d.passenger_id<>$2
        AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.blocker_id=d.passenger_id AND b.blocked_id=$2) OR (b.blocker_id=$2 AND b.blocked_id=d.passenger_id))
        AND d.latest_departure>now() AND d.earliest_departure<now()+interval '12 hours'
-       AND d.passenger_count<=s.vehicle_seat_count
        AND ST_DWithin(s.route::geography,d.origin,$3)
        AND ST_DWithin(s.route::geography,d.destination,$3)
        AND ST_DWithin(r.route::geography,d.origin,$3)
@@ -474,27 +474,53 @@ async function refreshNavigationMatches(sessionId: string, driverId: string) {
   );
   if (!demands.length) return [];
 
-  let baseline: Awaited<ReturnType<typeof getRoadRoute>>;
-  try { baseline = await getRoadRoute(session.current_location, session.destination); }
-  catch (error) {
-    if (error instanceof RoutingUnavailableError) throw new ApiError(503, error.message, 'routing_unavailable');
-    throw error;
-  }
+  const waypointResult = await pool.query<{
+    booking_id: string; candidate_id: string; kind: 'pickup' | 'dropoff'; place_name: string;
+    longitude: number; latitude: number; seat_count: number; state: 'scheduled' | 'visited' | 'skipped';
+  }>(
+    `SELECT w.booking_id,w.candidate_id,w.kind,w.place_name,
+       ST_X(w.location::geometry) AS longitude,ST_Y(w.location::geometry) AS latitude,b.seat_count,w.state
+       FROM navigation_waypoints w JOIN bookings b ON b.id=w.booking_id
+      WHERE w.navigation_session_id=$1 AND b.status IN ('confirmed','boarding','in_progress')
+      ORDER BY w.ordinal`, [sessionId],
+  );
+  const existingStops = waypointResult.rows.filter((stop) => stop.state === 'scheduled').map((stop) => ({
+    bookingId: stop.booking_id, candidateId: stop.candidate_id, kind: stop.kind, placeName: stop.place_name,
+    coordinates: [Number(stop.longitude), Number(stop.latitude)] as [number, number], seats: Number(stop.seat_count),
+  }));
+  const onboardSeats = waypointResult.rows.reduce((sum, stop) => {
+    if (stop.kind !== 'pickup' || stop.state !== 'visited') return sum;
+    const dropoff = waypointResult.rows.find((next) => next.booking_id === stop.booking_id && next.kind === 'dropoff');
+    return dropoff && dropoff.state !== 'visited' ? sum + Number(stop.seat_count) : sum;
+  }, 0);
+  const onboardBookingIds = [...new Set(waypointResult.rows
+    .filter((stop) => stop.kind === 'pickup' && stop.state === 'visited'
+      && waypointResult.rows.some((next) => next.booking_id === stop.booking_id && next.kind === 'dropoff' && next.state === 'scheduled'))
+    .map((stop) => stop.booking_id))];
+  if (onboardSeats > Number(session.vehicle_seat_count)) throw new ApiError(409, 'Navigation seat occupancy is inconsistent', 'navigation_capacity_inconsistent');
   const now = Date.now();
   const evaluated = await Promise.all(demands.map(async (demand): Promise<NavigationMatch | null> => {
     try {
-      const [toPickup, withPassenger] = await Promise.all([
-        getRoadRoute(session.current_location!, demand.origin),
-        getRoadRouteThroughPoints([session.current_location!, demand.origin, demand.destination, session.destination!]),
-      ]);
-      const pickupEta = new Date(now + toPickup.durationSeconds * 1000);
-      if (pickupEta < new Date(demand.earliest_departure) || pickupEta > new Date(demand.latest_departure)) return null;
-      const detourDistanceM = Math.max(0, Math.round(withPassenger.distanceMeters - baseline.distanceMeters));
-      const detourDurationS = Math.max(0, Math.round(withPassenger.durationSeconds - baseline.durationSeconds));
-      if (detourDistanceM > maxDetourMeters || detourDurationS > maxDetourSeconds) return null;
+      const candidateId = crypto.randomUUID();
+      const bookingId = `candidate:${demand.id}`;
+      const currentLocation: [number, number] = [Number(session.current_location![0]), Number(session.current_location![1])];
+      const destination: [number, number] = [Number(session.destination![0]), Number(session.destination![1])];
+      const plan = await optimizeStopInsertion({
+        currentLocation, destination, existingStops,
+        onboardSeats, onboardBookingIds, vehicleCapacity: Number(session.vehicle_seat_count), now: new Date(now),
+        maxDetourMeters, maxDetourSeconds,
+        candidate: {
+          bookingId, candidateId, seats: Number(demand.passenger_count),
+          pickup: { placeName: demand.origin_name, coordinates: [Number(demand.origin[0]), Number(demand.origin[1])] },
+          dropoff: { placeName: demand.destination_name, coordinates: [Number(demand.destination[0]), Number(demand.destination[1])] },
+          earliestPickupAt: new Date(demand.earliest_departure), latestPickupAt: new Date(demand.latest_departure),
+        },
+      }, getRoadRouteThroughPoints);
+      if (!plan) return null;
       return {
-        demandId: demand.id, pickupEta, detourDistanceM, detourDurationS,
+        demandId: demand.id, pickupEta: plan.pickupEta, detourDistanceM: plan.detourDistanceM, detourDurationS: plan.detourDurationS,
         expiresAt: new Date(Math.min(new Date(demand.latest_departure).getTime() + 30 * 60_000, now + 5 * 60_000)),
+        pickupOrdinal: plan.pickupOrdinal, dropoffOrdinal: plan.dropoffOrdinal,
       };
     } catch (error) {
       if (error instanceof RoutingUnavailableError) throw new ApiError(503, error.message, 'routing_unavailable');
@@ -516,13 +542,13 @@ async function refreshNavigationMatches(sessionId: string, driverId: string) {
     );
     for (const match of matches) {
       await client.query(
-        `INSERT INTO navigation_match_candidates(navigation_session_id,demand_id,route_version,detour_distance_m,detour_duration_s,pickup_eta,expires_at)
-         SELECT $1,d.id,$3,$4,$5,$6,$7 FROM passenger_demands d WHERE d.id=$2 AND d.status='open' AND d.latest_departure>now()
+        `INSERT INTO navigation_match_candidates(navigation_session_id,demand_id,route_version,detour_distance_m,detour_duration_s,pickup_eta,expires_at,pickup_ordinal,dropoff_ordinal)
+         SELECT $1,d.id,$3,$4,$5,$6,$7,$8,$9 FROM passenger_demands d WHERE d.id=$2 AND d.status='open' AND d.latest_departure>now()
          ON CONFLICT(navigation_session_id,demand_id) DO UPDATE SET route_version=EXCLUDED.route_version,
            detour_distance_m=EXCLUDED.detour_distance_m,detour_duration_s=EXCLUDED.detour_duration_s,pickup_eta=EXCLUDED.pickup_eta,
-           computed_at=now(),expires_at=EXCLUDED.expires_at
+           computed_at=now(),expires_at=EXCLUDED.expires_at,pickup_ordinal=EXCLUDED.pickup_ordinal,dropoff_ordinal=EXCLUDED.dropoff_ordinal
          WHERE navigation_match_candidates.status IN ('suggested','expired')`,
-        [sessionId, match.demandId, session.route_version, match.detourDistanceM, match.detourDurationS, match.pickupEta.toISOString(), match.expiresAt.toISOString()],
+        [sessionId, match.demandId, session.route_version, match.detourDistanceM, match.detourDurationS, match.pickupEta.toISOString(), match.expiresAt.toISOString(), match.pickupOrdinal, match.dropoffOrdinal],
       );
     }
     await client.query('COMMIT');
@@ -601,10 +627,6 @@ app.patch('/api/v1/navigation/sessions/:id/matching', requireAuth, requireRole('
     const session = rows[0];
     if (!session || !['active','paused'].includes(session.state)) throw new ApiError(404, 'navigation session unavailable');
     if (enabled && (!session.vehicle_id || !session.vehicle_seat_count)) throw new ApiError(409, 'A verified active vehicle is required before passenger matching can be enabled', 'verified_vehicle_required');
-    if (enabled) {
-      const matchedPassenger = await client.query('SELECT 1 FROM navigation_waypoints WHERE navigation_session_id=$1 LIMIT 1', [req.params.id]);
-      if (matchedPassenger.rowCount) throw new ApiError(409, 'This navigation already has a mutually agreed passenger. Finish this route before matching another passenger.', 'navigation_waypoint_active');
-    }
     await client.query('UPDATE navigation_sessions SET opt_in=$3 WHERE id=$1 AND driver_id=$2', [req.params.id, req.userId, enabled]);
     if (!enabled) await client.query(
       `UPDATE navigation_match_candidates SET status='expired' WHERE navigation_session_id=$1 AND status IN ('suggested','driver_interested','passenger_confirmed')`, [req.params.id],
@@ -777,8 +799,16 @@ app.post('/api/v1/navigation/sessions/:id/location', requireAuth, requireRole('d
        RETURNING ST_DWithin(route::geography,current_location,500) AS on_route,current_location_at`,
       [req.params.id, req.userId, coordinates[0], coordinates[1], accuracyMeters, captured.toISOString()],
     );
+    const nextStop = await client.query<{ id: string; kind: string; place_name: string; distance_m: number }>(
+      `SELECT id,kind,place_name,ST_Distance(location,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography) AS distance_m
+         FROM navigation_waypoints WHERE navigation_session_id=$1 AND state='scheduled'
+        ORDER BY ordinal LIMIT 1 FOR UPDATE`, [req.params.id, coordinates[0], coordinates[1]],
+    );
+    const waypointVisited = nextStop.rows[0] && Number(nextStop.rows[0].distance_m) <= Math.max(100, accuracyMeters + 40)
+      ? await client.query(`UPDATE navigation_waypoints SET state='visited' WHERE id=$1 AND state='scheduled'`, [nextStop.rows[0].id]) : null;
     await client.query('COMMIT');
-    res.json({ data: { accepted: true, onRoute: update.rows[0].on_route, capturedAt: update.rows[0].current_location_at } });
+    res.json({ data: { accepted: true, onRoute: update.rows[0].on_route, capturedAt: update.rows[0].current_location_at,
+      visitedStop: waypointVisited?.rowCount ? { kind: nextStop.rows[0].kind, placeName: nextStop.rows[0].place_name } : null } });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -2493,6 +2523,7 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     candidateId: string; sessionId: string; routeVersion: number; currentLocation: [number, number]; originalDestination: [number, number];
     origin: [number, number]; destination: [number, number]; originName: string; destinationName: string;
     navigationRoute: Awaited<ReturnType<typeof getRoadRouteThroughPoints>>; passengerRoute: Awaited<ReturnType<typeof getRoadRoute>>;
+    stops: NavigationStop[]; waypointSnapshot: string;
   } | null = null;
   const proposalLink = await pool.query<{ navigation_candidate_id: string | null }>(
     'SELECT navigation_candidate_id FROM proposals WHERE id=$1', [req.params.id],
@@ -2501,13 +2532,14 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     const { rows: plans } = await pool.query<{
       candidate_id: string; session_id: string; route_version: number; current_location: [number, number]; original_destination: [number, number];
       origin: [number, number]; destination: [number, number]; origin_name: string; destination_name: string;
+      earliest_departure: Date; latest_departure: Date; passenger_count: number; vehicle_seat_count: number;
     }>(
       `SELECT c.id AS candidate_id,s.id AS session_id,s.route_version,
           ARRAY[ST_X(s.current_location::geometry),ST_Y(s.current_location::geometry)] AS current_location,
           ARRAY[ST_X(s.destination::geometry),ST_Y(s.destination::geometry)] AS original_destination,
           ARRAY[ST_X(d.origin::geometry),ST_Y(d.origin::geometry)] AS origin,
           ARRAY[ST_X(d.destination::geometry),ST_Y(d.destination::geometry)] AS destination,
-          d.origin_name,d.destination_name
+          d.origin_name,d.destination_name,d.earliest_departure,d.latest_departure,d.passenger_count,s.vehicle_seat_count
        FROM proposals p JOIN navigation_match_candidates c ON c.id=p.navigation_candidate_id
        JOIN navigation_sessions s ON s.id=c.navigation_session_id
        JOIN passenger_demands d ON d.id=c.demand_id
@@ -2515,22 +2547,52 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
        WHERE p.id=$1 AND d.passenger_id=$2 AND p.vehicle_id=s.vehicle_id
          AND d.status='open' AND c.status='passenger_confirmed' AND c.expires_at>now()
          AND c.route_version=s.route_version AND s.state='paused' AND s.opt_in=true
-         AND s.current_location_at>now()-interval '2 minutes'
-         AND NOT EXISTS(SELECT 1 FROM navigation_waypoints w WHERE w.navigation_session_id=s.id)`,
+         AND s.current_location_at>now()-interval '2 minutes'`,
       [req.params.id, req.userId],
     );
     const plan = plans[0];
     if (!plan) throw new ApiError(409, 'navigation match consent or route is no longer current', 'navigation_candidate_unavailable');
     try {
-      const [navigationRoute, passengerRoute] = await Promise.all([
-        getRoadRouteThroughPoints([plan.current_location, plan.origin, plan.destination, plan.original_destination]),
-        getRoadRoute(plan.origin, plan.destination),
-      ]);
+      const waypointRows = await pool.query<{
+        id: string; booking_id: string; candidate_id: string; ordinal: number; kind: 'pickup' | 'dropoff'; place_name: string;
+        longitude: number; latitude: number; seat_count: number; state: 'scheduled' | 'visited' | 'skipped';
+      }>(`SELECT w.id,w.booking_id,w.candidate_id,w.ordinal,w.kind,w.place_name,
+           ST_X(w.location::geometry) AS longitude,ST_Y(w.location::geometry) AS latitude,b.seat_count,w.state
+         FROM navigation_waypoints w JOIN bookings b ON b.id=w.booking_id
+         WHERE w.navigation_session_id=$1 AND b.status IN ('confirmed','boarding','in_progress') ORDER BY w.ordinal`, [plan.session_id]);
+      const waypointSnapshot = JSON.stringify(waypointRows.rows.map(({id,booking_id,candidate_id,ordinal,kind,state}) => ({id,booking_id,candidate_id,ordinal,kind,state})));
+      const numericPoint = (point: [number, number]): [number, number] => [Number(point[0]), Number(point[1])];
+      const scheduledStops: NavigationStop[] = waypointRows.rows.filter((stop) => stop.state === 'scheduled').map((stop) => ({
+        bookingId: stop.booking_id, candidateId: stop.candidate_id, kind: stop.kind, placeName: stop.place_name,
+        coordinates: [Number(stop.longitude), Number(stop.latitude)], seats: Number(stop.seat_count),
+      }));
+      const onboardSeats = waypointRows.rows.reduce((sum, stop) => stop.kind === 'pickup' && stop.state === 'visited'
+        && waypointRows.rows.some((next) => next.booking_id === stop.booking_id && next.kind === 'dropoff' && next.state === 'scheduled')
+        ? sum + Number(stop.seat_count) : sum, 0);
+      const onboardBookingIds = [...new Set(waypointRows.rows.filter((stop) => stop.kind === 'pickup' && stop.state === 'visited'
+        && waypointRows.rows.some((next) => next.booking_id === stop.booking_id && next.kind === 'dropoff' && next.state === 'scheduled'))
+        .map((stop) => stop.booking_id))];
+      const candidateId = plan.candidate_id;
+      const insertion = await optimizeStopInsertion({
+        currentLocation: numericPoint(plan.current_location), destination: numericPoint(plan.original_destination), existingStops: scheduledStops,
+        onboardSeats, onboardBookingIds, vehicleCapacity: Number(plan.vehicle_seat_count), now: new Date(),
+        maxDetourMeters: Math.max(1_000, Math.min(100_000, Number(process.env.NAVIGATION_MATCH_MAX_DETOUR_METERS) || 25_000)),
+        maxDetourSeconds: Math.max(300, Math.min(7_200, Number(process.env.NAVIGATION_MATCH_MAX_DETOUR_SECONDS) || 1_800)),
+        candidate: {
+          bookingId: `candidate:${plan.candidate_id}`, candidateId, seats: Number(plan.passenger_count),
+          pickup: { placeName: plan.origin_name, coordinates: numericPoint(plan.origin) },
+          dropoff: { placeName: plan.destination_name, coordinates: numericPoint(plan.destination) },
+          earliestPickupAt: new Date(plan.earliest_departure), latestPickupAt: new Date(plan.latest_departure),
+        },
+      }, getRoadRouteThroughPoints);
+      if (!insertion) throw new ApiError(409, 'Navigation route no longer has a feasible safe insertion for this passenger', 'navigation_candidate_unavailable');
+      const passengerRoute = await getRoadRoute(numericPoint(plan.origin), numericPoint(plan.destination));
       navigationPlan = {
         candidateId: plan.candidate_id, sessionId: plan.session_id, routeVersion: Number(plan.route_version),
-        currentLocation: plan.current_location, originalDestination: plan.original_destination, origin: plan.origin,
-        destination: plan.destination, originName: plan.origin_name, destinationName: plan.destination_name,
-        navigationRoute, passengerRoute,
+        currentLocation: numericPoint(plan.current_location), originalDestination: numericPoint(plan.original_destination), origin: numericPoint(plan.origin),
+        destination: numericPoint(plan.destination), originName: plan.origin_name, destinationName: plan.destination_name,
+        navigationRoute: insertion.route, passengerRoute,
+        stops: insertion.stops, waypointSnapshot,
       };
     } catch (error) {
       if (error instanceof RoutingUnavailableError) throw new ApiError(503, error.message, 'routing_unavailable');
@@ -2568,7 +2630,7 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
            LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.owner_id=s.driver_id AND v.verification_status='verified'
           WHERE c.id=$1 AND c.demand_id=$2 AND s.state='paused' AND s.opt_in=true
             AND s.current_location_at>now()-interval '2 minutes' AND c.status='passenger_confirmed' AND c.expires_at>now()
-             AND s.route_version=$5 AND NOT EXISTS(SELECT 1 FROM navigation_waypoints w WHERE w.navigation_session_id=s.id)
+             AND s.route_version=$5
            FOR UPDATE OF c,s`, [proposal.navigation_candidate_id, demand.id, navigationPlan.currentLocation[0], navigationPlan.currentLocation[1], navigationPlan.routeVersion],
       );
       const candidate = candidates[0];
@@ -2576,6 +2638,15 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
           Number(candidate.seat_count ?? 0) < Number(demand.passenger_count) || Number(candidate.vehicle_seat_count ?? 0) < Number(demand.passenger_count) ||
           Number(candidate.route_version) !== Number(candidate.candidate_route_version) || Number(candidate.movement_m) > 150) {
         throw new ApiError(409, 'navigation match consent or route is no longer current', 'navigation_candidate_unavailable');
+      }
+      const waypointRows = await client.query<{ id: string; booking_id: string; candidate_id: string; ordinal: number; kind: string; state: string }>(
+        `SELECT w.id,w.booking_id,w.candidate_id,w.ordinal,w.kind,w.state FROM navigation_waypoints w
+         JOIN bookings b ON b.id=w.booking_id WHERE w.navigation_session_id=$1
+         AND b.status IN ('confirmed','boarding','in_progress') ORDER BY w.ordinal FOR UPDATE OF w`, [navigationPlan.sessionId],
+      );
+      const lockedSnapshot = JSON.stringify(waypointRows.rows.map(({id,booking_id,candidate_id,ordinal,kind,state}) => ({id,booking_id,candidate_id,ordinal,kind,state})));
+      if (lockedSnapshot !== navigationPlan.waypointSnapshot) {
+        throw new ApiError(409, 'Navigation stops changed during confirmation; refresh the route', 'navigation_stops_changed');
       }
     }
     const { rows: latestRevisions } = await client.query<{ actor_role: string }>(
@@ -2634,13 +2705,30 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
           Math.round(navigationPlan.navigationRoute.distanceMeters), Math.round(navigationPlan.navigationRoute.durationSeconds), navigationPlan.routeVersion],
       );
       if (!updatedSession.rows[0]) throw new ApiError(409, 'navigation session changed before route update', 'navigation_session_changed');
-      await client.query(
-        `INSERT INTO navigation_waypoints(navigation_session_id,booking_id,candidate_id,ordinal,kind,place_name,location)
-         VALUES($1,$2,$3,1,'pickup',$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography),
-               ($1,$2,$3,2,'dropoff',$7,ST_SetSRID(ST_MakePoint($8,$9),4326)::geography)`,
-        [navigationPlan.sessionId, bookings[0].id, navigationPlan.candidateId, navigationPlan.originName,
-          navigationPlan.origin[0], navigationPlan.origin[1], navigationPlan.destinationName, navigationPlan.destination[0], navigationPlan.destination[1]],
-      );
+      const oldWaypointRows = await client.query<{
+        booking_id: string; candidate_id: string; ordinal: number; kind: 'pickup' | 'dropoff'; place_name: string;
+        longitude: number; latitude: number; state: 'scheduled' | 'visited' | 'skipped';
+      }>(`SELECT w.booking_id,w.candidate_id,w.ordinal,w.kind,w.place_name,
+           ST_X(w.location::geometry) AS longitude,ST_Y(w.location::geometry) AS latitude,w.state
+         FROM navigation_waypoints w JOIN bookings b ON b.id=w.booking_id
+         WHERE w.navigation_session_id=$1 AND b.status IN ('confirmed','boarding','in_progress') ORDER BY w.ordinal`, [navigationPlan.sessionId]);
+      await client.query('DELETE FROM navigation_waypoints WHERE navigation_session_id=$1', [navigationPlan.sessionId]);
+      // History rows retain their original state; remaining scheduled stops are rebuilt
+      // from the road-route optimizer so every passenger keeps pickup before dropoff.
+      const history = oldWaypointRows.rows.filter((stop) => stop.state !== 'scheduled');
+      const waypointInserts = [
+        ...history.map((stop) => ({ bookingId: stop.booking_id, candidateId: stop.candidate_id, kind: stop.kind, name: stop.place_name,
+          coordinates: [Number(stop.longitude), Number(stop.latitude)] as [number, number], state: stop.state })),
+        ...navigationPlan.stops.map((stop) => ({ bookingId: stop.candidateId === navigationPlan!.candidateId ? bookings[0].id : stop.bookingId,
+          candidateId: stop.candidateId, kind: stop.kind, name: stop.placeName, coordinates: stop.coordinates, state: 'scheduled' as const })),
+      ];
+      for (const [index, stop] of waypointInserts.entries()) {
+        await client.query(
+          `INSERT INTO navigation_waypoints(navigation_session_id,booking_id,candidate_id,ordinal,kind,place_name,location,state)
+           VALUES($1,$2,$3,$4,$5,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9)`,
+          [navigationPlan.sessionId, stop.bookingId, stop.candidateId, index + 1, stop.kind, stop.name, stop.coordinates[0], stop.coordinates[1], stop.state],
+        );
+      }
       await client.query(
         `UPDATE navigation_match_candidates SET status='expired'
           WHERE navigation_session_id=$1 AND status IN ('suggested','driver_interested','passenger_confirmed')`, [navigationPlan.sessionId],

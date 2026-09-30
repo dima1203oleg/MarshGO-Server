@@ -15,30 +15,33 @@ describe('foreground navigation session API (opt-in local integration test)', { 
   const pool = new Pool({ connectionString: databaseUrl });
   const driver = crypto.randomUUID();
   const passenger = crypto.randomUUID();
+  const passengerTwo = crypto.randomUUID();
   const vehicle = crypto.randomUUID();
   const headers = (userId: string) => ({ 'content-type': 'application/json', 'x-dev-user-id': userId });
   let sessionId = '';
   let forwardDemandId = '';
   let reverseDemandId = '';
   let overCapacityDemandId = '';
-  let bookingId = '';
-  let acceptedOfferId = '';
+  let secondDemandId = '';
+  const bookingIds: string[] = [];
+  const acceptedOfferIds: string[] = [];
 
   before(async () => {
-    await pool.query(`INSERT INTO users(id,display_name,roles) VALUES($1,'Navigation test driver',ARRAY['driver']),($2,'Navigation test passenger',ARRAY['passenger'])`, [driver, passenger]);
-    await pool.query(`INSERT INTO user_roles(user_id,role) VALUES($1,'driver'),($2,'passenger')`, [driver, passenger]);
+    await pool.query(`INSERT INTO users(id,display_name,roles) VALUES($1,'Navigation test driver',ARRAY['driver']),($2,'Navigation test passenger A',ARRAY['passenger']),($3,'Navigation test passenger B',ARRAY['passenger'])`, [driver, passenger, passengerTwo]);
+    await pool.query(`INSERT INTO user_roles(user_id,role) VALUES($1,'driver'),($2,'passenger'),($3,'passenger')`, [driver, passenger, passengerTwo]);
     await pool.query(`INSERT INTO vehicles(id,owner_id,make,model,model_year,seat_count,verification_status,is_active)
       VALUES($1,$2,'Test','Verified car',2024,4,'verified',true)`, [vehicle, driver]);
   });
 
   after(async () => {
-    const demandIds = [forwardDemandId, reverseDemandId, overCapacityDemandId].filter(Boolean);
+    const demandIds = [forwardDemandId, reverseDemandId, overCapacityDemandId, secondDemandId].filter(Boolean);
     if (demandIds.length) await pool.query('DELETE FROM proposals WHERE demand_id=ANY($1::uuid[])', [demandIds]);
-    if (bookingId) {
-      await pool.query('DELETE FROM conversations WHERE booking_id=$1', [bookingId]);
-      await pool.query('DELETE FROM booking_events WHERE booking_id=$1', [bookingId]);
-      await pool.query('DELETE FROM bookings WHERE id=$1', [bookingId]);
-      if (acceptedOfferId) await pool.query('DELETE FROM offers WHERE id=$1', [acceptedOfferId]);
+    if (bookingIds.length) {
+      await pool.query('DELETE FROM conversations WHERE booking_id=ANY($1::uuid[])', [bookingIds]);
+      await pool.query('DELETE FROM navigation_waypoints WHERE booking_id=ANY($1::uuid[])', [bookingIds]);
+      await pool.query('DELETE FROM booking_events WHERE booking_id=ANY($1::uuid[])', [bookingIds]);
+      await pool.query('DELETE FROM bookings WHERE id=ANY($1::uuid[])', [bookingIds]);
+      if (acceptedOfferIds.length) await pool.query('DELETE FROM offers WHERE id=ANY($1::uuid[])', [acceptedOfferIds]);
     }
     if (sessionId) {
       await pool.query('DELETE FROM audit_events WHERE entity_id=$1', [sessionId]);
@@ -47,9 +50,9 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     if (demandIds.length) {
       await pool.query('DELETE FROM passenger_demands WHERE id=ANY($1::uuid[])', [demandIds]);
     }
-    await pool.query('DELETE FROM audit_events WHERE actor_id=ANY($1::uuid[])', [[driver, passenger]]);
+    await pool.query('DELETE FROM audit_events WHERE actor_id=ANY($1::uuid[])', [[driver, passenger, passengerTwo]]);
     await pool.query('DELETE FROM vehicles WHERE id=$1', [vehicle]);
-    await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[driver, passenger]]);
+    await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[driver, passenger, passengerTwo]]);
     await pool.end();
   });
 
@@ -95,11 +98,11 @@ describe('foreground navigation session API (opt-in local integration test)', { 
 
     const departureStart = new Date(Date.now() + 20 * 60_000);
     const departureEnd = new Date(Date.now() + 90 * 60_000);
-    const createDemand = async (origin: [number, number], destination: [number, number], count: number, name: string) => {
+    const createDemand = async (origin: [number, number], destination: [number, number], count: number, name: string, passengerId = passenger) => {
       const { rows } = await pool.query<{ id: string }>(
         `INSERT INTO passenger_demands(passenger_id,origin_name,destination_name,origin,destination,earliest_departure,latest_departure,passenger_count,budget_minor,budget_type)
          VALUES($1,$2,'Lviv',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,30000,'total_all') RETURNING id`,
-        [passenger, name, origin[0], origin[1], destination[0], destination[1], departureStart, departureEnd, count],
+        [passengerId, name, origin[0], origin[1], destination[0], destination[1], departureStart, departureEnd, count],
       );
       return rows[0].id;
     };
@@ -174,7 +177,7 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     const acceptedNavigationProposal = await fetch(`${apiUrl}/api/v1/proposals/${linkedProposal.id}/accept`, { method: 'POST', headers: headers(passenger) });
     assert.equal(acceptedNavigationProposal.status, 201, 'passenger confirmation of the price creates the single booking and updates the route');
     const acceptedBody = await acceptedNavigationProposal.json() as { data: { id: string; offer_id: string; status: string; total_price_minor: number } };
-    bookingId = acceptedBody.data.id; acceptedOfferId = acceptedBody.data.offer_id;
+    bookingIds.push(acceptedBody.data.id); acceptedOfferIds.push(acceptedBody.data.offer_id);
     assert.equal(acceptedBody.data.status, 'confirmed');
     assert.equal(acceptedBody.data.total_price_minor, 30000);
     const updatedNavigation = await pool.query<{ route_version: number; opt_in: boolean; route: [number, number][] }>(
@@ -189,10 +192,51 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     assert.deepEqual(insertedWaypoints.rows.map((waypoint) => [waypoint.kind, waypoint.place_name]), [
       ['pickup', 'Forward demand'], ['dropoff', 'Lviv'],
     ]);
-    const secondPassengerOptIn = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/matching`, {
+    secondDemandId = await createDemand([24.35,49.35], [24.65,49.65], 1, 'Second rider demand', passengerTwo);
+    const resumeForMatching = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/resume`, { method: 'POST', headers: headers(driver) });
+    assert.equal(resumeForMatching.status, 200);
+    const freshFix = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/location`, {
+      method: 'POST', headers: headers(driver),
+      body: JSON.stringify({ coordinates: [24, 49], accuracyMeters: 8, capturedAt: new Date().toISOString() }),
+    });
+    assert.equal(freshFix.status, 200);
+    const secondOptIn = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/matching`, {
       method: 'PATCH', headers: headers(driver), body: JSON.stringify({ enabled: true }),
     });
-    assert.equal(secondPassengerOptIn.status, 409, 'matching remains disabled until this single-passenger route ends');
+    assert.equal(secondOptIn.status, 200, 'the driver can opt in for a second rider when segment capacity allows it');
+    const secondCandidatesResponse = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/matches/refresh`, { method: 'POST', headers: headers(driver) });
+    assert.equal(secondCandidatesResponse.status, 200);
+    const secondCandidate = (await secondCandidatesResponse.json() as { data: Array<{ id: string; demand_id: string; pickup_ordinal: number; dropoff_ordinal: number }> }).data
+      .find((item) => item.demand_id === secondDemandId);
+    assert.ok(secondCandidate, 'the real road route admits a second rider on a later segment');
+    assert.ok(secondCandidate.pickup_ordinal < secondCandidate.dropoff_ordinal);
+    await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/pause`, { method: 'POST', headers: headers(driver) });
+    const secondInterest = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/matches/${secondCandidate.id}/interest`, { method: 'POST', headers: headers(driver) });
+    assert.equal(secondInterest.status, 200);
+    const secondConfirmation = await fetch(`${apiUrl}/api/v1/navigation/matches/${secondCandidate.id}/passenger-confirm`, { method: 'POST', headers: headers(passengerTwo) });
+    assert.equal(secondConfirmation.status, 200);
+    const secondProposalResponse = await fetch(`${apiUrl}/api/v1/demands/${secondDemandId}/proposals`, {
+      method: 'POST', headers: headers(driver),
+      body: JSON.stringify({ vehicleId: vehicle, priceMinor: 30000, departureAt: departureStart.toISOString(), comment: 'Second passenger', navigationCandidateId: secondCandidate.id }),
+    });
+    assert.equal(secondProposalResponse.status, 201);
+    const secondProposal = (await secondProposalResponse.json() as { data: { id: string } }).data;
+    const secondAccepted = await fetch(`${apiUrl}/api/v1/proposals/${secondProposal.id}/accept`, { method: 'POST', headers: headers(passengerTwo) });
+    assert.equal(secondAccepted.status, 201, 'both passengers are attached to the navigation route after explicit mutual agreement');
+    const secondAcceptedData = (await secondAccepted.json() as { data: { id: string; offer_id: string } }).data;
+    bookingIds.push(secondAcceptedData.id); acceptedOfferIds.push(secondAcceptedData.offer_id);
+    const finalWaypoints = await pool.query<{ booking_id: string; ordinal: number; kind: string; state: string }>(
+      `SELECT booking_id,ordinal,kind,state FROM navigation_waypoints WHERE navigation_session_id=$1 ORDER BY ordinal`, [sessionId],
+    );
+    assert.equal(finalWaypoints.rows.length, 4);
+    assert.deepEqual(finalWaypoints.rows.map((row) => row.ordinal), [1,2,3,4]);
+    for (const id of bookingIds) {
+      const stops = finalWaypoints.rows.filter((row) => row.booking_id === id);
+      assert.equal(stops.length, 2);
+      assert.equal(stops[0].kind, 'pickup');
+      assert.equal(stops[1].kind, 'dropoff');
+    }
+    assert.deepEqual(new Set(finalWaypoints.rows.map((row) => row.booking_id)), new Set(bookingIds));
     const bookingsAfter = await pool.query('SELECT count(*)::int AS count FROM bookings WHERE passenger_id=$1', [passenger]);
     assert.equal(bookingsAfter.rows[0].count, bookingsBefore.rows[0].count + 1);
     const optOut = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/matching`, {

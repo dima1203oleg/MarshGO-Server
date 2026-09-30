@@ -18,7 +18,7 @@ const server = http.createServer((request, response) => {
     response.writeHead(400).end(JSON.stringify({ code: 'InvalidQuery' }));
     return;
   }
-  const distance = waypoints.slice(1).reduce((total, point, index) => {
+  const legs = waypoints.slice(1).map((point, index) => {
     const from = waypoints[index];
     const lat1 = from[1] * Math.PI / 180;
     const lat2 = point[1] * Math.PI / 180;
@@ -27,12 +27,15 @@ const server = http.createServer((request, response) => {
     const haversine = 2 * 6_371_000 * Math.asin(Math.sqrt(
       Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2,
     ));
-    return total + haversine * 1.1;
-  }, 0);
+    const distance = haversine * 1.1;
+    return { distance, duration: distance / 12 };
+  });
+  const distance = legs.reduce((total, leg) => total + leg.distance, 0);
+  const duration = legs.reduce((total, leg) => total + leg.duration, 0);
   response.writeHead(200, { 'content-type': 'application/json' });
   response.end(JSON.stringify({
     code: 'Ok',
-    routes: [{ distance, duration: distance / 12, geometry: { coordinates: waypoints } }],
+    routes: [{ distance, duration, legs, geometry: { coordinates: waypoints } }],
   }));
 });
 server.on('connection', (socket) => socket.on('error', () => {}));

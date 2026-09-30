@@ -115,3 +115,34 @@
 **Ordering correction after CI:** Outbox events now use `clock_timestamp()` at insertion rather than transaction-start `now()`, and inbox rows preserve the source outbox timestamp. Events created within one transaction therefore retain causal ordering (for example Journey READY before later booking cancellation and REPLANNING). GitHub CI exposed this tie that did not occur in the first local run; the notification integration is rerun against the fix.
 
 **Verification after ordering correction:** Full isolated PostGIS/Redis `npm run test:integration` passed again on migration 021: Journey schema 1/1, booking/search/negotiation/inbox 10/10, navigation 1/1, cross-instance realtime 1/1, restart 1/1, rate limits 1/1. Root and standalone server typecheck/unit tests passed. The previous GitHub failure is fixed in code; the commit-level workflow is pending.
+
+## Phase E continuation — multi-passenger live navigation
+
+**Status:** PARTIAL.
+
+**DONE**
+- Added additive migration `022_multi_passenger_navigation.sql`: up to 30 ordered navigation waypoints, scheduled/visited/skipped states, and candidate pickup/dropoff insertion ordinals.
+- Added a server-side stop insertion optimizer that preserves each booking's pickup-before-dropoff order, checks occupied and segment-by-segment seat capacity, checks pickup time windows and detour limits, and prices the top eight geometric insertions with the configured road router.
+- Navigation matching evaluates existing stops and occupied seats rather than rejecting every demand larger than the vehicle's full-trip capacity or blocking a session after its first matched passenger.
+- Proposal acceptance requires passenger confirmation, locks/rechecks the navigation session and waypoint snapshot, then transactionally rebuilds waypoints and recomputes route geometry, distance and ETA. Matching pauses for explicit driver opt-in after each insertion.
+- Foreground GPS marks only the next scheduled stop visited within an accuracy-adjusted arrival radius; stop history is retained when a later passenger is added.
+- Extended the navigation integration scenario to use two independent passenger accounts on one driver route, complete both proposal/confirmation/booking flows and verify the four ordered pickup/dropoff records.
+- The integration runner applies all SQL migrations before tests, so a fresh isolated database is a supported test path.
+
+**CHANGED FILES**
+- `server/migrations/022_multi_passenger_navigation.sql`, `server/navigation/stopOptimizer.ts`, `server/index.ts`, `server/routing.ts`
+- `tests/navigation-stop-optimizer.test.ts`, `tests/navigation.integration.test.ts`, `tests/routing.test.ts`, `tests/fixtures/osrm-stub.mjs`, `scripts/run-integration-tests.sh`
+- `docs/API.md`, `docs/MULTIMODAL_PROGRESS.md`
+
+**TESTS**
+- `npm run check:production`: passed; 36 unit tests passed, one opt-in integration test skipped; ESLint and production Vite build passed.
+- Fresh isolated database `marshgo_e2e_multinav`: migrations 001–022 applied; Journey schema 1/1, booking/search/negotiation 10/10, multi-passenger navigation 1/1, Redis cross-instance realtime 1/1, restart durability 1/1 and shared rate limits 1/1 passed.
+- This uses a local OSRM contract fixture, not a contracted production routing provider or physical-device GPS.
+
+**LIMITATIONS / BLOCKED_EXTERNAL**
+- Production route quality depends on a contracted/self-hosted routing service; the optimizer's top-eight road rechecks still need load testing at larger stop counts.
+- This does not add JourneyLeg orchestration for future bus/transit legs, cumulative ETA uncertainty, predictive transfer rescue, provider outage handling or multi-leg replanning.
+- Physical iOS location accuracy, stop arrival acknowledgement and background tracking remain unverified. PWA GPS remains foreground-only.
+
+**NEXT**
+- Add dynamic Journey/leg event monitoring and future Community transfer matching using real scheduled predecessor legs plus explicit ETA uncertainty. Until a live transit schedule feed exists, do not show a future bus-to-Community match as available.

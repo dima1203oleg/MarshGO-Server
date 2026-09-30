@@ -41,6 +41,7 @@ describe('OSRM-compatible routing adapter', () => {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ code: 'Ok', routes: [{
         distance: 18500, duration: 1200,
+        legs: [{ distance: 4000, duration: 300 }, { distance: 6000, duration: 420 }, { distance: 8500, duration: 480 }],
         geometry: { type: 'LineString', coordinates: [[24,49],[24.2,49.2],[24.5,49.5],[25,50]] },
       }] }));
     });
@@ -51,6 +52,7 @@ describe('OSRM-compatible routing adapter', () => {
     const route = await getRoadRouteThroughPoints([[24,49],[24.2,49.2],[24.5,49.5],[25,50]]);
     assert.deepEqual(route.geometry, [[24,49],[24.2,49.2],[24.5,49.5],[25,50]]);
     assert.equal(route.distanceMeters, 18500);
+    assert.deepEqual(route.legs, [{ distanceMeters: 4000, durationSeconds: 300 }, { distanceMeters: 6000, durationSeconds: 420 }, { distanceMeters: 8500, durationSeconds: 480 }]);
     assert.match(requested[0], /24,49;24\.2,49\.2;24\.5,49\.5;25,50\?/);
   });
 

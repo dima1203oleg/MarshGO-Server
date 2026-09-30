@@ -1,7 +1,9 @@
+export type RoadRouteLeg = { distanceMeters: number; durationSeconds: number };
 export type RoadRoute = {
   geometry: [number, number][];
   distanceMeters: number;
   durationSeconds: number;
+  legs?: RoadRouteLeg[];
 };
 
 export class RoutingUnavailableError extends Error {
@@ -13,7 +15,7 @@ export async function getRoadRoute(origin: [number, number], destination: [numbe
 }
 
 export async function getRoadRouteThroughPoints(points: [number, number][]): Promise<RoadRoute> {
-  if (points.length < 2 || points.length > 6) throw new RoutingUnavailableError('A road route needs 2–6 valid waypoint coordinates');
+  if (points.length < 2 || points.length > 32) throw new RoutingUnavailableError('A road route needs 2–32 valid waypoint coordinates');
   for (const point of points) {
     if (point.length !== 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1]) || Math.abs(point[0]) > 180 || Math.abs(point[1]) > 90) {
       throw new RoutingUnavailableError('Road routing received invalid coordinates');
@@ -32,7 +34,7 @@ export async function getRoadRouteThroughPoints(points: [number, number][]): Pro
   if (!response?.ok) throw new RoutingUnavailableError('Road routing request failed');
   const payload = await response.json() as {
     code?: string;
-    routes?: Array<{ distance?: number; duration?: number; geometry?: { coordinates?: unknown } }>;
+    routes?: Array<{ distance?: number; duration?: number; geometry?: { coordinates?: unknown }; legs?: Array<{ distance?: number; duration?: number }> }>;
   };
   const route = payload.code === 'Ok' ? payload.routes?.[0] : undefined;
   const coordinates = route?.geometry?.coordinates;
@@ -47,5 +49,12 @@ export async function getRoadRouteThroughPoints(points: [number, number][]): Pro
     }
     return [Number(point[0]), Number(point[1])];
   });
-  return { geometry, distanceMeters: route.distance!, durationSeconds: route.duration! };
+  const legs = route.legs?.map((leg): RoadRouteLeg | null => {
+    if (!Number.isFinite(leg.distance) || !Number.isFinite(leg.duration) || leg.distance! <= 0 || leg.duration! <= 0) return null;
+    return { distanceMeters: leg.distance!, durationSeconds: leg.duration! };
+  });
+  return {
+    geometry, distanceMeters: route.distance!, durationSeconds: route.duration!,
+    ...(legs && legs.every((leg): leg is RoadRouteLeg => leg !== null) && legs.length === points.length - 1 ? { legs } : {}),
+  };
 }

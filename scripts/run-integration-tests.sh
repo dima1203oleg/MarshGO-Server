@@ -11,6 +11,7 @@ if [[ ! "$DATABASE_HOST" =~ ^(127\.0\.0\.1|localhost|::1)$ || ! "$DATABASE_NAME"
   echo "Refusing integration tests outside loopback marshgo_e2e-prefixed database." >&2
   exit 2
 fi
+DATABASE_URL="$DATABASE_URL" npm run db:migrate
 
 API_PORT="${API_TEST_PORT:-3306}"
 SECONDARY_API_PORT="${API_TEST_SECONDARY_PORT:-3307}"
