@@ -21,6 +21,8 @@ describe('foreground navigation session API (opt-in local integration test)', { 
   let forwardDemandId = '';
   let reverseDemandId = '';
   let overCapacityDemandId = '';
+  let bookingId = '';
+  let acceptedOfferId = '';
 
   before(async () => {
     await pool.query(`INSERT INTO users(id,display_name,roles) VALUES($1,'Navigation test driver',ARRAY['driver']),($2,'Navigation test passenger',ARRAY['passenger'])`, [driver, passenger]);
@@ -32,6 +34,12 @@ describe('foreground navigation session API (opt-in local integration test)', { 
   after(async () => {
     const demandIds = [forwardDemandId, reverseDemandId, overCapacityDemandId].filter(Boolean);
     if (demandIds.length) await pool.query('DELETE FROM proposals WHERE demand_id=ANY($1::uuid[])', [demandIds]);
+    if (bookingId) {
+      await pool.query('DELETE FROM conversations WHERE booking_id=$1', [bookingId]);
+      await pool.query('DELETE FROM booking_events WHERE booking_id=$1', [bookingId]);
+      await pool.query('DELETE FROM bookings WHERE id=$1', [bookingId]);
+      if (acceptedOfferId) await pool.query('DELETE FROM offers WHERE id=$1', [acceptedOfferId]);
+    }
     if (sessionId) {
       await pool.query('DELETE FROM audit_events WHERE entity_id=$1', [sessionId]);
       await pool.query('DELETE FROM navigation_sessions WHERE id=$1', [sessionId]);
@@ -163,14 +171,36 @@ describe('foreground navigation session API (opt-in local integration test)', { 
       body: JSON.stringify({ vehicleId: vehicle, priceMinor: 30000, departureAt: departureStart.toISOString(), navigationCandidateId: candidate.id }),
     });
     assert.equal(duplicateProposal.status, 409, 'one candidate can produce only one proposal');
+    const acceptedNavigationProposal = await fetch(`${apiUrl}/api/v1/proposals/${linkedProposal.id}/accept`, { method: 'POST', headers: headers(passenger) });
+    assert.equal(acceptedNavigationProposal.status, 201, 'passenger confirmation of the price creates the single booking and updates the route');
+    const acceptedBody = await acceptedNavigationProposal.json() as { data: { id: string; offer_id: string; status: string; total_price_minor: number } };
+    bookingId = acceptedBody.data.id; acceptedOfferId = acceptedBody.data.offer_id;
+    assert.equal(acceptedBody.data.status, 'confirmed');
+    assert.equal(acceptedBody.data.total_price_minor, 30000);
+    const updatedNavigation = await pool.query<{ route_version: number; opt_in: boolean; route: [number, number][] }>(
+      `SELECT route_version,opt_in,ST_AsGeoJSON(route)::json->'coordinates' AS route FROM navigation_sessions WHERE id=$1`, [sessionId],
+    );
+    assert.equal(updatedNavigation.rows[0].route_version, 2);
+    assert.equal(updatedNavigation.rows[0].opt_in, false, 'route matching pauses after inserting a passenger to prevent matching against an incomplete multi-stop baseline');
+    assert.deepEqual(updatedNavigation.rows[0].route, [[24,49],[24.2,49.2],[24.5,49.5],[25,50]]);
+    const insertedWaypoints = await pool.query<{ kind: string; place_name: string }>(
+      'SELECT kind,place_name FROM navigation_waypoints WHERE booking_id=$1 ORDER BY ordinal', [acceptedBody.data.id],
+    );
+    assert.deepEqual(insertedWaypoints.rows.map((waypoint) => [waypoint.kind, waypoint.place_name]), [
+      ['pickup', 'Forward demand'], ['dropoff', 'Lviv'],
+    ]);
+    const secondPassengerOptIn = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/matching`, {
+      method: 'PATCH', headers: headers(driver), body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(secondPassengerOptIn.status, 409, 'matching remains disabled until this single-passenger route ends');
     const bookingsAfter = await pool.query('SELECT count(*)::int AS count FROM bookings WHERE passenger_id=$1', [passenger]);
-    assert.equal(bookingsAfter.rows[0].count, bookingsBefore.rows[0].count);
+    assert.equal(bookingsAfter.rows[0].count, bookingsBefore.rows[0].count + 1);
     const optOut = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/matching`, {
       method: 'PATCH', headers: headers(driver), body: JSON.stringify({ enabled: false }),
     });
     assert.equal(optOut.status, 200);
     const staleProposalAccept = await fetch(`${apiUrl}/api/v1/proposals/${linkedProposal.id}/accept`, { method: 'POST', headers: headers(passenger) });
-    assert.equal(staleProposalAccept.status, 409, 'passenger cannot accept after the driver has revoked matching consent');
+    assert.equal(staleProposalAccept.status, 409, 'a navigation proposal cannot be accepted a second time');
     const withdrawnMatches = await fetch(`${apiUrl}/api/v1/demands/mine/navigation-matches`, { headers: headers(passenger) });
     assert.equal((await withdrawnMatches.json() as { data: Array<{ candidate_id: string }> }).data.some((item) => item.candidate_id === candidate.id), false);
     const resume = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/resume`, { method: 'POST', headers: headers(driver) });
@@ -202,7 +232,5 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     assert.equal(persisted.rows[0].destination, null);
     assert.equal(persisted.rows[0].destination_name, null);
     assert.equal((await pool.query('SELECT count(*)::int AS count FROM navigation_match_candidates WHERE navigation_session_id=$1 AND demand_id=$2', [sessionId, forwardDemandId])).rows[0].count, 1);
-    await pool.query('DELETE FROM proposals WHERE demand_id=ANY($1::uuid[])', [[forwardDemandId, reverseDemandId, overCapacityDemandId]]);
-    await pool.query('DELETE FROM passenger_demands WHERE id=ANY($1::uuid[])', [[forwardDemandId, reverseDemandId, overCapacityDemandId]]);
   });
 });
