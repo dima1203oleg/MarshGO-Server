@@ -19,6 +19,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     admin: crypto.randomUUID(),
     vehicle: crypto.randomUUID(),
     offer: crypto.randomUUID(),
+    expiredOffer: crypto.randomUUID(),
   };
   const keys = Array.from({ length: 20 }, () => `api-test-${crypto.randomUUID()}`);
   const passengerA = ids.passengers[0];
@@ -49,6 +50,11 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
         ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
         now()+interval '10 days',15000,1,1)`, [ids.offer, ids.driver, ids.vehicle]);
+    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,departure_at,price_per_seat_minor,total_seats,available_seats)
+      VALUES ($1,$2,$3,'Expired API Test Origin','Expired API Test Destination',
+        ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
+        ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
+        now()-interval '1 minute',15000,1,1)`, [ids.expiredOffer, ids.driver, ids.vehicle]);
   });
 
   after(async () => {
@@ -194,6 +200,22 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       'SELECT to_status,count(*) FROM booking_events WHERE booking_id=$1 GROUP BY to_status', [accepted.data.id],
     );
     assert.deepEqual(Object.fromEntries(lifecycle.rows.map((row) => [row.to_status, Number(row.count)])), { confirmed: 1, cancelled: 1 });
+  });
+
+  it('rejects a new booking on a published offer after its departure without changing inventory', async () => {
+    const response = await fetch(`${apiUrl}/api/v1/bookings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `expired-${crypto.randomUUID()}` },
+      body: JSON.stringify({ offerId: ids.expiredOffer, seats: 1 }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json() as { error: { code: string } }).error.code, 'offer_expired');
+    const inventory = await pool.query<{ available_seats: number; booking_count: string }>(
+      `SELECT o.available_seats,(SELECT count(*) FROM bookings b WHERE b.offer_id=o.id) AS booking_count
+         FROM offers o WHERE o.id=$1`, [ids.expiredOffer],
+    );
+    assert.equal(inventory.rows[0].available_seats, 1);
+    assert.equal(Number(inventory.rows[0].booking_count), 0);
   });
 
   it('accepts private safety reports only from booking participants and restricts staff review', async () => {

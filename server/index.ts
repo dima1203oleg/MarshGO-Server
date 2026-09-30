@@ -1621,8 +1621,8 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const offer = await client.query<{ price_per_seat_minor: number; currency: string; available_seats: number; driver_id: string; status: string }>(
-      'SELECT price_per_seat_minor, currency, available_seats, driver_id, status FROM offers WHERE id = $1 FOR UPDATE', [offerId],
+    const offer = await client.query<{ price_per_seat_minor: number; currency: string; available_seats: number; driver_id: string; status: string; departure_at: Date }>(
+      'SELECT price_per_seat_minor, currency, available_seats, driver_id, status, departure_at FROM offers WHERE id = $1 FOR UPDATE', [offerId],
     );
     const currentOffer = offer.rows[0];
     if (!currentOffer || currentOffer.status !== 'published') throw new ApiError(404, 'offer unavailable');
@@ -1636,6 +1636,9 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
       await client.query('COMMIT');
       res.status(200).json({ data: prior.rows[0], replayed: true });
       return;
+    }
+    if (new Date(currentOffer.departure_at).getTime() <= Date.now()) {
+      throw new ApiError(409, 'offer departure has passed', 'offer_expired');
     }
     if (currentOffer.driver_id === userId) throw new ApiError(400, 'drivers cannot book their own offer');
     if (Number(currentOffer.available_seats) < seats) throw new ApiError(409, 'not enough available seats');
