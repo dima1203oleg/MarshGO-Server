@@ -218,6 +218,37 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(Number(inventory.rows[0].booking_count), 0);
   });
 
+  it('allows the trip driver to cancel a confirmed booking once and denies nonparticipants', async () => {
+    const bookingResponse = await fetch(`${apiUrl}/api/v1/bookings`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerB, 'idempotency-key': `driver-cancel-book-${crypto.randomUUID()}` },
+      body: JSON.stringify({ offerId: ids.offer, seats: 1 }),
+    });
+    assert.equal(bookingResponse.status, 201);
+    const booking = await bookingResponse.json() as { data: { id: string } };
+    const denied = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/cancel`, {
+      method: 'POST', headers: { 'x-dev-user-id': ids.passengers[2] },
+    });
+    assert.equal(denied.status, 404);
+
+    const cancelled = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/cancel`, {
+      method: 'POST', headers: { 'x-dev-user-id': ids.driver },
+    });
+    assert.equal(cancelled.status, 200);
+    assert.equal((await cancelled.json() as { replayed: boolean }).replayed, false);
+    const repeated = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/cancel`, {
+      method: 'POST', headers: { 'x-dev-user-id': ids.driver },
+    });
+    assert.equal(repeated.status, 200);
+    assert.equal((await repeated.json() as { replayed: boolean }).replayed, true);
+
+    const inventory = await pool.query<{ available_seats: number; cancellation_events: string }>(
+      `SELECT o.available_seats,(SELECT count(*) FROM booking_events e WHERE e.booking_id=$2 AND e.to_status='cancelled') AS cancellation_events
+         FROM offers o WHERE o.id=$1`, [ids.offer, booking.data.id],
+    );
+    assert.equal(inventory.rows[0].available_seats, 1);
+    assert.equal(Number(inventory.rows[0].cancellation_events), 1);
+  });
+
   it('accepts private safety reports only from booking participants and restricts staff review', async () => {
     const bookingResponse = await fetch(`${apiUrl}/api/v1/bookings`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `report-${crypto.randomUUID()}` },

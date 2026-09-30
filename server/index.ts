@@ -1675,8 +1675,8 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const locked = await client.query<{ id: string; offer_id: string; seat_count: number; status: string; driver_id: string }>(
-      'SELECT b.id,b.offer_id,b.seat_count,b.status,o.driver_id FROM bookings b JOIN offers o ON o.id=b.offer_id WHERE b.id=$1 AND b.passenger_id=$2 FOR UPDATE OF b', [req.params.id, req.userId],
+    const locked = await client.query<{ id: string; offer_id: string; seat_count: number; status: string; driver_id: string; passenger_id: string }>(
+      'SELECT b.id,b.offer_id,b.seat_count,b.status,o.driver_id,b.passenger_id FROM bookings b JOIN offers o ON o.id=b.offer_id WHERE b.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF b', [req.params.id, req.userId],
     );
     const booking = locked.rows[0];
     if (!booking) throw new ApiError(404, 'booking unavailable');
