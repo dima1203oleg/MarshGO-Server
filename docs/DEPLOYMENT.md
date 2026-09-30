@@ -11,7 +11,7 @@
 
 The API binds to loopback by default. Set `API_HOST` explicitly for a private container/network binding in a deployment; do not expose the development bypass on a public interface.
 
-The example environment configures `REDIS_URL` for the local Redis container. Production API processes require a reachable shared Redis instance and the same managed `SESSION_SECRET`; keep both outside source control. Redis Pub/Sub provides transient WebSocket fan-out and Redis `GETDEL` coordinates one-use socket tickets. PostgreSQL stores the durable messages, so clients reload from REST after reconnect.
+The example environment configures `REDIS_URL` for the local Redis container. Production API processes require a reachable shared Redis instance, the same managed `SESSION_SECRET` of at least 32 bytes, explicit HTTPS `CORS_ORIGINS` (plus `capacitor://localhost` only when serving the native app), and configured Twilio credentials. The server refuses to start with development OTP/bypass, wildcard/default origins, or missing SMS credentials. Keep all credentials outside source control. Redis Pub/Sub provides transient WebSocket fan-out and Redis `GETDEL` coordinates one-use socket tickets. PostgreSQL stores the durable messages, so clients reload from REST after reconnect.
 
 The compose ports bind to loopback. Volumes persist across container restarts. Do not use `docker compose down -v` if you need to retain local data.
 

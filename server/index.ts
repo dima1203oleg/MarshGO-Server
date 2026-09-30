@@ -10,6 +10,7 @@ import type { Duplex } from 'node:stream';
 import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
 import { calculatePlatformFee } from './fees';
+import { validateRuntimeConfig } from './config';
 import { GeocodingUnavailableError, suggestPlaces } from './geocoding';
 import {
   createVehiclePhotoUpload, createVerificationEvidenceUpload, deleteStoredVehiclePhoto, getVehiclePhotoUrl,
@@ -18,8 +19,8 @@ import {
 } from './objectStorage';
 
 const app = express();
+validateRuntimeConfig(process.env);
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
-if (process.env.NODE_ENV === 'production' && !process.env.SESSION_SECRET) throw new Error('SESSION_SECRET is required in production');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 12, idleTimeoutMillis: 30_000 });
 type RealtimeTicket = { userId: string; sessionId: string; expiresAt: number };
 type RealtimeMessage = { id: string; conversation_id: string; sender_id: string; sender_name: string; body: string; created_at: Date };
@@ -35,6 +36,7 @@ const realtimeSessionBySocket = new WeakMap<WebSocket, string>();
 const aliveRealtimeSockets = new WeakSet<WebSocket>();
 const realtimeServer = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: 1024 });
 let realtimeOutboxTimer: NodeJS.Timeout | undefined;
+let realtimeOutboxDispatch: Promise<void> | undefined;
 function closeRealtimeConnectionsLocally(userId: string, sessionId?: string) {
   for (const client of realtimeClients.get(userId) ?? []) {
     if (!sessionId || realtimeSessionBySocket.get(client) === sessionId) client.close(1008, 'session revoked');
@@ -2711,7 +2713,12 @@ async function startServer() {
   }
   server = app.listen(port, host, () => console.log(JSON.stringify({ level: 'info', event: 'api.started', host, port, realtime: realtimeRedis ? 'redis' : 'single_process_dev' })));
   attachRealtimeUpgradeHandler();
-  const dispatch = () => { void dispatchRealtimeOutbox().catch((error: unknown) => console.error(JSON.stringify({ level: 'error', event: 'realtime.outbox_dispatch_failed', message: error instanceof Error ? error.message : 'unknown_error' }))); };
+  const dispatch = () => {
+    if (realtimeOutboxDispatch) return;
+    realtimeOutboxDispatch = dispatchRealtimeOutbox()
+      .catch((error: unknown) => console.error(JSON.stringify({ level: 'error', event: 'realtime.outbox_dispatch_failed', message: error instanceof Error ? error.message : 'unknown_error' })))
+      .finally(() => { realtimeOutboxDispatch = undefined; });
+  };
   dispatch();
   realtimeOutboxTimer = setInterval(dispatch, 500);
   realtimeOutboxTimer.unref();
@@ -2731,6 +2738,7 @@ async function shutdown() {
   clearInterval(navigationExpiryTimer);
   clearInterval(realtimeHeartbeat);
   if (realtimeOutboxTimer) clearInterval(realtimeOutboxTimer);
+  if (realtimeOutboxDispatch) await realtimeOutboxDispatch;
   realtimeServer.close();
   if (!server) { await closeResources(); process.exit(0); return; }
   server.close(() => {
