@@ -2,6 +2,7 @@ import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { Pool } from 'pg';
+import { retainNavigationSessions } from '../server/navigation/sessionRetention';
 
 const apiUrl = process.env.API_TEST_URL;
 const databaseUrl = process.env.API_TEST_DATABASE_URL;
@@ -19,6 +20,7 @@ describe('foreground navigation session API (opt-in local integration test)', { 
   const vehicle = crypto.randomUUID();
   const headers = (userId: string) => ({ 'content-type': 'application/json', 'x-dev-user-id': userId });
   let sessionId = '';
+  let offlineSessionId = '';
   let forwardDemandId = '';
   let reverseDemandId = '';
   let overCapacityDemandId = '';
@@ -46,6 +48,10 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     if (sessionId) {
       await pool.query('DELETE FROM audit_events WHERE entity_id=$1', [sessionId]);
       await pool.query('DELETE FROM navigation_sessions WHERE id=$1', [sessionId]);
+    }
+    if (offlineSessionId) {
+      await pool.query('DELETE FROM audit_events WHERE entity_id=$1', [offlineSessionId]);
+      await pool.query('DELETE FROM navigation_sessions WHERE id=$1', [offlineSessionId]);
     }
     if (demandIds.length) {
       await pool.query('DELETE FROM passenger_demands WHERE id=ANY($1::uuid[])', [demandIds]);
@@ -264,6 +270,19 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     });
     assert.equal(teleport.status, 422);
 
+    const rerouteFix = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/location`, {
+      method: 'POST', headers: headers(driver),
+      body: JSON.stringify({ coordinates: [24, 49], accuracyMeters: 8, capturedAt: new Date().toISOString() }),
+    });
+    assert.equal(rerouteFix.status, 200);
+    const versionBeforeReroute = await pool.query<{ route_version: number }>('SELECT route_version FROM navigation_sessions WHERE id=$1', [sessionId]);
+    const reroute = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/reroute`, { method: 'POST', headers: headers(driver) });
+    assert.equal(reroute.status, 200);
+    const rerouted = (await reroute.json() as { data: { route_version: number; opt_in: boolean; route: [number, number][] } }).data;
+    assert.equal(rerouted.route_version, Number(versionBeforeReroute.rows[0].route_version) + 1);
+    assert.equal(rerouted.opt_in, false, 'route changes require a fresh passenger-matching opt-in');
+    assert.deepEqual(rerouted.route, [[24, 49], [25, 50]]);
+
     const ended = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/end`, { method: 'POST', headers: headers(driver) });
     assert.equal(ended.status, 200);
     const replay = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/end`, { method: 'POST', headers: headers(driver) });
@@ -276,5 +295,36 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     assert.equal(persisted.rows[0].destination, null);
     assert.equal(persisted.rows[0].destination_name, null);
     assert.equal((await pool.query('SELECT count(*)::int AS count FROM navigation_match_candidates WHERE navigation_session_id=$1 AND demand_id=$2', [sessionId, forwardDemandId])).rows[0].count, 1);
+
+    const offlineCreated = await fetch(`${apiUrl}/api/v1/navigation/sessions`, {
+      method: 'POST', headers: headers(driver),
+      body: JSON.stringify({ origin: [24, 49], destination: [25, 50], destinationName: 'Offline resume destination' }),
+    });
+    assert.equal(offlineCreated.status, 201);
+    offlineSessionId = (await offlineCreated.json() as { data: { id: string } }).data.id;
+    const offlineFix = await fetch(`${apiUrl}/api/v1/navigation/sessions/${offlineSessionId}/location`, {
+      method: 'POST', headers: headers(driver),
+      body: JSON.stringify({ coordinates: [24, 49], accuracyMeters: 8, capturedAt: new Date().toISOString() }),
+    });
+    assert.equal(offlineFix.status, 200);
+    await pool.query('UPDATE navigation_sessions SET current_location_at=now()-interval \'3 minutes\',last_activity_at=now() WHERE id=$1', [offlineSessionId]);
+    const clearedLocation = await retainNavigationSessions(pool);
+    assert.ok(clearedLocation.clearedLocations >= 1);
+    const resumable = await pool.query<{ state: string; route: unknown; destination: unknown; current_location: unknown }>(
+      'SELECT state,route,destination,current_location FROM navigation_sessions WHERE id=$1', [offlineSessionId],
+    );
+    assert.equal(resumable.rows[0].state, 'active');
+    assert.ok(resumable.rows[0].route, 'a temporary GPS gap must preserve the active route');
+    assert.ok(resumable.rows[0].destination);
+    assert.equal(resumable.rows[0].current_location, null, 'stale precise position is purged independently');
+    await pool.query('UPDATE navigation_sessions SET last_activity_at=now()-interval \'25 hours\' WHERE id=$1', [offlineSessionId]);
+    const abandonedSession = await retainNavigationSessions(pool);
+    assert.ok(abandonedSession.endedSessions >= 1);
+    const expired = await pool.query<{ state: string; route: unknown; destination: unknown }>(
+      'SELECT state,route,destination FROM navigation_sessions WHERE id=$1', [offlineSessionId],
+    );
+    assert.equal(expired.rows[0].state, 'ended');
+    assert.equal(expired.rows[0].route, null);
+    assert.equal(expired.rows[0].destination, null);
   });
 });

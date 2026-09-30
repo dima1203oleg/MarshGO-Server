@@ -111,7 +111,12 @@ describe('booking durability across API process restart (opt-in local integratio
     if (child.exitCode !== null || child.killed) return;
     const exited = new Promise<void>(resolve => child.once('exit', () => resolve()));
     child.kill('SIGTERM');
-    const stopped = await Promise.race([exited.then(() => true), new Promise<false>(resolve => setTimeout(() => resolve(false), 10_000))]);
+    let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
+    const stopped = await Promise.race([
+      exited.then(() => true),
+      new Promise<false>(resolve => { shutdownTimer = setTimeout(() => resolve(false), 10_000); }),
+    ]);
+    if (shutdownTimer) clearTimeout(shutdownTimer);
     if (!stopped) {
       child.kill('SIGKILL');
       await exited;

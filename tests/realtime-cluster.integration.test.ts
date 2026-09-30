@@ -199,6 +199,17 @@ describe('Redis-backed realtime across API instances', { skip: !enabled }, () =>
     assert.equal(retriedEvent.data.status, 'retry_verified');
     assert.ok(await waitForPublished(pool, retryKey));
 
+    const prunedRecipientKey = `deleted-recipient:${crypto.randomUUID()}`;
+    const validRecipientEvent = waitForSocketEvent(socket, 'booking.changed');
+    await pool.query(
+      `INSERT INTO realtime_outbox(event_type,dedupe_key,recipient_ids,payload)
+       VALUES('booking.changed',$1,$2::uuid[],$3::jsonb)`,
+      [prunedRecipientKey, [passengerId, crypto.randomUUID()], JSON.stringify({ booking_id: bookingId, status: 'active_recipient_only' })],
+    );
+    const prunedDelivery = await validRecipientEvent;
+    assert.equal(prunedDelivery.data.status, 'active_recipient_only');
+    assert.ok(await waitForPublished(pool, prunedRecipientKey));
+
     const messageWait = waitForSocketEvent(socket, 'conversation.message.created');
     const response = await fetch(`${primaryUrl}/api/v1/conversations/${conversationId}/messages`, {
       method: 'POST', headers: { 'x-dev-user-id': driverId, 'content-type': 'application/json' },

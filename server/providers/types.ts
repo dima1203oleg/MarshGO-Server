@@ -15,6 +15,9 @@ export interface ProviderOption {
   providerId: string;
   providerType: string;
   mode: JourneyLegMode;
+  /** Canonical stop/place identity; never derived by comparing display names. */
+  originNodeId?: string;
+  destinationNodeId?: string;
   origin: ProviderSearchContext['origin'];
   destination: ProviderSearchContext['destination'];
   departureAt: Date | null;

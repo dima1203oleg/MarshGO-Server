@@ -48,6 +48,17 @@ describe('Journey domain schema (opt-in local integration test)', { skip: !enabl
       client.release();
     }
   });
+
+  it('keeps spatial indexes on passenger request pickup and dropoff coordinates', async () => {
+    assert.ok(pool);
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes WHERE schemaname='public'
+         AND indexname IN ('passenger_demands_origin_gix','passenger_demands_destination_gix') ORDER BY indexname`,
+    );
+    assert.deepEqual(indexes.rows.map(({ indexname }) => indexname), [
+      'passenger_demands_destination_gix', 'passenger_demands_origin_gix',
+    ]);
+  });
 });
 
 after(async () => { await pool?.end(); });

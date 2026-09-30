@@ -36,4 +36,19 @@ describe('persistent notification projection', () => {
       journey_leg_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', state: 'COMPLETED',
     });
   });
+
+  it('explains when a negotiation proposal expires without exposing private fields', () => {
+    const projected = projectNotification('proposal.expired', {
+      proposal_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      demand_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      status: 'expired', price_minor: 16000, driver_phone: '+380000000000',
+    });
+    assert.equal(projected?.title, 'Пропозиція більше не актуальна');
+    assert.deepEqual(projected?.payload, {
+      eventType: 'proposal.expired',
+      proposal_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      demand_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      status: 'expired',
+    });
+  });
 });

@@ -8,9 +8,26 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
 const migrationsDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'migrations');
 
+async function connectWhenDatabaseIsReady() {
+  const attempts = 12;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try { return await pool.connect(); }
+    catch (error) {
+      const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+      const transient = code.startsWith('08') || ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', '57P03'].includes(code);
+      if (!transient || attempt === attempts) throw error;
+      const delayMs = Math.min(attempt * 500, 3_000);
+      console.warn(`Database is not ready (attempt ${attempt}/${attempts}); retrying in ${delayMs}ms`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error('Database connection retries exhausted');
+}
+
 async function migrate() {
-  const client = await pool.connect();
+  let client: Awaited<ReturnType<typeof connectWhenDatabaseIsReady>> | undefined;
   try {
+    client = await connectWhenDatabaseIsReady();
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(743921604)');
     await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())');
@@ -25,10 +42,10 @@ async function migrate() {
     }
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK').catch(() => undefined);
     throw error;
   } finally {
-    client.release();
+    client?.release();
     await pool.end();
   }
 }

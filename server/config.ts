@@ -27,6 +27,15 @@ function validateProductionOrigins(value: string): void {
   }
 }
 
+function requireHttpsUrl(environment: RuntimeEnvironment, name: string): void {
+  const raw = requireValue(environment, name);
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error(`${name} must be a valid HTTPS URL in production`); }
+  if (url.protocol !== 'https:' || ['localhost', '127.0.0.1', '::1'].includes(url.hostname) || url.username || url.password) {
+    throw new Error(`${name} must be a public HTTPS URL in production`);
+  }
+}
+
 /** Fail closed before listening if production could silently use dev auth or default CORS. */
 export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   if (environment.NODE_ENV !== 'production') return;
@@ -47,4 +56,18 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   requireValue(environment, 'TWILIO_ACCOUNT_SID');
   requireValue(environment, 'TWILIO_AUTH_TOKEN');
   requireValue(environment, 'TWILIO_FROM_NUMBER');
+
+  if ((environment.MAP_RENDERER ?? 'maplibre') !== 'maplibre') throw new Error('MAP_RENDERER=maplibre is required');
+  if ((environment.MAP_DATA_PROVIDER ?? 'marshgo') !== 'marshgo') throw new Error('MAP_DATA_PROVIDER=marshgo is required');
+  if ((environment.ROUTING_PRIMARY ?? 'osrm') !== 'osrm') throw new Error('ROUTING_PRIMARY=osrm is the only configured production routing provider');
+  if ((environment.TRAFFIC_PROVIDER ?? 'none') !== 'none') throw new Error('TRAFFIC_PROVIDER=none is the only configured traffic provider');
+  requireHttpsUrl({ ...environment, OSRM_URL: environment.OSRM_URL || environment.ROUTING_ENGINE_URL }, 'OSRM_URL');
+  requireHttpsUrl(environment, 'GEOCODING_ENGINE_URL');
+  requireHttpsUrl(environment, 'GEOCODING_REVERSE_URL');
+  requireHttpsUrl(environment, 'MAP_STYLE_MANIFEST_URL');
+  requireHttpsUrl(environment, 'MAP_DATA_MANIFEST_URL');
+  for (const name of ['HERE_ROUTING_ENABLED', 'HERE_TRAFFIC_ENABLED', 'TOMTOM_ROUTING_ENABLED', 'TOMTOM_TRAFFIC_ENABLED']) {
+    if (environment[name] !== undefined && !['true', 'false'].includes(environment[name]!)) throw new Error(`${name} must be true or false`);
+    if (environment[name] === 'true') throw new Error(`${name}=true is unsupported until its server-side provider adapter is implemented`);
+  }
 }

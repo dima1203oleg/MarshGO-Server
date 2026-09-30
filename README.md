@@ -14,7 +14,7 @@ npm run db:migrate
 npm run api
 ```
 
-API health endpoints: `GET /healthz` and `GET /readyz`. The versioned REST API is documented in [`docs/API.md`](docs/API.md). Apply only additive migrations to reviewed databases.
+API health endpoints: `GET /healthz` and `GET /readyz`. The versioned REST API is documented in [`docs/API.md`](docs/API.md). The current integrated schema is migration `027`; apply only additive migrations to reviewed databases. See `docs/DATA_MODEL.md` for migration history and known product gaps.
 
 ## Verification
 

@@ -1,7 +1,7 @@
 import { after, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, Server } from 'node:http';
-import { getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from '../server/routing';
+import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from '../server/routing';
 
 describe('OSRM-compatible routing adapter', () => {
   let server: Server | undefined;
@@ -20,6 +20,11 @@ describe('OSRM-compatible routing adapter', () => {
         distance: 10400,
         duration: 930,
         geometry: { type: 'LineString', coordinates: [[23.86, 49.25], [23.95, 49.51], [24.03, 49.84]] },
+        legs: [{ distance: 10400, duration: 930, steps: [
+          { distance: 0, duration: 0, maneuver: { type: 'depart', location: [23.86, 49.25], bearing_after: 42 } },
+          { distance: 5200, duration: 450, name: 'Highway', maneuver: { type: 'turn', modifier: 'left', location: [23.95, 49.51], bearing_before: 42, bearing_after: 90, exit: 2 } },
+          { distance: 5200, duration: 480, maneuver: { type: 'arrive', location: [24.03, 49.84] } },
+        ] }],
       }] }));
     });
     await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
@@ -30,7 +35,14 @@ describe('OSRM-compatible routing adapter', () => {
       geometry: [[23.86, 49.25], [23.95, 49.51], [24.03, 49.84]],
       distanceMeters: 10400,
       durationSeconds: 930,
+      legs: [{ distanceMeters: 10400, durationSeconds: 930 }],
     });
+    const canonical = await calculateCanonicalRoute({ origin: [23.86, 49.25], destination: [24.03, 49.84], profile: { mode: 'CAR' }, requestId: 'route-contract-test' });
+    assert.equal(canonical.geometry.encoding, 'polyline6');
+    assert.equal(canonical.maneuvers[0].type, 'DEPART');
+    assert.equal(canonical.maneuvers[1].modifier, 'LEFT');
+    assert.equal(canonical.maneuvers[1].streetName, 'Highway');
+    assert.equal(canonical.maneuvers[1].exitNumber, 2);
   });
 
   it('sends ordered pickup and dropoff waypoints to the road routing provider', async () => {
