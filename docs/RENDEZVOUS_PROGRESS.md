@@ -36,6 +36,11 @@
 - The Site does not yet render a live map or automatically stream foreground fixes; location sending is a deliberate one-shot user action. No iOS background location behavior is claimed.
 - No production SMS/APNs credentials, external route/geocode/tiles service, HTTPS staging, signing identity, or physical iPhone acceptance was available for this local implementation pass.
 
+### iOS simulator rendering check
+
+- Built, installed and launched the Capacitor app on iPhone 15 Pro Max and iPhone 16 Pro Max simulators. Both rendered the MARSHGO welcome screen at native simulator resolution without visible clipping. The simulator script now waits for WebKit to settle and captures a screenshot.
+- This is launch-screen smoke evidence only; it does not test sign-in, an authenticated booking/rendezvous, camera, location permission behavior, background GPS, push, production signing or TestFlight. The physical-device acceptance requested by the product specification remains outstanding.
+
 ### NEXT
 
 Build the Journey Monitor against actual schedule/location observations and existing transfer feasibility logic. Cascade Rendezvous timing changes into downstream legs and only trigger replan when a verified observation makes the current connection infeasible. Add user-facing booking screens after those API response states are stable.
