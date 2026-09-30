@@ -174,8 +174,10 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const acceptedResponse = attempts[acceptedIndex];
     const acceptedUser = ids.passengers[acceptedIndex];
     const acceptedKey = keys[acceptedIndex];
-    const accepted = await acceptedResponse.json() as { data: { id: string; total_price_minor: number } };
+    const accepted = await acceptedResponse.json() as { data: { id: string; total_price_minor: number; platform_fee_minor: number; fee_class: string; fee_rule_version: string } };
     assert.equal(accepted.data.total_price_minor, 15000);
+    assert.deepEqual({ feeClass: accepted.data.fee_class, feeMinor: accepted.data.platform_fee_minor, rule: accepted.data.fee_rule_version },
+      { feeClass: 'community', feeMinor: 0, rule: 'community-0pct-v1' });
 
     const replay = await book(acceptedUser, acceptedKey);
     assert.equal(replay.status, 200);
@@ -608,9 +610,11 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(passengerA),
     });
     assert.equal(accepted.status, 201);
-    const booking = await accepted.json() as { data: { id: string; total_price_minor: number; seat_count: number }; agreedTotalMinor: number };
+    const booking = await accepted.json() as { data: { id: string; total_price_minor: number; seat_count: number; platform_fee_minor: number; fee_class: string; fee_rule_version: string }; agreedTotalMinor: number };
     assert.equal(booking.data.total_price_minor, 15000);
     assert.equal(booking.data.seat_count, 2);
+    assert.deepEqual({ feeClass: booking.data.fee_class, feeMinor: booking.data.platform_fee_minor, rule: booking.data.fee_rule_version },
+      { feeClass: 'community', feeMinor: 0, rule: 'community-0pct-v1' });
     assert.equal(booking.agreedTotalMinor, 15000);
     const negotiationEvents = await pool.query<{ event_type: string; recipient_ids: string[]; payload: { proposal_id?: string } }>(
       `SELECT event_type,recipient_ids,payload FROM realtime_outbox

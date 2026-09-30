@@ -9,6 +9,7 @@ import { RedisRateLimitStore } from './redisRateLimitStore';
 import type { Duplex } from 'node:stream';
 import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
+import { calculatePlatformFee } from './fees';
 import { GeocodingUnavailableError, suggestPlaces } from './geocoding';
 import {
   createVehiclePhotoUpload, createVerificationEvidenceUpload, deleteStoredVehiclePhoto, getVehiclePhotoUrl,
@@ -1023,7 +1024,7 @@ app.get('/api/v1/users/me/export', requireAuth, asyncHandler(async (req, res) =>
     pool.query('SELECT id,phone_e164,display_name,email,roles,is_verified,created_at FROM users WHERE id=$1', [req.userId]),
     pool.query('SELECT id,make,model,model_year,seat_count,verification_status,created_at FROM vehicles WHERE owner_id=$1', [req.userId]),
     pool.query(
-      `SELECT b.id,b.offer_id,b.seat_count,b.total_price_minor,b.currency,b.status,b.created_at
+      `SELECT b.id,b.offer_id,b.seat_count,b.total_price_minor,b.currency,b.fee_class,b.platform_fee_minor,b.fee_rule_version,b.status,b.created_at
          FROM bookings b JOIN offers o ON o.id=b.offer_id WHERE b.passenger_id=$1 OR o.driver_id=$1`, [req.userId],
     ),
     pool.query('SELECT id,origin_name,destination_name,earliest_departure,latest_departure,passenger_count,budget_minor,status,created_at FROM passenger_demands WHERE passenger_id=$1', [req.userId]),
@@ -1620,7 +1621,7 @@ app.post('/api/v1/offers', requireAuth, requireRole('driver'), asyncHandler(asyn
 
 app.get('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT b.id, b.offer_id, b.seat_count, b.total_price_minor, b.currency, b.status, b.created_at,
+    `SELECT b.id, b.offer_id, b.seat_count, b.total_price_minor, b.currency, b.fee_class, b.platform_fee_minor, b.fee_rule_version, b.status, b.created_at,
             o.origin_name, o.destination_name, o.departure_at, u.display_name AS driver_name, p.display_name AS passenger_name,
             (o.driver_id=$1) AS current_user_is_driver,
             (SELECT count(*)::int FROM booking_completion_confirmations cc WHERE cc.booking_id=b.id) AS completion_confirmation_count,
@@ -1664,7 +1665,7 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     if (!currentOffer || currentOffer.status !== 'published') throw new ApiError(404, 'offer unavailable');
 
     const prior = await client.query(
-      'SELECT id, offer_id, seat_count, total_price_minor, currency, status FROM bookings WHERE passenger_id = $1 AND idempotency_key = $2',
+      'SELECT id, offer_id, seat_count, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, status FROM bookings WHERE passenger_id = $1 AND idempotency_key = $2',
       [userId, key],
     );
     if (prior.rows[0]) {
@@ -1680,12 +1681,13 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     if (Number(currentOffer.available_seats) < seats) throw new ApiError(409, 'not enough available seats');
 
     const total = Number(currentOffer.price_per_seat_minor) * seats;
+    const fee = calculatePlatformFee(total, 'community');
     await client.query('UPDATE offers SET available_seats = available_seats - $2 WHERE id = $1', [offerId, seats]);
     const booking = await client.query(
-      `INSERT INTO bookings(offer_id, passenger_id, seat_count, unit_price_minor, total_price_minor, currency, idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
-       RETURNING id, offer_id, seat_count, unit_price_minor, total_price_minor, currency, status, created_at`,
-      [offerId, userId, seats, currentOffer.price_per_seat_minor, total, currentOffer.currency, key],
+      `INSERT INTO bookings(offer_id, passenger_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING id, offer_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, status, created_at`,
+      [offerId, userId, seats, currentOffer.price_per_seat_minor, total, currentOffer.currency, fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, key],
     );
     await client.query('INSERT INTO conversations(booking_id) VALUES ($1)', [booking.rows[0].id]);
     await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id) VALUES ($1,NULL,'confirmed',$2)", [booking.rows[0].id, userId]);
@@ -2298,11 +2300,13 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
         navigationPlan ? Math.round(navigationPlan.passengerRoute.durationSeconds) : null],
     );
     const agreedTotal = Number(proposal.price_minor);
+    const fee = calculatePlatformFee(agreedTotal, 'community');
     const { rows: bookings } = await client.query(
-      `INSERT INTO bookings(offer_id,passenger_id,seat_count,unit_price_minor,total_price_minor,currency,idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,'UAH',$6)
-       RETURNING id,offer_id,seat_count,unit_price_minor,total_price_minor,currency,status,created_at`,
-      [offers[0].id, req.userId, demand.passenger_count, Math.floor(agreedTotal / Number(demand.passenger_count)), agreedTotal, `proposal-accept:${proposal.id}`],
+      `INSERT INTO bookings(offer_id,passenger_id,seat_count,unit_price_minor,total_price_minor,currency,fee_class,platform_fee_minor,fee_rule_version,idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,'UAH',$6,$7,$8,$9)
+       RETURNING id,offer_id,seat_count,unit_price_minor,total_price_minor,currency,fee_class,platform_fee_minor,fee_rule_version,status,created_at`,
+      [offers[0].id, req.userId, demand.passenger_count, Math.floor(agreedTotal / Number(demand.passenger_count)), agreedTotal,
+        fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, `proposal-accept:${proposal.id}`],
     );
     await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id) VALUES ($1,NULL,'confirmed',$2)", [bookings[0].id, req.userId]);
     const { rows: remainingInventory } = await client.query<{ available_seats: number }>(

@@ -7,8 +7,8 @@ RATE_LIMIT_TEST_PREFIX="marshgo:integration:rate-limit:$$:$RANDOM:"
 export API_RATE_LIMIT_PREFIX="$RATE_LIMIT_TEST_PREFIX"
 DATABASE_HOST="$(node -e 'process.stdout.write(new URL(process.argv[1]).hostname)' "$DATABASE_URL")"
 DATABASE_NAME="$(node -e 'process.stdout.write(new URL(process.argv[1]).pathname)' "$DATABASE_URL")"
-if [[ ! "$DATABASE_HOST" =~ ^(127\.0\.0\.1|localhost|::1)$ || "$DATABASE_NAME" != "/marshgo_e2e" ]]; then
-  echo "Refusing integration tests outside loopback marshgo_e2e database." >&2
+if [[ ! "$DATABASE_HOST" =~ ^(127\.0\.0\.1|localhost|::1)$ || ! "$DATABASE_NAME" =~ ^/marshgo_e2e(_[a-z0-9_]+)?$ ]]; then
+  echo "Refusing integration tests outside loopback marshgo_e2e-prefixed database." >&2
   exit 2
 fi
 
