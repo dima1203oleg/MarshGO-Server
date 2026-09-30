@@ -104,7 +104,7 @@ async function dispatchRealtimeOutbox() {
        )
        UPDATE realtime_outbox o SET locked_until=now()+interval '30 seconds',attempt_count=o.attempt_count+1
         FROM available WHERE o.id=available.id
-       RETURNING o.id,o.event_type,o.recipient_ids,o.payload,o.attempt_count`,
+       RETURNING o.id,o.event_type,o.recipient_ids::text[] AS recipient_ids,o.payload,o.attempt_count`,
     );
     rows = claimed.rows;
     await client.query('COMMIT');
@@ -115,7 +115,8 @@ async function dispatchRealtimeOutbox() {
 
   for (const row of rows) {
     try {
-      if (!supportedOutboxEvents.has(row.event_type) || !Array.isArray(row.recipient_ids) || row.recipient_ids.length === 0) throw new Error('unsupported realtime outbox event');
+      if (!supportedOutboxEvents.has(row.event_type)) throw new Error(`unsupported realtime outbox event type: ${row.event_type}`);
+      if (!Array.isArray(row.recipient_ids) || row.recipient_ids.length === 0) throw new Error(`invalid realtime outbox recipients: ${typeof row.recipient_ids}`);
       await broadcastRealtime(row.recipient_ids, row.event_type, row.payload);
       await pool.query('UPDATE realtime_outbox SET published_at=now(),locked_until=NULL,last_error=NULL WHERE id=$1', [row.id]);
     } catch (error) {
