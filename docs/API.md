@@ -78,6 +78,10 @@ Headers: `Idempotency-Key` (16–128 characters). JSON body: `{ "offerId": "<uui
 
 Cancels a confirmed booking owned by the caller and restores its seats exactly once. Other booking states cannot be cancelled through this endpoint.
 
+`GET /api/v1/bookings/:id/rescue`
+
+Passenger-only lookup available after cancelling the booking. Returns currently published MARSHGO Community rides with sufficient seats, future departures in the original time window, and origin/destination within 20 km of the cancelled ride's stored endpoints. Results include source, check time, and endpoint distances. This is a bounded inventory prefilter; it does not promise routing-engine detour feasibility or partner availability. Select an alternative and use the normal offer and booking endpoints, which revalidate inventory transactionally.
+
 ## Realtime events
 
 Authenticated WebSocket clients connect through a single-use ticket from `POST /api/v1/realtime/ticket` to `/api/v1/realtime?ticket=...`. The server sends `{ "type": "...", "data": { ... } }` only to the persisted user IDs captured by the domain transaction. The PostgreSQL outbox commits atomically with chat messages, offer bookings/cancellations, booking lifecycle transitions, proposal create/counter/agree/accept, competing-proposal closure, and proposal closure when a passenger cancels demand. Event types include `conversation.message.created`, `booking.confirmed`, `booking.cancelled`, `booking.changed`, `proposal.created`, `proposal.countered`, `proposal.updated`, `proposal.accepted`, and `proposal.closed`.

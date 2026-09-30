@@ -1705,6 +1705,54 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
   }
 }));
 
+app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res) => {
+  const { rows: bookings } = await pool.query<{
+    id: string; passenger_id: string; status: string; seat_count: number; departure_at: Date;
+    origin_name: string; destination_name: string; origin_lon: number; origin_lat: number;
+    destination_lon: number; destination_lat: number; offer_id: string;
+  }>(
+    `SELECT b.id,b.passenger_id,b.status,b.seat_count,o.departure_at,o.origin_name,o.destination_name,
+            ST_X(o.origin::geometry) AS origin_lon,ST_Y(o.origin::geometry) AS origin_lat,
+            ST_X(o.destination::geometry) AS destination_lon,ST_Y(o.destination::geometry) AS destination_lat,o.id AS offer_id
+       FROM bookings b JOIN offers o ON o.id=b.offer_id
+      WHERE b.id=$1 AND b.passenger_id=$2`, [req.params.id, req.userId],
+  );
+  const booking = bookings[0];
+  if (!booking) throw new ApiError(404, 'booking unavailable');
+  if (booking.status !== 'cancelled') throw new ApiError(409, 'rescue search is available only after cancellation');
+  const { rows } = await pool.query(
+    `SELECT o.id,o.origin_name,o.destination_name,o.departure_at,o.arrival_at,o.distance_m,o.duration_s,o.route_source,
+            o.price_per_seat_minor,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
+            ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key,
+            round(ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography))::int AS origin_distance_m,
+            round(ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography))::int AS destination_distance_m,
+            'MARSHGO Community'::text AS source
+       FROM offers o JOIN users u ON u.id=o.driver_id
+       LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
+       LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count
+                            FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true
+      WHERE o.status='published' AND o.departure_at>now() AND o.id<>$5 AND o.driver_id<>$6
+        AND o.available_seats >= $7
+        AND o.departure_at >= GREATEST(now(),$8::timestamptz-interval '2 hours')
+        AND o.departure_at <= $8::timestamptz+interval '4 hours'
+        AND ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000)
+        AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,20000)
+        AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.blocker_id=o.driver_id AND b.blocked_id=$6) OR (b.blocker_id=$6 AND b.blocked_id=o.driver_id))
+      ORDER BY ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography)+ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography),ABS(extract(epoch FROM (o.departure_at-$8::timestamptz)))
+      LIMIT 20`, [booking.origin_lon, booking.origin_lat, booking.destination_lon, booking.destination_lat,
+      booking.offer_id, req.userId, booking.seat_count, booking.departure_at],
+  );
+  res.json({ data: {
+    booking_id: booking.id,
+    checked_at: new Date().toISOString(),
+    radius_m: 20_000,
+    alternatives: await Promise.all(rows.map(async ({ vehicle_photo_key, ...offer }) => ({
+      ...offer,
+      vehicle_photo_url: vehicle_photo_key ? await getVehiclePhotoUrl(vehicle_photo_key).catch(() => null) : null,
+    }))),
+  } });
+}));
+
 app.get('/api/v1/bookings/:id/ticket', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query<{ id: string; status: string; departure_at: Date }>(
     `SELECT b.id,b.status,o.departure_at FROM bookings b JOIN offers o ON o.id=b.offer_id

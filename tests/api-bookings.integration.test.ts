@@ -249,6 +249,49 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(Number(inventory.rows[0].cancellation_events), 1);
   });
 
+  it('returns only current nearby MARSHGO rides with enough seats for a cancelled booking', async () => {
+    const nearbyOfferId = crypto.randomUUID();
+    const farOfferId = crypto.randomUUID();
+    const noSeatsOfferId = crypto.randomUUID();
+    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,departure_at,price_per_seat_minor,total_seats,available_seats)
+      VALUES
+      ($1,$2,$3,'Rescue Nearby Origin','Rescue Nearby Destination',
+        ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
+        now()+interval '10 days 30 minutes',22000,4,4),
+      ($4,$2,$3,'Rescue Far Origin','Rescue Far Destination',
+        ST_SetSRID(ST_MakePoint(27.0,52.0),4326)::geography,ST_SetSRID(ST_MakePoint(28.0,53.0),4326)::geography,
+        now()+interval '10 days 30 minutes',18000,4,4),
+      ($5,$2,$3,'Rescue Sold Out Origin','Rescue Sold Out Destination',
+        ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
+        now()+interval '10 days 30 minutes',16000,4,0)`, [nearbyOfferId, ids.driver, ids.vehicle, farOfferId, noSeatsOfferId]);
+    const bookingResponse = await fetch(`${apiUrl}/api/v1/bookings`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `rescue-book-${crypto.randomUUID()}` },
+      body: JSON.stringify({ offerId: ids.offer, seats: 1 }),
+    });
+    assert.equal(bookingResponse.status, 201);
+    const booking = await bookingResponse.json() as { data: { id: string } };
+    const activeRescue = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rescue`, { headers: { 'x-dev-user-id': passengerA } });
+    assert.equal(activeRescue.status, 409);
+
+    const cancelled = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/cancel`, {
+      method: 'POST', headers: { 'x-dev-user-id': passengerA },
+    });
+    assert.equal(cancelled.status, 200);
+    const denied = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rescue`, { headers: { 'x-dev-user-id': passengerB } });
+    assert.equal(denied.status, 404);
+    const rescueResponse = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rescue`, { headers: { 'x-dev-user-id': passengerA } });
+    assert.equal(rescueResponse.status, 200);
+    const rescue = await rescueResponse.json() as { data: { booking_id: string; checked_at: string; radius_m: number; alternatives: Array<{ id: string; source: string; available_seats: number; origin_distance_m: number; destination_distance_m: number }> } };
+    assert.equal(rescue.data.booking_id, booking.data.id);
+    assert.ok(Number.isFinite(Date.parse(rescue.data.checked_at)));
+    assert.equal(rescue.data.radius_m, 20_000);
+    assert.deepEqual(rescue.data.alternatives.map(item => item.id), [nearbyOfferId]);
+    assert.equal(rescue.data.alternatives[0].source, 'MARSHGO Community');
+    assert.equal(rescue.data.alternatives[0].available_seats, 4);
+    assert.equal(rescue.data.alternatives[0].origin_distance_m, 0);
+    assert.equal(rescue.data.alternatives[0].destination_distance_m, 0);
+  });
+
   it('accepts private safety reports only from booking participants and restricts staff review', async () => {
     const bookingResponse = await fetch(`${apiUrl}/api/v1/bookings`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `report-${crypto.randomUUID()}` },
