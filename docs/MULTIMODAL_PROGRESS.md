@@ -92,3 +92,22 @@
 
 **NEXT**
 - Continue future Community transfer matching using the existing opt-in Navigation matching domain and explicit uncertainty/time windows. Scheduled non-Community predecessor legs remain unavailable until a real provider feed exists.
+
+## Phase G continuation — persistent in-app notification inbox
+
+**Status:** PARTIAL.
+
+**DONE**
+- Added additive migration `021_user_notifications.sql` with user-owned rows, event/dedupe identity, safe JSON payload, read timestamp, expiry and inbox/unread indexes.
+- Realtime outbox dispatch now idempotently persists an allowlisted notification projection before WebSocket fan-out. Chat text, sender names, phone numbers, route coordinates and arbitrary event payload fields are excluded.
+- Added authenticated keyset-paginated `GET /api/v1/notifications`, `POST /api/v1/notifications/:id/read` and `POST /api/v1/notifications/read-all`. Cross-account reads return 404.
+- Replaced the Site's “no new notifications” placeholder with a persistent inbox sheet, unread badge, read controls and pagination. It refreshes from realtime events and after login; logout clears inbox data from UI memory.
+
+**LIMITATIONS / BLOCKED_EXTERNAL**
+- Browser push and APNs registration/delivery are not implemented. Inbox writes are coupled to realtime outbox delivery; rows are durable after delivery, while push remains a separate future worker integration.
+- No Journey-started, leg-started, transfer-risk, replan or provider-delay events exist yet, so those notification categories are absent.
+
+**NEXT**
+- Implement Journey state monitoring and a real event source for ETA/transfer risk before adding predictive replan notifications. External transit provider feeds remain unavailable until integration contracts and credentials are provided.
+
+**Verification update:** On isolated loopback database `marshgo_e2e_notifications`, migrations 001–021 applied from a clean database. Full `npm run test:integration` passed: Journey schema 1/1, API booking/search/negotiation/Journey notification integration 10/10, navigation 1/1, Redis cross-instance realtime 1/1, restart durability 1/1, and shared rate limits 1/1. Root typecheck/lint/build and unit tests passed (33 pass, 1 opt-in DB-only skip); standalone Site typecheck/lint/build passed. Playwright E2E passed 4/4; the Journey test now opens the persisted inbox, verifies booking and replanning events, and marks an item read. The initial inbox assertion expected three rows but the flow correctly generated four (booking confirm/cancel and Journey READY/REPLANNING); the expected count was corrected and the full suite then passed.

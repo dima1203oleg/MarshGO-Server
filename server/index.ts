@@ -12,6 +12,7 @@ import { getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from
 import { calculatePlatformFee } from './fees';
 import { validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest } from './journey/search';
+import { projectNotification } from './notifications';
 import { selectRepresentativeJourneys } from './journey/scoring';
 import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { GeocodingUnavailableError, suggestPlaces } from './geocoding';
@@ -124,6 +125,16 @@ async function dispatchRealtimeOutbox() {
     try {
       if (!supportedOutboxEvents.has(row.event_type)) throw new Error(`unsupported realtime outbox event type: ${row.event_type}`);
       if (!Array.isArray(row.recipient_ids) || row.recipient_ids.length === 0) throw new Error(`invalid realtime outbox recipients: ${typeof row.recipient_ids}`);
+      const notification = projectNotification(row.event_type, row.payload);
+      if (notification) {
+        for (const userId of row.recipient_ids) {
+          await pool.query(
+            `INSERT INTO user_notifications(user_id,source_dedupe_key,event_type,title,body,payload)
+             VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(user_id,source_dedupe_key) DO NOTHING`,
+            [userId, `${row.id}:${row.event_type}`, row.event_type, notification.title, notification.body, JSON.stringify(notification.payload)],
+          );
+        }
+      }
       await broadcastRealtime(row.recipient_ids, row.event_type, row.payload);
       await pool.query('UPDATE realtime_outbox SET published_at=now(),locked_until=NULL,last_error=NULL WHERE id=$1', [row.id]);
     } catch (error) {
@@ -324,6 +335,58 @@ app.get('/api/v1/admin/ops/realtime', requireAuth, requireStaff, asyncHandler(as
     retrying_count: Number(rows[0].retrying_count),
     redis: process.env.REDIS_URL ? (realtimeRedis?.isReady ? 'connected' : 'disconnected') : 'single_process_development',
   } });
+}));
+
+app.get('/api/v1/notifications', requireAuth, asyncHandler(async (req, res) => {
+  const rawLimit = req.query.limit === undefined ? 30 : Number(req.query.limit);
+  if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 50) throw new ApiError(400, 'limit must be an integer from 1 to 50');
+  let cursor: { createdAt: string; id: string } | null = null;
+  if (typeof req.query.cursor === 'string') {
+    try {
+      const decoded = Buffer.from(req.query.cursor, 'base64url').toString('utf8');
+      const separator = decoded.lastIndexOf('|');
+      const createdAt = decoded.slice(0, separator);
+      const id = decoded.slice(separator + 1);
+      if (separator < 1 || !Number.isFinite(new Date(createdAt).getTime())
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new Error('invalid cursor');
+      cursor = { createdAt, id };
+    } catch { throw new ApiError(400, 'cursor is invalid'); }
+  }
+  const [page, unread] = await Promise.all([
+    pool.query<{ id: string; event_type: string; title: string; body: string; payload: Record<string, unknown>; created_at: Date; read_at: Date | null }>(
+      `SELECT id,event_type,title,body,payload,created_at,read_at FROM user_notifications
+        WHERE user_id=$1 AND expires_at>now() AND ($2::timestamptz IS NULL OR (created_at,id)<($2::timestamptz,$3::uuid))
+        ORDER BY created_at DESC,id DESC LIMIT $4`, [req.userId, cursor?.createdAt ?? null, cursor?.id ?? null, rawLimit + 1],
+    ),
+    pool.query<{ unread_count: string }>('SELECT count(*)::text AS unread_count FROM user_notifications WHERE user_id=$1 AND read_at IS NULL AND expires_at>now()', [req.userId]),
+  ]);
+  const hasMore = page.rows.length > rawLimit;
+  const items = page.rows.slice(0, rawLimit);
+  const last = items.at(-1);
+  res.json({ data: {
+    items,
+    nextCursor: hasMore && last ? Buffer.from(`${new Date(last.created_at).toISOString()}|${last.id}`).toString('base64url') : null,
+    unreadCount: Number(unread.rows[0]?.unread_count ?? 0),
+  } });
+}));
+
+app.post('/api/v1/notifications/read-all', requireAuth, asyncHandler(async (req, res) => {
+  const result = await pool.query(
+    'UPDATE user_notifications SET read_at=now() WHERE user_id=$1 AND read_at IS NULL AND expires_at>now()', [req.userId],
+  );
+  res.json({ data: { updated: result.rowCount ?? 0 } });
+}));
+
+app.post('/api/v1/notifications/:id/read', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid notification ID');
+  }
+  const { rows } = await pool.query<{ id: string; read_at: Date }>(
+    'UPDATE user_notifications SET read_at=COALESCE(read_at,now()) WHERE id=$1 AND user_id=$2 AND expires_at>now() RETURNING id,read_at',
+    [req.params.id, req.userId],
+  );
+  if (!rows[0]) throw new ApiError(404, 'notification not found');
+  res.json({ data: rows[0] });
 }));
 
 app.post('/api/v1/routing/route', requireAuth, asyncHandler(async (req, res) => {

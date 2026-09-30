@@ -252,6 +252,43 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.deepEqual(journeyEvents.rows.map(event => event.payload.state), ['READY','REPLANNING']);
     assert.ok(journeyEvents.rows.every(event => event.recipient_ids.length === 1 && event.recipient_ids[0] === passengerA));
 
+    let persistedNotifications = 0;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const count = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM user_notifications WHERE user_id=$1 AND (payload->>'journey_id'=$2 OR payload->>'booking_id'=$3)`,
+        [passengerA, journey.id, linkedBooking.data.id],
+      );
+      persistedNotifications = Number(count.rows[0].count);
+      if (persistedNotifications >= 4) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.equal(persistedNotifications, 4, 'outbox delivery persists booking and Journey updates to the inbox');
+    const inbox = await fetch(`${apiUrl}/api/v1/notifications?limit=1`, { headers: { 'x-dev-user-id': passengerA } });
+    assert.equal(inbox.status, 200);
+    const inboxBody = await inbox.json() as { data: { items: Array<{ id: string; title: string; body: string; payload: Record<string, unknown> }>; nextCursor: string | null; unreadCount: number } };
+    assert.equal(inboxBody.data.items.length, 1);
+    assert.ok(inboxBody.data.nextCursor);
+    assert.equal(inboxBody.data.unreadCount, 4);
+    const latestNotification = inboxBody.data.items[0];
+    assert.equal(latestNotification.title, 'План маршруту оновлено');
+    assert.equal(JSON.stringify(latestNotification).includes('phone'), false);
+    assert.equal(JSON.stringify(latestNotification).includes('API test passenger'), false);
+    const privateRead = await fetch(`${apiUrl}/api/v1/notifications/${latestNotification.id}/read`, {
+      method: 'POST', headers: { 'x-dev-user-id': passengerB },
+    });
+    assert.equal(privateRead.status, 404);
+    const markedRead = await fetch(`${apiUrl}/api/v1/notifications/${latestNotification.id}/read`, {
+      method: 'POST', headers: { 'x-dev-user-id': passengerA },
+    });
+    assert.equal(markedRead.status, 200);
+    const readAgain = await fetch(`${apiUrl}/api/v1/notifications/${latestNotification.id}/read`, {
+      method: 'POST', headers: { 'x-dev-user-id': passengerA },
+    });
+    assert.equal(readAgain.status, 200);
+    const unreadAfterRead = await fetch(`${apiUrl}/api/v1/notifications?limit=10`, { headers: { 'x-dev-user-id': passengerA } });
+    const unreadData = await unreadAfterRead.json() as { data: { unreadCount: number } };
+    assert.equal(unreadData.data.unreadCount, 3);
+
     const disabledCommunity = await fetch(`${apiUrl}/api/v1/journeys/search`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
       body: JSON.stringify({ ...body, preferences: { allowCommunity: false } }),

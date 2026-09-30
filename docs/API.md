@@ -113,3 +113,10 @@ Realtime is an invalidation/delivery channel, not a query or a durable client in
 Responses use `{ "data": ... }`; errors use `{ "error": { "code", "message", "requestId" } }`. This is the current API surface, not a claim of full OpenAPI coverage. OpenAPI generation remains unimplemented.
 
 The production PWA uses OTP sign-in, server offer search/booking, booking history and participant chat, profile/vehicle CRUD, vehicle-document submission, staff review, and reverse-marketplace demand/proposal endpoints. Place search needs `GEOCODING_ENGINE_URL`; without it, the demand form cannot publish a request. Driver proposals require an authorized verified vehicle; the review workflow is implemented but private storage and operational staff provisioning remain blockers. The foreground navigation UI supports explicit opt-in road-corridor candidate matching and passenger confirmation of mutual interest. Candidate-bound price proposals are accepted only after the passenger confirms; that API transaction revalidates consent/session state, creates the booking, inserts ordered pickup/dropoff waypoints and recomputes the driver's remaining road route. This is a single-passenger first slice, not a generalized multi-passenger navigation schedule. Production geocoder, road router, map tiles, SMS, private storage and interactive native device acceptance remain unconfigured or unverified.
+
+## Persistent notification inbox
+
+- `GET /api/v1/notifications?limit=30&cursor=...` returns the authenticated user's non-expired notifications, opaque keyset pagination, and current unread count. `limit` is 1–50.
+- `POST /api/v1/notifications/:id/read` marks one notification read; IDs belonging to another user return 404.
+- `POST /api/v1/notifications/read-all` marks the authenticated user's current notifications read.
+- Realtime outbox delivery writes inbox rows idempotently before WebSocket fan-out. Notification copy is generic; chat bodies, phone numbers, coordinates, and names are not copied into the inbox payload. Inbox entries expire after 180 days. Push/APNs delivery is not implemented.
