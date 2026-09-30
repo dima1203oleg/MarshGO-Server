@@ -15,13 +15,14 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
   const pool = new Pool({ connectionString: databaseUrl });
   const ids = {
     driver: crypto.randomUUID(),
-    passengerA: crypto.randomUUID(),
-    passengerB: crypto.randomUUID(),
+    passengers: Array.from({ length: 20 }, () => crypto.randomUUID()),
     admin: crypto.randomUUID(),
     vehicle: crypto.randomUUID(),
     offer: crypto.randomUUID(),
   };
-  const keys = [`api-test-${crypto.randomUUID()}`, `api-test-${crypto.randomUUID()}`];
+  const keys = Array.from({ length: 20 }, () => `api-test-${crypto.randomUUID()}`);
+  const passengerA = ids.passengers[0];
+  const passengerB = ids.passengers[1];
   let apiCreatedVehicleId: string | null = null;
   const extraVehicleIds: string[] = [];
   const verificationIds: string[] = [];
@@ -30,10 +31,17 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
 
   before(async () => {
     await pool.query(`INSERT INTO users(id,display_name,roles) VALUES
-      ($1,'API test driver',ARRAY['driver']),($2,'API test passenger A',ARRAY['passenger']),($3,'API test passenger B',ARRAY['passenger']),($4,'API test administrator',ARRAY['admin'])`,
-    [ids.driver, ids.passengerA, ids.passengerB, ids.admin]);
+      ($1,'API test driver',ARRAY['driver']),($2,'API test administrator',ARRAY['admin'])`,
+    [ids.driver, ids.admin]);
+    await pool.query(`INSERT INTO users(id,display_name,roles)
+      SELECT user_id,
+             CASE user_id WHEN $2::uuid THEN 'API test passenger A' WHEN $3::uuid THEN 'API test passenger B' ELSE 'API test concurrent passenger' END,
+             ARRAY['passenger']
+        FROM unnest($1::uuid[]) AS user_id`, [ids.passengers, passengerA, passengerB]);
     await pool.query(`INSERT INTO user_roles(user_id,role) VALUES
-      ($1,'driver'),($2,'passenger'),($3,'passenger'),($4,'admin')`, [ids.driver, ids.passengerA, ids.passengerB, ids.admin]);
+      ($1,'driver'),($2,'admin')`, [ids.driver, ids.admin]);
+    await pool.query(`INSERT INTO user_roles(user_id,role)
+      SELECT user_id, 'passenger' FROM unnest($1::uuid[]) AS user_id`, [ids.passengers]);
     await pool.query(`INSERT INTO vehicles(id,owner_id,make,model,model_year,seat_count)
       VALUES ($1,$2,'Test','Vehicle',2024,4)`, [ids.vehicle, ids.driver]);
     await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,departure_at,price_per_seat_minor,total_seats,available_seats)
@@ -47,24 +55,24 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     if (otpUserId) await pool.query('DELETE FROM audit_events WHERE actor_id=$1', [otpUserId]);
     await pool.query('DELETE FROM vehicles WHERE owner_id IN (SELECT id FROM users WHERE phone_e164 LIKE $1)', [`+38099${process.pid}%`]);
     await pool.query('DELETE FROM users WHERE phone_e164 LIKE $1', [`+38099${process.pid}%`]);
-    await pool.query('DELETE FROM sessions WHERE user_id = ANY($1::uuid[])', [[ids.driver, ids.passengerA, ids.passengerB]]);
-    await pool.query('DELETE FROM verification_records WHERE user_id = ANY($1::uuid[]) OR id=ANY($2::uuid[])', [[ids.driver, ids.passengerA, ids.passengerB, ids.admin], verificationIds]);
+    await pool.query('DELETE FROM sessions WHERE user_id = ANY($1::uuid[])', [[ids.driver, ...ids.passengers]]);
+    await pool.query('DELETE FROM verification_records WHERE user_id = ANY($1::uuid[]) OR id=ANY($2::uuid[])', [[ids.driver, ...ids.passengers, ids.admin], verificationIds]);
     await pool.query('DELETE FROM otp_challenges WHERE phone_e164 LIKE $1', [`+38099${process.pid}%`]);
-    await pool.query("DELETE FROM audit_events WHERE actor_id = ANY($1::uuid[]) AND action IN ('vehicle.created','offer.created','demand.created','demand.cancelled','proposal.created','proposal.countered','proposal.agreed','proposal.accepted','user.blocked','user.unblocked')", [[ids.driver, ids.passengerA]]);
-    await pool.query("DELETE FROM audit_events WHERE entity_id=ANY($1::uuid[]) OR (actor_id=ANY($2::uuid[]) AND action LIKE 'moderation.%')", [moderationCaseIds, [ids.passengerA, ids.admin]]);
+    await pool.query("DELETE FROM audit_events WHERE actor_id = ANY($1::uuid[]) AND action IN ('vehicle.created','offer.created','demand.created','demand.cancelled','proposal.created','proposal.countered','proposal.agreed','proposal.accepted','user.blocked','user.unblocked')", [[ids.driver, ...ids.passengers]]);
+    await pool.query("DELETE FROM audit_events WHERE entity_id=ANY($1::uuid[]) OR (actor_id=ANY($2::uuid[]) AND action LIKE 'moderation.%')", [moderationCaseIds, [passengerA, ids.admin]]);
     await pool.query('DELETE FROM moderation_cases WHERE id=ANY($1::uuid[])', [moderationCaseIds]);
-    await pool.query('DELETE FROM realtime_outbox WHERE recipient_ids && $1::uuid[]', [[ids.driver, ids.passengerA, ids.passengerB, ids.admin]]);
+    await pool.query('DELETE FROM realtime_outbox WHERE recipient_ids && $1::uuid[]', [[ids.driver, ...ids.passengers, ids.admin]]);
     await pool.query("DELETE FROM audit_events WHERE (actor_id=ANY($1::uuid[]) AND action LIKE 'verification.%') OR entity_id=ANY($2::uuid[])", [[ids.driver, ids.admin], verificationIds]);
     await pool.query('DELETE FROM audit_events WHERE entity_id IN (SELECT id FROM bookings WHERE offer_id IN (SELECT id FROM offers WHERE driver_id = $1)) OR entity_id = ANY($2::uuid[])',
       [ids.driver, [ids.vehicle, ...(apiCreatedVehicleId ? [apiCreatedVehicleId] : []), ...extraVehicleIds, ...verificationIds]]);
     await pool.query('DELETE FROM reviews WHERE booking_id IN (SELECT id FROM bookings WHERE offer_id IN (SELECT id FROM offers WHERE driver_id=$1))', [ids.driver]);
     await pool.query('DELETE FROM conversations WHERE booking_id IN (SELECT id FROM bookings WHERE offer_id IN (SELECT id FROM offers WHERE driver_id = $1))', [ids.driver]);
     await pool.query('DELETE FROM bookings WHERE offer_id IN (SELECT id FROM offers WHERE driver_id = $1)', [ids.driver]);
-    await pool.query('DELETE FROM proposals WHERE driver_id=$1 OR demand_id IN (SELECT id FROM passenger_demands WHERE passenger_id=$2)', [ids.driver, ids.passengerA]);
-    await pool.query('DELETE FROM passenger_demands WHERE passenger_id=$1', [ids.passengerA]);
+    await pool.query('DELETE FROM proposals WHERE driver_id=$1 OR demand_id IN (SELECT id FROM passenger_demands WHERE passenger_id=$2)', [ids.driver, passengerA]);
+    await pool.query('DELETE FROM passenger_demands WHERE passenger_id=$1', [passengerA]);
     await pool.query('DELETE FROM offers WHERE driver_id = $1', [ids.driver]);
     await pool.query('DELETE FROM vehicles WHERE owner_id = $1', [ids.driver]);
-    await pool.query('DELETE FROM users WHERE id = ANY($1::uuid[])', [[ids.driver, ids.passengerA, ids.passengerB, ids.admin]]);
+    await pool.query('DELETE FROM users WHERE id = ANY($1::uuid[])', [[ids.driver, ...ids.passengers, ids.admin]]);
     await pool.end();
   });
 
@@ -142,31 +150,37 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(oldAccess.status, 401);
   });
 
-  it('rejects anonymous booking and allows only one user to book the last seat', async () => {
+  it('allows exactly one of 20 concurrent accounts to book the last seat and cancels idempotently', async () => {
     const anonymous = await fetch(`${apiUrl}/api/v1/bookings`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
     });
     assert.equal(anonymous.status, 401);
 
-    const book = (userId: string, key: string) => fetch(`${apiUrl}/api/v1/bookings`, {
+    const book = (userId: string, key: string, seats = 1) => fetch(`${apiUrl}/api/v1/bookings`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-dev-user-id': userId, 'idempotency-key': key },
-      body: JSON.stringify({ offerId: ids.offer, seats: 1 }),
+      body: JSON.stringify({ offerId: ids.offer, seats }),
     });
-    const [first, second] = await Promise.all([
-      book(ids.passengerA, keys[0]),
-      book(ids.passengerB, keys[1]),
-    ]);
-    assert.deepEqual([first.status, second.status].sort(), [201, 409]);
-    const acceptedResponse = first.status === 201 ? first : second;
-    const acceptedUser = first.status === 201 ? ids.passengerA : ids.passengerB;
-    const acceptedKey = first.status === 201 ? keys[0] : keys[1];
+    const attempts = await Promise.all(ids.passengers.map((userId, index) => book(userId, keys[index])));
+    assert.equal(attempts.filter((response) => response.status === 201).length, 1);
+    assert.equal(attempts.filter((response) => response.status === 409).length, 19);
+    const acceptedIndex = attempts.findIndex((response) => response.status === 201);
+    const acceptedResponse = attempts[acceptedIndex];
+    const acceptedUser = ids.passengers[acceptedIndex];
+    const acceptedKey = keys[acceptedIndex];
     const accepted = await acceptedResponse.json() as { data: { id: string; total_price_minor: number } };
     assert.equal(accepted.data.total_price_minor, 15000);
 
     const replay = await book(acceptedUser, acceptedKey);
     assert.equal(replay.status, 200);
     assert.equal((await replay.json() as { replayed: boolean }).replayed, true);
+    assert.equal((await book(acceptedUser, acceptedKey, 2)).status, 409);
+    const beforeCancel = await pool.query<{ available_seats: number; booking_count: string }>(
+      `SELECT o.available_seats, (SELECT count(*) FROM bookings b WHERE b.offer_id=o.id AND b.status='confirmed') AS booking_count
+         FROM offers o WHERE o.id=$1`, [ids.offer],
+    );
+    assert.equal(beforeCancel.rows[0].available_seats, 0);
+    assert.equal(Number(beforeCancel.rows[0].booking_count), 1);
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const cancelled = await fetch(`${apiUrl}/api/v1/bookings/${accepted.data.id}/cancel`, {
@@ -176,17 +190,21 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     }
     const { rows } = await pool.query('SELECT available_seats FROM offers WHERE id = $1', [ids.offer]);
     assert.equal(rows[0].available_seats, 1);
+    const lifecycle = await pool.query<{ to_status: string; count: string }>(
+      'SELECT to_status,count(*) FROM booking_events WHERE booking_id=$1 GROUP BY to_status', [accepted.data.id],
+    );
+    assert.deepEqual(Object.fromEntries(lifecycle.rows.map((row) => [row.to_status, Number(row.count)])), { confirmed: 1, cancelled: 1 });
   });
 
   it('accepts private safety reports only from booking participants and restricts staff review', async () => {
     const bookingResponse = await fetch(`${apiUrl}/api/v1/bookings`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.passengerA, 'idempotency-key': `report-${crypto.randomUUID()}` },
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `report-${crypto.randomUUID()}` },
       body: JSON.stringify({ offerId: ids.offer, seats: 1 }),
     });
     assert.equal(bookingResponse.status, 201);
     const booking = await bookingResponse.json() as { data: { id: string } };
     const report = await fetch(`${apiUrl}/api/v1/reports`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.passengerA },
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
       body: JSON.stringify({ bookingId: booking.data.id, category: 'safety', details: 'Driver drove dangerously near the destination.' }),
     });
     assert.equal(report.status, 201);
@@ -195,19 +213,19 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(reportBody.data.status, 'open');
 
     const repeated = await fetch(`${apiUrl}/api/v1/reports`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.passengerA },
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
       body: JSON.stringify({ bookingId: booking.data.id, category: 'safety', details: 'A second open report for the same booking.' }),
     });
     assert.equal(repeated.status, 409);
     const outsider = await fetch(`${apiUrl}/api/v1/reports`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.passengerB },
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerB },
       body: JSON.stringify({ bookingId: booking.data.id, category: 'other', details: 'I am not a participant here.' }),
     });
     assert.equal(outsider.status, 404);
 
-    const forbiddenQueue = await fetch(`${apiUrl}/api/v1/admin/moderation?status=all`, { headers: { 'x-dev-user-id': ids.passengerB } });
+    const forbiddenQueue = await fetch(`${apiUrl}/api/v1/admin/moderation?status=all`, { headers: { 'x-dev-user-id': passengerB } });
     assert.equal(forbiddenQueue.status, 403);
-    const forbiddenRealtimeMetrics = await fetch(`${apiUrl}/api/v1/admin/ops/realtime`, { headers: { 'x-dev-user-id': ids.passengerB } });
+    const forbiddenRealtimeMetrics = await fetch(`${apiUrl}/api/v1/admin/ops/realtime`, { headers: { 'x-dev-user-id': passengerB } });
     assert.equal(forbiddenRealtimeMetrics.status, 403);
     const realtimeMetrics = await fetch(`${apiUrl}/api/v1/admin/ops/realtime`, { headers: { 'x-dev-user-id': ids.admin } });
     assert.equal(realtimeMetrics.status, 200);
@@ -239,7 +257,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
 
   it('enforces driver role, vehicle ownership, and vehicle verification before publishing', async () => {
     const passengerVehicle = await fetch(`${apiUrl}/api/v1/vehicles`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.passengerA },
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
       body: JSON.stringify({ make: 'Toyota', model: 'Test', modelYear: 2024, seats: 4 }),
     });
     assert.equal(passengerVehicle.status, 403);
@@ -255,7 +273,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(vehicle.data.is_active, true);
 
     const forbiddenEdit = await fetch(`${apiUrl}/api/v1/vehicles/${apiCreatedVehicleId}`, {
-      method: 'PATCH', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.passengerA },
+      method: 'PATCH', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
       body: JSON.stringify({ model: 'Hijacked' }),
     });
     assert.equal(forbiddenEdit.status, 403);
@@ -310,7 +328,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const myOffers = await fetch(`${apiUrl}/api/v1/offers/mine`, { headers: { 'x-dev-user-id': ids.driver } });
     assert.equal(myOffers.status, 200);
     assert.equal((await myOffers.json() as { data: Array<{ id: string; status: string }> }).data.some((offer) => offer.id === response.data.id && offer.status === 'published'), true);
-    const otherUsersOffers = await fetch(`${apiUrl}/api/v1/offers/mine`, { headers: { 'x-dev-user-id': ids.passengerA } });
+    const otherUsersOffers = await fetch(`${apiUrl}/api/v1/offers/mine`, { headers: { 'x-dev-user-id': passengerA } });
     assert.equal(otherUsersOffers.status, 403);
     const localDepartureDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv' }).format(new Date(offerPayload.departureAt));
     const found = await fetch(`${apiUrl}/api/v1/offers?origin=API%20Publish%20Origin&destination=API%20Publish%20Destination&date=${localDepartureDate}&seats=2`);
@@ -346,10 +364,10 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const anonymousQueue = await fetch(`${apiUrl}/api/v1/admin/verification`);
     assert.equal(anonymousQueue.status, 401);
     const driverHeaders = { 'content-type': 'application/json', 'x-dev-user-id': ids.driver };
-    const passengerQueue = await fetch(`${apiUrl}/api/v1/admin/verification`, { headers: { 'x-dev-user-id': ids.passengerA } });
+    const passengerQueue = await fetch(`${apiUrl}/api/v1/admin/verification`, { headers: { 'x-dev-user-id': passengerA } });
     assert.equal(passengerQueue.status, 403);
     const selfUpload = await fetch(`${apiUrl}/api/v1/vehicles/${apiCreatedVehicleId}/verification/evidence/upload-url`, {
-      method: 'POST', headers: { ...driverHeaders, 'x-dev-user-id': ids.passengerA },
+      method: 'POST', headers: { ...driverHeaders, 'x-dev-user-id': passengerA },
       body: JSON.stringify({ contentType: 'application/pdf' }),
     });
     assert.equal(selfUpload.status, 403);
@@ -367,7 +385,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(queue.data.some((item) => item.evidence_ref !== undefined), false);
     assert.equal(queue.data.some((item) => item.phone_e164 !== undefined), false);
 
-    const forbiddenEvidence = await fetch(`${apiUrl}/api/v1/admin/verification/${vehicleRecord}/evidence`, { headers: { 'x-dev-user-id': ids.passengerA } });
+    const forbiddenEvidence = await fetch(`${apiUrl}/api/v1/admin/verification/${vehicleRecord}/evidence`, { headers: { 'x-dev-user-id': passengerA } });
     assert.equal(forbiddenEvidence.status, 403);
     const unconfiguredEvidence = await fetch(`${apiUrl}/api/v1/admin/verification/${vehicleRecord}/evidence`, { headers: staffHeaders });
     assert.equal(unconfiguredEvidence.status, 503);
@@ -420,7 +438,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const earliest = new Date(now + 9 * 86400_000);
     const latest = new Date(now + 10 * 86400_000);
     const demandResponse = await fetch(`${apiUrl}/api/v1/demands`, {
-      method: 'POST', headers: headers(ids.passengerA),
+      method: 'POST', headers: headers(passengerA),
       body: JSON.stringify({
         originName: 'Reverse Origin', destinationName: 'Reverse Destination',
         origin: [23.86, 49.25], destination: [24.03, 49.84],
@@ -434,19 +452,19 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(demand.data.notes, 'One suitcase');
     assert.equal(demand.data.requirements.luggage, true);
 
-    const blocked = await fetch(`${apiUrl}/api/v1/users/${ids.driver}/block`, { method: 'POST', headers: headers(ids.passengerA) });
+    const blocked = await fetch(`${apiUrl}/api/v1/users/${ids.driver}/block`, { method: 'POST', headers: headers(passengerA) });
     assert.equal(blocked.status, 204);
-    const blocks = await fetch(`${apiUrl}/api/v1/users/me/blocks`, { headers: headers(ids.passengerA) });
+    const blocks = await fetch(`${apiUrl}/api/v1/users/me/blocks`, { headers: headers(passengerA) });
     assert.equal((await blocks.json() as { data: Array<{ user_id: string }> }).data[0]?.user_id, ids.driver);
     const blockedProposal = await fetch(`${apiUrl}/api/v1/demands/${demand.data.id}/proposals`, {
       method: 'POST', headers: headers(ids.driver),
       body: JSON.stringify({ vehicleId: apiCreatedVehicleId, priceMinor: 17000, departureAt: earliest.toISOString() }),
     });
     assert.equal(blockedProposal.status, 404);
-    const unblocked = await fetch(`${apiUrl}/api/v1/users/${ids.driver}/block`, { method: 'DELETE', headers: headers(ids.passengerA) });
+    const unblocked = await fetch(`${apiUrl}/api/v1/users/${ids.driver}/block`, { method: 'DELETE', headers: headers(passengerA) });
     assert.equal(unblocked.status, 204);
 
-    const ownDemands = await fetch(`${apiUrl}/api/v1/demands/mine`, { headers: headers(ids.passengerA) });
+    const ownDemands = await fetch(`${apiUrl}/api/v1/demands/mine`, { headers: headers(passengerA) });
     assert.equal(ownDemands.status, 200);
     assert.equal((await ownDemands.json() as { data: Array<{ id: string; proposal_count: number }> }).data.find((item) => item.id === demand.data.id)?.proposal_count, 0);
 
@@ -470,12 +488,12 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(sameActorCounter.status, 409);
 
     const counter = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/counter`, {
-      method: 'POST', headers: headers(ids.passengerA),
+      method: 'POST', headers: headers(passengerA),
       body: JSON.stringify({ priceMinor: 15000, departureAt: earliest.toISOString(), comment: 'Agreed at this price' }),
     });
     assert.equal(counter.status, 200);
     const prematureAccept = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/accept`, {
-      method: 'POST', headers: headers(ids.passengerA),
+      method: 'POST', headers: headers(passengerA),
     });
     assert.equal(prematureAccept.status, 409);
     const agreedByDriver = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/agree`, {
@@ -491,7 +509,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(proposalHistory.data[2].price_minor, 15000);
 
     const accepted = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/accept`, {
-      method: 'POST', headers: headers(ids.passengerA),
+      method: 'POST', headers: headers(passengerA),
     });
     assert.equal(accepted.status, 201);
     const booking = await accepted.json() as { data: { id: string; total_price_minor: number; seat_count: number }; agreedTotalMinor: number };
@@ -503,11 +521,11 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         WHERE dedupe_key LIKE $1 ORDER BY created_at,id`, [`%:${proposal.data.id}%`],
     );
     assert.deepEqual(negotiationEvents.rows.map((event) => event.event_type).sort(), ['proposal.accepted','proposal.countered','proposal.created','proposal.updated'].sort());
-    assert.ok(negotiationEvents.rows.every((event) => event.recipient_ids.includes(ids.passengerA) && event.recipient_ids.includes(ids.driver)));
+    assert.ok(negotiationEvents.rows.every((event) => event.recipient_ids.includes(passengerA) && event.recipient_ids.includes(ids.driver)));
     assert.ok(negotiationEvents.rows.every((event) => event.payload.proposal_id === proposal.data.id));
 
     const cancellationDemand = await fetch(`${apiUrl}/api/v1/demands`, {
-      method: 'POST', headers: headers(ids.passengerA),
+      method: 'POST', headers: headers(passengerA),
       body: JSON.stringify({
         originName: 'Cancel Origin', destinationName: 'Cancel Destination', origin: [23.86, 49.25], destination: [24.03, 49.84],
         earliestDeparture: earliest.toISOString(), latestDeparture: latest.toISOString(), passengers: 1,
@@ -520,7 +538,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal(cancellationProposalResponse.status, 201);
     const cancellationProposal = await cancellationProposalResponse.json() as { data: { id: string } };
-    const cancelled = await fetch(`${apiUrl}/api/v1/demands/${cancellationDemandId}/cancel`, { method: 'POST', headers: headers(ids.passengerA) });
+    const cancelled = await fetch(`${apiUrl}/api/v1/demands/${cancellationDemandId}/cancel`, { method: 'POST', headers: headers(passengerA) });
     assert.equal((await cancelled.json() as { data: { status: string } }).data.status, 'cancelled');
     const closedProposal = await pool.query<{ status: string }>('SELECT status FROM proposals WHERE id=$1', [cancellationProposal.data.id]);
     assert.equal(closedProposal.rows[0].status, 'rejected');
@@ -529,8 +547,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     );
     assert.equal(cancelledProposalEvent.rows[0].event_type, 'proposal.closed');
     assert.equal(cancelledProposalEvent.rows[0].payload.reason, 'demand_cancelled');
-    assert.deepEqual(new Set(cancelledProposalEvent.rows[0].recipient_ids), new Set([ids.driver, ids.passengerA]));
-    const cancelledAgain = await fetch(`${apiUrl}/api/v1/demands/${cancellationDemandId}/cancel`, { method: 'POST', headers: headers(ids.passengerA) });
+    assert.deepEqual(new Set(cancelledProposalEvent.rows[0].recipient_ids), new Set([ids.driver, passengerA]));
+    const cancelledAgain = await fetch(`${apiUrl}/api/v1/demands/${cancellationDemandId}/cancel`, { method: 'POST', headers: headers(passengerA) });
     assert.equal((await cancelledAgain.json() as { replayed: boolean }).replayed, true);
 
     const ticketResponse = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/ticket`, { headers: headers(ids.driver) });
@@ -541,7 +559,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal(invalidTicket.status, 400);
     const wrongBoarding = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/boarding`, {
-      method: 'POST', headers: headers(ids.passengerA), body: JSON.stringify({ ticket: ticket.data.token }),
+      method: 'POST', headers: headers(passengerA), body: JSON.stringify({ ticket: ticket.data.token }),
     });
     assert.equal(wrongBoarding.status, 404);
     const boarding = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/boarding`, {
@@ -549,7 +567,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal((await boarding.json() as { data: { status: string } }).data.status, 'boarding');
     const passengerStart = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/start`, {
-      method: 'POST', headers: headers(ids.passengerA),
+      method: 'POST', headers: headers(passengerA),
     });
     assert.equal(passengerStart.status, 404);
     const started = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/start`, {
@@ -557,11 +575,11 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal((await started.json() as { data: { status: string } }).data.status, 'in_progress');
     const earlyReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
-      method: 'POST', headers: headers(ids.passengerA), body: JSON.stringify({ rating: 5 }),
+      method: 'POST', headers: headers(passengerA), body: JSON.stringify({ rating: 5 }),
     });
     assert.equal(earlyReview.status, 409);
     const firstCompletion = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/complete`, {
-      method: 'POST', headers: headers(ids.passengerA),
+      method: 'POST', headers: headers(passengerA),
     });
     assert.deepEqual((await firstCompletion.json() as { data: { status: string; confirmations: number } }).data, {
       id: booking.data.id, status: 'in_progress', confirmations: 1, requiredConfirmations: 2,
@@ -571,7 +589,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal((await secondCompletion.json() as { data: { status: string } }).data.status, 'completed');
     const passengerReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
-      method: 'POST', headers: headers(ids.passengerA), body: JSON.stringify({ rating: 5, comment: 'Доїхали вчасно.' }),
+      method: 'POST', headers: headers(passengerA), body: JSON.stringify({ rating: 5, comment: 'Доїхали вчасно.' }),
     });
     assert.equal(passengerReview.status, 201);
     const driverReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
@@ -579,7 +597,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal(driverReview.status, 201);
     const duplicateReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
-      method: 'POST', headers: headers(ids.passengerA), body: JSON.stringify({ rating: 1 }),
+      method: 'POST', headers: headers(passengerA), body: JSON.stringify({ rating: 1 }),
     });
     assert.equal(duplicateReview.status, 409);
     const offerDate = new Date(Date.now() + 10 * 86400_000);
@@ -594,7 +612,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     ]);
 
     const duplicateAccept = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/accept`, {
-      method: 'POST', headers: headers(ids.passengerA),
+      method: 'POST', headers: headers(passengerA),
     });
     assert.equal(duplicateAccept.status, 409);
 
@@ -604,7 +622,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(conversationResponse.status, 200);
     const conversation = await conversationResponse.json() as { data: { id: string } };
     const message = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
-      method: 'POST', headers: headers(ids.passengerA), body: JSON.stringify({ body: 'Підтверджую час виїзду.' }),
+      method: 'POST', headers: headers(passengerA), body: JSON.stringify({ body: 'Підтверджую час виїзду.' }),
     });
     assert.equal(message.status, 201);
     const history = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
@@ -612,10 +630,10 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal((await history.json() as { data: Array<{ body: string }> }).data[0].body, 'Підтверджую час виїзду.');
     const outside = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
-      method: 'POST', headers: headers(ids.passengerB), body: JSON.stringify({ body: 'I should not see this.' }),
+      method: 'POST', headers: headers(passengerB), body: JSON.stringify({ body: 'I should not see this.' }),
     });
     assert.equal(outside.status, 404);
-    const blockAfterBooking = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/block-other`, { method: 'POST', headers: headers(ids.passengerA) });
+    const blockAfterBooking = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/block-other`, { method: 'POST', headers: headers(passengerA) });
     assert.equal(blockAfterBooking.status, 204);
     const blockedHistory = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, { headers: headers(ids.driver) });
     assert.equal(blockedHistory.status, 404);
@@ -623,7 +641,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ body: 'blocked chat should fail' }),
     });
     assert.equal(blockedChatSend.status, 404);
-    const finalUnblock = await fetch(`${apiUrl}/api/v1/users/${ids.driver}/block`, { method: 'DELETE', headers: headers(ids.passengerA) });
+    const finalUnblock = await fetch(`${apiUrl}/api/v1/users/${ids.driver}/block`, { method: 'DELETE', headers: headers(passengerA) });
     assert.equal(finalUnblock.status, 204);
   });
 });
