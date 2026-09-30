@@ -2000,7 +2000,7 @@ app.get('/api/v1/demands', requireAuth, requireRole('driver'), asyncHandler(asyn
 
 app.get('/api/v1/demands/:id/proposals', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT p.id,p.demand_id,p.driver_id,u.display_name AS driver_name,p.vehicle_id,v.make,v.model,v.model_year,
+    `SELECT p.id,p.demand_id,p.driver_id,u.display_name AS driver_name,p.vehicle_id,p.navigation_candidate_id,v.make,v.model,v.model_year,
             p.price_minor,p.currency,p.departure_at,p.comment,p.status,p.expires_at,p.revision_number,
             latest.actor_role AS last_actor_role,latest.comment AS last_comment
        FROM passenger_demands d JOIN proposals p ON p.demand_id=d.id
@@ -2021,11 +2021,12 @@ app.get('/api/v1/demands/:id/proposals', requireAuth, asyncHandler(async (req, r
 }));
 
 app.post('/api/v1/demands/:id/proposals', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
-  const { vehicleId, priceMinor, departureAt, comment } = req.body ?? {};
+  const { vehicleId, priceMinor, departureAt, comment, navigationCandidateId } = req.body ?? {};
   const departure = new Date(departureAt);
   if (typeof vehicleId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(vehicleId) ||
       !Number.isInteger(priceMinor) || priceMinor < 1 || priceMinor > 100_000_000 || !Number.isFinite(departure.getTime()) ||
-      (comment !== undefined && (typeof comment !== 'string' || comment.length > 1000))) throw new ApiError(400, 'invalid proposal');
+      (comment !== undefined && (typeof comment !== 'string' || comment.length > 1000)) ||
+      (navigationCandidateId !== undefined && (typeof navigationCandidateId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(navigationCandidateId)))) throw new ApiError(400, 'invalid proposal');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -2037,16 +2038,34 @@ app.post('/api/v1/demands/:id/proposals', requireAuth, requireRole('driver'), as
     if (demand.passenger_id === req.userId) throw new ApiError(403, 'cannot propose to your own demand');
     if (await usersBlockEachOther(req.userId!, demand.passenger_id, client)) throw new ApiError(404, 'demand unavailable');
     if (departure < new Date(demand.earliest_departure) || departure > new Date(demand.latest_departure)) throw new ApiError(400, 'departure is outside the demand time window');
+    if (navigationCandidateId) {
+      const { rows: candidates } = await client.query<{ id: string; vehicle_id: string | null; vehicle_seat_count: number | null; seat_count: number; route_version: number; candidate_route_version: number }>(
+        `SELECT c.id,s.vehicle_id,s.vehicle_seat_count,v.seat_count,s.route_version,c.route_version AS candidate_route_version
+           FROM navigation_match_candidates c
+           JOIN navigation_sessions s ON s.id=c.navigation_session_id
+           LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.owner_id=s.driver_id AND v.verification_status='verified'
+          WHERE c.id=$1 AND c.demand_id=$2 AND s.driver_id=$3 AND s.state='paused' AND s.opt_in=true
+            AND s.current_location_at>now()-interval '2 minutes' AND c.status='passenger_confirmed' AND c.expires_at>now()
+          FOR UPDATE OF c,s`, [navigationCandidateId, req.params.id, req.userId],
+      );
+      const candidate = candidates[0];
+      if (!candidate || candidate.vehicle_id !== vehicleId || Number(candidate.seat_count ?? 0) < Number(demand.passenger_count) ||
+          Number(candidate.vehicle_seat_count ?? 0) < Number(demand.passenger_count) || Number(candidate.route_version) !== Number(candidate.candidate_route_version)) {
+        throw new ApiError(409, 'navigation match is no longer current; refresh the route before proposing', 'navigation_candidate_unavailable');
+      }
+      const existing = await client.query('SELECT 1 FROM proposals WHERE navigation_candidate_id=$1', [navigationCandidateId]);
+      if (existing.rowCount) throw new ApiError(409, 'a proposal already exists for this navigation match', 'navigation_proposal_exists');
+    }
     const { rows: vehicles } = await client.query<{ seat_count: number }>(
       "SELECT seat_count FROM vehicles WHERE id=$1 AND owner_id=$2 AND verification_status='verified' FOR SHARE", [vehicleId, req.userId],
     );
     if (!vehicles[0]) throw new ApiError(404, 'verified vehicle unavailable');
     if (Number(vehicles[0].seat_count) < Number(demand.passenger_count)) throw new ApiError(400, 'vehicle has too few passenger seats');
     const { rows } = await client.query(
-      `INSERT INTO proposals(demand_id,driver_id,vehicle_id,price_minor,departure_at,comment,expires_at)
-       VALUES ($1,$2,$3,$4,$5,$6,LEAST(now()+interval '24 hours',$7::timestamptz))
-       RETURNING id,demand_id,driver_id,vehicle_id,price_minor,departure_at,status,expires_at,created_at`,
-      [req.params.id, req.userId, vehicleId, priceMinor, departure.toISOString(), comment?.trim() || null, demand.latest_departure],
+      `INSERT INTO proposals(demand_id,driver_id,vehicle_id,price_minor,departure_at,comment,expires_at,navigation_candidate_id)
+       VALUES ($1,$2,$3,$4,$5,$6,LEAST(now()+interval '24 hours',$7::timestamptz),$8)
+       RETURNING id,demand_id,driver_id,vehicle_id,price_minor,departure_at,status,expires_at,created_at,navigation_candidate_id`,
+      [req.params.id, req.userId, vehicleId, priceMinor, departure.toISOString(), comment?.trim() || null, demand.latest_departure, navigationCandidateId ?? null],
     );
     await client.query(
       `INSERT INTO proposal_revisions(proposal_id,revision_number,actor_id,actor_role,price_minor,departure_at,comment)
@@ -2056,7 +2075,7 @@ app.post('/api/v1/demands/:id/proposals', requireAuth, requireRole('driver'), as
     await insertRealtimeOutbox(client, 'proposal.created', `proposal.created:${rows[0].id}`,
       [req.userId!, demand.passenger_id], {
         proposal_id: rows[0].id, demand_id: req.params.id, status: 'pending', revision_number: 1,
-        price_minor: priceMinor, departure_at: departure.toISOString(),
+        price_minor: priceMinor, departure_at: departure.toISOString(), navigation_candidate_id: navigationCandidateId ?? null,
       });
     await client.query('COMMIT');
     res.status(201).json({ data: rows[0] });
@@ -2175,11 +2194,28 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     if (!demand || demand.passenger_id !== req.userId) throw new ApiError(404, 'demand unavailable');
     if (demand.status !== 'open') throw new ApiError(409, 'demand has already been resolved');
     const { rows: proposalRows } = await client.query<{
-      id: string; driver_id: string; vehicle_id: string; price_minor: number; departure_at: Date; status: string; expires_at: Date;
-    }>('SELECT id,driver_id,vehicle_id,price_minor,departure_at,status,expires_at FROM proposals WHERE id=$1 AND demand_id=$2 FOR UPDATE', [req.params.id, demand.id]);
+      id: string; driver_id: string; vehicle_id: string; price_minor: number; departure_at: Date; status: string; expires_at: Date; navigation_candidate_id: string | null;
+    }>('SELECT id,driver_id,vehicle_id,price_minor,departure_at,status,expires_at,navigation_candidate_id FROM proposals WHERE id=$1 AND demand_id=$2 FOR UPDATE', [req.params.id, demand.id]);
     const proposal = proposalRows[0];
     if (!proposal || proposal.status !== 'pending' || new Date(proposal.expires_at) <= new Date()) throw new ApiError(409, 'proposal is no longer available');
     if (await usersBlockEachOther(proposal.driver_id, demand.passenger_id, client)) throw new ApiError(404, 'proposal unavailable');
+    if (proposal.navigation_candidate_id) {
+      const { rows: candidates } = await client.query<{ id: string; driver_id: string; vehicle_id: string | null; vehicle_seat_count: number | null; seat_count: number; route_version: number; candidate_route_version: number }>(
+        `SELECT c.id,s.driver_id,s.vehicle_id,s.vehicle_seat_count,v.seat_count,s.route_version,c.route_version AS candidate_route_version
+           FROM navigation_match_candidates c
+           JOIN navigation_sessions s ON s.id=c.navigation_session_id
+           LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.owner_id=s.driver_id AND v.verification_status='verified'
+          WHERE c.id=$1 AND c.demand_id=$2 AND s.state='paused' AND s.opt_in=true
+            AND s.current_location_at>now()-interval '2 minutes' AND c.status='passenger_confirmed' AND c.expires_at>now()
+          FOR UPDATE OF c,s`, [proposal.navigation_candidate_id, demand.id],
+      );
+      const candidate = candidates[0];
+      if (!candidate || candidate.driver_id !== proposal.driver_id || candidate.vehicle_id !== proposal.vehicle_id ||
+          Number(candidate.seat_count ?? 0) < Number(demand.passenger_count) || Number(candidate.vehicle_seat_count ?? 0) < Number(demand.passenger_count) ||
+          Number(candidate.route_version) !== Number(candidate.candidate_route_version)) {
+        throw new ApiError(409, 'navigation match consent or route is no longer current', 'navigation_candidate_unavailable');
+      }
+    }
     const { rows: latestRevisions } = await client.query<{ actor_role: string }>(
       'SELECT actor_role FROM proposal_revisions WHERE proposal_id=$1 ORDER BY revision_number DESC LIMIT 1', [proposal.id],
     );
