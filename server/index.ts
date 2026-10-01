@@ -1487,7 +1487,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           departureAt: offer.departure_at, arrivalAt: candidate.arrivalAt, durationSeconds: offer.duration_s,
           distanceMeters: offer.distance_m, priceMinor: candidate.totalPriceMinor, priceStatus: 'ESTIMATED',
           availabilityStatus: 'AVAILABLE', source: 'community-offer', lastUpdatedAt: offer.snapshot_at,
-          driver: { id: offer.driver_id, name: offer.driver_name, averageRating: offer.average_rating, reviewCount: offer.review_count },
+          driver: {
+            id: offer.driver_id,
+            name: offer.driver_name,
+            averageRating: offer.average_rating === null ? null : Number(offer.average_rating),
+            reviewCount: offer.review_count,
+          },
           vehicle: { id: offer.vehicle_id, make: offer.vehicle_make, model: offer.vehicle_model } }],
       });
     }
