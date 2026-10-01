@@ -847,6 +847,11 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
 
     const driverDemands = await fetch(`${apiUrl}/api/v1/demands`, { headers: headers(ids.driver) });
     assert.equal((await driverDemands.json() as { data: Array<{ id: string }> }).data.some((item) => item.id === demand.data.id), true);
+    const directDemand = await fetch(`${apiUrl}/api/v1/demands/${demand.data.id}`, { headers: headers(ids.driver) });
+    assert.equal(directDemand.status, 200);
+    assert.equal((await directDemand.json() as { data: { id: string } }).data.id, demand.data.id);
+    const unrelatedDemand = await fetch(`${apiUrl}/api/v1/demands/${demand.data.id}`, { headers: headers(passengerB) });
+    assert.equal(unrelatedDemand.status, 403);
     const noProposals = await fetch(`${apiUrl}/api/v1/demands/${demand.data.id}/proposals`, { headers: headers(ids.driver) });
     assert.equal(noProposals.status, 200);
     assert.deepEqual((await noProposals.json() as { data: unknown[] }).data, []);
@@ -1027,12 +1032,20 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(passengerA),
     });
     assert.equal(duplicateAccept.status, 409);
+    const matchedDemandReload = await fetch(`${apiUrl}/api/v1/demands/${proposal.data.demand_id}`, { headers: headers(ids.driver) });
+    assert.equal(matchedDemandReload.status, 200);
+    assert.equal((await matchedDemandReload.json() as { data: { id: string; status: string } }).data.status, 'matched');
 
     const conversationResponse = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/conversation`, {
       headers: headers(ids.driver),
     });
     assert.equal(conversationResponse.status, 200);
     const conversation = await conversationResponse.json() as { data: { id: string } };
+    const conversationById = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}`, { headers: headers(passengerA) });
+    assert.equal(conversationById.status, 200);
+    assert.equal((await conversationById.json() as { data: { booking_id: string } }).data.booking_id, booking.data.id);
+    const unrelatedConversation = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}`, { headers: headers(passengerB) });
+    assert.equal(unrelatedConversation.status, 404);
     const message = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
       method: 'POST', headers: headers(passengerA), body: JSON.stringify({ body: 'Підтверджую час виїзду.' }),
     });

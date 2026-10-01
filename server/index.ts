@@ -2753,6 +2753,23 @@ app.get('/api/v1/demands/mine', requireAuth, requireRole('passenger'), asyncHand
   res.json({ data: rows });
 }));
 
+app.get('/api/v1/demands/:id', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT d.id,d.origin_name,d.destination_name,d.earliest_departure,d.latest_departure,d.passenger_count,
+            d.budget_minor,d.budget_type,d.notes,d.requirements,d.status,d.created_at,
+            (SELECT count(*)::int FROM proposals p WHERE p.demand_id=d.id AND p.status='pending') AS proposal_count
+       FROM passenger_demands d
+      WHERE d.id=$1 AND d.passenger_id<>$2
+        AND ((d.status='open' AND d.latest_departure>now()) OR EXISTS(
+          SELECT 1 FROM proposals own_proposal WHERE own_proposal.demand_id=d.id AND own_proposal.driver_id=$2
+        ))
+        AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.blocker_id=d.passenger_id AND b.blocked_id=$2) OR (b.blocker_id=$2 AND b.blocked_id=d.passenger_id))`,
+    [req.params.id, req.userId],
+  );
+  if (!rows[0]) throw new ApiError(404, 'demand unavailable');
+  res.json({ data: rows[0] });
+}));
+
 app.post('/api/v1/demands/:id/cancel', requireAuth, requireRole('passenger'), asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
@@ -3238,6 +3255,21 @@ app.get('/api/v1/bookings/:id/conversation', requireAuth, asyncHandler(async (re
     `SELECT c.id,c.booking_id,c.created_at FROM conversations c
       JOIN conversation_members cm ON cm.conversation_id=c.id
      WHERE c.booking_id=$1 AND cm.user_id=$2`, [req.params.id, req.userId],
+  );
+  if (!rows[0]) throw new ApiError(404, 'conversation unavailable');
+  res.json({ data: rows[0] });
+}));
+
+app.get('/api/v1/conversations/:id', requireAuth, asyncHandler(async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT c.id,c.booking_id,c.created_at FROM conversations c
+      JOIN conversation_members cm ON cm.conversation_id=c.id
+     WHERE c.id=$1 AND cm.user_id=$2
+       AND NOT EXISTS (
+         SELECT 1 FROM conversation_members peer JOIN user_blocks b
+           ON (b.blocker_id=$2 AND b.blocked_id=peer.user_id) OR (b.blocker_id=peer.user_id AND b.blocked_id=$2)
+          WHERE peer.conversation_id=c.id AND peer.user_id<>$2
+       )`, [req.params.id, req.userId],
   );
   if (!rows[0]) throw new ApiError(404, 'conversation unavailable');
   res.json({ data: rows[0] });
