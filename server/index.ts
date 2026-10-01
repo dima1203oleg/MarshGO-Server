@@ -6,6 +6,7 @@ import { Pool, PoolClient } from 'pg';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createClient } from 'redis';
 import { RedisRateLimitStore } from './redisRateLimitStore';
+import { parseBearerToken } from './auth/bearer';
 import type { Duplex } from 'node:stream';
 import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
@@ -266,7 +267,7 @@ async function insertSession(client: PoolClient, userId: string, familyId: strin
   return { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt };
 }
 function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  const bearer = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const bearer = parseBearerToken(req.get('authorization'));
   if (bearer) {
     pool.query<{ id: string; user_id: string }>(
       `SELECT s.id,s.user_id FROM sessions s JOIN users u ON u.id=s.user_id
