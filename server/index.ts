@@ -3536,24 +3536,38 @@ app.post('/api/v1/realtime/ticket', requireAuth, asyncHandler(async (req, res) =
 }));
 
 app.get('/api/v1/conversations/:id/messages', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(404, 'conversation unavailable');
   const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
-  const { rows } = await pool.query(
-    `SELECT m.id,m.sender_id,u.display_name AS sender_name,m.body,m.created_at
-       FROM messages m JOIN users u ON u.id=m.sender_id
-      WHERE m.conversation_id=$1 AND EXISTS (
-        SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=m.conversation_id AND cm.user_id=$2
-      )
-      ORDER BY m.created_at DESC,m.id DESC LIMIT $3`, [req.params.id, req.userId, limit],
-  );
+  const before = typeof req.query.before === 'string' ? req.query.before : undefined;
+  if (before && !/^[0-9a-f-]{36}$/i.test(before)) throw new ApiError(400, 'before must be a message UUID');
   const { rows: membership } = await pool.query(
     'SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2', [req.params.id, req.userId],
   );
   if (!membership[0]) throw new ApiError(404, 'conversation unavailable');
+  if (before) {
+    const cursor = await pool.query('SELECT 1 FROM messages WHERE id=$1 AND conversation_id=$2', [before, req.params.id]);
+    if (!cursor.rows[0]) throw new ApiError(400, 'before must identify a message in this conversation');
+  }
   const { rows: peers } = await pool.query<{ user_id: string }>(
     'SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id<>$2 LIMIT 1', [req.params.id, req.userId],
   );
   if (peers[0] && await usersBlockEachOther(req.userId!, peers[0].user_id)) throw new ApiError(404, 'conversation unavailable');
-  res.json({ data: rows.reverse() });
+  const { rows: page } = await pool.query(
+    `SELECT m.id,m.sender_id,u.display_name AS sender_name,m.body,m.created_at
+       FROM messages m JOIN users u ON u.id=m.sender_id
+      WHERE m.conversation_id=$1
+        AND ($3::uuid IS NULL OR (m.created_at,m.id) < (
+          SELECT anchor.created_at,anchor.id FROM messages anchor
+           WHERE anchor.id=$3::uuid AND anchor.conversation_id=$1
+        ))
+      ORDER BY m.created_at DESC,m.id DESC LIMIT $2`, [req.params.id, limit + 1, before ?? null],
+  );
+  const hasMore = page.length > limit;
+  const messages = page.slice(0, limit).reverse();
+  res.json({
+    data: messages,
+    pagination: { hasMore, nextCursor: hasMore ? messages[0]?.id ?? null : null },
+  });
 }));
 
 app.get('/api/v1/conversation-unread-counts', requireAuth, asyncHandler(async (req, res) => {

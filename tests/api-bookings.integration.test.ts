@@ -1149,6 +1149,34 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ body: 'Чекаю біля входу.' }),
     });
     assert.equal(driverReply.status, 201);
+    await pool.query(
+      `INSERT INTO messages(conversation_id,sender_id,body,created_at)
+       SELECT $1,$2,'Історія сторінка ' || seq::text,now()-((1000-seq)*interval '1 second')
+         FROM generate_series(1,55) AS seq`, [conversation.data.id, passengerA],
+    );
+    const firstMessagePage = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, { headers: headers(ids.driver) });
+    assert.equal(firstMessagePage.status, 200);
+    const firstPage = await firstMessagePage.json() as { data: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } };
+    assert.equal(firstPage.data.length, 50);
+    assert.equal(firstPage.pagination.hasMore, true);
+    assert.equal(firstPage.data.at(-1)?.body, 'Чекаю біля входу.');
+    assert.equal(firstPage.pagination.nextCursor, firstPage.data[0]?.id);
+    const secondMessagePage = await fetch(
+      `${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?before=${firstPage.pagination.nextCursor}`,
+      { headers: headers(ids.driver) },
+    );
+    assert.equal(secondMessagePage.status, 200);
+    const secondPage = await secondMessagePage.json() as { data: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } };
+    assert.equal(secondPage.data.length, 7);
+    assert.equal(secondPage.data.at(-1)?.body, 'Історія сторінка 7');
+    assert.equal(secondPage.pagination.hasMore, false);
+    assert.equal(secondPage.pagination.nextCursor, null);
+    assert.equal(firstPage.data.some((item) => secondPage.data.some((older) => older.id === item.id)), false);
+    const invalidMessageCursor = await fetch(
+      `${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?before=not-a-uuid`,
+      { headers: headers(ids.driver) },
+    );
+    assert.equal(invalidMessageCursor.status, 400);
     const unreadForPassenger = await fetch(`${apiUrl}/api/v1/conversation-unread-counts`, { headers: headers(passengerA) });
     const passengerUnread = await unreadForPassenger.json() as { data: Array<{ conversation_id: string; unread_count: number }> };
     assert.equal(passengerUnread.data.find((item) => item.conversation_id === conversation.data.id)?.unread_count, 1);
