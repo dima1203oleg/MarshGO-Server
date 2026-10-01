@@ -3565,8 +3565,7 @@ app.get('/api/v1/conversations/:id/messages', requireAuth, asyncHandler(async (r
   const hasMore = page.length > limit;
   const messages = page.slice(0, limit).reverse();
   res.json({
-    data: messages,
-    pagination: { hasMore, nextCursor: hasMore ? messages[0]?.id ?? null : null },
+    data: { messages, pagination: { hasMore, nextCursor: hasMore ? messages[0]?.id ?? null : null } },
   });
 }));
 

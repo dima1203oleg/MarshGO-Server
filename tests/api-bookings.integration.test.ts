@@ -1138,7 +1138,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const history = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
       headers: headers(ids.driver),
     });
-    assert.equal((await history.json() as { data: Array<{ body: string }> }).data[0].body, 'Підтверджую час виїзду.');
+    assert.equal((await history.json() as { data: { messages: Array<{ body: string }> } }).data.messages[0].body, 'Підтверджую час виїзду.');
     const markRead = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/read`, { method: 'POST', headers: headers(ids.driver) });
     assert.equal(markRead.status, 200);
     const driverReadState = (await markRead.json() as { data: { conversation_id: string; last_read_message_id: string; unread_count: number } }).data;
@@ -1156,22 +1156,22 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     );
     const firstMessagePage = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, { headers: headers(ids.driver) });
     assert.equal(firstMessagePage.status, 200);
-    const firstPage = await firstMessagePage.json() as { data: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } };
-    assert.equal(firstPage.data.length, 50);
+    const firstPage = (await firstMessagePage.json() as { data: { messages: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } } }).data;
+    assert.equal(firstPage.messages.length, 50);
     assert.equal(firstPage.pagination.hasMore, true);
-    assert.equal(firstPage.data.at(-1)?.body, 'Чекаю біля входу.');
-    assert.equal(firstPage.pagination.nextCursor, firstPage.data[0]?.id);
+    assert.equal(firstPage.messages.at(-1)?.body, 'Чекаю біля входу.');
+    assert.equal(firstPage.pagination.nextCursor, firstPage.messages[0]?.id);
     const secondMessagePage = await fetch(
       `${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?before=${firstPage.pagination.nextCursor}`,
       { headers: headers(ids.driver) },
     );
     assert.equal(secondMessagePage.status, 200);
-    const secondPage = await secondMessagePage.json() as { data: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } };
-    assert.equal(secondPage.data.length, 7);
-    assert.equal(secondPage.data.at(-1)?.body, 'Історія сторінка 7');
+    const secondPage = (await secondMessagePage.json() as { data: { messages: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } } }).data;
+    assert.equal(secondPage.messages.length, 7);
+    assert.equal(secondPage.messages.at(-1)?.body, 'Історія сторінка 7');
     assert.equal(secondPage.pagination.hasMore, false);
     assert.equal(secondPage.pagination.nextCursor, null);
-    assert.equal(firstPage.data.some((item) => secondPage.data.some((older) => older.id === item.id)), false);
+    assert.equal(firstPage.messages.some((item) => secondPage.messages.some((older) => older.id === item.id)), false);
     const invalidMessageCursor = await fetch(
       `${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?before=not-a-uuid`,
       { headers: headers(ids.driver) },
