@@ -1030,10 +1030,16 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(ids.driver),
     });
     assert.equal((await secondCompletion.json() as { data: { status: string } }).data.status, 'completed');
+    const bookingsBeforeReview = await fetch(`${apiUrl}/api/v1/bookings`, { headers: headers(passengerA) });
+    const completedBookingBeforeReview = (await bookingsBeforeReview.json() as { data: Array<{ id: string; current_user_has_review: boolean }> }).data.find((item) => item.id === booking.data.id);
+    assert.equal(completedBookingBeforeReview?.current_user_has_review, false);
     const passengerReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
       method: 'POST', headers: headers(passengerA), body: JSON.stringify({ rating: 5, comment: 'Доїхали вчасно.' }),
     });
     assert.equal(passengerReview.status, 201);
+    const bookingsAfterReview = await fetch(`${apiUrl}/api/v1/bookings`, { headers: headers(passengerA) });
+    const completedBookingAfterReview = (await bookingsAfterReview.json() as { data: Array<{ id: string; current_user_has_review: boolean }> }).data.find((item) => item.id === booking.data.id);
+    assert.equal(completedBookingAfterReview?.current_user_has_review, true);
     const driverReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
       method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ rating: 4 }),
     });
