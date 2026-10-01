@@ -532,19 +532,24 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
 
   it('returns only current nearby MARSHGO rides with enough seats for a cancelled booking', async () => {
     const nearbyOfferId = crypto.randomUUID();
+    const corridorOfferId = crypto.randomUUID();
     const farOfferId = crypto.randomUUID();
     const noSeatsOfferId = crypto.randomUUID();
-    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,departure_at,price_per_seat_minor,total_seats,available_seats)
+    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,route_source,price_per_seat_minor,total_seats,available_seats)
       VALUES
       ($1,$2,$3,'Rescue Nearby Origin','Rescue Nearby Destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
-        now()+interval '10 days 30 minutes',22000,4,4),
+        NULL,now()+interval '10 days 30 minutes',NULL,22000,4,4),
+      ($6,$2,$3,'Rescue Corridor Origin','Rescue Corridor Destination',
+        ST_SetSRID(ST_MakePoint(24.5,49.5),4326)::geography,ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
+        ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[24.5,49.5],[25.0,50.0]]}'),4326),
+        now()+interval '10 days 40 minutes','osrm',24000,4,4),
       ($4,$2,$3,'Rescue Far Origin','Rescue Far Destination',
         ST_SetSRID(ST_MakePoint(27.0,52.0),4326)::geography,ST_SetSRID(ST_MakePoint(28.0,53.0),4326)::geography,
-        now()+interval '10 days 30 minutes',18000,4,4),
+        NULL,now()+interval '10 days 30 minutes',NULL,18000,4,4),
       ($5,$2,$3,'Rescue Sold Out Origin','Rescue Sold Out Destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
-        now()+interval '10 days 30 minutes',16000,4,0)`, [nearbyOfferId, ids.driver, ids.vehicle, farOfferId, noSeatsOfferId]);
+        NULL,now()+interval '10 days 30 minutes',NULL,16000,4,0)`, [nearbyOfferId, ids.driver, ids.vehicle, farOfferId, noSeatsOfferId, corridorOfferId]);
     const bookingResponse = await fetch(`${apiUrl}/api/v1/bookings`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `rescue-book-${crypto.randomUUID()}` },
       body: JSON.stringify({ offerId: ids.offer, seats: 1 }),
@@ -562,15 +567,18 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(denied.status, 404);
     const rescueResponse = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rescue`, { headers: { 'x-dev-user-id': passengerA } });
     assert.equal(rescueResponse.status, 200);
-    const rescue = await rescueResponse.json() as { data: { booking_id: string; checked_at: string; radius_m: number; alternatives: Array<{ id: string; source: string; available_seats: number; origin_distance_m: number; destination_distance_m: number }> } };
+    const rescue = await rescueResponse.json() as { data: { booking_id: string; checked_at: string; radius_m: number; alternatives: Array<{ id: string; source: string; available_seats: number; origin_distance_m: number; destination_distance_m: number; rescue_match: string; route_origin_distance_m: number | null }> } };
     assert.equal(rescue.data.booking_id, booking.data.id);
     assert.ok(Number.isFinite(Date.parse(rescue.data.checked_at)));
     assert.equal(rescue.data.radius_m, 20_000);
-    assert.deepEqual(rescue.data.alternatives.map(item => item.id), [nearbyOfferId]);
+    assert.deepEqual(rescue.data.alternatives.map(item => item.id), [nearbyOfferId, corridorOfferId]);
     assert.equal(rescue.data.alternatives[0].source, 'MARSHGO Community');
     assert.equal(rescue.data.alternatives[0].available_seats, 4);
     assert.equal(rescue.data.alternatives[0].origin_distance_m, 0);
     assert.equal(rescue.data.alternatives[0].destination_distance_m, 0);
+    assert.equal(rescue.data.alternatives[0].rescue_match, 'ENDPOINTS');
+    assert.equal(rescue.data.alternatives[1].rescue_match, 'ALONG_CANCELLED_ROUTE');
+    assert.ok((rescue.data.alternatives[1].route_origin_distance_m ?? Infinity) < 1_000);
   });
 
   it('accepts private safety reports only from booking participants and restricts staff review', async () => {

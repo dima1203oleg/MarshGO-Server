@@ -2212,11 +2212,12 @@ app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res
   const { rows: bookings } = await pool.query<{
     id: string; passenger_id: string; status: string; seat_count: number; departure_at: Date;
     origin_name: string; destination_name: string; origin_lon: number; origin_lat: number;
-    destination_lon: number; destination_lat: number; offer_id: string;
+    destination_lon: number; destination_lat: number; offer_id: string; route_geojson: string | null;
   }>(
     `SELECT b.id,b.passenger_id,b.status,b.seat_count,o.departure_at,o.origin_name,o.destination_name,
             ST_X(o.origin::geometry) AS origin_lon,ST_Y(o.origin::geometry) AS origin_lat,
-            ST_X(o.destination::geometry) AS destination_lon,ST_Y(o.destination::geometry) AS destination_lat,o.id AS offer_id
+            ST_X(o.destination::geometry) AS destination_lon,ST_Y(o.destination::geometry) AS destination_lat,
+            o.id AS offer_id,ST_AsGeoJSON(o.route) AS route_geojson
        FROM bookings b JOIN offers o ON o.id=b.offer_id
       WHERE b.id=$1 AND b.passenger_id=$2`, [req.params.id, req.userId],
   );
@@ -2229,8 +2230,14 @@ app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res
             ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key,
             round(ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography))::int AS origin_distance_m,
             round(ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography))::int AS destination_distance_m,
+            CASE WHEN ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000)
+                 THEN 'ENDPOINTS' ELSE 'ALONG_CANCELLED_ROUTE' END AS rescue_match,
+            CASE WHEN route.route IS NULL THEN NULL
+                 ELSE round(ST_Distance(o.origin,route.route::geography))::int END AS route_origin_distance_m,
             'MARSHGO Community'::text AS source
        FROM offers o JOIN users u ON u.id=o.driver_id
+       CROSS JOIN (SELECT CASE WHEN $9::text IS NULL THEN NULL::geometry
+                               ELSE ST_GeomFromGeoJSON($9::text) END AS route) route
        LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
        LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count
                             FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true
@@ -2238,12 +2245,22 @@ app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res
         AND o.available_seats >= $7
         AND o.departure_at >= GREATEST(now(),$8::timestamptz-interval '2 hours')
         AND o.departure_at <= $8::timestamptz+interval '4 hours'
-        AND ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000)
         AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,20000)
-        AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.blocker_id=o.driver_id AND b.blocked_id=$6) OR (b.blocker_id=$6 AND b.blocked_id=o.driver_id))
-      ORDER BY ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography)+ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography),ABS(extract(epoch FROM (o.departure_at-$8::timestamptz)))
+        AND (
+          ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000)
+          OR (
+            route.route IS NOT NULL AND o.route IS NOT NULL
+            AND o.route_source IS NOT NULL AND o.route_source<>'development_unrouted'
+            AND ST_DWithin(o.origin,route.route::geography,20000)
+            AND ST_LineLocatePoint(route.route,o.origin::geometry) < ST_LineLocatePoint(route.route,o.destination::geometry)
+          )
+        )
+        AND NOT EXISTS(SELECT 1 FROM user_blocks ub WHERE (ub.blocker_id=o.driver_id AND ub.blocked_id=$6) OR (ub.blocker_id=$6 AND ub.blocked_id=o.driver_id))
+      ORDER BY CASE WHEN ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000) THEN 0 ELSE 1 END,
+        ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography)+ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography),
+        ABS(extract(epoch FROM (o.departure_at-$8::timestamptz)))
       LIMIT 20`, [booking.origin_lon, booking.origin_lat, booking.destination_lon, booking.destination_lat,
-      booking.offer_id, req.userId, booking.seat_count, booking.departure_at],
+      booking.offer_id, req.userId, booking.seat_count, booking.departure_at, booking.route_geojson],
   );
   res.json({ data: {
     booking_id: booking.id,
