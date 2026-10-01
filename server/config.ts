@@ -1,5 +1,17 @@
 type RuntimeEnvironment = NodeJS.ProcessEnv;
 
+const MAX_TRUSTED_PROXY_HOPS = 5;
+
+export function getTrustedProxyHops(environment: RuntimeEnvironment): number {
+  const raw = environment.TRUST_PROXY_HOPS?.trim();
+  if (!raw) {
+    if (environment.NODE_ENV === 'production') throw new Error('TRUST_PROXY_HOPS is required in production');
+    return 0;
+  }
+  if (!/^(0|[1-5])$/.test(raw)) throw new Error(`TRUST_PROXY_HOPS must be an integer from 0 to ${MAX_TRUSTED_PROXY_HOPS}`);
+  return Number(raw);
+}
+
 function requireValue(environment: RuntimeEnvironment, name: string): string {
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required in production`);
@@ -38,6 +50,7 @@ function requireHttpsUrl(environment: RuntimeEnvironment, name: string): void {
 
 /** Fail closed before listening if production could silently use dev auth or default CORS. */
 export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
+  getTrustedProxyHops(environment);
   if (environment.NODE_ENV !== 'production') return;
 
   const secret = requireValue(environment, 'SESSION_SECRET');
