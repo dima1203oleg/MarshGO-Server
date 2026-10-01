@@ -70,6 +70,10 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   requireValue(environment, 'TWILIO_AUTH_TOKEN');
   requireValue(environment, 'TWILIO_FROM_NUMBER');
 
+  if (environment.GEOCODING_PROVIDER !== undefined && !['nominatim', 'photon'].includes(environment.GEOCODING_PROVIDER)) {
+    throw new Error('GEOCODING_PROVIDER must be nominatim or photon');
+  }
+
   if ((environment.MAP_RENDERER ?? 'maplibre') !== 'maplibre') throw new Error('MAP_RENDERER=maplibre is required');
   if ((environment.MAP_DATA_PROVIDER ?? 'marshgo') !== 'marshgo') throw new Error('MAP_DATA_PROVIDER=marshgo is required');
   if ((environment.ROUTING_PRIMARY ?? 'osrm') !== 'osrm') throw new Error('ROUTING_PRIMARY=osrm is the only configured production routing provider');
