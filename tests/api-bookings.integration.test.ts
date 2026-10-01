@@ -804,6 +804,23 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.deepEqual(rejectionState.rows.map((row) => row.status), ['rejected', 'rejected']);
     const rejectedVehicle = await pool.query('SELECT verification_status FROM vehicles WHERE id=$1', [apiCreatedVehicleId]);
     assert.equal(rejectedVehicle.rows[0].verification_status, 'rejected');
+    const ownerVerificationResponse = await fetch(`${apiUrl}/api/v1/users/me/verification`, { headers: { 'x-dev-user-id': ids.driver } });
+    assert.equal(ownerVerificationResponse.status, 200);
+    const ownerVerification = await ownerVerificationResponse.json() as { data: Array<{ id: string; vehicle_id: string; status: string; review_note: string | null }> };
+    const ownerRejectedRecord = ownerVerification.data.find((record) => record.id === rejectedVehicleRecord);
+    assert.deepEqual(ownerRejectedRecord && {
+      id: ownerRejectedRecord.id,
+      vehicle_id: ownerRejectedRecord.vehicle_id,
+      status: ownerRejectedRecord.status,
+      review_note: ownerRejectedRecord.review_note,
+    }, {
+      id: rejectedVehicleRecord,
+      vehicle_id: apiCreatedVehicleId,
+      status: 'rejected',
+      review_note: 'Document is unreadable',
+    });
+    const unrelatedUserVerification = await fetch(`${apiUrl}/api/v1/users/me/verification`, { headers: { 'x-dev-user-id': passengerA } });
+    assert.equal((await unrelatedUserVerification.json() as { data: unknown[] }).data.length, 0);
     // This shared fixture is used by the next negotiation test; restore its verified state after asserting rejection behavior.
     await pool.query("UPDATE vehicles SET verification_status='verified' WHERE id=$1", [apiCreatedVehicleId]);
   });

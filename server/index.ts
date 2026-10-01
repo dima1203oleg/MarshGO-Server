@@ -1517,7 +1517,7 @@ app.get('/api/v1/vehicles', requireAuth, asyncHandler(async (req, res) => {
 app.get('/api/v1/users/me/verification', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (verification_type,vehicle_id)
-            id,verification_type,vehicle_id,status,created_at,reviewed_at
+            id,verification_type,vehicle_id,status,created_at,reviewed_at,review_note
        FROM verification_records WHERE user_id=$1
       ORDER BY verification_type,vehicle_id,created_at DESC,id DESC`, [req.userId],
   );
