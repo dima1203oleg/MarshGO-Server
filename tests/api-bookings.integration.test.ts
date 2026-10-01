@@ -21,6 +21,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     vehicle: crypto.randomUUID(),
     offer: crypto.randomUUID(),
     journeyOffer: crypto.randomUUID(),
+    rescueOffer: crypto.randomUUID(),
     rendezvousOffer: crypto.randomUUID(),
     expiredOffer: crypto.randomUUID(),
   };
@@ -61,6 +62,12 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[23.8561,49.2567],[24.0297,49.8397]]}'),4326),
         now()+interval '10 days',now()+interval '10 days 1 hour',78000,3600,'osrm',15000,1,1)`, [ids.journeyOffer, ids.driver, ids.vehicle]);
     await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
+      VALUES ($1,$2,$3,'Journey Rescue Origin','Journey Rescue Destination',
+        ST_SetSRID(ST_MakePoint(23.8561,49.2567),4326)::geography,
+        ST_SetSRID(ST_MakePoint(24.0297,49.8397),4326)::geography,
+        ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[23.8561,49.2567],[24.0297,49.8397]]}'),4326),
+        now()+interval '10 days',now()+interval '10 days 1 hour',78000,3600,'osrm',17000,1,1)`, [ids.rescueOffer, ids.driver, ids.vehicle]);
+    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
       VALUES ($1,$2,$3,'Pickup point','Rendezvous destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
         ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
@@ -81,7 +88,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     await pool.query('DELETE FROM journeys WHERE user_id = ANY($1::uuid[])', [[ids.driver, ...ids.passengers]]);
     await pool.query('DELETE FROM verification_records WHERE user_id = ANY($1::uuid[]) OR id=ANY($2::uuid[])', [[ids.driver, ...ids.passengers, ids.admin], verificationIds]);
     await pool.query('DELETE FROM otp_challenges WHERE phone_e164 LIKE $1', [`+38099${process.pid}%`]);
-    await pool.query("DELETE FROM audit_events WHERE actor_id = ANY($1::uuid[]) AND action IN ('vehicle.created','offer.created','demand.created','demand.cancelled','proposal.created','proposal.countered','proposal.agreed','proposal.accepted','user.blocked','user.unblocked','journey.leg.booked','journey.replanning')", [[ids.driver, ...ids.passengers]]);
+    await pool.query("DELETE FROM audit_events WHERE actor_id = ANY($1::uuid[]) AND action IN ('vehicle.created','offer.created','demand.created','demand.cancelled','proposal.created','proposal.countered','proposal.agreed','proposal.accepted','user.blocked','user.unblocked','journey.leg.booked','journey.replanning','journey.rescue.booked')", [[ids.driver, ...ids.passengers]]);
     await pool.query("DELETE FROM audit_events WHERE entity_id=ANY($1::uuid[]) OR (actor_id=ANY($2::uuid[]) AND action LIKE 'moderation.%')", [moderationCaseIds, [passengerA, ids.admin]]);
     await pool.query('DELETE FROM moderation_cases WHERE id=ANY($1::uuid[])', [moderationCaseIds]);
     await pool.query('DELETE FROM realtime_outbox WHERE recipient_ids && $1::uuid[]', [[ids.driver, ...ids.passengers, ids.admin]]);
@@ -287,6 +294,44 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(inboxBody.data.items.length, 1);
     assert.ok(inboxBody.data.nextCursor);
     assert.equal(inboxBody.data.unreadCount, 4);
+
+    const rescueResponse = await fetch(`${apiUrl}/api/v1/bookings/${linkedBooking.data.id}/rescue`, {
+      headers: { 'x-dev-user-id': passengerA },
+    });
+    assert.equal(rescueResponse.status, 200);
+    const rescueBody = await rescueResponse.json() as { data: { alternatives: Array<{ id: string }> } };
+    assert.ok(rescueBody.data.alternatives.some((alternative) => alternative.id === ids.rescueOffer));
+    const rescueKeys = [`journey-rescue-${crypto.randomUUID()}`, `journey-rescue-${crypto.randomUUID()}`];
+    const rescueRequest = (key: string) => fetch(`${apiUrl}/api/v1/bookings`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': key },
+      body: JSON.stringify({ offerId: ids.rescueOffer, seats: 1, journeyId: journey.id, journeyLegId: journey.legs[0].id }),
+    });
+    const rescueRaces = await Promise.all(rescueKeys.map((key) => rescueRequest(key)));
+    assert.deepEqual(rescueRaces.map((response) => response.status).sort(), [201, 409], 'concurrent rescue attempts create exactly one replacement booking');
+    const winningIndex = rescueRaces.findIndex((response) => response.status === 201);
+    const rescuedBody = await rescueRaces[winningIndex].json() as { data: { id: string }; replayed: boolean };
+    assert.equal(rescuedBody.replayed, false);
+    const replay = await rescueRequest(rescueKeys[winningIndex]);
+    assert.equal(replay.status, 200, 'rescue booking is idempotent against its original cancelled leg');
+    assert.equal((await replay.json() as { data: { id: string } }).data.id, rescuedBody.data.id);
+    const duplicateRescue = await fetch(`${apiUrl}/api/v1/bookings`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `journey-rescue-${crypto.randomUUID()}` },
+      body: JSON.stringify({ offerId: ids.rescueOffer, seats: 1, journeyId: journey.id, journeyLegId: journey.legs[0].id }),
+    });
+    assert.equal(duplicateRescue.status, 409, 'a replacement cannot be attached to the same cancelled leg twice');
+    const completedRescueJourney = await pool.query<{ state: string; confirmed_price_minor: number; legs: Array<{ ordinal: number; state: string; booking_id: string | null; metadata: Record<string, string> }> }>(
+      `SELECT j.state,j.confirmed_price_minor,
+              jsonb_agg(jsonb_build_object('ordinal',l.ordinal,'state',l.state,'booking_id',l.booking_id,'metadata',l.metadata) ORDER BY l.ordinal) AS legs
+         FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 GROUP BY j.id`, [journey.id],
+    );
+    assert.equal(completedRescueJourney.rows[0].state, 'READY');
+    assert.equal(completedRescueJourney.rows[0].confirmed_price_minor, 17000);
+    assert.equal(completedRescueJourney.rows[0].legs.length, 2);
+    assert.equal(completedRescueJourney.rows[0].legs[0].state, 'REPLACED');
+    assert.equal(completedRescueJourney.rows[0].legs[0].booking_id, linkedBooking.data.id);
+    assert.equal(completedRescueJourney.rows[0].legs[1].state, 'CONFIRMED');
+    assert.equal(completedRescueJourney.rows[0].legs[1].booking_id, rescuedBody.data.id);
+    assert.equal(completedRescueJourney.rows[0].legs[1].metadata.rescue_from_leg_id, journey.legs[0].id);
     const latestNotification = inboxBody.data.items[0];
     assert.equal(latestNotification.title, 'План маршруту оновлено');
     assert.equal(JSON.stringify(latestNotification).includes('phone'), false);

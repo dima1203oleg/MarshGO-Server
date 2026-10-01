@@ -2078,10 +2078,14 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     );
     if (prior.rows[0]) {
       if (prior.rows[0].offer_id !== offerId || Number(prior.rows[0].seat_count) !== seats) throw new ApiError(409, 'idempotency key already used for another request');
-      const priorJourney = await client.query<{ id: string }>(
-        'SELECT id FROM journey_legs WHERE booking_id=$1 AND journey_id=$2 AND id=$3',
-        [prior.rows[0].id, journeyId ?? null, journeyLegId ?? null],
-      );
+      const priorJourney = hasJourneyReference
+        ? await client.query<{ id: string }>(
+          `SELECT id FROM journey_legs
+            WHERE booking_id=$1 AND journey_id=$2
+              AND (id=$3::uuid OR metadata->>'rescue_from_leg_id'=$3::text)`,
+          [prior.rows[0].id, journeyId, journeyLegId],
+        )
+        : { rows: [] as Array<{ id: string }> };
       const bookingHasJourney = await client.query<{ id: string }>('SELECT id FROM journey_legs WHERE booking_id=$1', [prior.rows[0].id]);
       if ((hasJourneyReference && !priorJourney.rows[0]) || (!hasJourneyReference && bookingHasJourney.rows[0])) {
         throw new ApiError(409, 'idempotency key already used with another Journey association');
@@ -2096,18 +2100,61 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     if (currentOffer.driver_id === userId) throw new ApiError(400, 'drivers cannot book their own offer');
     if (Number(currentOffer.available_seats) < seats) throw new ApiError(409, 'not enough available seats');
 
+    let journeyRescue: { ordinal: number; old_offer_id: string; old_departure_at: Date; replaced_booking_id: string } | null = null;
     if (hasJourneyReference) {
-      const selected = await client.query<{ passenger_count: number; journey_state: string; leg_state: string; offer_id: string; booking_id: string | null; leg_count: number }>(
-        `SELECT j.passenger_count,j.state AS journey_state,l.state AS leg_state,l.offer_id,l.booking_id,
-                (SELECT count(*)::int FROM journey_legs all_legs WHERE all_legs.journey_id=j.id) AS leg_count
+      const selected = await client.query<{
+        passenger_count: number; journey_state: string; leg_state: string; leg_mode: string; offer_id: string;
+        booking_id: string | null; leg_count: number; ordinal: number; old_offer_id: string | null;
+        old_departure_at: Date | null;
+      }>(
+        `SELECT j.passenger_count,j.state AS journey_state,l.state AS leg_state,l.mode AS leg_mode,l.offer_id,l.booking_id,l.ordinal,
+                (SELECT count(*)::int FROM journey_legs all_legs WHERE all_legs.journey_id=j.id) AS leg_count,
+                old_offer.id AS old_offer_id,old_offer.departure_at AS old_departure_at
            FROM journeys j JOIN journey_legs l ON l.journey_id=j.id
+           LEFT JOIN bookings old_booking ON old_booking.id=l.booking_id AND old_booking.passenger_id=j.user_id AND old_booking.status='cancelled'
+           LEFT JOIN offers old_offer ON old_offer.id=old_booking.offer_id
           WHERE j.id=$1 AND l.id=$2 AND j.user_id=$3 FOR UPDATE OF j,l`, [journeyId, journeyLegId, userId],
       );
       const journeySelection = selected.rows[0];
-      if (!journeySelection || journeySelection.offer_id !== offerId || journeySelection.leg_state !== 'SELECTED'
-          || journeySelection.booking_id || journeySelection.journey_state !== 'PLANNED' || journeySelection.leg_count !== 1
-          || Number(journeySelection.passenger_count) !== seats) {
+      const isInitialJourneyBooking = Boolean(journeySelection && journeySelection.offer_id === offerId
+        && journeySelection.leg_state === 'SELECTED' && !journeySelection.booking_id
+        && journeySelection.journey_state === 'PLANNED' && journeySelection.leg_count === 1
+        && Number(journeySelection.passenger_count) === seats);
+      const isJourneyRescue = Boolean(journeySelection && journeySelection.leg_mode === 'COMMUNITY'
+        && journeySelection.leg_state === 'CANCELLED' && journeySelection.booking_id
+        && journeySelection.old_offer_id && journeySelection.old_departure_at
+        && journeySelection.journey_state === 'REPLANNING'
+        && Number(journeySelection.passenger_count) === seats
+        && journeySelection.old_offer_id !== offerId
+        && journeySelection.ordinal < 30);
+      if (!isInitialJourneyBooking && !isJourneyRescue) {
         throw new ApiError(409, 'Journey leg is no longer bookable or does not match this offer and passenger count', 'journey_leg_unavailable');
+      }
+      if (isJourneyRescue && journeySelection) {
+        const eligible = await client.query<{ ok: boolean }>(
+          `SELECT
+             candidate.departure_at >= GREATEST(now(),$2::timestamptz-interval '2 hours')
+             AND candidate.departure_at <= $2::timestamptz+interval '4 hours'
+             AND ST_DWithin(candidate.destination,old_offer.destination,20000)
+             AND (
+               ST_DWithin(candidate.origin,old_offer.origin,20000)
+               OR (old_offer.route IS NOT NULL AND old_offer.route_source IS NOT NULL AND old_offer.route_source<>'development_unrouted'
+                   AND ST_DWithin(candidate.origin,old_offer.route::geography,20000)
+                   AND ST_LineLocatePoint(old_offer.route,candidate.origin::geometry)<ST_LineLocatePoint(old_offer.route,candidate.destination::geometry))
+             )
+             AND NOT EXISTS(SELECT 1 FROM user_blocks ub WHERE (ub.blocker_id=candidate.driver_id AND ub.blocked_id=$3)
+               OR (ub.blocker_id=$3 AND ub.blocked_id=candidate.driver_id)) AS ok
+            FROM offers candidate JOIN offers old_offer ON old_offer.id=$4
+           WHERE candidate.id=$1`,
+          [offerId, journeySelection.old_departure_at, userId, journeySelection.old_offer_id],
+        );
+        if (!eligible.rows[0]?.ok) throw new ApiError(409, 'This ride is no longer a suitable replacement for the cancelled Journey leg', 'journey_rescue_unavailable');
+        journeyRescue = {
+          ordinal: journeySelection.ordinal,
+          old_offer_id: journeySelection.old_offer_id!,
+          old_departure_at: journeySelection.old_departure_at!,
+          replaced_booking_id: journeySelection.booking_id!,
+        };
       }
     }
 
@@ -2130,7 +2177,46 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
         booking_id: booking.rows[0].id, offer_id: offerId, status: 'confirmed', seat_count: seats,
         available_seats: Number(currentOffer.available_seats) - seats,
       });
-    if (hasJourneyReference) {
+    if (hasJourneyReference && journeyRescue) {
+      const newLegId = crypto.randomUUID();
+      const shifted = await client.query<{ ordinal: number }>(
+        'SELECT ordinal FROM journey_legs WHERE journey_id=$1 AND ordinal>$2 ORDER BY ordinal DESC FOR UPDATE', [journeyId, journeyRescue.ordinal],
+      );
+      if (shifted.rows.some((row) => Number(row.ordinal) >= 30)) {
+        throw new ApiError(409, 'Journey cannot fit another replacement leg', 'journey_leg_limit');
+      }
+      for (const row of shifted.rows) {
+        await client.query('UPDATE journey_legs SET ordinal=$3,updated_at=now() WHERE journey_id=$1 AND ordinal=$2',
+          [journeyId, row.ordinal, Number(row.ordinal) + 1]);
+      }
+      await client.query(
+        `UPDATE journey_legs SET state='REPLACED',metadata=metadata || jsonb_build_object('rescue_replaced_by_leg_id',$2::text),updated_at=now()
+          WHERE journey_id=$1 AND id=$3`, [journeyId, newLegId, journeyLegId],
+      );
+      await client.query(
+        `INSERT INTO journey_legs(
+           id,journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,
+           predicted_departure_at,predicted_arrival_at,duration_s,distance_m,price_minor,price_min_minor,price_max_minor,currency,
+           price_status,availability_status,offer_id,booking_id,state,data_source,metadata
+         )
+         SELECT $1,$2,$3,'COMMUNITY',o.origin,o.origin_name,o.destination,o.destination_name,o.departure_at,o.arrival_at,
+                o.departure_at,o.arrival_at,o.duration_s,o.distance_m,$4,$4,$4,o.currency,'LOCKED','AVAILABLE',o.id,$5,'CONFIRMED',
+                'MARSHGO Community',jsonb_build_object('rescue_from_leg_id',$6::text,'replaced_booking_id',$7::text,'replaced_offer_id',$8::text)
+           FROM offers o WHERE o.id=$9`,
+        [newLegId, journeyId, journeyRescue.ordinal + 1, total, booking.rows[0].id, journeyLegId, journeyRescue.replaced_booking_id, journeyRescue.old_offer_id, offerId],
+      );
+      const journeyTotal = await client.query<{ total: number }>(
+        `SELECT COALESCE(sum(price_minor),0)::int AS total FROM journey_legs
+          WHERE journey_id=$1 AND state NOT IN ('REPLACED','CANCELLED','FAILED','COMPLETED')`, [journeyId],
+      );
+      await client.query(
+        `UPDATE journeys SET confirmed_price_minor=$2,total_price_minor=$2,estimated_price_min_minor=$2,
+           estimated_price_max_minor=$2,state='READY',updated_at=now() WHERE id=$1`, [journeyId, journeyTotal.rows[0].total],
+      );
+      await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [userId, 'journey.rescue.booked', 'journey', journeyId]);
+      await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:rescue:${booking.rows[0].id}`,
+        [userId], { journey_id: journeyId, journey_leg_id: newLegId, replaced_journey_leg_id: journeyLegId, booking_id: booking.rows[0].id, state: 'READY' });
+    } else if (hasJourneyReference) {
       await client.query(
         `UPDATE journey_legs SET booking_id=$2,state='CONFIRMED',price_status='LOCKED',price_minor=$3,
            price_min_minor=$3,price_max_minor=$3,updated_at=now() WHERE id=$1`, [journeyLegId, booking.rows[0].id, total],
