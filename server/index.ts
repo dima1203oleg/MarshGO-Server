@@ -3468,6 +3468,62 @@ app.get('/api/v1/conversations/:id/messages', requireAuth, asyncHandler(async (r
   res.json({ data: rows.reverse() });
 }));
 
+app.get('/api/v1/conversation-unread-counts', requireAuth, asyncHandler(async (req, res) => {
+  const { rows } = await pool.query<{ conversation_id: string; booking_id: string | null; unread_count: number }>(
+    `SELECT c.id AS conversation_id,c.booking_id,count(m.id)::int AS unread_count
+       FROM conversations c
+       JOIN conversation_members cm ON cm.conversation_id=c.id AND cm.user_id=$1
+       LEFT JOIN messages cursor ON cursor.id=cm.last_read_message_id
+       LEFT JOIN messages m ON m.conversation_id=c.id AND m.sender_id<>$1
+         AND (cursor.id IS NULL OR (m.created_at,m.id)>(cursor.created_at,cursor.id))
+      WHERE NOT EXISTS (
+        SELECT 1 FROM conversation_members peer JOIN user_blocks b
+          ON (b.blocker_id=$1 AND b.blocked_id=peer.user_id) OR (b.blocker_id=peer.user_id AND b.blocked_id=$1)
+         WHERE peer.conversation_id=c.id AND peer.user_id<>$1
+      )
+      GROUP BY c.id,c.booking_id ORDER BY c.created_at DESC,c.id`, [req.userId],
+  );
+  res.json({ data: rows });
+}));
+
+app.post('/api/v1/conversations/:id/read', requireAuth, asyncHandler(async (req, res) => {
+  if (typeof req.params.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(req.params.id)) {
+    throw new ApiError(404, 'conversation unavailable');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: members } = await client.query<{ user_id: string }>(
+      `SELECT cm.user_id FROM conversation_members cm
+        WHERE cm.conversation_id=$1 AND cm.user_id=$2 FOR UPDATE`, [req.params.id, req.userId],
+    );
+    if (!members[0]) throw new ApiError(404, 'conversation unavailable');
+    const { rows: peers } = await client.query<{ user_id: string }>(
+      `SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id<>$2 LIMIT 1`, [req.params.id, req.userId],
+    );
+    if (peers[0] && await usersBlockEachOther(req.userId!, peers[0].user_id)) throw new ApiError(404, 'conversation unavailable');
+    const { rows: latest } = await client.query<{ id: string | null }>(
+      'SELECT id FROM messages WHERE conversation_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1', [req.params.id],
+    );
+    await client.query(
+      'UPDATE conversation_members SET last_read_message_id=$3 WHERE conversation_id=$1 AND user_id=$2',
+      [req.params.id, req.userId, latest[0]?.id ?? null],
+    );
+    const { rows: counts } = await client.query<{ unread_count: number }>(
+      `SELECT count(m.id)::int AS unread_count FROM conversation_members cm
+         LEFT JOIN messages cursor ON cursor.id=cm.last_read_message_id
+         LEFT JOIN messages m ON m.conversation_id=cm.conversation_id AND m.sender_id<>cm.user_id
+           AND (cursor.id IS NULL OR (m.created_at,m.id)>(cursor.created_at,cursor.id))
+        WHERE cm.conversation_id=$1 AND cm.user_id=$2`, [req.params.id, req.userId],
+    );
+    await client.query('COMMIT');
+    res.json({ data: { conversation_id: req.params.id, last_read_message_id: latest[0]?.id ?? null, unread_count: counts[0]?.unread_count ?? 0 } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}));
+
 app.post('/api/v1/conversations/:id/messages', requireAuth, asyncHandler(async (req, res) => {
   const body = req.body?.body;
   if (typeof body !== 'string' || body.trim().length < 1 || body.trim().length > 4000) throw new ApiError(400, 'message body must contain 1–4000 characters');

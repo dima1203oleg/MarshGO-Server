@@ -1075,10 +1075,37 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(passengerA), body: JSON.stringify({ body: 'Підтверджую час виїзду.' }),
     });
     assert.equal(message.status, 201);
+    const unreadForDriver = await fetch(`${apiUrl}/api/v1/conversation-unread-counts`, { headers: headers(ids.driver) });
+    assert.equal(unreadForDriver.status, 200);
+    const driverUnread = await unreadForDriver.json() as { data: Array<{ conversation_id: string; booking_id: string; unread_count: number }> };
+    assert.deepEqual(driverUnread.data.find((item) => item.conversation_id === conversation.data.id), {
+      conversation_id: conversation.data.id, booking_id: booking.data.id, unread_count: 1,
+    });
+    const unreadForOutsider = await fetch(`${apiUrl}/api/v1/conversation-unread-counts`, { headers: headers(passengerB) });
+    assert.equal(unreadForOutsider.status, 200);
+    assert.equal((await unreadForOutsider.json() as { data: Array<{ conversation_id: string }> }).data.some((item) => item.conversation_id === conversation.data.id), false);
     const history = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
       headers: headers(ids.driver),
     });
     assert.equal((await history.json() as { data: Array<{ body: string }> }).data[0].body, 'Підтверджую час виїзду.');
+    const markRead = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/read`, { method: 'POST', headers: headers(ids.driver) });
+    assert.equal(markRead.status, 200);
+    const driverReadState = (await markRead.json() as { data: { conversation_id: string; last_read_message_id: string; unread_count: number } }).data;
+    assert.equal(driverReadState.conversation_id, conversation.data.id);
+    assert.ok(driverReadState.last_read_message_id);
+    assert.equal(driverReadState.unread_count, 0);
+    const driverReply = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
+      method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ body: 'Чекаю біля входу.' }),
+    });
+    assert.equal(driverReply.status, 201);
+    const unreadForPassenger = await fetch(`${apiUrl}/api/v1/conversation-unread-counts`, { headers: headers(passengerA) });
+    const passengerUnread = await unreadForPassenger.json() as { data: Array<{ conversation_id: string; unread_count: number }> };
+    assert.equal(passengerUnread.data.find((item) => item.conversation_id === conversation.data.id)?.unread_count, 1);
+    const passengerMarkRead = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/read`, { method: 'POST', headers: headers(passengerA) });
+    assert.equal(passengerMarkRead.status, 200);
+    assert.equal((await passengerMarkRead.json() as { data: { unread_count: number } }).data.unread_count, 0);
+    const invalidRead = await fetch(`${apiUrl}/api/v1/conversations/not-a-uuid/read`, { method: 'POST', headers: headers(passengerA) });
+    assert.equal(invalidRead.status, 404);
     const outside = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
       method: 'POST', headers: headers(passengerB), body: JSON.stringify({ body: 'I should not see this.' }),
     });
