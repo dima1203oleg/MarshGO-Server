@@ -24,6 +24,40 @@ export function parseNominatimSuggestions(payload: unknown): PlaceSuggestion[] {
   });
 }
 
+export function parsePhotonSuggestions(payload: unknown): PlaceSuggestion[] {
+  if (!payload || typeof payload !== 'object' || !Array.isArray((payload as Record<string, unknown>).features)) {
+    throw new GeocodingUnavailableError('Photon returned an invalid response');
+  }
+  return (payload as { features: unknown[] }).features.flatMap((item): PlaceSuggestion[] => {
+    if (!item || typeof item !== 'object') return [];
+    const feature = item as Record<string, unknown>;
+    const properties = feature.properties && typeof feature.properties === 'object'
+      ? feature.properties as Record<string, unknown>
+      : {};
+    const geometry = feature.geometry && typeof feature.geometry === 'object'
+      ? feature.geometry as Record<string, unknown>
+      : {};
+    const coordinates = Array.isArray(geometry.coordinates) ? geometry.coordinates : [];
+    const longitude = Number(coordinates[0]);
+    const latitude = Number(coordinates[1]);
+    const id = properties.osm_type && properties.osm_id ? `${properties.osm_type}:${properties.osm_id}` : '';
+    const countryCode = typeof properties.countrycode === 'string' ? properties.countrycode.toUpperCase() : '';
+    const label = [properties.name, properties.city, properties.state, properties.country]
+      .filter((part): part is string => typeof part === 'string' && Boolean(part.trim()))
+      .filter((part, index, values) => values.indexOf(part) === index)
+      .join(', ');
+    if (countryCode !== 'UA' || !id || !label || !Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+        Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return [];
+    return [{ label, latitude, longitude, providerId: id }];
+  });
+}
+
+function parseProviderSuggestions(payload: unknown): PlaceSuggestion[] {
+  return process.env.GEOCODING_PROVIDER === 'photon'
+    ? parsePhotonSuggestions(payload)
+    : parseNominatimSuggestions(payload);
+}
+
 export async function reverseGeocode(latitude: number, longitude: number): Promise<PlaceSuggestion> {
   if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180) {
     throw new GeocodingUnavailableError('Reverse geocoding coordinates are invalid');
@@ -38,15 +72,18 @@ export async function reverseGeocode(latitude: number, longitude: number): Promi
   }
   url.searchParams.set('lat', String(latitude));
   url.searchParams.set('lon', String(longitude));
-  url.searchParams.set('format', 'jsonv2');
-  url.searchParams.set('accept-language', 'uk');
+  if (process.env.GEOCODING_PROVIDER === 'photon') url.searchParams.set('limit', '1');
+  else {
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('accept-language', 'uk');
+  }
   const headers = new Headers({ accept: 'application/json', 'user-agent': 'MARSHGO/1.0 (reverse geocoding)' });
   const apiKey = process.env.GEOCODING_API_KEY;
   if (apiKey) headers.set('authorization', `Bearer ${apiKey}`);
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) }).catch(() => null);
   if (!response?.ok) throw new GeocodingUnavailableError('Reverse geocoder request failed');
   const record = await response.json().catch(() => { throw new GeocodingUnavailableError('Reverse geocoder returned invalid JSON'); });
-  const [place] = parseNominatimSuggestions([record]);
+  const [place] = parseProviderSuggestions(process.env.GEOCODING_PROVIDER === 'photon' ? record : [record]);
   if (!place) throw new GeocodingUnavailableError('Reverse geocoder returned no valid place');
   return place;
 }
@@ -61,15 +98,20 @@ export async function suggestPlaces(query: string): Promise<PlaceSuggestion[]> {
     throw new GeocodingUnavailableError('Production geocoder must use HTTPS');
   }
   url.searchParams.set('q', query);
-  url.searchParams.set('format', 'jsonv2');
-  url.searchParams.set('countrycodes', 'ua');
-  url.searchParams.set('accept-language', 'uk');
-  url.searchParams.set('limit', '6');
+  if (process.env.GEOCODING_PROVIDER === 'photon') {
+    url.searchParams.set('limit', '6');
+    url.searchParams.set('bbox', '22,44,41,53');
+  } else {
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('countrycodes', 'ua');
+    url.searchParams.set('accept-language', 'uk');
+    url.searchParams.set('limit', '6');
+  }
 
   const headers = new Headers({ accept: 'application/json', 'user-agent': 'MARSHGO/1.0 (place search)' });
   const apiKey = process.env.GEOCODING_API_KEY;
   if (apiKey) headers.set('authorization', `Bearer ${apiKey}`);
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) }).catch(() => null);
   if (!response?.ok) throw new GeocodingUnavailableError('Geocoder request failed');
-  return parseNominatimSuggestions(await response.json());
+  return parseProviderSuggestions(await response.json());
 }

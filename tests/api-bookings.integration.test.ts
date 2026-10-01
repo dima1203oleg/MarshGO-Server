@@ -21,6 +21,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     vehicle: crypto.randomUUID(),
     offer: crypto.randomUUID(),
     journeyOffer: crypto.randomUUID(),
+    rescueOffer: crypto.randomUUID(),
     rendezvousOffer: crypto.randomUUID(),
     expiredOffer: crypto.randomUUID(),
   };
@@ -61,6 +62,12 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[23.8561,49.2567],[24.0297,49.8397]]}'),4326),
         now()+interval '10 days',now()+interval '10 days 1 hour',78000,3600,'osrm',15000,1,1)`, [ids.journeyOffer, ids.driver, ids.vehicle]);
     await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
+      VALUES ($1,$2,$3,'Journey Rescue Origin','Journey Rescue Destination',
+        ST_SetSRID(ST_MakePoint(23.8561,49.2567),4326)::geography,
+        ST_SetSRID(ST_MakePoint(24.0297,49.8397),4326)::geography,
+        ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[23.8561,49.2567],[24.0297,49.8397]]}'),4326),
+        now()+interval '10 days',now()+interval '10 days 1 hour',78000,3600,'osrm',17000,1,1)`, [ids.rescueOffer, ids.driver, ids.vehicle]);
+    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
       VALUES ($1,$2,$3,'Pickup point','Rendezvous destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
         ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
@@ -81,7 +88,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     await pool.query('DELETE FROM journeys WHERE user_id = ANY($1::uuid[])', [[ids.driver, ...ids.passengers]]);
     await pool.query('DELETE FROM verification_records WHERE user_id = ANY($1::uuid[]) OR id=ANY($2::uuid[])', [[ids.driver, ...ids.passengers, ids.admin], verificationIds]);
     await pool.query('DELETE FROM otp_challenges WHERE phone_e164 LIKE $1', [`+38099${process.pid}%`]);
-    await pool.query("DELETE FROM audit_events WHERE actor_id = ANY($1::uuid[]) AND action IN ('vehicle.created','offer.created','demand.created','demand.cancelled','proposal.created','proposal.countered','proposal.agreed','proposal.accepted','user.blocked','user.unblocked','journey.leg.booked','journey.replanning')", [[ids.driver, ...ids.passengers]]);
+    await pool.query("DELETE FROM audit_events WHERE actor_id = ANY($1::uuid[]) AND action IN ('vehicle.created','offer.created','demand.created','demand.cancelled','proposal.created','proposal.countered','proposal.agreed','proposal.accepted','user.blocked','user.unblocked','journey.leg.booked','journey.replanning','journey.rescue.booked')", [[ids.driver, ...ids.passengers]]);
     await pool.query("DELETE FROM audit_events WHERE entity_id=ANY($1::uuid[]) OR (actor_id=ANY($2::uuid[]) AND action LIKE 'moderation.%')", [moderationCaseIds, [passengerA, ids.admin]]);
     await pool.query('DELETE FROM moderation_cases WHERE id=ANY($1::uuid[])', [moderationCaseIds]);
     await pool.query('DELETE FROM realtime_outbox WHERE recipient_ids && $1::uuid[]', [[ids.driver, ...ids.passengers, ids.admin]]);
@@ -287,6 +294,44 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(inboxBody.data.items.length, 1);
     assert.ok(inboxBody.data.nextCursor);
     assert.equal(inboxBody.data.unreadCount, 4);
+
+    const rescueResponse = await fetch(`${apiUrl}/api/v1/bookings/${linkedBooking.data.id}/rescue`, {
+      headers: { 'x-dev-user-id': passengerA },
+    });
+    assert.equal(rescueResponse.status, 200);
+    const rescueBody = await rescueResponse.json() as { data: { alternatives: Array<{ id: string }> } };
+    assert.ok(rescueBody.data.alternatives.some((alternative) => alternative.id === ids.rescueOffer));
+    const rescueKeys = [`journey-rescue-${crypto.randomUUID()}`, `journey-rescue-${crypto.randomUUID()}`];
+    const rescueRequest = (key: string) => fetch(`${apiUrl}/api/v1/bookings`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': key },
+      body: JSON.stringify({ offerId: ids.rescueOffer, seats: 1, journeyId: journey.id, journeyLegId: journey.legs[0].id }),
+    });
+    const rescueRaces = await Promise.all(rescueKeys.map((key) => rescueRequest(key)));
+    assert.deepEqual(rescueRaces.map((response) => response.status).sort(), [201, 409], 'concurrent rescue attempts create exactly one replacement booking');
+    const winningIndex = rescueRaces.findIndex((response) => response.status === 201);
+    const rescuedBody = await rescueRaces[winningIndex].json() as { data: { id: string }; replayed: boolean };
+    assert.equal(rescuedBody.replayed, false);
+    const replay = await rescueRequest(rescueKeys[winningIndex]);
+    assert.equal(replay.status, 200, 'rescue booking is idempotent against its original cancelled leg');
+    assert.equal((await replay.json() as { data: { id: string } }).data.id, rescuedBody.data.id);
+    const duplicateRescue = await fetch(`${apiUrl}/api/v1/bookings`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `journey-rescue-${crypto.randomUUID()}` },
+      body: JSON.stringify({ offerId: ids.rescueOffer, seats: 1, journeyId: journey.id, journeyLegId: journey.legs[0].id }),
+    });
+    assert.equal(duplicateRescue.status, 409, 'a replacement cannot be attached to the same cancelled leg twice');
+    const completedRescueJourney = await pool.query<{ state: string; confirmed_price_minor: number; legs: Array<{ ordinal: number; state: string; booking_id: string | null; metadata: Record<string, string> }> }>(
+      `SELECT j.state,j.confirmed_price_minor,
+              jsonb_agg(jsonb_build_object('ordinal',l.ordinal,'state',l.state,'booking_id',l.booking_id,'metadata',l.metadata) ORDER BY l.ordinal) AS legs
+         FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 GROUP BY j.id`, [journey.id],
+    );
+    assert.equal(completedRescueJourney.rows[0].state, 'READY');
+    assert.equal(completedRescueJourney.rows[0].confirmed_price_minor, 17000);
+    assert.equal(completedRescueJourney.rows[0].legs.length, 2);
+    assert.equal(completedRescueJourney.rows[0].legs[0].state, 'REPLACED');
+    assert.equal(completedRescueJourney.rows[0].legs[0].booking_id, linkedBooking.data.id);
+    assert.equal(completedRescueJourney.rows[0].legs[1].state, 'CONFIRMED');
+    assert.equal(completedRescueJourney.rows[0].legs[1].booking_id, rescuedBody.data.id);
+    assert.equal(completedRescueJourney.rows[0].legs[1].metadata.rescue_from_leg_id, journey.legs[0].id);
     const latestNotification = inboxBody.data.items[0];
     assert.equal(latestNotification.title, 'План маршруту оновлено');
     assert.equal(JSON.stringify(latestNotification).includes('phone'), false);
@@ -532,19 +577,24 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
 
   it('returns only current nearby MARSHGO rides with enough seats for a cancelled booking', async () => {
     const nearbyOfferId = crypto.randomUUID();
+    const corridorOfferId = crypto.randomUUID();
     const farOfferId = crypto.randomUUID();
     const noSeatsOfferId = crypto.randomUUID();
-    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,departure_at,price_per_seat_minor,total_seats,available_seats)
+    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,route_source,price_per_seat_minor,total_seats,available_seats)
       VALUES
       ($1,$2,$3,'Rescue Nearby Origin','Rescue Nearby Destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
-        now()+interval '10 days 30 minutes',22000,4,4),
+        NULL,now()+interval '10 days 30 minutes',NULL,22000,4,4),
+      ($6,$2,$3,'Rescue Corridor Origin','Rescue Corridor Destination',
+        ST_SetSRID(ST_MakePoint(24.5,49.5),4326)::geography,ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
+        ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[24.5,49.5],[25.0,50.0]]}'),4326),
+        now()+interval '10 days 40 minutes','osrm',24000,4,4),
       ($4,$2,$3,'Rescue Far Origin','Rescue Far Destination',
         ST_SetSRID(ST_MakePoint(27.0,52.0),4326)::geography,ST_SetSRID(ST_MakePoint(28.0,53.0),4326)::geography,
-        now()+interval '10 days 30 minutes',18000,4,4),
+        NULL,now()+interval '10 days 30 minutes',NULL,18000,4,4),
       ($5,$2,$3,'Rescue Sold Out Origin','Rescue Sold Out Destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
-        now()+interval '10 days 30 minutes',16000,4,0)`, [nearbyOfferId, ids.driver, ids.vehicle, farOfferId, noSeatsOfferId]);
+        NULL,now()+interval '10 days 30 minutes',NULL,16000,4,0)`, [nearbyOfferId, ids.driver, ids.vehicle, farOfferId, noSeatsOfferId, corridorOfferId]);
     const bookingResponse = await fetch(`${apiUrl}/api/v1/bookings`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `rescue-book-${crypto.randomUUID()}` },
       body: JSON.stringify({ offerId: ids.offer, seats: 1 }),
@@ -562,15 +612,18 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(denied.status, 404);
     const rescueResponse = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rescue`, { headers: { 'x-dev-user-id': passengerA } });
     assert.equal(rescueResponse.status, 200);
-    const rescue = await rescueResponse.json() as { data: { booking_id: string; checked_at: string; radius_m: number; alternatives: Array<{ id: string; source: string; available_seats: number; origin_distance_m: number; destination_distance_m: number }> } };
+    const rescue = await rescueResponse.json() as { data: { booking_id: string; checked_at: string; radius_m: number; alternatives: Array<{ id: string; source: string; available_seats: number; origin_distance_m: number; destination_distance_m: number; rescue_match: string; route_origin_distance_m: number | null }> } };
     assert.equal(rescue.data.booking_id, booking.data.id);
     assert.ok(Number.isFinite(Date.parse(rescue.data.checked_at)));
     assert.equal(rescue.data.radius_m, 20_000);
-    assert.deepEqual(rescue.data.alternatives.map(item => item.id), [nearbyOfferId]);
+    assert.deepEqual(rescue.data.alternatives.map(item => item.id), [nearbyOfferId, corridorOfferId]);
     assert.equal(rescue.data.alternatives[0].source, 'MARSHGO Community');
     assert.equal(rescue.data.alternatives[0].available_seats, 4);
     assert.equal(rescue.data.alternatives[0].origin_distance_m, 0);
     assert.equal(rescue.data.alternatives[0].destination_distance_m, 0);
+    assert.equal(rescue.data.alternatives[0].rescue_match, 'ENDPOINTS');
+    assert.equal(rescue.data.alternatives[1].rescue_match, 'ALONG_CANCELLED_ROUTE');
+    assert.ok((rescue.data.alternatives[1].route_origin_distance_m ?? Infinity) < 1_000);
   });
 
   it('accepts private safety reports only from booking participants and restricts staff review', async () => {
@@ -804,6 +857,23 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.deepEqual(rejectionState.rows.map((row) => row.status), ['rejected', 'rejected']);
     const rejectedVehicle = await pool.query('SELECT verification_status FROM vehicles WHERE id=$1', [apiCreatedVehicleId]);
     assert.equal(rejectedVehicle.rows[0].verification_status, 'rejected');
+    const ownerVerificationResponse = await fetch(`${apiUrl}/api/v1/users/me/verification`, { headers: { 'x-dev-user-id': ids.driver } });
+    assert.equal(ownerVerificationResponse.status, 200);
+    const ownerVerification = await ownerVerificationResponse.json() as { data: Array<{ id: string; vehicle_id: string; status: string; review_note: string | null }> };
+    const ownerRejectedRecord = ownerVerification.data.find((record) => record.id === rejectedVehicleRecord);
+    assert.deepEqual(ownerRejectedRecord && {
+      id: ownerRejectedRecord.id,
+      vehicle_id: ownerRejectedRecord.vehicle_id,
+      status: ownerRejectedRecord.status,
+      review_note: ownerRejectedRecord.review_note,
+    }, {
+      id: rejectedVehicleRecord,
+      vehicle_id: apiCreatedVehicleId,
+      status: 'rejected',
+      review_note: 'Document is unreadable',
+    });
+    const unrelatedUserVerification = await fetch(`${apiUrl}/api/v1/users/me/verification`, { headers: { 'x-dev-user-id': passengerA } });
+    assert.equal((await unrelatedUserVerification.json() as { data: unknown[] }).data.length, 0);
     // This shared fixture is used by the next negotiation test; restore its verified state after asserting rejection behavior.
     await pool.query("UPDATE vehicles SET verification_status='verified' WHERE id=$1", [apiCreatedVehicleId]);
   });
@@ -1005,10 +1075,16 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(ids.driver),
     });
     assert.equal((await secondCompletion.json() as { data: { status: string } }).data.status, 'completed');
+    const bookingsBeforeReview = await fetch(`${apiUrl}/api/v1/bookings`, { headers: headers(passengerA) });
+    const completedBookingBeforeReview = (await bookingsBeforeReview.json() as { data: Array<{ id: string; current_user_has_review: boolean }> }).data.find((item) => item.id === booking.data.id);
+    assert.equal(completedBookingBeforeReview?.current_user_has_review, false);
     const passengerReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
       method: 'POST', headers: headers(passengerA), body: JSON.stringify({ rating: 5, comment: 'Доїхали вчасно.' }),
     });
     assert.equal(passengerReview.status, 201);
+    const bookingsAfterReview = await fetch(`${apiUrl}/api/v1/bookings`, { headers: headers(passengerA) });
+    const completedBookingAfterReview = (await bookingsAfterReview.json() as { data: Array<{ id: string; current_user_has_review: boolean }> }).data.find((item) => item.id === booking.data.id);
+    assert.equal(completedBookingAfterReview?.current_user_has_review, true);
     const driverReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
       method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ rating: 4 }),
     });
@@ -1050,10 +1126,65 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(passengerA), body: JSON.stringify({ body: 'Підтверджую час виїзду.' }),
     });
     assert.equal(message.status, 201);
+    const unreadForDriver = await fetch(`${apiUrl}/api/v1/conversation-unread-counts`, { headers: headers(ids.driver) });
+    assert.equal(unreadForDriver.status, 200);
+    const driverUnread = await unreadForDriver.json() as { data: Array<{ conversation_id: string; booking_id: string; unread_count: number }> };
+    assert.deepEqual(driverUnread.data.find((item) => item.conversation_id === conversation.data.id), {
+      conversation_id: conversation.data.id, booking_id: booking.data.id, unread_count: 1,
+    });
+    const unreadForOutsider = await fetch(`${apiUrl}/api/v1/conversation-unread-counts`, { headers: headers(passengerB) });
+    assert.equal(unreadForOutsider.status, 200);
+    assert.equal((await unreadForOutsider.json() as { data: Array<{ conversation_id: string }> }).data.some((item) => item.conversation_id === conversation.data.id), false);
     const history = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
       headers: headers(ids.driver),
     });
-    assert.equal((await history.json() as { data: Array<{ body: string }> }).data[0].body, 'Підтверджую час виїзду.');
+    assert.equal((await history.json() as { data: { messages: Array<{ body: string }> } }).data.messages[0].body, 'Підтверджую час виїзду.');
+    const markRead = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/read`, { method: 'POST', headers: headers(ids.driver) });
+    assert.equal(markRead.status, 200);
+    const driverReadState = (await markRead.json() as { data: { conversation_id: string; last_read_message_id: string; unread_count: number } }).data;
+    assert.equal(driverReadState.conversation_id, conversation.data.id);
+    assert.ok(driverReadState.last_read_message_id);
+    assert.equal(driverReadState.unread_count, 0);
+    const driverReply = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
+      method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ body: 'Чекаю біля входу.' }),
+    });
+    assert.equal(driverReply.status, 201);
+    await pool.query(
+      `INSERT INTO messages(conversation_id,sender_id,body,created_at)
+       SELECT $1,$2,'Історія сторінка ' || seq::text,now()-((1000-seq)*interval '1 second')
+         FROM generate_series(1,55) AS seq`, [conversation.data.id, passengerA],
+    );
+    const firstMessagePage = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, { headers: headers(ids.driver) });
+    assert.equal(firstMessagePage.status, 200);
+    const firstPage = (await firstMessagePage.json() as { data: { messages: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } } }).data;
+    assert.equal(firstPage.messages.length, 50);
+    assert.equal(firstPage.pagination.hasMore, true);
+    assert.equal(firstPage.messages.at(-1)?.body, 'Чекаю біля входу.');
+    assert.equal(firstPage.pagination.nextCursor, firstPage.messages[0]?.id);
+    const secondMessagePage = await fetch(
+      `${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?before=${firstPage.pagination.nextCursor}`,
+      { headers: headers(ids.driver) },
+    );
+    assert.equal(secondMessagePage.status, 200);
+    const secondPage = (await secondMessagePage.json() as { data: { messages: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } } }).data;
+    assert.equal(secondPage.messages.length, 7);
+    assert.equal(secondPage.messages.at(-1)?.body, 'Історія сторінка 7');
+    assert.equal(secondPage.pagination.hasMore, false);
+    assert.equal(secondPage.pagination.nextCursor, null);
+    assert.equal(firstPage.messages.some((item) => secondPage.messages.some((older) => older.id === item.id)), false);
+    const invalidMessageCursor = await fetch(
+      `${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?before=not-a-uuid`,
+      { headers: headers(ids.driver) },
+    );
+    assert.equal(invalidMessageCursor.status, 400);
+    const unreadForPassenger = await fetch(`${apiUrl}/api/v1/conversation-unread-counts`, { headers: headers(passengerA) });
+    const passengerUnread = await unreadForPassenger.json() as { data: Array<{ conversation_id: string; unread_count: number }> };
+    assert.equal(passengerUnread.data.find((item) => item.conversation_id === conversation.data.id)?.unread_count, 1);
+    const passengerMarkRead = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/read`, { method: 'POST', headers: headers(passengerA) });
+    assert.equal(passengerMarkRead.status, 200);
+    assert.equal((await passengerMarkRead.json() as { data: { unread_count: number } }).data.unread_count, 0);
+    const invalidRead = await fetch(`${apiUrl}/api/v1/conversations/not-a-uuid/read`, { method: 'POST', headers: headers(passengerA) });
+    assert.equal(invalidRead.status, 404);
     const outside = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
       method: 'POST', headers: headers(passengerB), body: JSON.stringify({ body: 'I should not see this.' }),
     });

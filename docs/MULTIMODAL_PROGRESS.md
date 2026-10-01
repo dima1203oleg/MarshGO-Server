@@ -170,3 +170,23 @@
 
 **NEXT**
 - Add a monitor that evaluates real provider/vehicle ETA observations against subsequent Journey leg windows. Activate it only for legs with verified schedule and uncertainty data; provider feeds remain the gating external dependency.
+
+## Phase E continuation — route-aware Community Rescue candidates
+
+**Status:** PARTIAL.
+
+**DONE**
+- The passenger-scoped rescue search still returns time-compatible, capacity-checked published rides that connect near the cancelled route's endpoints.
+- It now also finds road-routed Community offers whose pickup lies within 20 km of the cancelled offer's stored road geometry, advances in the correct direction along that geometry, and ends within 20 km of the original destination.
+- Candidate DTOs distinguish endpoint matches from corridor matches and report the pickup's distance from the cancelled route. Offers without real stored route geometry cannot qualify through the corridor branch.
+- Added a PostGIS API integration scenario for a candidate beginning well after the original origin but following the cancelled route, while retaining checks for endpoint matches, distant candidates, insufficient seats and participant authorization.
+
+**TESTS**
+- `npm run typecheck`: PASS.
+- `npm run lint:all`: PASS.
+- `npm test`: 46 passed, 1 opt-in DB integration test skipped.
+- `npm run test:integration`: PASS — Journey schema 2/2; booking/Rescue 11/11; navigation 1/1; Redis multi-instance realtime 1/1; API restart durability 1/1; shared rate limits 1/1.
+
+**LIMITATIONS**
+- This returns suggestions only. It does not book replacements, search transit/taxi partners, or monitor an active multi-leg Journey.
+- Road geometry must exist and be trustworthy; deployments without a configured routing provider must not fabricate geometry.

@@ -1,5 +1,7 @@
 import type { RoadRoute } from '../routing';
 
+export const MAX_NAVIGATION_STOPS = 30;
+
 export type StopKind = 'pickup' | 'dropoff';
 export interface NavigationStop {
   bookingId: string;
@@ -98,7 +100,7 @@ export async function optimizeStopInsertion(
     || !Array.isArray(input.onboardBookingIds) || new Set(input.onboardBookingIds).size !== input.onboardBookingIds.length
     || !Number.isFinite(input.maxDetourMeters) || input.maxDetourMeters < 0
     || !Number.isFinite(input.maxDetourSeconds) || input.maxDetourSeconds < 0
-    || input.existingStops.length > 26) {
+    || input.existingStops.length + 2 > MAX_NAVIGATION_STOPS) {
     throw new TypeError('stop insertion input is invalid');
   }
   if (candidate.seats > input.vehicleCapacity) return null;

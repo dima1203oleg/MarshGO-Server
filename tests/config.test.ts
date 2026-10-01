@@ -4,6 +4,7 @@ import { validateRuntimeConfig } from '../server/config';
 
 const validProductionConfig: NodeJS.ProcessEnv = {
   NODE_ENV: 'production',
+  TRUST_PROXY_HOPS: '2',
   SESSION_SECRET: 'a'.repeat(64),
   CORS_ORIGINS: 'https://marshgo.example,capacitor://localhost',
   SMS_PROVIDER: 'twilio',
@@ -28,6 +29,13 @@ describe('runtime production configuration', () => {
 
   it('does not apply production restrictions to development', () => {
     assert.doesNotThrow(() => validateRuntimeConfig({ NODE_ENV: 'development', AUTH_DEV_OTP: 'true' }));
+  });
+
+  it('requires an explicit, bounded trusted proxy topology in production', () => {
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRUST_PROXY_HOPS: undefined }), /TRUST_PROXY_HOPS is required/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRUST_PROXY_HOPS: '1.5' }), /integer from 0 to 5/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRUST_PROXY_HOPS: '6' }), /integer from 0 to 5/);
+    assert.doesNotThrow(() => validateRuntimeConfig({ ...validProductionConfig, TRUST_PROXY_HOPS: '0' }));
   });
 
   it('rejects development auth bypass in production', () => {
