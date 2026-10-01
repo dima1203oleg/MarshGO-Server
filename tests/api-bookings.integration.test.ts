@@ -861,7 +861,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       body: JSON.stringify({ vehicleId: apiCreatedVehicleId, priceMinor: 17000, departureAt: earliest.toISOString(), comment: 'Can take two passengers' }),
     });
     assert.equal(proposalResponse.status, 201);
-    const proposal = await proposalResponse.json() as { data: { id: string } };
+    const proposal = await proposalResponse.json() as { data: { id: string; demand_id: string } };
 
     const sameActorCounter = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/counter`, {
       method: 'POST', headers: headers(ids.driver),
