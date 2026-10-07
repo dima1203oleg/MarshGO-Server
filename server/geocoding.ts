@@ -58,7 +58,21 @@ function parseProviderSuggestions(payload: unknown): PlaceSuggestion[] {
     : parseNominatimSuggestions(payload);
 }
 
+const reverseCache = new Map<string, { at: number; place: PlaceSuggestion }>();
+const reverseCacheTtlMs = 10 * 60_000;
+
+/** Map-picker pans fire many nearby lookups; a ~100 m grid cache keeps providers within their rate limits. */
 export async function reverseGeocode(latitude: number, longitude: number): Promise<PlaceSuggestion> {
+  const key = `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+  const hit = reverseCache.get(key);
+  if (hit && Date.now() - hit.at < reverseCacheTtlMs) return hit.place;
+  const place = await reverseGeocodeUncached(latitude, longitude);
+  if (reverseCache.size > 500) reverseCache.delete(reverseCache.keys().next().value as string);
+  reverseCache.set(key, { at: Date.now(), place });
+  return place;
+}
+
+async function reverseGeocodeUncached(latitude: number, longitude: number): Promise<PlaceSuggestion> {
   if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180) {
     throw new GeocodingUnavailableError('Reverse geocoding coordinates are invalid');
   }

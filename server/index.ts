@@ -1,5 +1,7 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
+import { cert, getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import express, { NextFunction, Request, Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { Pool, PoolClient } from 'pg';
@@ -19,6 +21,11 @@ import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOpt
 import { selectRepresentativeJourneys } from './journey/scoring';
 import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
+import { cachedSnapshot, selectNearby } from './mobility/nearby';
+import type { MobilityAssetType } from './mobility/types';
+import { shouldGrantAdmin } from './adminPhones';
+import { testProviderConnection } from './mobility/connection';
+import { assertPublicHttpsUrl, UnsafeUrlError } from './mobility/safeFetch';
 import { GeocodingUnavailableError, reverseGeocode, suggestPlaces } from './geocoding';
 import { retainNavigationSessions } from './navigation/sessionRetention';
 import { expireDueProposals } from './proposals/expiry';
@@ -180,6 +187,7 @@ const placeSearchLimiter = rateLimit({
   limit: 60,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   ...(process.env.REDIS_URL ? { store: new RedisRateLimitStore(() => realtimeRedis, `${rateLimitPrefix}place-search:`) } : {}),
 });
 const apiRateLimitWindowMs = Number(process.env.API_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
@@ -187,6 +195,7 @@ const apiRateLimitLimit = Number(process.env.API_RATE_LIMIT_LIMIT) || 300;
 const apiRateLimitStore = process.env.REDIS_URL ? new RedisRateLimitStore(() => realtimeRedis, rateLimitPrefix) : undefined;
 
 app.disable('x-powered-by');
+app.set('trust proxy', 1);
 app.use((req, res, next) => {
   const requestId = crypto.randomUUID();
   res.locals.requestId = requestId;
@@ -216,6 +225,7 @@ app.use('/api', rateLimit({
   ...(apiRateLimitStore ? { store: apiRateLimitStore } : {}),
   standardHeaders: 'draft-8',
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   handler: (_req, res) => res.status(429).json({ error: { code: 'rate_limit_exceeded', message: 'Too many requests', requestId: res.locals.requestId } }),
 }));
 
@@ -324,6 +334,140 @@ function requireStaff(req: AuthenticatedRequest, res: Response, next: NextFuncti
     next();
   }).catch(next);
 }
+
+function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  pool.query<{ allowed: boolean }>(`SELECT EXISTS(SELECT 1 FROM user_roles WHERE user_id=$1 AND role='admin') AS allowed`, [req.userId])
+    .then(({ rows }) => {
+      if (!rows[0]?.allowed) return res.status(403).json({ error: { code: 'forbidden', message: 'Admin role is required', requestId: res.locals.requestId } });
+      next();
+    }).catch(next);
+}
+
+const providerTypes = ['public_transit', 'bike', 'ebike', 'scooter', 'moped', 'carsharing', 'taxi', 'carpool', 'on_demand', 'other'];
+const sourceTypes = ['gtfs', 'gtfs_rt', 'gbfs', 'gofs', 'rest', 'graphql', 'websocket', 'json', 'csv', 'marshgo'];
+const providerColumns = 'id,name,city,country,provider_type,source_type,feed_url,realtime_url,priority,status,health,access,license,update_frequency,coverage,source_ref,last_checked_at,last_sync_at,last_error,last_report,created_at,updated_at';
+async function auditMobility(actorId: string | undefined, action: string, providerId: string, details: Record<string, unknown>) {
+  await pool.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)', [actorId, action, 'mobility_provider', providerId, JSON.stringify(details)]);
+}
+
+const rentalTypeMap: Record<string, { providerTypes: string[]; assetTypes: MobilityAssetType[] }> = {
+  bike: { providerTypes: ['bike', 'ebike'], assetTypes: ['BIKE', 'EBIKE'] },
+  scooter: { providerTypes: ['scooter'], assetTypes: ['SCOOTER'] },
+  moped: { providerTypes: ['moped'], assetTypes: ['MOPED'] },
+  carsharing: { providerTypes: ['carsharing'], assetTypes: ['CARSHARING'] },
+};
+
+/** What the client may offer: rental modes backed by healthy GBFS providers and public-transit types backed by healthy GTFS feeds. */
+app.get('/api/v1/mobility/availability', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query<{ provider_type: string; source_type: string; city: string; last_report: { counts?: Record<string, number> } }>(
+    `SELECT provider_type,source_type,city,last_report FROM mobility_providers WHERE status='enabled' AND health='healthy' AND source_type IN ('gbfs','gtfs')`);
+  const modes = Object.entries(rentalTypeMap).map(([mode, config]) => {
+    const matching = rows.filter((row) => row.source_type === 'gbfs' && config.providerTypes.includes(row.provider_type));
+    return { mode, available: matching.length > 0, cities: [...new Set(matching.map((row) => row.city))].sort() };
+  });
+  const transit: Record<string, { available: boolean; cities: string[] }> = {};
+  for (const type of ['bus', 'tram', 'trolleybus', 'metro', 'train']) {
+    const cities = [...new Set(rows.filter((row) => row.source_type === 'gtfs' && (row.last_report?.counts?.[`routes_${type}`] ?? 0) > 0).map((row) => row.city))].sort();
+    transit[type] = { available: cities.length > 0, cities };
+  }
+  res.json({ data: { modes, transit } });
+}));
+
+app.get('/api/v1/mobility/nearby', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
+  const mode = typeof req.query.mode === 'string' ? req.query.mode : '';
+  const lat = Number(req.query.lat), lon = Number(req.query.lon);
+  const radiusM = req.query.radiusM === undefined ? 1000 : Number(req.query.radiusM);
+  const config = rentalTypeMap[mode];
+  if (!config || !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180 || !Number.isFinite(radiusM) || radiusM < 100 || radiusM > 3000) {
+    throw new ApiError(400, 'mode, lat, lon and radiusM (100-3000) are required', 'invalid_nearby_query');
+  }
+  const { rows: providers } = await pool.query<{ id: string; name: string; feed_url: string }>(
+    `SELECT id,name,feed_url FROM mobility_providers WHERE status='enabled' AND health='healthy' AND source_type='gbfs' AND provider_type = ANY($1) ORDER BY priority`, [config.providerTypes]);
+  const settled = await Promise.allSettled(providers.map(async (provider) => ({ providerId: provider.id, providerName: provider.name, snapshot: await cachedSnapshot(provider.id, provider.feed_url) })));
+  const snapshots = settled.flatMap((item) => item.status === 'fulfilled' ? [item.value] : []);
+  const result = selectNearby(snapshots, [lon, lat], radiusM, config.assetTypes);
+  res.json({ data: { mode, radiusM, providers: providers.length, failedProviders: settled.length - snapshots.length, ...result } });
+}));
+
+app.get('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(`SELECT ${providerColumns} FROM mobility_providers ORDER BY city, priority, name`);
+  res.json({ data: rows });
+}));
+
+app.post('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const { name, city, providerType, sourceType, feedUrl, realtimeUrl, priority } = req.body ?? {};
+  if (typeof name !== 'string' || name.trim().length < 2 || name.length > 120 || typeof city !== 'string' || city.trim().length < 2 || city.length > 120 ||
+      !providerTypes.includes(providerType) || !sourceTypes.includes(sourceType) || typeof feedUrl !== 'string' ||
+      (realtimeUrl !== undefined && realtimeUrl !== null && typeof realtimeUrl !== 'string') ||
+      (priority !== undefined && (!Number.isInteger(priority) || priority < 1 || priority > 1000))) {
+    throw new ApiError(400, 'invalid mobility provider', 'invalid_provider');
+  }
+  try { await assertPublicHttpsUrl(feedUrl); if (realtimeUrl) await assertPublicHttpsUrl(realtimeUrl); }
+  catch (error) { if (error instanceof UnsafeUrlError) throw new ApiError(400, error.message, 'unsafe_url'); throw error; }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO mobility_providers(name,city,provider_type,source_type,feed_url,realtime_url,priority,created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${providerColumns}`,
+      [name.trim(), city.trim(), providerType, sourceType, feedUrl, realtimeUrl || null, priority ?? 100, req.userId],
+    );
+    await auditMobility(req.userId, 'mobility.provider.created', rows[0].id, { name: rows[0].name, city: rows[0].city, sourceType });
+    res.status(201).json({ data: rows[0] });
+  } catch (error) {
+    if ((error as { code?: string }).code === '23505') throw new ApiError(409, 'A provider with this name already exists in the city', 'provider_exists');
+    throw error;
+  }
+}));
+
+app.patch('/api/v1/admin/mobility/providers/:id', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid provider id', 'invalid_provider_id');
+  const { status, priority } = req.body ?? {};
+  if ((status !== undefined && !['enabled', 'disabled', 'paused'].includes(status)) || (priority !== undefined && (!Number.isInteger(priority) || priority < 1 || priority > 1000)) || (status === undefined && priority === undefined)) {
+    throw new ApiError(400, 'status or priority is required', 'invalid_provider_update');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await client.query('SELECT status,priority,health,access FROM mobility_providers WHERE id=$1 FOR UPDATE', [req.params.id]);
+    if (!current.rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
+    if (status === 'enabled' && current.rows[0].access !== 'open') throw new ApiError(409, 'This source needs credentials or a secure endpoint before it can be enabled', 'provider_access_required');
+    if (status === 'enabled' && current.rows[0].health === 'offline') throw new ApiError(409, 'Run a successful connection test before enabling an offline provider', 'provider_offline');
+    const { rows } = await client.query(`UPDATE mobility_providers SET status=COALESCE($2,status),priority=COALESCE($3,priority),updated_at=now() WHERE id=$1 RETURNING ${providerColumns}`, [req.params.id, status ?? null, priority ?? null]);
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)',
+      [req.userId, 'mobility.provider.updated', 'mobility_provider', req.params.id, JSON.stringify({ old: { status: current.rows[0].status, priority: current.rows[0].priority }, new: { status: rows[0].status, priority: rows[0].priority } })]);
+    await client.query('COMMIT');
+    res.json({ data: rows[0] });
+  } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+}));
+
+app.delete('/api/v1/admin/mobility/providers/:id', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid provider id', 'invalid_provider_id');
+  const { rows } = await pool.query('DELETE FROM mobility_providers WHERE id=$1 RETURNING name,city', [req.params.id]);
+  if (!rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
+  await auditMobility(req.userId, 'mobility.provider.deleted', req.params.id, { name: rows[0].name, city: rows[0].city });
+  res.status(204).end();
+}));
+
+app.post('/api/v1/admin/mobility/providers/:id/test', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid provider id', 'invalid_provider_id');
+  const found = await pool.query<{ id: string; source_type: string; feed_url: string }>('SELECT id,source_type,feed_url FROM mobility_providers WHERE id=$1', [req.params.id]);
+  if (!found.rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
+  const report = await testProviderConnection(found.rows[0]);
+  const { rows } = await pool.query(
+    `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_sync_at=CASE WHEN $2='healthy' THEN now() ELSE last_sync_at END,last_error=$3,last_report=$4,
+       status=CASE WHEN $2='offline' AND status='enabled' THEN 'paused' ELSE status END,updated_at=now() WHERE id=$1 RETURNING ${providerColumns}`,
+    [req.params.id, report.health, report.error ?? null, JSON.stringify(report)],
+  );
+  await auditMobility(req.userId, 'mobility.provider.tested', req.params.id, { health: report.health, error: report.error ?? null });
+  res.json({ data: { provider: rows[0], report } });
+}));
+
+app.get('/api/v1/admin/mobility/audit', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT a.id,a.action,a.entity_id,a.details,a.created_at,u.display_name AS actor FROM audit_events a LEFT JOIN users u ON u.id=a.actor_id
+      WHERE a.entity_type='mobility_provider' ORDER BY a.created_at DESC,a.id DESC LIMIT 100`,
+  );
+  res.json({ data: rows });
+}));
 
 app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
 app.get('/readyz', asyncHandler(async (_req, res) => {
@@ -922,6 +1066,14 @@ async function expireStaleProposals() {
   ));
 }
 
+async function grantConfiguredAdmin(client: PoolClient, userId: string, phone: string): Promise<boolean> {
+  if (!shouldGrantAdmin(phone)) return false;
+  const inserted = await client.query('INSERT INTO user_roles(user_id,role) VALUES ($1,$2) ON CONFLICT DO NOTHING', [userId, 'admin']);
+  await client.query(`UPDATE users SET roles=(SELECT ARRAY(SELECT DISTINCT unnest(roles || ARRAY['admin']::text[]) ORDER BY 1)) WHERE id=$1 AND NOT ('admin' = ANY(roles))`, [userId]);
+  if (inserted.rowCount) await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$1)', [userId, 'role.admin.granted_by_config', 'user']);
+  return true;
+}
+
 app.post('/api/v1/auth/otp/request', asyncHandler(async (req, res) => {
   const phone = req.body?.phone;
   const requestedName = req.body?.displayName;
@@ -1001,7 +1153,7 @@ app.post('/api/v1/auth/otp/verify', asyncHandler(async (req, res) => {
     } else {
       const expected = Buffer.from(challenge.code_hash, 'hex');
       const actual = Buffer.from(otpHash(phone, code), 'hex');
-      if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+      if ((expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual))) {
         await client.query('UPDATE otp_challenges SET attempts=attempts+1 WHERE id=$1', [challenge.id]);
         invalidCode = true;
       } else {
@@ -1024,7 +1176,7 @@ app.post('/api/v1/auth/otp/verify', asyncHandler(async (req, res) => {
             user = inserted.rows[0];
             await client.query('INSERT INTO user_roles(user_id,role) VALUES ($1,$2)', [user.id, 'passenger']);
           }
-          if (user) session = await insertSession(client, user.id);
+          if (user) { if (await grantConfiguredAdmin(client, user.id, phone) && !user.roles.includes('admin')) user.roles = [...user.roles, 'admin']; session = await insertSession(client, user.id); }
         }
       }
     }
@@ -1036,6 +1188,73 @@ app.post('/api/v1/auth/otp/verify', asyncHandler(async (req, res) => {
     client.release();
   }
   if (invalidCode) throw new ApiError(401, 'Verification code is invalid or expired', 'otp_invalid');
+  if (unavailableAccount || !user || !session) throw new ApiError(403, 'Account is not available', 'account_unavailable');
+  setRefreshCookie(res, session.refreshToken, refreshLifetimeMs);
+  res.json({ data: { user, accessToken: session.accessToken, accessExpiresAt: session.accessExpiresAt.toISOString() } });
+}));
+
+function firebaseAuth() {
+  const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = process.env;
+  if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY) return null;
+  const app = getApps()[0] ?? initializeApp({ credential: cert({ projectId: FIREBASE_PROJECT_ID, clientEmail: FIREBASE_CLIENT_EMAIL, privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') }) });
+  return getAuth(app);
+}
+
+app.post('/api/v1/auth/firebase/verify', asyncHandler(async (req, res) => {
+  const idToken = req.body?.idToken;
+  const displayName = req.body?.displayName;
+  if (typeof idToken !== 'string' || idToken.length > 4096) throw new ApiError(400, 'Firebase ID token is required');
+  if (displayName !== undefined && (typeof displayName !== 'string' || displayName.trim().length < 2 || displayName.trim().length > 80)) {
+    throw new ApiError(400, 'Name must contain 2–80 characters');
+  }
+  const auth = firebaseAuth();
+  if (!auth) throw new ApiError(503, 'Firebase sign-in is not configured', 'firebase_unavailable');
+
+  let decodedToken;
+  try {
+    decodedToken = await auth.verifyIdToken(idToken, true);
+  } catch {
+    throw new ApiError(401, 'Invalid Firebase ID token', 'otp_invalid');
+  }
+
+  const phone = decodedToken.phone_number;
+  if (!phone) throw new ApiError(400, 'Firebase account must have a phone number');
+
+  const client = await pool.connect();
+  let session: Awaited<ReturnType<typeof insertSession>> | undefined;
+  let user: { id: string; display_name: string; phone_e164: string; roles: string[] } | undefined;
+  let unavailableAccount = false;
+
+  try {
+    await client.query('BEGIN');
+    const found = await client.query<{ id: string; display_name: string; phone_e164: string; roles: string[]; account_status: string }>(
+      'SELECT id,display_name,phone_e164,roles,account_status FROM users WHERE phone_e164=$1 FOR UPDATE', [phone],
+    );
+    if (found.rows[0]?.account_status !== undefined && found.rows[0].account_status !== 'active') {
+      unavailableAccount = true;
+    } else {
+      if (found.rows[0]) {
+        user = found.rows[0];
+        await client.query('UPDATE users SET is_verified=true,updated_at=now() WHERE id=$1', [user.id]);
+      } else {
+        const inserted = await client.query<{ id: string; display_name: string; phone_e164: string; roles: string[] }>(
+          `INSERT INTO users(phone_e164,display_name,roles,is_verified)
+           VALUES ($1,$2,ARRAY['passenger']::text[],true) RETURNING id,display_name,phone_e164,roles`,
+          [phone, typeof displayName === 'string' ? displayName.trim() : 'Новий користувач'],
+        );
+        user = inserted.rows[0];
+        await client.query('INSERT INTO user_roles(user_id,role) VALUES ($1,$2)', [user.id, 'passenger']);
+      }
+      if (user) session = await insertSession(client, user.id);
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
   if (unavailableAccount || !user || !session) throw new ApiError(403, 'Account is not available', 'account_unavailable');
   setRefreshCookie(res, session.refreshToken, refreshLifetimeMs);
   res.json({ data: { user, accessToken: session.accessToken, accessExpiresAt: session.accessExpiresAt.toISOString() } });
@@ -1332,7 +1551,8 @@ app.get('/api/v1/offers/:id', asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT o.id,o.origin_name,o.destination_name,o.departure_at,o.arrival_at,o.distance_m,o.duration_s,o.route_source,
             o.price_per_seat_minor,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
-            ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key
+            ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key,
+            CASE WHEN o.route IS NULL THEN NULL ELSE ST_AsGeoJSON(o.route::geometry)::json->'coordinates' END AS route_geometry
        FROM offers o JOIN users u ON u.id=o.driver_id
        LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
        LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true

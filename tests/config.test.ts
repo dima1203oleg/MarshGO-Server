@@ -43,6 +43,12 @@ describe('runtime production configuration', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, AUTH_DEV_OTP: 'true' }), /development authentication/);
   });
 
+  it('rejects non-Twilio SMS providers in production', () => {
+    for (const provider of ['development', 'getotp', '']) {
+      assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, SMS_PROVIDER: provider }), /SMS_PROVIDER=twilio/);
+    }
+  });
+
   it('requires strong sessions, explicit secure origins, and real SMS credentials', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, SESSION_SECRET: 'short' }), /32 bytes/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, CORS_ORIGINS: undefined }), /CORS_ORIGINS is required/);
