@@ -35,11 +35,11 @@ export function buildTransportCities(providers: TransportCityProvider[]) {
     const report = provider.last_report;
     const bbox = report?.bbox;
     if (bbox) city.bbox = city.bbox ? [Math.min(city.bbox[0], bbox[0]), Math.min(city.bbox[1], bbox[1]), Math.max(city.bbox[2], bbox[2]), Math.max(city.bbox[3], bbox[3])] : [...bbox];
-    if (provider.source_type === 'gtfs') {
-      city.routeCount += report?.counts?.routes ?? 0;
-      city.stopCount += report?.counts?.stops ?? 0;
+    if (provider.source_type === 'gtfs' || provider.source_type === 'geojson') {
+      city.routeCount += report?.counts?.routes ?? Object.entries(report?.counts ?? {}).filter(([key]) => key.startsWith('routes_')).reduce((sum, [, count]) => sum + count, 0);
+      city.stopCount += report?.counts?.stops ?? Object.entries(report?.counts ?? {}).filter(([key]) => key.startsWith('stops_')).reduce((sum, [, count]) => sum + count, 0);
       for (const [key, count] of Object.entries(report?.counts ?? {})) {
-        const match = /^routes_(bus|marshrutka|trolleybus|tram|metro|train|suburban|ferry)$/.exec(key);
+        const match = /^routes_(bus|marshrutka|trolleybus|tram|metro|train|suburban|city_train|funicular|ferry)$/.exec(key);
         if (match && count > 0) city.modes.add(match[1]);
       }
     }

@@ -24,7 +24,7 @@ import { selectRepresentativeJourneys } from './journey/scoring';
 import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
-import { cachedNetwork, cachedVehicles, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
+import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
 import { buildTransportCities } from './mobility/cities';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
@@ -351,8 +351,8 @@ function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFuncti
 }
 
 const providerTypes = ['public_transit', 'bike', 'ebike', 'scooter', 'moped', 'carsharing', 'taxi', 'carpool', 'on_demand', 'other'];
-const sourceTypes = ['gtfs', 'gtfs_rt', 'gbfs', 'gofs', 'rest', 'graphql', 'websocket', 'json', 'csv', 'marshgo'];
-const providerColumns = 'id,name,city,country,provider_type,source_type,feed_url,realtime_url,priority,status,health,access,license,update_frequency,coverage,source_ref,last_checked_at,last_sync_at,last_error,last_report,created_at,updated_at';
+const sourceTypes = ['gtfs', 'gtfs_rt', 'gbfs', 'gofs', 'rest', 'graphql', 'websocket', 'json', 'csv', 'geojson', 'marshgo'];
+const providerColumns = 'id,name,city,country,provider_type,source_type,feed_url,realtime_url,priority,status,health,access,license,update_frequency,coverage,source_ref,commercial_use,attribution_required,last_verified_at,discovery_status,last_checked_at,last_sync_at,last_error,last_report,created_at,updated_at';
 async function auditMobility(actorId: string | undefined, action: string, providerId: string, details: Record<string, unknown>) {
   await pool.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)', [actorId, action, 'mobility_provider', providerId, JSON.stringify(details)]);
 }
@@ -367,26 +367,27 @@ const rentalTypeMap: Record<string, { providerTypes: string[]; assetTypes: Mobil
 /** What the client may offer: rental modes backed by healthy GBFS providers and public-transit types backed by healthy GTFS feeds. */
 app.get('/api/v1/mobility/availability', requireAuth, asyncHandler(async (_req, res) => {
   const { rows } = await pool.query<{ provider_type: string; source_type: string; city: string; last_report: { counts?: Record<string, number> } }>(
-    `SELECT provider_type,source_type,city,last_report FROM mobility_providers WHERE status='enabled' AND health='healthy' AND source_type IN ('gbfs','gtfs','gtfs_rt','json')`);
+    `SELECT provider_type,source_type,city,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') AND source_type IN ('gbfs','gtfs','gtfs_rt','json','geojson')`);
   const modes = Object.entries(rentalTypeMap).map(([mode, config]) => {
     const matching = rows.filter((row) => row.source_type === 'gbfs' && config.providerTypes.includes(row.provider_type));
     return { mode, available: matching.length > 0, cities: [...new Set(matching.map((row) => row.city))].sort() };
   });
   const transit: Record<string, { available: boolean; cities: string[] }> = {};
-  for (const type of ['bus', 'marshrutka', 'tram', 'trolleybus', 'metro', 'train']) {
+  for (const type of ['bus', 'marshrutka', 'tram', 'trolleybus', 'metro', 'train', 'city_train', 'funicular']) {
     const cities = [...new Set(rows.filter((row) => row.provider_type === 'public_transit' && ((row.last_report?.counts?.[`routes_${type}`] ?? 0) > 0 || (row.last_report?.counts?.[`vehicles_${type}`] ?? 0) > 0)).map((row) => row.city))].sort();
     transit[type] = { available: cities.length > 0, cities };
   }
   res.json({ data: { modes, transit } });
 }));
 
-/** The 19 transport tiles. `service` narrows public-transit providers by what their feeds actually contain; `nationwide` tiles use sources with city "Україна". */
+/** Transport tiles. `service` narrows public-transit providers by what their feeds actually contain; `nationwide` tiles use sources with city "Україна". */
 const transportTiles: Array<{ id: string; providerTypes: string[]; service?: string; nationwide?: boolean }> = [
   { id: 'carpool', providerTypes: ['carpool'] }, { id: 'taxi', providerTypes: ['taxi'] }, { id: 'carsharing', providerTypes: ['carsharing'] },
   { id: 'car_rental', providerTypes: [] }, { id: 'transfer', providerTypes: [] },
   { id: 'bus', providerTypes: ['public_transit'], service: 'bus', nationwide: false }, { id: 'marshrutka', providerTypes: ['public_transit'], service: 'marshrutka', nationwide: false },
   { id: 'trolleybus', providerTypes: ['public_transit'], service: 'trolleybus', nationwide: false }, { id: 'tram', providerTypes: ['public_transit'], service: 'tram', nationwide: false }, { id: 'metro', providerTypes: ['public_transit'], service: 'metro', nationwide: false },
   { id: 'train', providerTypes: ['public_transit'], service: 'train', nationwide: true }, { id: 'suburban_train', providerTypes: ['public_transit'], service: 'suburban', nationwide: true },
+  { id: 'city_train', providerTypes: ['public_transit'], service: 'city_train', nationwide: false }, { id: 'funicular', providerTypes: ['public_transit'], service: 'funicular', nationwide: false },
   { id: 'intercity_bus', providerTypes: ['public_transit'], service: 'bus', nationwide: true },
   { id: 'bike', providerTypes: ['bike', 'ebike'] }, { id: 'scooter', providerTypes: ['scooter'] }, { id: 'moped', providerTypes: ['moped'] },
   { id: 'plane', providerTypes: [] }, { id: 'ferry', providerTypes: [] }, { id: 'walk', providerTypes: [] },
@@ -400,8 +401,8 @@ app.get('/api/v1/mobility/providers', requireAuth, asyncHandler(async (req, res)
   const lat = req.query.lat === undefined ? null : Number(req.query.lat), lon = req.query.lon === undefined ? null : Number(req.query.lon);
   if ((lat !== null && (!Number.isFinite(lat) || Math.abs(lat) > 90)) || (lon !== null && (!Number.isFinite(lon) || Math.abs(lon) > 180))) throw new ApiError(400, 'lat and lon must be valid coordinates', 'invalid_coordinate');
   const { rows } = await pool.query<{ name: string; city: string; provider_type: string; source_type: string; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
-    `SELECT name,city,provider_type,source_type,last_report FROM mobility_providers WHERE status='enabled' AND health='healthy' ORDER BY priority,name`);
-  const servicesOf = (report: { counts?: Record<string, number> }) => new Set(Object.entries(report?.counts ?? {}).filter(([key, count]) => count > 0 && /^(routes|vehicles)_(bus|marshrutka|tram|trolleybus|metro|suburban|train)$/.test(key)).map(([key]) => key.split('_')[1]));
+    `SELECT name,city,provider_type,source_type,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') ORDER BY priority,name`);
+  const servicesOf = (report: { counts?: Record<string, number> }) => new Set(Object.entries(report?.counts ?? {}).filter(([key, count]) => count > 0 && /^(routes|vehicles)_(bus|marshrutka|tram|trolleybus|metro|suburban|train|city_train|funicular)$/.test(key)).map(([key]) => key.slice(key.indexOf('_') + 1)));
   const data = transportTiles.map((tile) => {
     if (tile.id === 'carpool') return { transportType: tile.id, providers: [{ id: 'carpool:MARSHGO', name: 'MARSHGO Community', available: true, cities: [], sources: ['marshgo'], services: [] }] };
     const entries = new Map<string, { id: string; name: string; available: true; cities: Set<string>; sources: Set<string>; services: Set<string> }>();
@@ -468,6 +469,7 @@ app.get('/api/v1/transport/layers', requireAuth, asyncHandler(async (_req, res) 
   res.json({ data: [
     { id: 'PUBLIC_TRANSPORT', available: publicTransport }, { id: 'METRO', available: lines.has('metro') }, { id: 'BUS', available: lines.has('bus') || lines.has('marshrutka') },
     { id: 'TRAM', available: lines.has('tram') }, { id: 'TROLLEYBUS', available: lines.has('trolleybus') }, { id: 'STOPS', available: publicTransport || lines.has('train') || lines.has('metro') },
+    { id: 'MINIBUS', available: lines.has('marshrutka') }, { id: 'CITY_TRAIN', available: lines.has('city_train') }, { id: 'FUNICULAR', available: lines.has('funicular') },
     { id: 'BICYCLE', available: micro.has('bike') || micro.has('ebike') }, { id: 'SCOOTER', available: micro.has('scooter') }, { id: 'RENTAL_POINTS', available: stationsAvailable },
   ] });
 }));
@@ -476,16 +478,38 @@ app.get('/api/v1/transport/layers', requireAuth, asyncHandler(async (_req, res) 
 app.get('/api/v1/transport/cities', requireAuth, asyncHandler(async (_req, res) => {
   const { rows } = await pool.query<{ name: string; city: string; source_type: string; license: string | null; source_ref: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } | null }>(
     `SELECT name,city,source_type,license,source_ref,last_report FROM mobility_providers
-      WHERE provider_type='public_transit' AND source_type IN ('gtfs','gtfs_rt') AND status='enabled' AND health IN ('healthy','degraded')
+      WHERE provider_type='public_transit' AND source_type IN ('gtfs','gtfs_rt','geojson') AND status='enabled' AND health IN ('healthy','degraded')
       ORDER BY priority,name`);
   res.json({ data: buildTransportCities(rows) });
+}));
+
+/** Read-only registry exposes audited licensing and discovery state without leaking feed credentials or internal error text. */
+app.get('/api/v1/transport/providers', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id,name,city,provider_type AS "providerType",source_type AS "sourceType",access,license,
+       commercial_use AS "commercialUse",attribution_required AS "attributionRequired",source_ref AS "sourceRef",
+       update_frequency AS "updateFrequency",discovery_status AS "discoveryStatus",health,status,
+       last_checked_at AS "lastCheckedAt",last_sync_at AS "lastSyncAt",last_report->'counts' AS counts
+     FROM mobility_providers ORDER BY city,priority,name`);
+  res.json({ data: rows });
+}));
+
+app.get('/api/v1/transport/health', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT name,city,source_type AS "sourceType",discovery_status AS "discoveryStatus",health,status,access,
+       last_checked_at AS "lastCheckedAt",last_sync_at AS "lastSyncAt",last_report->'counts' AS counts
+     FROM mobility_providers ORDER BY city,priority,name`);
+  res.json({ data: rows, checkedAt: new Date().toISOString() });
 }));
 
 const loadRoutes = async (box: [number, number, number, number], types: LineType[] = []) => {
   // Skip feeds that contain none of the requested transport types (e.g. a national rail feed when the user asked for trams).
   const hasTypes = (row: LayerProviderRow) => types.length === 0 || types.some((type) => (row.last_report?.counts?.[`routes_${type}`] ?? 0) > 0);
-  const providers = (await layerProviders(['gtfs'], ['public_transit'])).filter((row) => providerTouches(row, box) && hasTypes(row));
-  const settled = await Promise.all(providers.map((row) => layerFetch(cachedNetwork(row.id, row.feed_url).then((network) => ({ row, network })))));
+  const providers = (await layerProviders(['gtfs', 'geojson'], ['public_transit'])).filter((row) => providerTouches(row, box) && hasTypes(row));
+  const settled = await Promise.all(providers.map((row) => layerFetch((row.source_type === 'gtfs'
+    ? cachedNetwork(row.id, row.feed_url)
+    : (() => { const mode = geoJsonMode(row.name); return mode ? cachedGeoJsonNetwork(row.id, row.feed_url, mode) : Promise.reject(new Error('Unknown GeoJSON transport mode')); })())
+    .then((network) => ({ row, network })))));
   return { settled, loaded: settled.flatMap((item) => item.ok ? [item.value] : []) };
 };
 
@@ -580,11 +604,12 @@ app.patch('/api/v1/admin/mobility/providers/:id', requireAuth, requireAdmin, asy
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const current = await client.query('SELECT status,priority,health,access FROM mobility_providers WHERE id=$1 FOR UPDATE', [req.params.id]);
+    const current = await client.query('SELECT status,priority,health,access,license,commercial_use,last_verified_at,discovery_status FROM mobility_providers WHERE id=$1 FOR UPDATE', [req.params.id]);
     if (!current.rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
     if (status === 'enabled' && current.rows[0].access !== 'open') throw new ApiError(409, 'This source needs credentials or a secure endpoint before it can be enabled', 'provider_access_required');
     if (status === 'enabled' && current.rows[0].health === 'offline') throw new ApiError(409, 'Run a successful connection test before enabling an offline provider', 'provider_offline');
-    const { rows } = await client.query(`UPDATE mobility_providers SET status=COALESCE($2,status),priority=COALESCE($3,priority),updated_at=now() WHERE id=$1 RETURNING ${providerColumns}`, [req.params.id, status ?? null, priority ?? null]);
+    if (status === 'enabled' && (!current.rows[0].license || current.rows[0].commercial_use !== true || !current.rows[0].last_verified_at || !['VALIDATED','ENABLED'].includes(current.rows[0].discovery_status))) throw new ApiError(409, 'Record the source licence and validate commercial-use terms before enabling this provider', 'provider_license_unverified');
+    const { rows } = await client.query(`UPDATE mobility_providers SET status=COALESCE($2,status),discovery_status=CASE WHEN $2='enabled' THEN 'ENABLED' ELSE discovery_status END,priority=COALESCE($3,priority),updated_at=now() WHERE id=$1 RETURNING ${providerColumns}`, [req.params.id, status ?? null, priority ?? null]);
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)',
       [req.userId, 'mobility.provider.updated', 'mobility_provider', req.params.id, JSON.stringify({ old: { status: current.rows[0].status, priority: current.rows[0].priority }, new: { status: rows[0].status, priority: rows[0].priority } })]);
     await client.query('COMMIT');
@@ -602,7 +627,7 @@ app.delete('/api/v1/admin/mobility/providers/:id', requireAuth, requireAdmin, as
 
 app.post('/api/v1/admin/mobility/providers/:id/test', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid provider id', 'invalid_provider_id');
-  const found = await pool.query<{ id: string; source_type: string; feed_url: string }>('SELECT id,source_type,feed_url FROM mobility_providers WHERE id=$1', [req.params.id]);
+  const found = await pool.query<{ id: string; name: string; source_type: string; feed_url: string }>('SELECT id,name,source_type,feed_url FROM mobility_providers WHERE id=$1', [req.params.id]);
   if (!found.rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
   const report = await testProviderConnection(found.rows[0]);
   const { rows } = await pool.query(

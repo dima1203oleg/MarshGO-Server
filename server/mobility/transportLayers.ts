@@ -3,14 +3,14 @@ import bindings from 'gtfs-realtime-bindings';
 import { fetchBinary, fetchJson } from './safeFetch';
 import { parseCsvLine, routeTypeLabel } from './gtfs';
 import { extractVehicleList, vehicleTransportLabel } from './jsonVehicles';
-import type { Bbox } from './types';
+import { bboxOf, type Bbox } from './types';
 
 /**
  * Map data for the 2D transport layers. Everything is loaded per viewport (bbox) and per layer, never as one "whole transport world":
  * static GTFS geometry is parsed once per feed and cached for hours, vehicle positions are cached for seconds.
  */
-export type LineType = 'bus' | 'marshrutka' | 'trolleybus' | 'tram' | 'metro' | 'train' | 'suburban';
-const LINE_TYPES = new Set<string>(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban']);
+export type LineType = 'bus' | 'marshrutka' | 'trolleybus' | 'tram' | 'metro' | 'train' | 'suburban' | 'city_train' | 'funicular';
+const LINE_TYPES = new Set<string>(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular']);
 export const isLineType = (value: string): value is LineType => LINE_TYPES.has(value);
 
 export interface NetworkStop { id: string; name: string; lon: number; lat: number; types: LineType[]; routes: string[] }
@@ -122,6 +122,60 @@ const NETWORK_TTL_MS = 6 * 60 * 60_000;
 const networks = new Map<string, { at: number; promise: Promise<TransportNetwork> }>();
 const WANTED = /(^|\/)(stops|routes|trips|stop_times|shapes)\.txt$/;
 
+/** Normalize an official Kyiv GeoJSON route/station feed into the same network shape as GTFS. */
+export function buildGeoJsonNetwork(body: unknown, mode: LineType): TransportNetwork {
+  if (!body || typeof body !== 'object' || !Array.isArray((body as { features?: unknown }).features)) throw new Error('Invalid GeoJSON FeatureCollection');
+  const features = (body as { features: unknown[] }).features;
+  const groups = new Map<string, { name: string; direction: string; order: number; coordinates: Array<[number, number]>; from?: string; to?: string }[]>();
+  const stops: NetworkStop[] = [];
+  const points: Array<[number, number]> = [];
+  for (const raw of features) {
+    if (!raw || typeof raw !== 'object') continue;
+    const feature = raw as { geometry?: { type?: string; coordinates?: unknown }; properties?: Record<string, unknown> };
+    const props = feature.properties ?? {};
+    const geometry = feature.geometry;
+    if (geometry?.type === 'Point' && Array.isArray(geometry.coordinates)) {
+      const [lon, lat] = geometry.coordinates.map(Number);
+      if (!Number.isFinite(lon) || !Number.isFinite(lat) || Math.abs(lon) > 180 || Math.abs(lat) > 90 || (lon === 0 && lat === 0)) continue;
+      const name = String(props.name ?? props.name_uk ?? props.stop_name ?? props.station_name ?? '').trim();
+      if (!name) continue;
+      const id = String(props.code1 ?? props.stop_id ?? props.objectid ?? name);
+      stops.push({ id, name, lon, lat, types: [mode], routes: typeof props.line === 'string' ? [props.line] : [] });
+      points.push([lon, lat]);
+      continue;
+    }
+    if (geometry?.type !== 'LineString' || !Array.isArray(geometry.coordinates)) continue;
+    const coordinates = geometry.coordinates.flatMap((point): Array<[number, number]> => {
+      if (!Array.isArray(point) || point.length < 2) return [];
+      const lon = Number(point[0]), lat = Number(point[1]);
+      return Number.isFinite(lon) && Number.isFinite(lat) && Math.abs(lon) <= 180 && Math.abs(lat) <= 90 && (lon !== 0 || lat !== 0) ? [[lon, lat]] : [];
+    });
+    if (coordinates.length < 2) continue;
+    const name = String(props.num_route ?? props.route_short_name ?? props.line ?? props.name ?? '').trim();
+    if (!name) continue;
+    const direction = String(props.napryamok ?? props.direction ?? props.to_stop_ ?? '').trim();
+    const key = `${name}|${direction}`;
+    const list = groups.get(key) ?? [];
+    list.push({ name, direction, order: Number(props.order_ ?? props.sequence ?? 0), coordinates,
+      ...(props.from_stop_ ? { from: String(props.from_stop_) } : {}), ...(props.to_stop_ ? { to: String(props.to_stop_) } : {}) });
+    groups.set(key, list);
+  }
+  const routes: NetworkRoute[] = [];
+  for (const [key, segments] of groups) {
+    segments.sort((a, b) => a.order - b.order);
+    const coordinates: Array<[number, number]> = [];
+    for (const segment of segments) for (const coordinate of segment.coordinates) {
+      const previous = coordinates[coordinates.length - 1];
+      if (!previous || previous[0] !== coordinate[0] || previous[1] !== coordinate[1]) coordinates.push(coordinate);
+    }
+    if (coordinates.length < 2) continue;
+    const first = segments[0], last = segments[segments.length - 1];
+    routes.push({ id: key, name: first.name, type: mode, direction: first.from && last.to ? `${first.from} → ${last.to}` : first.direction,
+      stopCount: segments.length + 1, coordinates: decimate(coordinates, 240) });
+  }
+  return { stops, routes, bbox: points.length ? bboxOf(points) ?? null : routes.length ? bboxOf(routes.flatMap((route) => route.coordinates)) ?? null : null };
+}
+
 /** Static feeds are parsed once and shared for six hours; a failed load is not cached. */
 export function cachedNetwork(providerId: string, url: string): Promise<TransportNetwork> {
   const hit = networks.get(providerId);
@@ -136,6 +190,25 @@ export function cachedNetwork(providerId: string, url: string): Promise<Transpor
   networks.set(providerId, { at: Date.now(), promise });
   promise.catch(() => networks.delete(providerId));
   return promise;
+}
+
+export function cachedGeoJsonNetwork(providerId: string, url: string, mode: LineType): Promise<TransportNetwork> {
+  const key = `geojson:${providerId}`;
+  const hit = networks.get(key);
+  if (hit && Date.now() - hit.at < NETWORK_TTL_MS) return hit.promise;
+  const promise = fetchJson(url, 15000).then(({ data }) => buildGeoJsonNetwork(data, mode));
+  networks.set(key, { at: Date.now(), promise });
+  promise.catch(() => networks.delete(key));
+  return promise;
+}
+
+export function geoJsonMode(name: string): LineType | null {
+  const normalized = name.toLocaleLowerCase('uk');
+  if (normalized.includes('routeTaxi'.toLocaleLowerCase('uk')) || normalized.includes('маршрут')) return 'marshrutka';
+  if (normalized.includes('метро') || normalized.includes('underground')) return 'metro';
+  if (normalized.includes('фунікулер') || normalized.includes('funicular')) return 'funicular';
+  if (normalized.includes('електричк') || normalized.includes('city express') || normalized.includes('кільцев')) return 'city_train';
+  return null;
 }
 
 export function inBbox(bbox: Bbox, lon: number, lat: number): boolean { return lon >= bbox[0] && lon <= bbox[2] && lat >= bbox[1] && lat <= bbox[3]; }

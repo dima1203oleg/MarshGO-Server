@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildNetwork, decimate, inBbox, intersects, isFreshVehicleTimestamp, parseBbox, parseVehicleTimestamp, routeInBbox } from '../server/mobility/transportLayers';
+import { buildGeoJsonNetwork, buildNetwork, decimate, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, parseBbox, parseVehicleTimestamp, routeInBbox } from '../server/mobility/transportLayers';
 
 const files = {
   'routes.txt': 'route_id,route_short_name,route_type\nR1,47,3\nR2,2,0\nR3,M1,1\nR4,X,1700\n',
@@ -42,6 +42,34 @@ describe('transport layer network', () => {
     assert.equal(inBbox([24, 49, 25, 50], 24.5, 49.5), true);
     assert.equal(intersects([24, 49, 25, 50], [26, 49, 27, 50]), false);
     assert.equal(routeInBbox(network.routes[0], [24, 49, 24.04, 49.85]), true);
+  });
+});
+
+describe('official GeoJSON network normalization', () => {
+  it('keeps city train and funicular as distinct modes and joins ordered route segments', () => {
+    const body = { type: 'FeatureCollection', features: [
+      { type: 'Feature', geometry: { type: 'LineString', coordinates: [[30.1, 50.1], [30.2, 50.2]] }, properties: { num_route: 'E1', napryamok: 'clockwise', order_: 2, from_stop_: 'B', to_stop_: 'C' } },
+      { type: 'Feature', geometry: { type: 'LineString', coordinates: [[30, 50], [30.1, 50.1]] }, properties: { num_route: 'E1', napryamok: 'clockwise', order_: 1, from_stop_: 'A', to_stop_: 'B' } },
+      { type: 'Feature', geometry: { type: 'Point', coordinates: [30, 50] }, properties: { code1: 'a', name: 'Станція A' } },
+    ] };
+    const network = buildGeoJsonNetwork(body, 'city_train');
+    assert.equal(network.routes.length, 1);
+    assert.equal(network.routes[0].type, 'city_train');
+    assert.deepEqual(network.routes[0].coordinates, [[30, 50], [30.1, 50.1], [30.2, 50.2]]);
+    assert.equal(network.routes[0].direction, 'A → C');
+    assert.equal(network.stops[0].types[0], 'city_train');
+    assert.equal(geoJsonMode('Київ — фунікулер (геометрія)'), 'funicular');
+    assert.equal(geoJsonMode('Київ — міська електричка'), 'city_train');
+    assert.equal(geoJsonMode('Київ — маршрутки'), 'marshrutka');
+  });
+  it('rejects non-FeatureCollection payloads and ignores malformed/invalid coordinates', () => {
+    assert.throws(() => buildGeoJsonNetwork({}, 'metro'), /FeatureCollection/);
+    const network = buildGeoJsonNetwork({ features: [
+      { geometry: { type: 'Point', coordinates: [200, 50] }, properties: { name: 'bad' } },
+      { geometry: { type: 'LineString', coordinates: [[30, 50], ['bad', 50], [30.1, 50.1]] }, properties: { name: 'M1' } },
+    ] }, 'metro');
+    assert.equal(network.stops.length, 0);
+    assert.equal(network.routes.length, 1);
   });
 });
 

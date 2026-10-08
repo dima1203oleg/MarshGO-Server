@@ -2,6 +2,7 @@ import dns from 'node:dns/promises';
 import net from 'node:net';
 
 const MAX_BYTES = 5 * 1024 * 1024;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 export function isPrivateAddress(address: string): boolean {
   if (net.isIPv4(address)) {
@@ -25,10 +26,22 @@ export async function assertPublicHttpsUrl(raw: string): Promise<URL> {
   return url;
 }
 
+/** Follow only a small number of HTTPS redirects, re-running the SSRF guard on every destination. */
+async function fetchPublic(raw: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  let url = await assertPublicHttpsUrl(raw);
+  for (let redirects = 0; ; redirects++) {
+    const response = await fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+    const location = response.headers.get('location');
+    await response.body?.cancel().catch(() => undefined);
+    if (!location || redirects >= 3) throw new Error('Feed redirect limit exceeded or missing Location header');
+    url = await assertPublicHttpsUrl(new URL(location, url).toString());
+  }
+}
+
 export async function fetchJson(raw: string, timeoutMs = 8000): Promise<{ data: unknown; ms: number }> {
-  const url = await assertPublicHttpsUrl(raw);
   const started = Date.now();
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: { accept: 'application/json', 'user-agent': 'MARSHGO-Mobility/1.0' } });
+  const response = await fetchPublic(raw, { headers: { accept: 'application/json', 'user-agent': 'MARSHGO-Mobility/1.0' } }, timeoutMs);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const declared = Number(response.headers.get('content-length') ?? 0);
   if (declared > MAX_BYTES) throw new Error('Feed is too large');
@@ -39,18 +52,16 @@ export async function fetchJson(raw: string, timeoutMs = 8000): Promise<{ data: 
 
 /** Reachability probe for non-JSON feeds (GTFS zip, CSV, ...): checks status and content type without downloading the body. */
 export async function probeUrl(raw: string, timeoutMs = 8000): Promise<{ status: number; contentType: string | null; ms: number }> {
-  const url = await assertPublicHttpsUrl(raw);
   const started = Date.now();
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: { 'user-agent': 'MARSHGO-Mobility/1.0' } });
+  const response = await fetchPublic(raw, { headers: { 'user-agent': 'MARSHGO-Mobility/1.0' } }, timeoutMs);
   await response.body?.cancel().catch(() => undefined);
   return { status: response.status, contentType: response.headers.get('content-type'), ms: Date.now() - started };
 }
 
 /** Downloads a binary feed (GTFS zip, GTFS-RT protobuf) with the same SSRF guard and a hard size cap. */
 export async function fetchBinary(raw: string, maxBytes: number, timeoutMs = 20000): Promise<{ data: Uint8Array; ms: number }> {
-  const url = await assertPublicHttpsUrl(raw);
   const started = Date.now();
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: { 'user-agent': 'MARSHGO-Mobility/1.0' } });
+  const response = await fetchPublic(raw, { headers: { 'user-agent': 'MARSHGO-Mobility/1.0' } }, timeoutMs);
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const declared = Number(response.headers.get('content-length') ?? 0);
   if (declared > maxBytes) throw new Error('Feed is too large');
