@@ -13,8 +13,8 @@ export type LineType = 'bus' | 'marshrutka' | 'trolleybus' | 'tram' | 'metro' | 
 const LINE_TYPES = new Set<string>(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban']);
 export const isLineType = (value: string): value is LineType => LINE_TYPES.has(value);
 
-export interface NetworkStop { id: string; name: string; lon: number; lat: number; types: LineType[] }
-export interface NetworkRoute { id: string; name: string; type: LineType; coordinates: Array<[number, number]> }
+export interface NetworkStop { id: string; name: string; lon: number; lat: number; types: LineType[]; routes: string[] }
+export interface NetworkRoute { id: string; name: string; type: LineType; direction: string; stopCount: number; coordinates: Array<[number, number]> }
 export interface TransportNetwork { stops: NetworkStop[]; routes: NetworkRoute[]; bbox: Bbox | null }
 
 function rows(text: string | undefined): Array<Record<string, string>> {
@@ -66,10 +66,14 @@ export function buildNetwork(files: Record<string, string>): TransportNetwork {
     const list = tripStops.get(row.trip_id) ?? []; list.push({ seq: Number(row.stop_sequence), stopId: row.stop_id }); tripStops.set(row.trip_id, list);
   }
   const typesByStop = new Map<string, Set<LineType>>();
+  const routesByStop = new Map<string, Set<string>>();
   const longestByKey = new Map<string, { tripId: string; count: number }>();
   for (const [tripId, list] of tripStops) {
     const meta = tripRoute.get(tripId)!; const type = routeInfo.get(meta.routeId)!.type;
-    for (const { stopId } of list) { const set = typesByStop.get(stopId) ?? new Set<LineType>(); set.add(type); typesByStop.set(stopId, set); }
+    for (const { stopId } of list) {
+      const set = typesByStop.get(stopId) ?? new Set<LineType>(); set.add(type); typesByStop.set(stopId, set);
+      const routeNames = routesByStop.get(stopId) ?? new Set<string>(); routeNames.add(routeInfo.get(meta.routeId)!.name); routesByStop.set(stopId, routeNames);
+    }
     const key = `${meta.routeId}|${meta.direction}`;
     const best = longestByKey.get(key);
     if (!best || list.length > best.count) longestByKey.set(key, { tripId, count: list.length });
@@ -90,10 +94,15 @@ export function buildNetwork(files: Record<string, string>): TransportNetwork {
   for (const [key, { tripId }] of longestByKey) {
     const routeId = key.split('|')[0]; const info = routeInfo.get(routeId)!; const meta = tripRoute.get(tripId)!;
     const shape = meta.shapeId ? shapes.get(meta.shapeId) : undefined;
-    let coordinates: Array<[number, number]>;
-    if (shape && shape.length >= 2) coordinates = shape.sort((a, b) => a.seq - b.seq).map((p) => [p.lon, p.lat]);
-    else coordinates = (tripStops.get(tripId) ?? []).sort((a, b) => a.seq - b.seq).flatMap(({ stopId }): Array<[number, number]> => { const stop = stopById.get(stopId); return stop ? [[stop.lon, stop.lat]] : []; });
-    if (coordinates.length >= 2) routes.push({ id: key, name: info.name, type: info.type, coordinates: decimate(coordinates, 160) });
+    let coordinates: Array<[number, number]> = [];
+    if (shape && shape.length >= 2) coordinates = shape.sort((a, b) => a.seq - b.seq).map((p): [number, number] => [p.lon, p.lat]);
+    const orderedStops = [...(tripStops.get(tripId) ?? [])].sort((a, b) => a.seq - b.seq).flatMap(({ stopId }) => {
+      const stop = stopById.get(stopId); return stop ? [{ id: stopId, ...stop }] : [];
+    });
+    if (!shape || shape.length < 2) coordinates = orderedStops.map((stop): [number, number] => [stop.lon, stop.lat]);
+    if (coordinates.length >= 2) routes.push({ id: key, name: info.name, type: info.type,
+      direction: orderedStops.length >= 2 ? `${orderedStops[0].name} → ${orderedStops[orderedStops.length - 1].name}` : '',
+      stopCount: orderedStops.length, coordinates: decimate(coordinates, 160) });
   }
 
   const stops: NetworkStop[] = [];
@@ -101,7 +110,7 @@ export function buildNetwork(files: Record<string, string>): TransportNetwork {
   for (const [id, stop] of stopById) {
     const types = typesByStop.get(id);
     if (!types || types.size === 0) continue;
-    stops.push({ id, name: stop.name, lon: stop.lon, lat: stop.lat, types: [...types] });
+    stops.push({ id, name: stop.name, lon: stop.lon, lat: stop.lat, types: [...types], routes: [...(routesByStop.get(id) ?? [])].sort((a, b) => a.localeCompare(b, 'uk')) });
     points.push([stop.lon, stop.lat]);
   }
   let bbox: Bbox | null = null;
@@ -135,7 +144,24 @@ export function intersects(a: Bbox, b: Bbox): boolean { return a[0] <= b[2] && a
 /** A feed's route is drawn when any of its points is inside the viewport (keeps payloads small without clipping lines). */
 export function routeInBbox(route: NetworkRoute, bbox: Bbox): boolean { return route.coordinates.some(([lon, lat]) => inBbox(bbox, lon, lat)); }
 
-export interface LiveVehicle { id: string; lon: number; lat: number; type: LineType | 'other'; route: string; bearing: number | null; providerId: string }
+export interface LiveVehicle { id: string; lon: number; lat: number; type: LineType | 'other'; route: string; bearing: number | null; speed: number | null; timestamp: Date | null; providerId: string }
+
+export function parseVehicleTimestamp(value: unknown): Date | null {
+  let milliseconds: number;
+  if (typeof value === 'number' && Number.isFinite(value)) milliseconds = value < 1_000_000_000_000 ? value * 1000 : value;
+  else if (typeof value === 'string' && value.trim()) {
+    const numeric = Number(value);
+    milliseconds = Number.isFinite(numeric) ? (numeric < 1_000_000_000_000 ? numeric * 1000 : numeric) : Date.parse(value);
+  } else return null;
+  const date = new Date(milliseconds);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+export function isFreshVehicleTimestamp(timestamp: Date | null, now = Date.now()): boolean {
+  if (!timestamp) return false;
+  const age = now - timestamp.getTime();
+  return age >= -30_000 && age <= 120_000;
+}
 
 const VEHICLE_TTL_MS = 10_000;
 const vehicleCache = new Map<string, { at: number; promise: Promise<LiveVehicle[]> }>();
@@ -149,9 +175,13 @@ async function loadVehicles(providerId: string, sourceType: string, url: string,
     for (const entity of message.entity) {
       const position = entity.vehicle?.position;
       if (!position || !Number.isFinite(position.latitude) || !Number.isFinite(position.longitude)) continue;
+      if (Math.abs(position.latitude) > 90 || Math.abs(position.longitude) > 180 || (position.latitude === 0 && position.longitude === 0)) continue;
       const routeId = entity.vehicle?.trip?.routeId ?? '';
       const known = routeNames.get(routeId);
-      out.push({ id: `${providerId}:${entity.id}`, lon: position.longitude, lat: position.latitude, type: known?.type ?? 'other', route: known?.name ?? routeId, bearing: Number.isFinite(position.bearing) ? Number(position.bearing) : null, providerId });
+      const speed = Number(position.speed);
+      out.push({ id: `${providerId}:${entity.id}`, lon: position.longitude, lat: position.latitude, type: known?.type ?? 'other', route: known?.name ?? routeId,
+        bearing: Number.isFinite(position.bearing) ? Number(position.bearing) : null, speed: Number.isFinite(speed) && speed >= 0 ? speed : null,
+        timestamp: parseVehicleTimestamp(entity.vehicle?.timestamp), providerId });
     }
     return out;
   }
@@ -159,11 +189,13 @@ async function loadVehicles(providerId: string, sourceType: string, url: string,
   const out: LiveVehicle[] = [];
   for (const vehicle of extractVehicleList(body)) {
     const lat = Number(vehicle.latitude ?? vehicle.lat), lon = Number(vehicle.longitude ?? vehicle.lon ?? vehicle.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0)) continue;
+    if (!Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) continue;
     const label = vehicleTransportLabel(vehicle);
     const bearing = Number(vehicle.bearing ?? vehicle.course ?? vehicle.azimuth);
+    const speed = Number(vehicle.speed ?? vehicle.speed_mps);
     out.push({ id: `${providerId}:${String(vehicle.vehicle_id ?? vehicle.id ?? vehicle.license_plate ?? `${lat},${lon}`)}`, lon, lat, type: asLineType(label) ?? 'other',
-      route: String(vehicle.route_name ?? vehicle.route ?? vehicle.route_short_name ?? ''), bearing: Number.isFinite(bearing) ? bearing : null, providerId });
+      route: String(vehicle.route_name ?? vehicle.route ?? vehicle.route_short_name ?? ''), bearing: Number.isFinite(bearing) ? bearing : null,
+      speed: Number.isFinite(speed) && speed >= 0 ? speed : null, timestamp: parseVehicleTimestamp(vehicle.timestamp ?? vehicle.updated_at ?? vehicle.last_update), providerId });
   }
   return out;
 }

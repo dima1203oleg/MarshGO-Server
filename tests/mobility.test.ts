@@ -86,6 +86,21 @@ describe('nearby assets', () => {
 
 import { strToU8 } from 'fflate';
 import { parseCsvLine, routeTypeLabel, summarizeGtfs } from '../server/mobility/gtfs';
+import { buildTransportCities } from '../server/mobility/cities';
+
+it('derives transport cities from healthy provider coverage with mode counts and source attribution', () => {
+  const cities = buildTransportCities([
+    { name: 'Львівавтодор — розклад', city: 'Львів', source_type: 'gtfs', license: 'CC BY 4.0', source_ref: 'mdb:lviv', last_report: { bbox: [23.86, 49.77, 24.16, 49.98], counts: { stops: 1071, routes: 72, routes_bus: 64, routes_tram: 8 } } },
+    { name: 'Львівавтодор — realtime', city: 'Львів', source_type: 'gtfs_rt', license: 'CC BY 4.0', source_ref: 'mdb:lviv-rt', last_report: { bbox: [23.86, 49.77, 24.16, 49.98] } },
+    { name: 'Київпастранс — розклад', city: 'Київ', source_type: 'gtfs', license: 'CC BY 4.0', source_ref: 'data.gov.ua:kyiv', last_report: { bbox: [30.28, 50.22, 30.78, 50.57], counts: { stops: 1492, routes: 162, routes_bus: 102, routes_tram: 17, routes_trolleybus: 43 } } },
+  ]);
+  assert.deepEqual(cities.map(({ id }) => id), ['kyiv', 'lviv']);
+  assert.deepEqual(cities[0].modes, ['bus', 'tram', 'trolleybus']);
+  assert.equal(cities[0].stopCount, 1492);
+  assert.equal(cities[1].realtimeAvailable, true);
+  assert.equal(cities[1].providers.length, 2);
+  assert.equal(cities[1].sourceUrl, 'https://opendata.city-adm.lviv.ua/en/dataset/lviv-public-transport-gtfs-real-time');
+});
 
 describe('GTFS parsing', () => {
   it('parses quoted CSV fields', () => {

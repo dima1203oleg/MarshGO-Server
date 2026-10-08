@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildNetwork, decimate, inBbox, intersects, parseBbox, routeInBbox } from '../server/mobility/transportLayers';
+import { buildNetwork, decimate, inBbox, intersects, isFreshVehicleTimestamp, parseBbox, parseVehicleTimestamp, routeInBbox } from '../server/mobility/transportLayers';
 
 const files = {
   'routes.txt': 'route_id,route_short_name,route_type\nR1,47,3\nR2,2,0\nR3,M1,1\nR4,X,1700\n',
@@ -16,6 +16,8 @@ describe('transport layer network', () => {
     const bus = network.routes.find((route) => route.name === '47')!;
     assert.equal(bus.type, 'bus');
     assert.deepEqual(bus.coordinates, [[24.03, 49.84], [24.032, 49.841], [24.07, 49.80]]);
+    assert.equal(bus.direction, 'Франка → Сихів');
+    assert.equal(bus.stopCount, 3);
   });
   it('uses shapes.txt geometry when present and types tram and metro routes', () => {
     const tram = network.routes.find((route) => route.name === '2')!;
@@ -25,6 +27,7 @@ describe('transport layer network', () => {
   it('keeps only valid stops that a known route serves, with the transport types serving them', () => {
     assert.deepEqual(network.stops.map((stop) => stop.id).sort(), ['A', 'B', 'C']);
     assert.deepEqual([...network.stops.find((stop) => stop.id === 'A')!.types].sort(), ['bus', 'tram']);
+    assert.deepEqual(network.stops.find((stop) => stop.id === 'A')!.routes, ['2', '47']);
     assert.ok(network.bbox && network.bbox[0] === 24.03);
   });
   it('validates viewport boxes and limits their size', () => {
@@ -39,5 +42,22 @@ describe('transport layer network', () => {
     assert.equal(inBbox([24, 49, 25, 50], 24.5, 49.5), true);
     assert.equal(intersects([24, 49, 25, 50], [26, 49, 27, 50]), false);
     assert.equal(routeInBbox(network.routes[0], [24, 49, 24.04, 49.85]), true);
+  });
+});
+
+describe('realtime vehicle freshness', () => {
+  it('accepts Unix seconds, milliseconds and ISO timestamps', () => {
+    assert.equal(parseVehicleTimestamp('1700000000')?.getTime(), 1_700_000_000_000);
+    assert.equal(parseVehicleTimestamp('1700000000000')?.getTime(), 1_700_000_000_000);
+    assert.equal(parseVehicleTimestamp('2026-10-08T12:00:00.000Z')?.toISOString(), '2026-10-08T12:00:00.000Z');
+    assert.equal(parseVehicleTimestamp('not a timestamp'), null);
+  });
+  it('hides missing, stale, or implausibly future timestamps', () => {
+    const now = Date.parse('2026-10-08T12:00:00.000Z');
+    assert.equal(isFreshVehicleTimestamp(new Date(now - 120_000), now), true);
+    assert.equal(isFreshVehicleTimestamp(new Date(now - 120_001), now), false);
+    assert.equal(isFreshVehicleTimestamp(new Date(now + 30_000), now), true);
+    assert.equal(isFreshVehicleTimestamp(new Date(now + 30_001), now), false);
+    assert.equal(isFreshVehicleTimestamp(null, now), false);
   });
 });

@@ -24,7 +24,8 @@ import { selectRepresentativeJourneys } from './journey/scoring';
 import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
-import { cachedNetwork, cachedVehicles, inBbox, intersects, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
+import { cachedNetwork, cachedVehicles, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
+import { buildTransportCities } from './mobility/cities';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { normalizePlate } from './vehiclePlate';
@@ -471,6 +472,15 @@ app.get('/api/v1/transport/layers', requireAuth, asyncHandler(async (_req, res) 
   ] });
 }));
 
+/** Cities are discovered from healthy enabled GTFS providers and their validated coverage, not hardcoded in the client. */
+app.get('/api/v1/transport/cities', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query<{ name: string; city: string; source_type: string; license: string | null; source_ref: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } | null }>(
+    `SELECT name,city,source_type,license,source_ref,last_report FROM mobility_providers
+      WHERE provider_type='public_transit' AND source_type IN ('gtfs','gtfs_rt') AND status='enabled' AND health IN ('healthy','degraded')
+      ORDER BY priority,name`);
+  res.json({ data: buildTransportCities(rows) });
+}));
+
 const loadRoutes = async (box: [number, number, number, number], types: LineType[] = []) => {
   // Skip feeds that contain none of the requested transport types (e.g. a national rail feed when the user asked for trams).
   const hasTypes = (row: LayerProviderRow) => types.length === 0 || types.some((type) => (row.last_report?.counts?.[`routes_${type}`] ?? 0) > 0);
@@ -484,7 +494,7 @@ app.get('/api/v1/transport/routes', requireAuth, asyncHandler(async (req, res) =
   if (!box || types.length === 0) throw new ApiError(400, 'bbox (west,south,east,north, at most 2 degrees) and types are required', 'invalid_transport_query');
   const { settled, loaded } = await loadRoutes(box, types);
   const features = loaded.flatMap(({ row, network }) => network.routes.filter((route: NetworkRoute) => types.includes(route.type) && routeInBbox(route, box))
-    .map((route) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${route.id}`, name: route.name, transport: route.type, provider: row.name.split(' — ')[0] }, geometry: { type: 'LineString' as const, coordinates: route.coordinates } })));
+    .map((route) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${route.id}`, name: route.name, direction: route.direction, stopCount: route.stopCount, transport: route.type, provider: row.name.split(' — ')[0] }, geometry: { type: 'LineString' as const, coordinates: route.coordinates } })));
   sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 600) }, meta: { failedProviders: settled.length - loaded.length, truncated: features.length > 600 } });
 }));
 
@@ -493,7 +503,7 @@ app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) =>
   if (!box || types.length === 0) throw new ApiError(400, 'bbox (west,south,east,north, at most 0.5 degree) and types are required; zoom in to see stops', 'invalid_transport_query');
   const { settled, loaded } = await loadRoutes(box, types);
   const features = loaded.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat) && stop.types.some((type) => types.includes(type)))
-    .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, transports: stop.types.join(','), provider: row.name.split(' — ')[0] }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } })));
+    .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: stop.types.join(','), provider: row.name.split(' — ')[0] }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } })));
   sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 2500) }, meta: { failedProviders: settled.length - loaded.length, truncated: features.length > 2500 } });
 }));
 
@@ -505,9 +515,12 @@ app.get('/api/v1/transport/vehicles', requireAuth, asyncHandler(async (req, res)
   const names = new Map<string, { name: string; type: LineType }>();
   for (const { network } of loaded) for (const route of network.routes) names.set(route.id.split('|')[0], { name: route.name, type: route.type });
   const settled = await Promise.all(realtime.map((row) => layerFetch(cachedVehicles(row.id, row.source_type, row.feed_url, names))));
-  const vehicles = settled.flatMap((item) => item.ok ? item.value : []).filter((vehicle) => inBbox(box, vehicle.lon, vehicle.lat) && (vehicle.type === 'other' || types.includes(vehicle.type)));
-  const features = vehicles.slice(0, 1500).map((vehicle) => ({ type: 'Feature' as const, properties: { id: vehicle.id, route: vehicle.route, transport: vehicle.type, bearing: vehicle.bearing }, geometry: { type: 'Point' as const, coordinates: [vehicle.lon, vehicle.lat] } }));
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features }, meta: { failedProviders: settled.filter((item) => !item.ok).length, updatedAt: new Date().toISOString() } });
+  const received = settled.flatMap((item) => item.ok ? item.value : []);
+  const fresh = received.filter((vehicle) => isFreshVehicleTimestamp(vehicle.timestamp));
+  const vehicles = fresh.filter((vehicle) => inBbox(box, vehicle.lon, vehicle.lat) && (vehicle.type === 'other' || types.includes(vehicle.type)));
+  const features = vehicles.slice(0, 1500).map((vehicle) => ({ type: 'Feature' as const, properties: { id: vehicle.id, route: vehicle.route, transport: vehicle.type,
+    bearing: vehicle.bearing, speed: vehicle.speed, updatedAt: vehicle.timestamp?.toISOString() }, geometry: { type: 'Point' as const, coordinates: [vehicle.lon, vehicle.lat] } }));
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features }, meta: { failedProviders: settled.filter((item) => !item.ok).length, filteredStaleVehicles: received.length - fresh.length } });
 }));
 
 app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req, res) => {
