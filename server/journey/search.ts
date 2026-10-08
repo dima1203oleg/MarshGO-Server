@@ -1,4 +1,4 @@
-import { JOURNEY_STRATEGIES, type JourneyPreferences, type JourneyStrategy } from './types';
+import { JOURNEY_STRATEGIES, JOURNEY_TRANSPORT_TYPES, type JourneyPreferences, type JourneyStrategy } from './types';
 
 export interface JourneySearchRequest {
   origin: { name: string; coordinates: [number, number] };
@@ -58,7 +58,7 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
   if (!isRecord(rawPreferences)) throw new TypeError('preferences must be an object');
   const allowedPreferences = new Set([
     ...Object.keys(preferenceBounds), 'minDriverRating','preferredVehicleClass',
-    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer',
+    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowedTransportTypes','allowedTransitProviders',
   ]);
   const unknownPreference = Object.keys(rawPreferences).find((key) => !allowedPreferences.has(key));
   if (unknownPreference) throw new TypeError(`unsupported preference: ${unknownPreference}`);
@@ -81,6 +81,20 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
     const raw = rawPreferences[key];
     if (raw !== undefined && typeof raw !== 'boolean') throw new TypeError(`${key} must be a boolean`);
     if (typeof raw === 'boolean') preferences[key] = raw;
+  }
+  if (rawPreferences.allowedTransportTypes !== undefined) {
+    const types = rawPreferences.allowedTransportTypes;
+    if (!Array.isArray(types) || types.length > JOURNEY_TRANSPORT_TYPES.length
+      || types.some((type) => typeof type !== 'string' || !(JOURNEY_TRANSPORT_TYPES as readonly string[]).includes(type))
+      || new Set(types).size !== types.length) throw new TypeError('allowedTransportTypes is invalid');
+    preferences.allowedTransportTypes = types as JourneyPreferences['allowedTransportTypes'];
+  }
+  if (rawPreferences.allowedTransitProviders !== undefined) {
+    const providers = rawPreferences.allowedTransitProviders;
+    if (!Array.isArray(providers) || providers.length > 100
+      || providers.some((provider) => typeof provider !== 'string' || provider.trim().length < 2 || provider.trim().length > 120)
+      || new Set(providers).size !== providers.length) throw new TypeError('allowedTransitProviders is invalid');
+    preferences.allowedTransitProviders = providers as string[];
   }
   if (rawPreferences.minDriverRating !== undefined) {
     const rating = rawPreferences.minDriverRating;

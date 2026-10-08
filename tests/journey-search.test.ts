@@ -19,6 +19,10 @@ describe('Journey search request validation', () => {
     assert.equal(parsed.departureAt.toISOString(), '2026-09-30T09:00:00.000Z');
     assert.equal(parsed.passengers, 2);
     assert.equal(parsed.preferences.minimumTransferBufferSeconds, 900);
+    const tramOnly = parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: ['tram'] } }, now);
+    assert.deepEqual(tramOnly.preferences.allowedTransportTypes, ['tram']);
+    const chosenProvider = parseJourneySearchRequest({ ...request, preferences: { allowedTransitProviders: ['Львівавтодор'] } }, now);
+    assert.deepEqual(chosenProvider.preferences.allowedTransitProviders, ['Львівавтодор']);
   });
 
   it('rejects invalid points, missing time zone, past departure, and unsupported preferences', () => {
@@ -27,6 +31,8 @@ describe('Journey search request validation', () => {
     assert.throws(() => parseJourneySearchRequest({ ...request, departureAt: '2026-09-30T10:00:00+03:00' }, now), /must be in the future/);
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { maxTransfers: -1 } }, now), /outside the supported range/);
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { preferredCarColor: 'blue' } }, now), /unsupported preference/);
+    assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: ['ufo'] } }, now), /allowedTransportTypes is invalid/);
+    assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransitProviders: [''] } }, now), /allowedTransitProviders is invalid/);
     assert.throws(() => parseJourneySearchRequest({ ...request, strategy: 'FAKEST' }, now), /not supported/);
   });
 });
