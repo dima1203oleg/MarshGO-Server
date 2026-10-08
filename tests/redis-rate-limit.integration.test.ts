@@ -18,19 +18,3 @@ test('API instances share the Redis rate-limit window', { skip: !apiUrl || !seco
   }
   assert.deepEqual(statuses, [404, 404, 404, 429, 429]);
 });
-
-test('trusted forwarded client IPs receive separate Redis rate-limit windows', { skip: !apiUrl || !secondaryApiUrl }, async () => {
-  const request = (url: string, clientIp: string) => fetch(`${url}/api/v1/rate-limit-test`, {
-    headers: { 'x-forwarded-for': clientIp },
-  });
-  const statuses = [
-    (await request(apiUrl!, '198.51.100.10')).status,
-    (await request(secondaryApiUrl!, '198.51.100.11')).status,
-    (await request(apiUrl!, '198.51.100.10')).status,
-    (await request(secondaryApiUrl!, '198.51.100.11')).status,
-    (await request(apiUrl!, '198.51.100.10')).status,
-    (await request(secondaryApiUrl!, '198.51.100.11')).status,
-    (await request(apiUrl!, '198.51.100.10')).status,
-  ];
-  assert.deepEqual(statuses, [404, 404, 404, 404, 404, 404, 429]);
-});

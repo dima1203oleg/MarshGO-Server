@@ -1,4 +1,4 @@
-import type { ConnectionReport, MobilityAsset, MobilityAssetType, MobilityStation } from './types';
+import { bboxOf, type ConnectionReport, type MobilityAsset, type MobilityAssetType, type MobilityStation } from './types';
 import { fetchJson } from './safeFetch';
 
 type Json = Record<string, unknown>;
@@ -86,8 +86,9 @@ export async function testGbfsConnection(providerId: string, discoveryUrl: strin
   const [vehicleTypes, vehicleStatus, freeBikes, stationInfo, stationStatus] = await Promise.all([load('vehicle_types'), load('vehicle_status'), load('free_bike_status'), load('station_information'), load('station_status')]);
   const statusFeed = vehicleStatus ?? freeBikes;
   let rejected = 0;
-  if (statusFeed) { const { assets, rejected: bad } = normalizeVehicles(providerId, vehicleTypes ?? undefined, statusFeed); counts.vehicles = assets.length; rejected += bad; checks.push({ name: 'Vehicles', ok: assets.length > 0, detail: `${assets.length} valid, ${bad} rejected` }); }
-  if (stationInfo) { const { stations, rejected: bad } = normalizeStations(providerId, stationInfo, stationStatus ?? undefined); counts.stations = stations.length; rejected += bad; checks.push({ name: 'Stations', ok: stations.length > 0 || (counts.vehicles ?? 0) > 0, detail: `${stations.length} valid, ${bad} rejected` }); }
+  const points: Array<[number, number]> = [];
+  if (statusFeed) { const { assets, rejected: bad } = normalizeVehicles(providerId, vehicleTypes ?? undefined, statusFeed); counts.vehicles = assets.length; rejected += bad; for (const asset of assets) points.push(asset.location); checks.push({ name: 'Vehicles', ok: assets.length > 0, detail: `${assets.length} valid, ${bad} rejected` }); }
+  if (stationInfo) { const { stations, rejected: bad } = normalizeStations(providerId, stationInfo, stationStatus ?? undefined); counts.stations = stations.length; rejected += bad; for (const station of stations) points.push(station.location); checks.push({ name: 'Stations', ok: stations.length > 0 || (counts.vehicles ?? 0) > 0, detail: `${stations.length} valid, ${bad} rejected` }); }
   if (!statusFeed && !stationInfo) { checks.push({ name: 'Vehicle or station data', ok: false }); return fail('No vehicle or station feed'); }
   const freshnessSource = [statusFeed, stationStatus].find(isObject);
   const rawUpdated = isObject(freshnessSource) ? freshnessSource.last_updated : undefined;
@@ -95,7 +96,7 @@ export async function testGbfsConnection(providerId: string, discoveryUrl: strin
   const ageSeconds = updated === null ? null : Math.round(Date.now() / 1000 - (updated > 1e12 ? updated / 1000 : updated));
   if (ageSeconds !== null) { counts.ageSeconds = ageSeconds; checks.push({ name: 'Freshness', ok: ageSeconds < 600, detail: `${ageSeconds}s old` }); }
   const allOk = checks.every((check) => check.ok);
-  return { health: allOk && rejected === 0 ? 'healthy' : 'degraded', checks, counts, responseMs: Date.now() - started };
+  return { health: allOk && rejected === 0 ? 'healthy' : 'degraded', checks, counts, responseMs: Date.now() - started, ...(bboxOf(points) ? { bbox: bboxOf(points) } : {}) };
 }
 
 export interface GbfsSnapshot { assets: MobilityAsset[]; stations: MobilityStation[]; fetchedAt: number }

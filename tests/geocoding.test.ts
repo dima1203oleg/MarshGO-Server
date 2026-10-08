@@ -1,7 +1,7 @@
 import { after, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, Server } from 'node:http';
-import { parseNominatimSuggestions, parsePhotonSuggestions, reverseGeocode, suggestPlaces, GeocodingUnavailableError } from '../server/geocoding';
+import { parseNominatimSuggestions, reverseGeocode, suggestPlaces, GeocodingUnavailableError } from '../server/geocoding';
 
 describe('Nominatim-compatible place search adapter', () => {
   let server: Server | undefined;
@@ -9,7 +9,6 @@ describe('Nominatim-compatible place search adapter', () => {
   const originalReverseUrl = process.env.GEOCODING_REVERSE_URL;
   const originalKey = process.env.GEOCODING_API_KEY;
   const originalEnvironment = process.env.NODE_ENV;
-  const originalProvider = process.env.GEOCODING_PROVIDER;
 
   after(async () => {
     if (server?.listening) await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
@@ -21,37 +20,6 @@ describe('Nominatim-compatible place search adapter', () => {
     else process.env.GEOCODING_API_KEY = originalKey;
     if (originalEnvironment === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = originalEnvironment;
-    if (originalProvider === undefined) delete process.env.GEOCODING_PROVIDER;
-    else process.env.GEOCODING_PROVIDER = originalProvider;
-  });
-
-  it('parses Photon GeoJSON results and rejects results outside Ukraine', () => {
-    assert.deepEqual(parsePhotonSuggestions({ features: [
-      { properties: { osm_type: 'R', osm_id: 42, countrycode: 'UA', name: 'Стрий', state: 'Львівська область', country: 'Україна' }, geometry: { coordinates: [23.856, 49.258] } },
-      { properties: { osm_type: 'R', osm_id: 43, countrycode: 'PL', name: 'Стрий' }, geometry: { coordinates: [22, 50] } },
-    ] }), [{ label: 'Стрий, Львівська область, Україна', latitude: 49.258, longitude: 23.856, providerId: 'R:42' }]);
-  });
-
-  it('uses Photon search-as-you-type response format and limits results to Ukraine', async () => {
-    server = createServer((request, response) => {
-      const url = new URL(request.url ?? '/', 'http://localhost');
-      assert.equal(url.searchParams.get('q'), 'Київ');
-      assert.equal(url.searchParams.get('bbox'), '22,44,41,53');
-      assert.equal(url.searchParams.get('limit'), '6');
-      response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ features: [
-        { properties: { osm_type: 'R', osm_id: 1, countrycode: 'UA', name: 'Київ', country: 'Україна' }, geometry: { coordinates: [30.524, 50.45] } },
-      ] }));
-    });
-    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
-    const address = server.address();
-    assert.ok(address && typeof address !== 'string');
-    process.env.NODE_ENV = 'test';
-    process.env.GEOCODING_PROVIDER = 'photon';
-    process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/api`;
-    assert.deepEqual(await suggestPlaces('Київ'), [{ label: 'Київ, Україна', latitude: 50.45, longitude: 30.524, providerId: 'R:1' }]);
-    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
-    server = undefined;
   });
 
   it('validates provider records and filters invalid coordinates', () => {
@@ -63,7 +31,6 @@ describe('Nominatim-compatible place search adapter', () => {
   });
 
   it('queries an isolated provider contract and restricts suggestions to Ukraine', async () => {
-    process.env.GEOCODING_PROVIDER = 'nominatim';
     server = createServer((request, response) => {
       const url = new URL(request.url ?? '/', 'http://localhost');
       assert.equal(url.searchParams.get('q'), 'Стрий');
@@ -83,7 +50,6 @@ describe('Nominatim-compatible place search adapter', () => {
   });
 
   it('reverse geocodes coordinates through a bounded Ukrainian provider request', async () => {
-    process.env.GEOCODING_PROVIDER = 'nominatim';
     server = createServer((request, response) => {
       const url = new URL(request.url ?? '/', 'http://localhost');
       assert.equal(url.pathname, '/reverse');

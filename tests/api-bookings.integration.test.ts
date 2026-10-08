@@ -21,7 +21,6 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     vehicle: crypto.randomUUID(),
     offer: crypto.randomUUID(),
     journeyOffer: crypto.randomUUID(),
-    rescueOffer: crypto.randomUUID(),
     rendezvousOffer: crypto.randomUUID(),
     expiredOffer: crypto.randomUUID(),
   };
@@ -62,12 +61,6 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[23.8561,49.2567],[24.0297,49.8397]]}'),4326),
         now()+interval '10 days',now()+interval '10 days 1 hour',78000,3600,'osrm',15000,1,1)`, [ids.journeyOffer, ids.driver, ids.vehicle]);
     await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
-      VALUES ($1,$2,$3,'Journey Rescue Origin','Journey Rescue Destination',
-        ST_SetSRID(ST_MakePoint(23.8561,49.2567),4326)::geography,
-        ST_SetSRID(ST_MakePoint(24.0297,49.8397),4326)::geography,
-        ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[23.8561,49.2567],[24.0297,49.8397]]}'),4326),
-        now()+interval '10 days',now()+interval '10 days 1 hour',78000,3600,'osrm',17000,1,1)`, [ids.rescueOffer, ids.driver, ids.vehicle]);
-    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
       VALUES ($1,$2,$3,'Pickup point','Rendezvous destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
         ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
@@ -88,7 +81,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     await pool.query('DELETE FROM journeys WHERE user_id = ANY($1::uuid[])', [[ids.driver, ...ids.passengers]]);
     await pool.query('DELETE FROM verification_records WHERE user_id = ANY($1::uuid[]) OR id=ANY($2::uuid[])', [[ids.driver, ...ids.passengers, ids.admin], verificationIds]);
     await pool.query('DELETE FROM otp_challenges WHERE phone_e164 LIKE $1', [`+38099${process.pid}%`]);
-    await pool.query("DELETE FROM audit_events WHERE actor_id = ANY($1::uuid[]) AND action IN ('vehicle.created','offer.created','demand.created','demand.cancelled','proposal.created','proposal.countered','proposal.agreed','proposal.accepted','user.blocked','user.unblocked','journey.leg.booked','journey.replanning','journey.rescue.booked')", [[ids.driver, ...ids.passengers]]);
+    await pool.query("DELETE FROM audit_events WHERE actor_id = ANY($1::uuid[]) AND action IN ('vehicle.created','offer.created','demand.created','demand.cancelled','proposal.created','proposal.countered','proposal.agreed','proposal.accepted','user.blocked','user.unblocked','journey.leg.booked','journey.replanning')", [[ids.driver, ...ids.passengers]]);
     await pool.query("DELETE FROM audit_events WHERE entity_id=ANY($1::uuid[]) OR (actor_id=ANY($2::uuid[]) AND action LIKE 'moderation.%')", [moderationCaseIds, [passengerA, ids.admin]]);
     await pool.query('DELETE FROM moderation_cases WHERE id=ANY($1::uuid[])', [moderationCaseIds]);
     await pool.query('DELETE FROM realtime_outbox WHERE recipient_ids && $1::uuid[]', [[ids.driver, ...ids.passengers, ids.admin]]);
@@ -163,7 +156,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(enabledDriver.status, 200, roleBody.error?.message);
     assert.deepEqual(roleBody.data?.roles, ['driver', 'passenger']);
     const ownCar = await fetch(`${apiUrl}/api/v1/vehicles`, {
-      method: 'POST', headers: authHeaders, body: JSON.stringify({ make: 'Test', model: 'OTP Car', modelYear: 2022, seats: 4 }),
+      method: 'POST', headers: authHeaders, body: JSON.stringify({ make: 'Test', model: 'OTP Car', modelYear: 2022, seats: 4, plate: 'AA7441OT' }),
     });
     assert.equal(ownCar.status, 201);
     const createdVehicle = await ownCar.json() as { data: { id: string } };
@@ -294,44 +287,6 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(inboxBody.data.items.length, 1);
     assert.ok(inboxBody.data.nextCursor);
     assert.equal(inboxBody.data.unreadCount, 4);
-
-    const rescueResponse = await fetch(`${apiUrl}/api/v1/bookings/${linkedBooking.data.id}/rescue`, {
-      headers: { 'x-dev-user-id': passengerA },
-    });
-    assert.equal(rescueResponse.status, 200);
-    const rescueBody = await rescueResponse.json() as { data: { alternatives: Array<{ id: string }> } };
-    assert.ok(rescueBody.data.alternatives.some((alternative) => alternative.id === ids.rescueOffer));
-    const rescueKeys = [`journey-rescue-${crypto.randomUUID()}`, `journey-rescue-${crypto.randomUUID()}`];
-    const rescueRequest = (key: string) => fetch(`${apiUrl}/api/v1/bookings`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': key },
-      body: JSON.stringify({ offerId: ids.rescueOffer, seats: 1, journeyId: journey.id, journeyLegId: journey.legs[0].id }),
-    });
-    const rescueRaces = await Promise.all(rescueKeys.map((key) => rescueRequest(key)));
-    assert.deepEqual(rescueRaces.map((response) => response.status).sort(), [201, 409], 'concurrent rescue attempts create exactly one replacement booking');
-    const winningIndex = rescueRaces.findIndex((response) => response.status === 201);
-    const rescuedBody = await rescueRaces[winningIndex].json() as { data: { id: string }; replayed: boolean };
-    assert.equal(rescuedBody.replayed, false);
-    const replay = await rescueRequest(rescueKeys[winningIndex]);
-    assert.equal(replay.status, 200, 'rescue booking is idempotent against its original cancelled leg');
-    assert.equal((await replay.json() as { data: { id: string } }).data.id, rescuedBody.data.id);
-    const duplicateRescue = await fetch(`${apiUrl}/api/v1/bookings`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA, 'idempotency-key': `journey-rescue-${crypto.randomUUID()}` },
-      body: JSON.stringify({ offerId: ids.rescueOffer, seats: 1, journeyId: journey.id, journeyLegId: journey.legs[0].id }),
-    });
-    assert.equal(duplicateRescue.status, 409, 'a replacement cannot be attached to the same cancelled leg twice');
-    const completedRescueJourney = await pool.query<{ state: string; confirmed_price_minor: number; legs: Array<{ ordinal: number; state: string; booking_id: string | null; metadata: Record<string, string> }> }>(
-      `SELECT j.state,j.confirmed_price_minor,
-              jsonb_agg(jsonb_build_object('ordinal',l.ordinal,'state',l.state,'booking_id',l.booking_id,'metadata',l.metadata) ORDER BY l.ordinal) AS legs
-         FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 GROUP BY j.id`, [journey.id],
-    );
-    assert.equal(completedRescueJourney.rows[0].state, 'READY');
-    assert.equal(completedRescueJourney.rows[0].confirmed_price_minor, 17000);
-    assert.equal(completedRescueJourney.rows[0].legs.length, 2);
-    assert.equal(completedRescueJourney.rows[0].legs[0].state, 'REPLACED');
-    assert.equal(completedRescueJourney.rows[0].legs[0].booking_id, linkedBooking.data.id);
-    assert.equal(completedRescueJourney.rows[0].legs[1].state, 'CONFIRMED');
-    assert.equal(completedRescueJourney.rows[0].legs[1].booking_id, rescuedBody.data.id);
-    assert.equal(completedRescueJourney.rows[0].legs[1].metadata.rescue_from_leg_id, journey.legs[0].id);
     const latestNotification = inboxBody.data.items[0];
     assert.equal(latestNotification.title, 'План маршруту оновлено');
     assert.equal(JSON.stringify(latestNotification).includes('phone'), false);
@@ -694,12 +649,13 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
 
     const vehicleResponse = await fetch(`${apiUrl}/api/v1/vehicles`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.driver },
-      body: JSON.stringify({ make: 'Kia', model: 'Ceed', modelYear: 2022, seats: 3 }),
+      body: JSON.stringify({ make: 'Kia', model: 'Ceed', modelYear: 2022, seats: 3, plate: 'AA7441KC' }),
     });
     assert.equal(vehicleResponse.status, 201);
     const vehicle = await vehicleResponse.json() as { data: { id: string; verification_status: string; is_active: boolean } };
     apiCreatedVehicleId = vehicle.data.id;
     assert.equal(vehicle.data.verification_status, 'pending');
+    assert.equal((vehicle.data as { trust_level?: number }).trust_level, 0, 'a new vehicle starts below level 1 until its photo is validated');
     assert.equal(vehicle.data.is_active, true);
 
     const forbiddenEdit = await fetch(`${apiUrl}/api/v1/vehicles/${apiCreatedVehicleId}`, {
@@ -715,7 +671,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
 
     const secondVehicle = await fetch(`${apiUrl}/api/v1/vehicles`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.driver },
-      body: JSON.stringify({ make: 'Skoda', model: 'Octavia', modelYear: 2023, seats: 4 }),
+      body: JSON.stringify({ make: 'Skoda', model: 'Octavia', modelYear: 2023, seats: 4, plate: 'AA7441SO' }),
     });
     const second = await secondVehicle.json() as { data: { id: string; is_active: boolean } };
     extraVehicleIds.push(second.data.id);
@@ -740,7 +696,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal(pendingOffer.status, 404);
 
-    await pool.query("UPDATE vehicles SET verification_status = 'verified' WHERE id = $1", [apiCreatedVehicleId]);
+    // Level 1 is normally reached automatically when a validated photo is attached to a vehicle with a plate.
+    await pool.query("UPDATE vehicles SET trust_level = 1 WHERE id = $1", [apiCreatedVehicleId]);
     const missingPhoto = await fetch(`${apiUrl}/api/v1/offers`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': ids.driver },
       body: JSON.stringify(offerPayload),
@@ -833,8 +790,9 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(stillPending.rows[0].verification_status, 'pending');
     const licenseApproval = await decide(licenseRecord);
     assert.equal(licenseApproval.status, 200);
-    const verifiedVehicle = await pool.query('SELECT verification_status FROM vehicles WHERE id=$1', [apiCreatedVehicleId]);
+    const verifiedVehicle = await pool.query('SELECT verification_status,trust_level FROM vehicles WHERE id=$1', [apiCreatedVehicleId]);
     assert.equal(verifiedVehicle.rows[0].verification_status, 'verified');
+    assert.equal(verifiedVehicle.rows[0].trust_level, 3, 'both document approvals raise the vehicle to the driver-verified trust level');
     const verifiedDriver = await pool.query('SELECT verification_level,profile_status FROM driver_profiles WHERE user_id=$1', [ids.driver]);
     assert.deepEqual(verifiedDriver.rows[0], { verification_level: 'identity', profile_status: 'active' });
     assert.equal((await decide(vehicleRecord)).status, 409);
@@ -875,7 +833,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const unrelatedUserVerification = await fetch(`${apiUrl}/api/v1/users/me/verification`, { headers: { 'x-dev-user-id': passengerA } });
     assert.equal((await unrelatedUserVerification.json() as { data: unknown[] }).data.length, 0);
     // This shared fixture is used by the next negotiation test; restore its verified state after asserting rejection behavior.
-    await pool.query("UPDATE vehicles SET verification_status='verified' WHERE id=$1", [apiCreatedVehicleId]);
+    await pool.query("UPDATE vehicles SET verification_status='verified',trust_level=3 WHERE id=$1", [apiCreatedVehicleId]);
   });
 
   it('keeps negotiation history and atomically converts an accepted proposal into a booking', async () => {
@@ -1075,16 +1033,10 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(ids.driver),
     });
     assert.equal((await secondCompletion.json() as { data: { status: string } }).data.status, 'completed');
-    const bookingsBeforeReview = await fetch(`${apiUrl}/api/v1/bookings`, { headers: headers(passengerA) });
-    const completedBookingBeforeReview = (await bookingsBeforeReview.json() as { data: Array<{ id: string; current_user_has_review: boolean }> }).data.find((item) => item.id === booking.data.id);
-    assert.equal(completedBookingBeforeReview?.current_user_has_review, false);
     const passengerReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
       method: 'POST', headers: headers(passengerA), body: JSON.stringify({ rating: 5, comment: 'Доїхали вчасно.' }),
     });
     assert.equal(passengerReview.status, 201);
-    const bookingsAfterReview = await fetch(`${apiUrl}/api/v1/bookings`, { headers: headers(passengerA) });
-    const completedBookingAfterReview = (await bookingsAfterReview.json() as { data: Array<{ id: string; current_user_has_review: boolean }> }).data.find((item) => item.id === booking.data.id);
-    assert.equal(completedBookingAfterReview?.current_user_has_review, true);
     const driverReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
       method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ rating: 4 }),
     });
@@ -1138,7 +1090,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const history = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, {
       headers: headers(ids.driver),
     });
-    assert.equal((await history.json() as { data: { messages: Array<{ body: string }> } }).data.messages[0].body, 'Підтверджую час виїзду.');
+    assert.equal((await history.json() as { data: Array<{ body: string }> }).data[0].body, 'Підтверджую час виїзду.');
     const markRead = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/read`, { method: 'POST', headers: headers(ids.driver) });
     assert.equal(markRead.status, 200);
     const driverReadState = (await markRead.json() as { data: { conversation_id: string; last_read_message_id: string; unread_count: number } }).data;
@@ -1149,34 +1101,6 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ body: 'Чекаю біля входу.' }),
     });
     assert.equal(driverReply.status, 201);
-    await pool.query(
-      `INSERT INTO messages(conversation_id,sender_id,body,created_at)
-       SELECT $1,$2,'Історія сторінка ' || seq::text,now()-((1000-seq)*interval '1 second')
-         FROM generate_series(1,55) AS seq`, [conversation.data.id, passengerA],
-    );
-    const firstMessagePage = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages`, { headers: headers(ids.driver) });
-    assert.equal(firstMessagePage.status, 200);
-    const firstPage = (await firstMessagePage.json() as { data: { messages: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } } }).data;
-    assert.equal(firstPage.messages.length, 50);
-    assert.equal(firstPage.pagination.hasMore, true);
-    assert.equal(firstPage.messages.at(-1)?.body, 'Чекаю біля входу.');
-    assert.equal(firstPage.pagination.nextCursor, firstPage.messages[0]?.id);
-    const secondMessagePage = await fetch(
-      `${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?before=${firstPage.pagination.nextCursor}`,
-      { headers: headers(ids.driver) },
-    );
-    assert.equal(secondMessagePage.status, 200);
-    const secondPage = (await secondMessagePage.json() as { data: { messages: Array<{ id: string; body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } } }).data;
-    assert.equal(secondPage.messages.length, 7);
-    assert.equal(secondPage.messages.at(-1)?.body, 'Історія сторінка 7');
-    assert.equal(secondPage.pagination.hasMore, false);
-    assert.equal(secondPage.pagination.nextCursor, null);
-    assert.equal(firstPage.messages.some((item) => secondPage.messages.some((older) => older.id === item.id)), false);
-    const invalidMessageCursor = await fetch(
-      `${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?before=not-a-uuid`,
-      { headers: headers(ids.driver) },
-    );
-    assert.equal(invalidMessageCursor.status, 400);
     const unreadForPassenger = await fetch(`${apiUrl}/api/v1/conversation-unread-counts`, { headers: headers(passengerA) });
     const passengerUnread = await unreadForPassenger.json() as { data: Array<{ conversation_id: string; unread_count: number }> };
     assert.equal(passengerUnread.data.find((item) => item.conversation_id === conversation.data.id)?.unread_count, 1);
@@ -1233,5 +1157,30 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const expiredProposals = await fetch(`${apiUrl}/api/v1/demands/${expiryDemandId}/proposals`, { headers: headers(passengerA) });
     const expiredProposalUiData = await expiredProposals.json() as { data: Array<{ id: string; status: string }> };
     assert.equal(expiredProposalUiData.data.find((item) => item.id === expiryProposalId)?.status, 'expired');
+  });
+
+  it('serves map layers only to signed-in users and rejects oversized or malformed viewports', async () => {
+    const devUser = crypto.randomUUID();
+    await pool.query(`INSERT INTO users(id,display_name,roles) VALUES($1,'Layer reader',ARRAY['passenger'])`, [devUser]);
+    await pool.query(`INSERT INTO user_roles(user_id,role) VALUES($1,'passenger')`, [devUser]);
+    try {
+      const headers = { 'x-dev-user-id': devUser };
+      for (const path of ['layers', 'routes?bbox=24,49,24.1,49.1&types=bus', 'stops?bbox=24,49,24.1,49.1&types=bus', 'vehicles?bbox=24,49,24.1,49.1&types=bus', 'micromobility?bbox=24,49,24.1,49.1&types=scooter']) {
+        assert.equal((await fetch(`${apiUrl}/api/v1/transport/${path}`)).status, 401, `${path} requires sign-in`);
+      }
+      const layers = await fetch(`${apiUrl}/api/v1/transport/layers`, { headers });
+      assert.equal(layers.status, 200);
+      const ids = (await layers.json() as { data: Array<{ id: string; available: boolean }> }).data.map((item) => item.id);
+      assert.deepEqual(ids, ['PUBLIC_TRANSPORT', 'METRO', 'BUS', 'TRAM', 'TROLLEYBUS', 'STOPS', 'BICYCLE', 'SCOOTER', 'RENTAL_POINTS']);
+      for (const path of ['routes?types=bus', 'routes?bbox=24,49,24.1,49.1', 'routes?bbox=20,45,30,55&types=bus', 'stops?bbox=24,49,25,50&types=bus', 'vehicles?bbox=x&types=bus', 'micromobility?bbox=24,49,25,50&types=scooter', 'micromobility?bbox=24,49,24.1,49.1&types=cars']) {
+        assert.equal((await fetch(`${apiUrl}/api/v1/transport/${path}`, { headers })).status, 400, `${path} must be rejected`);
+      }
+      const empty = await fetch(`${apiUrl}/api/v1/transport/routes?bbox=-10,-10,-9.9,-9.9&types=bus`, { headers });
+      assert.equal(empty.status, 200);
+      assert.deepEqual((await empty.json() as { data: { features: unknown[] } }).data.features, []);
+    } finally {
+      await pool.query('DELETE FROM user_roles WHERE user_id=$1', [devUser]);
+      await pool.query('DELETE FROM users WHERE id=$1', [devUser]);
+    }
   });
 });

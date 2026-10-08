@@ -1,13 +1,13 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 import { testProviderConnection } from './connection';
-import { ukraineCatalog } from './ukraineCatalog';
+import { ukraineCatalog, ukraineCatalogWave2 } from './ukraineCatalog';
 
 /** Idempotent: registers every catalogue source, tests the open ones and enables those that are healthy. */
 async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {
-    for (const entry of ukraineCatalog) {
+    for (const entry of [...ukraineCatalog, ...ukraineCatalogWave2]) {
       const { rows } = await pool.query<{ id: string; status: string }>(
         `INSERT INTO mobility_providers(name,city,provider_type,source_type,feed_url,priority,access,license,update_frequency,coverage,source_ref,country)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'UA')
@@ -25,7 +25,7 @@ async function main() {
       const report = await testProviderConnection({ id: provider.id, source_type: entry.sourceType, feed_url: entry.feedUrl });
       await pool.query(
         `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_sync_at=CASE WHEN $2='healthy' THEN now() ELSE last_sync_at END,last_error=$3,last_report=$4,
-           status=CASE WHEN $2='healthy' THEN 'enabled' ELSE 'disabled' END,updated_at=now() WHERE id=$1`,
+           status=CASE WHEN $2='offline' THEN 'disabled' ELSE 'enabled' END,updated_at=now() WHERE id=$1`,
         [provider.id, report.health, report.error ?? null, JSON.stringify(report)],
       );
       console.log(`${report.health.padEnd(8)} ${entry.name} ${JSON.stringify(report.counts)}`);

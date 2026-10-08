@@ -94,6 +94,7 @@ describe('GTFS parsing', () => {
   it('maps route types to transport labels', () => {
     assert.equal(routeTypeLabel(0), 'tram'); assert.equal(routeTypeLabel(1), 'metro'); assert.equal(routeTypeLabel(2), 'train');
     assert.equal(routeTypeLabel(3), 'bus'); assert.equal(routeTypeLabel(11), 'trolleybus'); assert.equal(routeTypeLabel(715), 'bus');
+    assert.equal(routeTypeLabel(102), 'train'); assert.equal(routeTypeLabel(106), 'suburban');
   });
   it('summarises a feed and flags missing files and bad coordinates', () => {
     const files = {
@@ -108,5 +109,28 @@ describe('GTFS parsing', () => {
     assert.deepEqual(summary.routeTypes, { bus: 1, tram: 1 });
     assert.equal(summary.trips, 2); assert.equal(summary.stopTimeRows, 2);
     assert.deepEqual(summary.missingFiles, ['calendar.txt|calendar_dates.txt']);
+  });
+});
+
+import { extractVehicleList, summarizeVehicles, vehicleTransportLabel } from '../server/mobility/jsonVehicles';
+
+describe('JSON vehicle feeds', () => {
+  it('finds the vehicle list in Dozor, EasyWay and iCity shapes', () => {
+    assert.equal(extractVehicleList([{ latitude: 1, longitude: 2 }]).length, 1);
+    assert.equal(extractVehicleList({ positions: [{ lat: 1, lon: 2 }, { lat: 3, lon: 4 }] }).length, 2);
+    assert.equal(extractVehicleList({ nothing: true }).length, 0);
+  });
+  it('maps transport spellings', () => {
+    assert.equal(vehicleTransportLabel({ route_type: 11 }), 'trolleybus');
+    assert.equal(vehicleTransportLabel({ transport_type: 'marshrutka' }), 'marshrutka');
+    assert.equal(vehicleTransportLabel({ type: 'bus' }), 'bus');
+    assert.equal(vehicleTransportLabel({ type: 'tram' }), 'tram');
+  });
+  it('counts valid vehicles per type and rejects bad coordinates', () => {
+    const list = [{ latitude: 49.8, longitude: 24, type: 'bus', timestamp: Math.floor(Date.now() / 1000) - 30 }, { lat: 49.9, lon: 24.1, type: 'tram' }, { lat: 0, lon: 0, type: 'bus' }, { lat: 'x', lon: 1 }];
+    const summary = summarizeVehicles(list);
+    assert.equal(summary.valid, 2); assert.equal(summary.invalid, 2);
+    assert.deepEqual(summary.byType, { bus: 1, tram: 1 });
+    assert.ok(summary.ageSeconds !== null && summary.ageSeconds < 120);
   });
 });

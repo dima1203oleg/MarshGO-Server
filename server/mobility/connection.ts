@@ -1,6 +1,7 @@
 import { testGbfsConnection } from './gbfs';
 import { testGtfsConnection } from './gtfs';
 import { testGtfsRealtimeConnection } from './gtfsRealtime';
+import { testJsonVehiclesConnection } from './jsonVehicles';
 import { probeUrl, UnsafeUrlError } from './safeFetch';
 import type { ConnectionReport } from './types';
 
@@ -8,6 +9,7 @@ export async function testProviderConnection(provider: { id: string; source_type
   if (provider.source_type === 'gbfs') return testGbfsConnection(provider.id, provider.feed_url);
   if (provider.source_type === 'gtfs') return testGtfsConnection(provider.feed_url);
   if (provider.source_type === 'gtfs_rt') return testGtfsRealtimeConnection(provider.feed_url);
+  if (provider.source_type === 'json') return testJsonVehiclesConnection(provider.feed_url);
   const started = Date.now();
   try {
     const probe = await probeUrl(provider.feed_url);

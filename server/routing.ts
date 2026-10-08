@@ -12,7 +12,7 @@ export async function getRoadRouteThroughPoints(points: [number, number][]): Pro
   const provider = new OsrmRoutingProvider(process.env.OSRM_URL || process.env.ROUTING_ENGINE_URL);
   const route = await provider.route({ origin: points[0], destination: points.at(-1)!, waypoints: points.slice(1,-1), profile: { mode: 'CAR' }, requestId: crypto.randomUUID() });
   return { geometry: decodePolyline6(route.geometry.value), distanceMeters: route.distanceMeters, durationSeconds: route.durationSeconds,
-    ...(route.legs.length ? { legs: route.legs } : {}) };
+    ...(route.legs.length ? { legs: route.legs } : {}), ...(route.maneuvers.length ? { maneuvers: route.maneuvers } : {}) };
 }
 
 export async function calculateCanonicalRoute(request: RouteRequest): Promise<RouteResult> {

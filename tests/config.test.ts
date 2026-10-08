@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { validateRuntimeConfig } from '../server/config';
+import { getTrustedProxyHops, validateRuntimeConfig } from '../server/config';
 
 const validProductionConfig: NodeJS.ProcessEnv = {
   NODE_ENV: 'production',
-  TRUST_PROXY_HOPS: '2',
+  TRUST_PROXY_HOPS: '1',
   SESSION_SECRET: 'a'.repeat(64),
   CORS_ORIGINS: 'https://marshgo.example,capacitor://localhost',
   SMS_PROVIDER: 'twilio',
@@ -31,11 +31,11 @@ describe('runtime production configuration', () => {
     assert.doesNotThrow(() => validateRuntimeConfig({ NODE_ENV: 'development', AUTH_DEV_OTP: 'true' }));
   });
 
-  it('requires an explicit, bounded trusted proxy topology in production', () => {
+  it('requires an explicit bounded reverse-proxy hop count in production', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRUST_PROXY_HOPS: undefined }), /TRUST_PROXY_HOPS is required/);
-    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRUST_PROXY_HOPS: '1.5' }), /integer from 0 to 5/);
-    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRUST_PROXY_HOPS: '6' }), /integer from 0 to 5/);
-    assert.doesNotThrow(() => validateRuntimeConfig({ ...validProductionConfig, TRUST_PROXY_HOPS: '0' }));
+    for (const value of ['-1', '6', '1.5', 'true']) assert.throws(() => getTrustedProxyHops({ NODE_ENV: 'development', TRUST_PROXY_HOPS: value }), /integer from 0 to 5/);
+    assert.equal(getTrustedProxyHops({ NODE_ENV: 'development' }), 0);
+    assert.equal(getTrustedProxyHops({ NODE_ENV: 'production', TRUST_PROXY_HOPS: '2' }), 2);
   });
 
   it('rejects development auth bypass in production', () => {
@@ -64,5 +64,6 @@ describe('runtime production configuration', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, ROUTING_PRIMARY: 'here' }), /only configured production routing provider/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, HERE_TRAFFIC_ENABLED: 'true' }), /provider adapter is implemented/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRAFFIC_PROVIDER: 'tomtom' }), /only configured traffic provider/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, GEOCODING_PROVIDER: 'unknown' }), /GEOCODING_PROVIDER must be nominatim or photon/);
   });
 });

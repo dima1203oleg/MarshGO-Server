@@ -2,6 +2,7 @@ type RuntimeEnvironment = NodeJS.ProcessEnv;
 
 const MAX_TRUSTED_PROXY_HOPS = 5;
 
+/** Trust only the explicitly configured reverse-proxy chain; Express's fixed hop count is unsafe across deployments. */
 export function getTrustedProxyHops(environment: RuntimeEnvironment): number {
   const raw = environment.TRUST_PROXY_HOPS?.trim();
   if (!raw) {
