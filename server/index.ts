@@ -2852,6 +2852,7 @@ app.get('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
             (o.driver_id=$1) AS current_user_is_driver,
             (SELECT count(*)::int FROM booking_completion_confirmations cc WHERE cc.booking_id=b.id) AS completion_confirmation_count,
             EXISTS(SELECT 1 FROM booking_completion_confirmations cc WHERE cc.booking_id=b.id AND cc.user_id=$1) AS current_user_confirmed_completion,
+            EXISTS(SELECT 1 FROM reviews rv WHERE rv.booking_id=b.id AND rv.author_id=$1) AS current_user_has_review,
             (SELECT json_build_object('id',a.id,'summary',a.summary,'new_unit_price_minor',a.new_unit_price_minor,'created_at',a.created_at)
                FROM booking_change_approvals a WHERE a.booking_id=b.id AND a.status='pending' LIMIT 1) AS pending_change
        FROM bookings b JOIN offers o ON o.id = b.offer_id JOIN users u ON u.id = o.driver_id

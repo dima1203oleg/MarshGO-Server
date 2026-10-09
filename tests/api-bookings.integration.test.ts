@@ -1041,6 +1041,12 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ rating: 4 }),
     });
     assert.equal(driverReview.status, 201);
+    const passengerBookingsAfterReview = await fetch(`${apiUrl}/api/v1/bookings`, { headers: headers(passengerA) });
+    assert.equal(passengerBookingsAfterReview.status, 200);
+    const bookingAfterReview = (await passengerBookingsAfterReview.json() as {
+      data: Array<{ id: string; current_user_has_review: boolean }>;
+    }).data.find((item) => item.id === booking.data.id);
+    assert.equal(bookingAfterReview?.current_user_has_review, true);
     const duplicateReview = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/reviews`, {
       method: 'POST', headers: headers(passengerA), body: JSON.stringify({ rating: 1 }),
     });
