@@ -40,4 +40,5 @@ export interface JourneyPreferences {
   preferredVehicleClass?: string;
   allowedTransportTypes?: JourneyTransportType[];
   allowedTransitProviders?: string[];
+  allowedTransitProvidersByType?: Partial<Record<JourneyTransportType, string[]>>;
 }

@@ -16,7 +16,7 @@ import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, Routi
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
-import { parseJourneySearchRequest } from './journey/search';
+import { parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
@@ -2188,8 +2188,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     });
     scheduledCandidates.push(...itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
       && (!search.preferences.allowedTransportTypes || search.preferences.allowedTransportTypes.includes(segment.transportType)))
-      && (!search.preferences.allowedTransitProviders?.length
-        || candidate.segments.every((segment) => search.preferences.allowedTransitProviders!.includes(segment.providerName.split(' — ')[0])))
+      && candidate.segments.every((segment) => transitProviderAllowed(search.preferences, segment.transportType, segment.providerName))
       && (search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
       && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers)));
   }
@@ -2238,15 +2237,16 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       );
       const journeyId = stored.rows[0].id;
       await client.query(
-        `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+        `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
         [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
           preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
           preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
           preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
           preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
           preferenceValues.minimumTransferBufferSeconds ?? 600, preferenceValues.maxCommunityDetourSeconds ?? 900,
-          preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? []],
+          preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+          JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
       );
       const leg = await client.query<{ id: string }>(
         `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,eta_uncertainty_seconds,distance_m,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_type,offer_id,reliability_score,transfer_risk_score,state,data_source,data_freshness_seconds,last_updated_at,metadata)
@@ -2293,15 +2293,16 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       );
       const journeyId = stored.rows[0].id;
       await client.query(
-        `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+        `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
         [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
           preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
           preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
           preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
           preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
           preferenceValues.minimumTransferBufferSeconds ?? 600, preferenceValues.maxCommunityDetourSeconds ?? 900,
-          preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? []],
+          preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+          JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
       );
 
       const responseLegs: Array<Record<string, unknown>> = [];

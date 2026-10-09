@@ -58,7 +58,7 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
   if (!isRecord(rawPreferences)) throw new TypeError('preferences must be an object');
   const allowedPreferences = new Set([
     ...Object.keys(preferenceBounds), 'minDriverRating','preferredVehicleClass',
-    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowedTransportTypes','allowedTransitProviders',
+    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowedTransportTypes','allowedTransitProviders','allowedTransitProvidersByType',
   ]);
   const unknownPreference = Object.keys(rawPreferences).find((key) => !allowedPreferences.has(key));
   if (unknownPreference) throw new TypeError(`unsupported preference: ${unknownPreference}`);
@@ -96,6 +96,20 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
       || new Set(providers).size !== providers.length) throw new TypeError('allowedTransitProviders is invalid');
     preferences.allowedTransitProviders = providers as string[];
   }
+  if (rawPreferences.allowedTransitProvidersByType !== undefined) {
+    const providersByType = rawPreferences.allowedTransitProvidersByType;
+    if (!isRecord(providersByType) || Object.keys(providersByType).length > JOURNEY_TRANSPORT_TYPES.length) {
+      throw new TypeError('allowedTransitProvidersByType is invalid');
+    }
+    const normalized: NonNullable<JourneyPreferences['allowedTransitProvidersByType']> = {};
+    for (const [type, providers] of Object.entries(providersByType)) {
+      if (!(JOURNEY_TRANSPORT_TYPES as readonly string[]).includes(type) || !Array.isArray(providers) || providers.length > 100
+        || providers.some((provider) => typeof provider !== 'string' || provider.trim().length < 2 || provider.trim().length > 120)
+        || new Set(providers).size !== providers.length) throw new TypeError('allowedTransitProvidersByType is invalid');
+      normalized[type as keyof typeof normalized] = (providers as string[]).map((provider) => provider.trim());
+    }
+    preferences.allowedTransitProvidersByType = normalized;
+  }
   if (rawPreferences.minDriverRating !== undefined) {
     const rating = rawPreferences.minDriverRating;
     if (typeof rating !== 'number' || !Number.isFinite(rating) || rating < 0 || rating > 5) throw new TypeError('minDriverRating must be from 0 to 5');
@@ -107,4 +121,12 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
     preferences.preferredVehicleClass = value.trim();
   }
   return { origin, destination, departureAt, passengers: value.passengers as number, strategy: value.strategy as JourneyStrategy, preferences };
+}
+
+/** Per-mode provider choices take precedence; the flat list remains for older clients. */
+export function transitProviderAllowed(preferences: JourneyPreferences, transportType: string, providerName: string): boolean {
+  const operator = providerName.split(' — ')[0];
+  const selectedForType = preferences.allowedTransitProvidersByType?.[transportType as keyof NonNullable<JourneyPreferences['allowedTransitProvidersByType']>];
+  if (selectedForType !== undefined) return selectedForType.includes(operator);
+  return !preferences.allowedTransitProviders?.length || preferences.allowedTransitProviders.includes(operator);
 }
