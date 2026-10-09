@@ -253,6 +253,13 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
         stops.set(id, canonical);
         candidates.push({ id, lon: stop.lon, lat: stop.lat });
         stopsByName.set(nameKey, candidates);
+      } else if (stationAlias && !candidates.some((candidate) => candidate.id === id
+        && candidate.lon === stop.lon && candidate.lat === stop.lat)) {
+        // Keep every source platform coordinate as an alias of the canonical
+        // interchange. Otherwise a third feed can be within 150 m of a
+        // secondary platform, yet appear too far from the first platform
+        // retained as the canonical representative (common at large stations).
+        candidates.push({ id, lon: stop.lon, lat: stop.lat });
       }
       remappedStops.set(stop.id, id);
     }

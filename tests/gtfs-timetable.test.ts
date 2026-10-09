@@ -265,6 +265,38 @@ test('composes a city bus and rail itinerary across differently named railway pl
   }).filter((itinerary) => itinerary.segments.length === 2).length, 0);
 });
 
+test('retains secondary city-station platform coordinates when merging a third rail feed', () => {
+  const cityBus = transferFeed({ routeType: '3', routeName: 'City bus', fromId: 'bus-start', fromName: 'Start',
+    fromLon: '23.9900', fromLat: '49.8400', toId: 'bus-station', toName: 'Залізничний вокзал',
+    toLon: '24.0010', toLat: '49.8400', departure: '08:00:00', arrival: '08:10:00' });
+  const busStart = cityBus.stops.get('bus-start')!;
+  const busStation = cityBus.stops.get('bus-station')!;
+  // The first stop creates the canonical station at x=24.0000. The served
+  // platform and rail station are each within 150 m of one another, while
+  // the representative coordinate is just outside that matching radius.
+  cityBus.stops = new Map([
+    [busStart.id, busStart],
+    ['secondary-platform', { id: 'secondary-platform', name: 'Залізничний вокзал платформа A', lon: 24, lat: 49.84 }],
+    [busStation.id, busStation],
+  ]);
+  const rail = transferFeed({ routeType: '2', routeName: 'Regional train', fromId: 'rail-station', fromName: 'Львів-Головний',
+    fromLon: '24.0023', fromLat: '49.8400', toId: 'rail-finish', toName: 'Finish',
+    toLon: '24.0200', toLat: '49.8500', departure: '08:30:00', arrival: '09:00:00' });
+  const merged = mergeGtfsTimetables([
+    { providerId: 'city', providerName: 'Kyiv city transit', providerCity: 'Київ', feed: cityBus },
+    { providerId: 'rail', providerName: 'National rail', providerCity: 'Україна', feed: rail },
+  ])!;
+  const results = findGtfsItineraries(merged, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [23.9900, 49.8400], destination: [24.0200, 49.8500],
+    maximumStopDistanceMeters: 2000, maximumTransfers: 1, minimumTransferBufferSeconds: 600,
+  });
+  const connected = results.find((itinerary) => itinerary.segments.length === 2);
+  assert.ok(connected);
+  assert.deepEqual(connected.segments.map((segment) => segment.transportType), ['bus', 'train']);
+  assert.ok(connected.transferWalkingMeters[0] >= 90 && connected.transferWalkingMeters[0] <= 100);
+});
+
 test('does not invent a feasible transfer when the configured buffer is missed', () => {
   const transit = connectingFeed();
   const rail = transit.stopTimes.get('r1')!;
