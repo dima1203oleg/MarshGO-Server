@@ -63,7 +63,7 @@ export function scoreJourneys<T extends JourneyOption>(
   })) as Record<Metric, { min: number; max: number }>;
   const combinedWeights = { ...JOURNEY_SCORE_WEIGHTS[strategy], ...weights };
 
-  return journeys.map((journey) => {
+  const scored = journeys.map((journey) => {
     const values: Record<Metric, number> = {
       durationSeconds: journey.durationSeconds,
       priceMinor: metrics.priceMinor(journey),
@@ -81,7 +81,20 @@ export function scoreJourneys<T extends JourneyOption>(
       return sum + normalized(value, ranges[metric].min, ranges[metric].max) * combinedWeights[weightKey];
     }, 0);
     return { journey, score, strategy };
-  }).sort((a, b) => a.score - b.score || a.journey.id.localeCompare(b.journey.id));
+  });
+  return scored.sort((a, b) => {
+    // These two strategies are promises about a single measurable value, so
+    // make that value the primary key. The weighted score remains the tie-breaker.
+    if (strategy === 'FASTEST' && a.journey.durationSeconds !== b.journey.durationSeconds) return a.journey.durationSeconds - b.journey.durationSeconds;
+    if (strategy === 'CHEAPEST') {
+      if (a.journey.priceMinor === null && b.journey.priceMinor !== null) return 1;
+      if (a.journey.priceMinor !== null && b.journey.priceMinor === null) return -1;
+      if (a.journey.priceMinor !== null && b.journey.priceMinor !== null && a.journey.priceMinor !== b.journey.priceMinor) {
+        return a.journey.priceMinor - b.journey.priceMinor;
+      }
+    }
+    return a.score - b.score || a.journey.id.localeCompare(b.journey.id);
+  });
 }
 
 export function selectRepresentativeJourneys<T extends JourneyOption>(

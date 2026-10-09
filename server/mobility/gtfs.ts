@@ -3,7 +3,11 @@ import { fetchBinary } from './safeFetch';
 import { bboxOf, type ConnectionReport } from './types';
 
 /** GTFS route_type → MARSHGO transport label (basic and extended route types). */
-export function routeTypeLabel(routeType: number): string {
+export function routeTypeLabel(routeType: number, routeName = ''): string {
+  const name = routeName.normalize('NFKC').toLocaleLowerCase('uk-UA');
+  if (name.includes('фунікулер') || name.includes('funicular')) return 'funicular';
+  if (name.includes('міська електричка') || name.includes('city train') || name.includes('city express') || name.includes('кільцева')) return 'city_train';
+  if (name.includes('маршрутка') || name.includes('маршрутн') || name.includes('minibus')) return 'marshrutka';
   if (routeType === 0 || (routeType >= 900 && routeType < 1000)) return 'tram';
   if (routeType === 1 || (routeType >= 400 && routeType < 500)) return 'metro';
   if (routeType === 106 || routeType === 109) return 'suburban';
@@ -45,7 +49,7 @@ export function summarizeGtfs(files: Record<string, Uint8Array>): GtfsSummary {
   const stopPoints = stops.flatMap((stop): Array<[number, number]> => { const lat = Number(stop.stop_lat), lon = Number(stop.stop_lon); return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0) ? [[lon, lat]] : []; });
   const routes = table(text('routes.txt'));
   const routeTypes: Record<string, number> = {};
-  for (const route of routes) { const label = routeTypeLabel(Number(route.route_type)); routeTypes[label] = (routeTypes[label] ?? 0) + 1; }
+  for (const route of routes) { const label = routeTypeLabel(Number(route.route_type), `${route.route_short_name ?? ''} ${route.route_long_name ?? ''} ${route.route_desc ?? ''}`); routeTypes[label] = (routeTypes[label] ?? 0) + 1; }
   const stopTimeText = text('stop_times.txt');
   return {
     stopPoints, agencies: table(text('agency.txt')).length, stops: stops.length, routes: routes.length,

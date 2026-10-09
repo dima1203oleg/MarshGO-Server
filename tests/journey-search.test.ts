@@ -21,6 +21,8 @@ describe('Journey search request validation', () => {
     assert.equal(parsed.preferences.minimumTransferBufferSeconds, 900);
     const tramOnly = parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: ['tram'] } }, now);
     assert.deepEqual(tramOnly.preferences.allowedTransportTypes, ['tram']);
+    const cityModes = parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: ['city_train', 'funicular'] } }, now);
+    assert.deepEqual(cityModes.preferences.allowedTransportTypes, ['city_train', 'funicular']);
     const chosenProvider = parseJourneySearchRequest({ ...request, preferences: { allowedTransitProviders: ['Львівавтодор'] } }, now);
     assert.deepEqual(chosenProvider.preferences.allowedTransitProviders, ['Львівавтодор']);
   });

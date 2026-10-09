@@ -3,9 +3,9 @@ export type JourneyStrategy = typeof JOURNEY_STRATEGIES[number];
 
 export type JourneyLegMode =
   | 'WALK' | 'COMMUNITY' | 'COMMUNITY_DEMAND' | 'TAXI' | 'TRANSFER' | 'BUS' | 'MINIBUS'
-  | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'URBAN_BUS' | 'CARSHARING' | 'FERRY';
+  | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'URBAN_BUS' | 'CARSHARING' | 'FERRY' | 'FUNICULAR';
 
-export const JOURNEY_TRANSPORT_TYPES = ['carpool','taxi','carsharing','car_rental','transfer','bus','marshrutka','trolleybus','tram','metro','train','suburban_train','intercity_bus','bike','scooter','moped','plane','ferry','walk'] as const;
+export const JOURNEY_TRANSPORT_TYPES = ['carpool','taxi','carsharing','car_rental','transfer','bus','marshrutka','trolleybus','tram','metro','city_train','funicular','train','suburban_train','intercity_bus','bike','scooter','moped','plane','ferry','walk'] as const;
 export type JourneyTransportType = typeof JOURNEY_TRANSPORT_TYPES[number];
 
 export interface JourneyOption {

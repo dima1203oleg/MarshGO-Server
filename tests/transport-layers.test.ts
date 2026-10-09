@@ -24,6 +24,15 @@ describe('transport layer network', () => {
     assert.equal(tram.type, 'tram'); assert.equal(tram.coordinates.length, 3);
     assert.equal(network.routes.find((route) => route.name === 'M1')?.type, 'metro');
   });
+  it('classifies GTFS routes named as marshrutkas consistently with journey search', () => {
+    const network = buildNetwork({
+      'routes.txt': 'route_id,route_short_name,route_long_name,route_type\nR1,5,Маршрутка № 5,3\n',
+      'stops.txt': 'stop_id,stop_name,stop_lat,stop_lon\nA,Львів,49.84,24.03\nB,Стрий,49.25,23.85\n',
+      'trips.txt': 'route_id,trip_id,direction_id,shape_id\nR1,T1,0,\n',
+      'stop_times.txt': 'trip_id,stop_id,stop_sequence\nT1,A,1\nT1,B,2\n',
+    });
+    assert.equal(network.routes[0]?.type, 'marshrutka');
+  });
   it('keeps only valid stops that a known route serves, with the transport types serving them', () => {
     assert.deepEqual(network.stops.map((stop) => stop.id).sort(), ['A', 'B', 'C']);
     assert.deepEqual([...network.stops.find((stop) => stop.id === 'A')!.types].sort(), ['bus', 'tram']);

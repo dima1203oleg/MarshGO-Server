@@ -47,7 +47,8 @@ const asLineType = (label: string): LineType | null => (isLineType(label) ? labe
 export function buildNetwork(files: Record<string, string>): TransportNetwork {
   const routeInfo = new Map<string, { name: string; type: LineType }>();
   for (const route of rows(files['routes.txt'])) {
-    const type = asLineType(routeTypeLabel(Number(route.route_type)));
+    const routeName = `${route.route_short_name ?? ''} ${route.route_long_name ?? ''} ${route.route_desc ?? ''}`;
+    const type = asLineType(routeTypeLabel(Number(route.route_type), routeName));
     if (type) routeInfo.set(route.route_id, { name: (route.route_short_name || route.route_long_name || route.route_id).trim(), type });
   }
   const stopById = new Map<string, { name: string; lon: number; lat: number }>();

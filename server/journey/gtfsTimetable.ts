@@ -8,12 +8,13 @@ const MAX_STOPS_PER_SIDE = 12;
 const EARTH_RADIUS_M = 6_371_000;
 
 type CsvRow = Record<string, string>;
-export type TransitJourneyMode = 'BUS' | 'MINIBUS' | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'FERRY';
+export type TransitJourneyMode = 'BUS' | 'MINIBUS' | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'FERRY' | 'FUNICULAR';
+export type GtfsTransportType = 'bus' | 'marshrutka' | 'intercity_bus' | 'train' | 'suburban_train' | 'city_train' | 'tram' | 'trolleybus' | 'metro' | 'ferry' | 'funicular';
 
 export interface GtfsTimetableFeed {
   fetchedAt: Date;
   timezone: string;
-  routes: Map<string, { name: string; mode: TransitJourneyMode }>;
+  routes: Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType }>;
   stops: Map<string, { id: string; name: string; lon: number; lat: number }>;
   trips: Map<string, { routeId: string; serviceId: string; headsign: string }>;
   stopTimes: Map<string, Array<{ stopId: string; sequence: number; arrivalSeconds: number; departureSeconds: number; pickupType: number; dropOffType: number }>>;
@@ -32,6 +33,7 @@ export interface GtfsDirectJourney {
   tripId: string;
   originStop: { id: string; name: string; coordinates: [number, number] };
   destinationStop: { id: string; name: string; coordinates: [number, number] };
+  transportType: GtfsTransportType;
   departureAt: Date;
   arrivalAt: Date;
   sourceFreshAt: Date;
@@ -49,6 +51,28 @@ interface SearchInput {
   maximumStopDistanceMeters?: number;
   limit?: number;
   now?: Date;
+}
+
+export interface GtfsItinerarySearchInput extends SearchInput {
+  maximumJourneySeconds?: number;
+  maximumTransfers?: number;
+  minimumTransferBufferSeconds?: number;
+  maximumWaitSeconds?: number;
+  allowedModes?: readonly TransitJourneyMode[];
+  allowedTransportTypes?: readonly string[];
+  providerCity?: string;
+}
+
+export interface GtfsItinerary {
+  id: string;
+  providerId: string;
+  providerName: string;
+  segments: GtfsDirectJourney[];
+  departureAt: Date;
+  arrivalAt: Date;
+  durationSeconds: number;
+  transfers: number;
+  walkingMeters: number;
 }
 
 function csvRows(text: string | undefined): CsvRow[] {
@@ -74,15 +98,20 @@ function gtfsTime(value: string | undefined): number | null {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
-function modeForRouteType(routeType: number): TransitJourneyMode | null {
-  const label = routeTypeLabel(routeType);
-  if (label === 'bus') return 'BUS';
-  if (label === 'marshrutka') return 'MINIBUS';
-  if (label === 'train' || label === 'suburban') return 'RAIL';
-  if (label === 'tram') return 'TRAM';
-  if (label === 'trolleybus') return 'TROLLEYBUS';
-  if (label === 'metro') return 'METRO';
-  if (label === 'ferry') return 'FERRY';
+function routeMode(routeType: number, routeName: string): { mode: TransitJourneyMode; transportType: GtfsTransportType } | null {
+  const normalizedName = routeName.normalize('NFKC').toLocaleLowerCase('uk-UA');
+  if (normalizedName.includes('міжміськ') || normalizedName.includes('intercity')) return { mode: 'BUS', transportType: 'intercity_bus' };
+  const label = routeTypeLabel(routeType, routeName);
+  if (label === 'bus') return { mode: 'BUS', transportType: 'bus' };
+  if (label === 'marshrutka') return { mode: 'MINIBUS', transportType: 'marshrutka' };
+  if (label === 'train') return { mode: 'RAIL', transportType: 'train' };
+  if (label === 'suburban') return { mode: 'RAIL', transportType: 'suburban_train' };
+  if (label === 'city_train') return { mode: 'RAIL', transportType: 'city_train' };
+  if (label === 'funicular') return { mode: 'FUNICULAR', transportType: 'funicular' };
+  if (label === 'tram') return { mode: 'TRAM', transportType: 'tram' };
+  if (label === 'trolleybus') return { mode: 'TROLLEYBUS', transportType: 'trolleybus' };
+  if (label === 'metro') return { mode: 'METRO', transportType: 'metro' };
+  if (label === 'ferry') return { mode: 'FERRY', transportType: 'ferry' };
   return null;
 }
 
@@ -91,11 +120,12 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
   const timezone = csvRows(text('agency.txt'))[0]?.agency_timezone;
   if (!timezone || !isValidTimezone(timezone)) throw new Error('GTFS feed must include a valid agency_timezone');
 
-  const routes = new Map<string, { name: string; mode: TransitJourneyMode }>();
+  const routes = new Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType }>();
   for (const row of csvRows(text('routes.txt'))) {
-    const mode = modeForRouteType(integer(row.route_type, -1));
-    if (!mode || !row.route_id) continue;
-    routes.set(row.route_id, { name: row.route_short_name?.trim() || row.route_long_name?.trim() || row.route_id, mode });
+    const name = row.route_short_name?.trim() || row.route_long_name?.trim() || row.route_id;
+    const route = routeMode(integer(row.route_type, -1), `${row.route_short_name ?? ''} ${row.route_long_name ?? ''} ${row.route_desc ?? ''}`);
+    if (!route || !row.route_id) continue;
+    routes.set(row.route_id, { name, ...route });
   }
 
   const stops = new Map<string, { id: string; name: string; lon: number; lat: number }>();
@@ -257,6 +287,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
             routeId: trip.routeId, routeName: route.name, headsign: trip.headsign, tripId,
             originStop: { id: originMatch.stop.id, name: originMatch.stop.name, coordinates: [originMatch.stop.lon, originMatch.stop.lat] },
             destinationStop: { id: destinationMatch.stop.id, name: destinationMatch.stop.name, coordinates: [destinationMatch.stop.lon, destinationMatch.stop.lat] },
+            transportType: route.transportType,
             departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
             distanceToOriginStopMeters: Math.round(originMatch.distance), distanceFromDestinationStopMeters: Math.round(destinationMatch.distance) });
           break;
@@ -266,6 +297,174 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
   }
   return [...new Map(results.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime())
     .map((journey) => [`${journey.providerId}:${journey.tripId}:${journey.originStop.id}:${journey.destinationStop.id}:${journey.departureAt.toISOString()}`, journey])).values()].slice(0, limit);
+}
+
+/**
+ * Build scheduled itineraries with up to three transit legs. Transfers are
+ * composed only at the same canonical GTFS stop in the same feed; we never
+ * infer a transfer between similarly named stops or agencies. Walking to and
+ * from the first/last stop uses the same conservative straight-line estimate
+ * as the direct-results flow and is surfaced separately in the result.
+ */
+export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerary[] {
+  const now = input.now ?? new Date();
+  const maximumJourneySeconds = input.maximumJourneySeconds ?? 24 * 60 * 60;
+  const maximumTransfers = input.maximumTransfers ?? 2;
+  const minimumTransferBufferSeconds = input.minimumTransferBufferSeconds ?? 600;
+  const maximumWaitSeconds = input.maximumWaitSeconds ?? 4 * 60 * 60;
+  const radius = input.maximumStopDistanceMeters ?? 2000;
+  const limit = input.limit ?? 20;
+  if (!Number.isFinite(input.earliestDeparture.getTime()) || !Number.isFinite(input.latestDeparture.getTime())
+    || input.latestDeparture < input.earliestDeparture || input.earliestDeparture < now
+    || !Number.isInteger(maximumJourneySeconds) || maximumJourneySeconds < 60 || maximumJourneySeconds > 7 * 24 * 60 * 60
+    || !Number.isInteger(maximumTransfers) || maximumTransfers < 0 || maximumTransfers > 2
+    || !Number.isInteger(minimumTransferBufferSeconds) || minimumTransferBufferSeconds < 0 || minimumTransferBufferSeconds > 7200
+    || !Number.isInteger(maximumWaitSeconds) || maximumWaitSeconds < 0 || maximumWaitSeconds > maximumJourneySeconds
+    || !Number.isFinite(radius) || radius < 100 || radius > 10_000
+    || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new TypeError('GTFS itinerary search bounds are invalid');
+  }
+
+  const closestStops = (point: [number, number]) => [...feed.stops.values()]
+    .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]) }))
+    .filter(({ distance }) => distance <= radius)
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, MAX_STOPS_PER_SIDE);
+  const originStops = closestStops(input.origin);
+  const destinationStops = closestStops(input.destination);
+  if (!originStops.length || !destinationStops.length) return [];
+
+  const routeDistance = distanceMeters(input.origin, input.destination);
+  const corridorWidth = Math.max(12_000, Math.min(60_000, routeDistance * 0.2));
+  const originLat = (input.origin[1] + input.destination[1]) / 2;
+  const toXY = ([lon, lat]: [number, number]) => [lon * 111_320 * Math.cos(originLat * Math.PI / 180), lat * 110_574] as const;
+  const [ax, ay] = toXY(input.origin), [bx, by] = toXY(input.destination);
+  const corridorStops = new Set<string>();
+  for (const stop of feed.stops.values()) {
+    const [px, py] = toXY([stop.lon, stop.lat]);
+    const dx = bx - ax, dy = by - ay;
+    const lengthSquared = dx * dx + dy * dy;
+    const t = lengthSquared === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lengthSquared));
+    const nearestX = ax + t * dx, nearestY = ay + t * dy;
+    if (Math.hypot(px - nearestX, py - nearestY) <= corridorWidth) corridorStops.add(stop.id);
+  }
+  originStops.forEach(({ stop }) => corridorStops.add(stop.id));
+  destinationStops.forEach(({ stop }) => corridorStops.add(stop.id));
+
+  const journeyEnd = new Date(input.earliestDeparture.getTime() + maximumJourneySeconds * 1000);
+  const firstServiceDate = localDate(input.earliestDeparture, feed.timezone);
+  const lastServiceDate = localDate(journeyEnd, feed.timezone);
+  const serviceDates = new Set<string>();
+  const dayCount = Math.ceil((journeyEnd.getTime() - input.earliestDeparture.getTime()) / 86_400_000) + 2;
+  for (let day = -1; day <= dayCount; day++) {
+    const date = dateStringAfter(firstServiceDate, day);
+    if (date <= lastServiceDate || day < 0) serviceDates.add(date);
+  }
+
+  const originDistances = new Map(originStops.map(({ stop, distance }) => [stop.id, Math.round(distance)]));
+  const destinationDistances = new Map(destinationStops.map(({ stop, distance }) => [stop.id, Math.round(distance)]));
+  const segments: GtfsDirectJourney[] = [];
+  const seenSegments = new Set<string>();
+  const stopTimesForJourney = [...feed.trips.entries()];
+  for (const [tripId, trip] of stopTimesForJourney) {
+    const route = feed.routes.get(trip.routeId);
+    const stops = feed.stopTimes.get(tripId);
+    if (!route || !stops || stops.length < 2 || (input.allowedModes && !input.allowedModes.includes(route.mode))) continue;
+    const transportType = route.transportType === 'bus' && input.providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
+    if (input.allowedTransportTypes && !input.allowedTransportTypes.includes(transportType)) continue;
+    const eligibleIndexes = stops.flatMap((stop, index) => corridorStops.has(stop.stopId) ? [index] : []);
+    if (eligibleIndexes.length < 2) continue;
+    for (const serviceDate of serviceDates) {
+      if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
+      for (let fromCursor = 0; fromCursor < eligibleIndexes.length - 1; fromCursor++) {
+        const fromIndex = eligibleIndexes[fromCursor];
+        const from = stops[fromIndex];
+        if (from.pickupType !== 0) continue;
+        const departureAt = localServiceTimeToUtc(serviceDate, from.departureSeconds, feed.timezone);
+        if (!departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
+        for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length && toCursor <= fromCursor + 20; toCursor++) {
+          const toIndex = eligibleIndexes[toCursor];
+          const to = stops[toIndex];
+          if (to.dropOffType !== 0 || to.arrivalSeconds < from.departureSeconds) continue;
+          const arrivalAt = localServiceTimeToUtc(serviceDate, to.arrivalSeconds, feed.timezone);
+          if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
+            || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
+          const originStop = feed.stops.get(from.stopId), destinationStop = feed.stops.get(to.stopId);
+          if (!originStop || !destinationStop) continue;
+          const key = `${tripId}:${from.stopId}:${to.stopId}:${departureAt.toISOString()}`;
+          if (seenSegments.has(key)) continue;
+          seenSegments.add(key);
+          segments.push({
+            providerId: input.providerId, providerName: input.providerName, mode: route.mode,
+            routeId: trip.routeId, routeName: route.name, headsign: trip.headsign, tripId,
+            originStop: { id: originStop.id, name: originStop.name, coordinates: [originStop.lon, originStop.lat] },
+            destinationStop: { id: destinationStop.id, name: destinationStop.name, coordinates: [destinationStop.lon, destinationStop.lat] },
+            transportType,
+            departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
+            distanceToOriginStopMeters: originDistances.get(from.stopId) ?? 0,
+            distanceFromDestinationStopMeters: destinationDistances.get(to.stopId) ?? 0,
+          });
+        }
+      }
+    }
+  }
+
+  const originStopIds = new Set(originStops.map(({ stop }) => stop.id));
+  const destinationStopIds = new Set(destinationStops.map(({ stop }) => stop.id));
+  const outgoing = new Map<string, GtfsDirectJourney[]>();
+  for (const segment of segments) {
+    const choices = outgoing.get(segment.originStop.id) ?? [];
+    choices.push(segment);
+    outgoing.set(segment.originStop.id, choices);
+  }
+  for (const choices of outgoing.values()) choices.sort((a, b) => a.departureAt.getTime() - b.departureAt.getTime() || a.arrivalAt.getTime() - b.arrivalAt.getTime());
+
+  const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
+  const results = new Map<string, GtfsItinerary>();
+  const maxTransitLegs = maximumTransfers + 1;
+  const maxFirstDeparture = input.latestDeparture.getTime();
+  const addPath = (path: GtfsDirectJourney[]) => {
+    const first = path[0];
+    const last = path.at(-1)!;
+    const accessMeters = first.distanceToOriginStopMeters;
+    const egressMeters = last.distanceFromDestinationStopMeters;
+    const departureAt = new Date(first.departureAt.getTime() - walkingSeconds(accessMeters) * 1000);
+    const egressSeconds = walkingSeconds(egressMeters);
+    const arrivalAt = new Date(last.arrivalAt.getTime() + egressSeconds * 1000);
+    const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
+    if (durationSeconds > maximumJourneySeconds) return;
+    const id = path.map((segment) => `${segment.providerId}:${segment.tripId}:${segment.originStop.id}:${segment.destinationStop.id}`).join('|');
+    if (!results.has(id)) results.set(id, {
+      id, providerId: input.providerId, providerName: input.providerName,
+      segments: path, departureAt, arrivalAt, durationSeconds,
+      transfers: Math.max(0, path.length - 1), walkingMeters: accessMeters + egressMeters,
+    });
+  };
+
+  const walk = (path: GtfsDirectJourney[]) => {
+    const last = path.at(-1)!;
+    if (destinationStopIds.has(last.destinationStop.id)) addPath(path);
+    if (path.length >= maxTransitLegs) return;
+    const previousIds = new Set(path.map((segment) => segment.tripId));
+    const visitedStops = new Set(path.map((segment) => segment.originStop.id));
+    visitedStops.add(last.destinationStop.id);
+    for (const next of outgoing.get(last.destinationStop.id) ?? []) {
+      if (previousIds.has(next.tripId) || visitedStops.has(next.destinationStop.id)) continue;
+      const waitSeconds = Math.floor((next.departureAt.getTime() - last.arrivalAt.getTime()) / 1000);
+      if (waitSeconds < minimumTransferBufferSeconds || waitSeconds > maximumWaitSeconds) continue;
+      walk([...path, next]);
+    }
+  };
+
+  for (const segment of segments) {
+    if (!originStopIds.has(segment.originStop.id) || segment.departureAt.getTime() > maxFirstDeparture) continue;
+    if (segment.departureAt.getTime() < input.earliestDeparture.getTime() + walkingSeconds(segment.distanceToOriginStopMeters) * 1000) continue;
+    walk([segment]);
+  }
+
+  return [...results.values()]
+    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || a.id.localeCompare(b.id))
+    .slice(0, limit);
 }
 
 const feedCache = new Map<string, { cachedAt: number; promise: Promise<GtfsTimetableFeed> }>();
