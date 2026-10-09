@@ -128,6 +128,22 @@ describe('GTFS parsing', () => {
     assert.equal(summary.trips, 2); assert.equal(summary.stopTimeRows, 2);
     assert.deepEqual(summary.missingFiles, ['calendar.txt|calendar_dates.txt']);
   });
+  it('only treats GTFS schedules with a trip in the next seven local days as usable', () => {
+    const base = {
+      'agency.txt': strToU8('agency_id,agency_name,agency_timezone\na,Test,Europe/Kyiv\n'),
+      'routes.txt': strToU8('route_id,route_type\nr,3\n'),
+      'trips.txt': strToU8('route_id,service_id,trip_id\nr,weekday,t1\n'),
+      'stops.txt': strToU8('stop_id,stop_name,stop_lat,stop_lon\ns,Stop,49.84,24.03\n'),
+      'stop_times.txt': strToU8('trip_id,arrival_time,departure_time,stop_id,stop_sequence\nt1,08:00:00,08:00:00,s,1\n'),
+    };
+    const now = new Date('2026-10-09T09:00:00.000Z');
+    const upcoming = { ...base, 'calendar.txt': strToU8('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,1,1,1,1,0,0,20261005,20261012\n') };
+    assert.equal(summarizeGtfs(upcoming, now).hasUpcomingService, true);
+    const expired = { ...base, 'calendar.txt': strToU8('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,1,1,1,1,0,0,20261001,20261008\n') };
+    assert.equal(summarizeGtfs(expired, now).hasUpcomingService, false);
+    const dateAdded = { ...base, 'calendar_dates.txt': strToU8('service_id,date,exception_type\nweekday,20261012,1\n') };
+    assert.equal(summarizeGtfs(dateAdded, now).hasUpcomingService, true);
+  });
 });
 
 import { extractVehicleList, summarizeVehicles, vehicleTransportLabel } from '../server/mobility/jsonVehicles';

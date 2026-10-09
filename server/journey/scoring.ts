@@ -24,6 +24,15 @@ export interface ScoredJourney<T extends JourneyOption = JourneyOption> {
   strategy: JourneyStrategy;
 }
 
+/** CHEAPEST is a global promise, so suppress its label if any candidate lacks a fare. */
+export function strategiesWithComparablePrices<T extends JourneyOption>(
+  journeys: readonly T[],
+  strategies: readonly JourneyStrategy[],
+): JourneyStrategy[] {
+  const hasUnknownFare = journeys.some((journey) => journey.priceMinor === null);
+  return hasUnknownFare ? strategies.filter((strategy) => strategy !== 'CHEAPEST') : [...strategies];
+}
+
 type Metric = 'durationSeconds' | 'priceMinor' | 'transfers' | 'walkingMeters' | 'risk' | 'comfortPenalty';
 
 function normalized(value: number, min: number, max: number): number {

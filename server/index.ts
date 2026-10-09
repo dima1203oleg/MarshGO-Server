@@ -20,7 +20,7 @@ import { parseJourneySearchRequest, transitProviderAllowed } from './journey/sea
 import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
-import { selectRepresentativeJourneys } from './journey/scoring';
+import { selectRepresentativeJourneys, strategiesWithComparablePrices } from './journey/scoring';
 import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
@@ -2207,14 +2207,17 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       comfort: null,
       legs: [
         ...(itinerary.segments[0].distanceToOriginStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
-        ...itinerary.segments.map((segment) => ({ mode: segment.mode, providerId: segment.providerId })),
+        ...itinerary.segments.flatMap((segment, index) => [
+          ...(index > 0 && itinerary.transferWalkingMeters[index - 1] > 0 ? [{ mode: 'WALK' as const }] : []),
+          { mode: segment.mode, providerId: segment.providerId },
+        ]),
         ...(itinerary.segments.at(-1)!.distanceFromDestinationStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
       ],
       kind: 'gtfs' as const,
       itinerary,
     })),
   ];
-  const representatives = selectRepresentativeJourneys(rankedCandidates, strategies);
+  const representatives = selectRepresentativeJourneys(rankedCandidates, strategiesWithComparablePrices(rankedCandidates, strategies));
   const routePlannerTypes = new Set(['carpool','walk','bus','marshrutka','intercity_bus','train','suburban_train','city_train','tram','trolleybus','metro','ferry','funicular']);
   const unsupportedSelectedTypes = (search.preferences.allowedTransportTypes ?? [])
     .filter((type) => !routePlannerTypes.has(type))
@@ -2336,7 +2339,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         { name: first.originStop.name, coordinates: first.originStop.coordinates },
         itinerary.departureAt, first.distanceToOriginStopMeters, 'До першої зупинки',
       );
-      for (const segment of itinerary.segments) {
+      for (const [segmentIndex, segment] of itinerary.segments.entries()) {
+        if (segmentIndex > 0) {
+          const previous = itinerary.segments[segmentIndex - 1];
+          await saveWalkLeg(
+            { name: previous.destinationStop.name, coordinates: previous.destinationStop.coordinates },
+            { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
+            previous.arrivalAt, itinerary.transferWalkingMeters[segmentIndex - 1], 'Пересадка між зупинками',
+          );
+        }
         const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
         const provider = eligibleGtfsProviders.find((item) => item.id === segment.providerId);
         const inserted = await client.query<{ id: string }>(
@@ -2379,7 +2390,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   res.json({ data: {
     journeys,
     partial: true,
-    blockedProviders: ['taxi','carsharing','transfer','bike','scooter','moped','air','walking-transfers-between-distinct-stops','community-transit-combinations'],
+    blockedProviders: ['taxi','carsharing','transfer','bike','scooter','moped','air','walking-transfers-between-unmatched-stops','community-transit-combinations'],
     unsupportedPreferences: [
       ...unsupportedSelectedTypes,
       ...(search.preferences.preferredVehicleClass ? ['preferredVehicleClass'] : []),

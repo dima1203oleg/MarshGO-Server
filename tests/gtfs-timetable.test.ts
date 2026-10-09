@@ -46,9 +46,32 @@ function connectingFeed() {
   return parseGtfsTimetable(files);
 }
 
-function transferFeed(options: { routeType: string; routeName: string; fromId: string; fromName: string; fromLon: string; fromLat: string; toId: string; toName: string; toLon: string; toLat: string; departure: string; arrival: string }) {
+function crowdedBusStops() {
+  const result = feed();
+  result.stops.clear();
+  result.trips.clear();
+  result.stopTimes.clear();
+  result.stopTimesByStop.clear();
+  for (let index = 0; index < 15; index++) {
+    const originId = `noise-origin-${index}`;
+    const destinationId = `noise-destination-${index}`;
+    result.stops.set(originId, { id: originId, name: `Bus stop ${index}`, lon: 24.02001 + index * 0.00001, lat: 49.8401 });
+    result.stops.set(destinationId, { id: destinationId, name: `Noise endpoint ${index}`, lon: 24.021 + index * 0.00001, lat: 49.841 });
+    const tripId = `noise-trip-${index}`;
+    result.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Noise endpoint' });
+    result.stopTimes.set(tripId, [
+      { stopId: originId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: destinationId, sequence: 2, arrivalSeconds: 8 * 3600 + 10 * 60, departureSeconds: 8 * 3600 + 10 * 60, pickupType: 0, dropOffType: 0 },
+    ]);
+    result.stopTimesByStop.set(originId, [...(result.stopTimesByStop.get(originId) ?? []), { tripId, index: 0 }]);
+    result.stopTimesByStop.set(destinationId, [...(result.stopTimesByStop.get(destinationId) ?? []), { tripId, index: 1 }]);
+  }
+  return result;
+}
+
+function transferFeed(options: { routeType: string; routeName: string; fromId: string; fromName: string; fromLon: string; fromLat: string; toId: string; toName: string; toLon: string; toLat: string; departure: string; arrival: string; timezone?: string }) {
   const files: Record<string, Uint8Array> = {
-    'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv'),
+    'agency.txt': new TextEncoder().encode(`agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,${options.timezone ?? 'Europe/Kyiv'}`),
     'routes.txt': new TextEncoder().encode(`route_id,agency_id,route_short_name,route_long_name,route_type\nr,a,7,${options.routeName},${options.routeType}`),
     'stops.txt': new TextEncoder().encode([
       'stop_id,stop_name,stop_lat,stop_lon',
@@ -156,9 +179,28 @@ test('composes a time-feasible bus-to-rail itinerary at the same canonical stop'
   assert.ok(results[0].arrivalAt.getTime() > results[0].segments.at(-1)!.arrivalAt.getTime());
 });
 
-test('composes a transfer across provider feeds only when stop name and coordinates match closely', () => {
+test('keeps the nearest stop for each transport type when dense city stops crowd out a station', () => {
+  const rail = transferFeed({ routeType: '2', routeName: 'Regional train', fromId: 'rail-origin', fromName: 'Rail station',
+    fromLon: '24.0203', fromLat: '49.8401', toId: 'rail-destination', toName: 'Rail destination',
+    toLon: '24.0300', toLat: '49.8500', departure: '08:00:00', arrival: '08:40:00' });
+  const merged = mergeGtfsTimetables([
+    { providerId: 'busy-city', providerName: 'Busy city buses', providerCity: 'Львів', feed: crowdedBusStops() },
+    { providerId: 'rail', providerName: 'Regional rail', providerCity: 'Україна', feed: rail },
+  ])!;
+  const results = findGtfsItineraries(merged, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 1000,
+    maximumTransfers: 0,
+  });
+  assert.equal(results.length, 1);
+  assert.equal(results[0].segments[0].transportType, 'train');
+  assert.equal(results[0].segments[0].providerId, 'rail');
+});
+
+test('composes across provider feeds using equivalent Kyiv timezone names and closely matched stops', () => {
   const originFeed = transferFeed({ routeType: '3', routeName: 'City bus', fromId: 'start', fromName: 'Start', fromLon: '24.0200', fromLat: '49.8400',
-    toId: 'bus-hub', toName: 'Main station', toLon: '24.0250', toLat: '49.8450', departure: '08:00:00', arrival: '08:20:00' });
+    toId: 'bus-hub', toName: 'Main station', toLon: '24.0250', toLat: '49.8450', departure: '08:00:00', arrival: '08:20:00', timezone: 'Europe/Kiev' });
+  assert.equal(originFeed.timezone, 'Europe/Kyiv');
   const destinationFeed = (hubLon: string) => transferFeed({ routeType: '2', routeName: 'Regional train', fromId: 'rail-hub', fromName: 'Main station', fromLon: hubLon, fromLat: '49.8450',
     toId: 'finish', toName: 'Finish', toLon: '24.0300', toLat: '49.8500', departure: '08:35:00', arrival: '09:00:00' });
   const sources = (railFeed: ReturnType<typeof destinationFeed>) => [
@@ -181,6 +223,46 @@ test('composes a transfer across provider feeds only when stop name and coordina
 
   const tooFar = mergeGtfsTimetables(sources(destinationFeed('24.0260')))!;
   assert.equal(findGtfsItineraries(tooFar, { ...options, providerId: 'merged', providerName: 'Merged providers', providerCity: 'Україна' }).length, 0);
+});
+
+test('composes a city bus and rail itinerary across differently named railway platforms with an explicit walk', () => {
+  const cityBus = transferFeed({ routeType: '3', routeName: 'City bus', fromId: 'bus-start', fromName: 'Start',
+    fromLon: '24.0000', fromLat: '49.8400', toId: 'bus-station', toName: 'Залізничний вокзал (117)',
+    toLon: '23.995026', toLat: '49.839890', departure: '08:00:00', arrival: '08:10:00' });
+  const railFeed = (railLon: string, stationName = 'Львів-Головний') => transferFeed({ routeType: '2', routeName: 'Regional train', fromId: 'rail-station',
+    fromName: stationName, fromLon: railLon, fromLat: '49.839912', toId: 'rail-finish', toName: 'Finish',
+    toLon: '23.9800', toLat: '49.8300', departure: '08:30:00', arrival: '09:00:00' });
+  const sources = (rail: ReturnType<typeof railFeed>) => [
+    { providerId: 'city-bus', providerName: 'Lviv city transit', providerCity: 'Львів', feed: cityBus },
+    { providerId: 'rail', providerName: 'Rail feed', providerCity: 'Україна', feed: rail },
+  ];
+  const options = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0000, 49.8400] as [number, number], destination: [23.9800, 49.8300] as [number, number],
+    maximumStopDistanceMeters: 2000, maximumTransfers: 1, minimumTransferBufferSeconds: 600,
+  };
+
+  const merged = mergeGtfsTimetables(sources(railFeed('23.993864')))!;
+  const results = findGtfsItineraries(merged, { ...options, providerId: 'merged', providerName: 'Lviv corridor', providerCity: 'Україна' });
+  const connected = results.find((itinerary) => itinerary.segments.length === 2);
+  assert.ok(connected);
+  assert.deepEqual(connected.segments.map((segment) => segment.transportType), ['bus', 'train']);
+  assert.ok(connected.transferWalkingMeters[0] >= 80 && connected.transferWalkingMeters[0] <= 90);
+  assert.ok(connected.walkingMeters >= connected.transferWalkingMeters[0]);
+  assert.equal(connected.segments[0].destinationStop.name, 'Залізничний вокзал (117)');
+  assert.equal(connected.segments[1].originStop.name, 'Львів-Головний');
+
+  const kyivAlias = mergeGtfsTimetables(sources(railFeed('23.993864', 'Київ-Пас.')))!;
+  const kyivAliasResults = findGtfsItineraries(kyivAlias, {
+    ...options, providerId: 'merged', providerName: 'Lviv corridor', providerCity: 'Україна',
+  });
+  assert.ok(kyivAliasResults.some((itinerary) => itinerary.segments.length === 2
+    && itinerary.segments[1].originStop.name === 'Київ-Пас.'));
+
+  const beyondStationRadius = mergeGtfsTimetables(sources(railFeed('23.992900')))!;
+  assert.equal(findGtfsItineraries(beyondStationRadius, {
+    ...options, providerId: 'merged', providerName: 'Lviv corridor', providerCity: 'Україна',
+  }).filter((itinerary) => itinerary.segments.length === 2).length, 0);
 });
 
 test('does not invent a feasible transfer when the configured buffer is missed', () => {

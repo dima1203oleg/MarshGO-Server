@@ -37,9 +37,54 @@ function table(text: string): Array<Record<string, string>> {
   return lines.slice(1).map((line) => { const values = parseCsvLine(line); const row: Record<string, string> = {}; header.forEach((name, index) => { row[name] = values[index] ?? ''; }); return row; });
 }
 
-export interface GtfsSummary { stopPoints: Array<[number, number]>; agencies: number; stops: number; routes: number; trips: number; stopTimeRows: number; badStops: number; routeTypes: Record<string, number>; hasCalendar: boolean; hasShapes: boolean; missingFiles: string[] }
+export interface GtfsSummary { stopPoints: Array<[number, number]>; agencies: number; stops: number; routes: number; trips: number; stopTimeRows: number; badStops: number; routeTypes: Record<string, number>; hasCalendar: boolean; hasUpcomingService: boolean; hasShapes: boolean; missingFiles: string[] }
 
-export function summarizeGtfs(files: Record<string, Uint8Array>): GtfsSummary {
+function dateStringAfter(date: string, days: number): string {
+  const value = new Date(Date.UTC(Number(date.slice(0, 4)), Number(date.slice(4, 6)) - 1, Number(date.slice(6, 8)) + days));
+  return `${value.getUTCFullYear()}${String(value.getUTCMonth() + 1).padStart(2, '0')}${String(value.getUTCDate()).padStart(2, '0')}`;
+}
+
+function hasUpcomingService(files: Record<string, Uint8Array>, now: Date, days = 7): boolean {
+  const text = (name: string) => (files[name] ? strFromU8(files[name]) : '');
+  const agencies = table(text('agency.txt'));
+  const calendars = table(text('calendar.txt'));
+  const exceptions = table(text('calendar_dates.txt'));
+  const trips = table(text('trips.txt'));
+  const timezone = agencies[0]?.agency_timezone?.trim() || 'UTC';
+  let formatter: Intl.DateTimeFormat;
+  try {
+    formatter = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' });
+  } catch { return false; }
+  const dateParts = formatter.formatToParts(now);
+  const part = (type: Intl.DateTimeFormatPartTypes) => dateParts.find((value) => value.type === type)?.value ?? '';
+  const firstDate = `${part('year')}${part('month')}${part('day')}`;
+  const serviceIds = new Set(trips.map((trip) => trip.service_id).filter(Boolean));
+  const calendarByService = new Map(calendars.map((calendar) => [calendar.service_id, calendar]));
+  const exceptionsByService = new Map<string, Map<string, string>>();
+  for (const exception of exceptions) {
+    if (!exception.service_id || !exception.date) continue;
+    const byDate = exceptionsByService.get(exception.service_id) ?? new Map<string, string>();
+    byDate.set(exception.date, exception.exception_type);
+    exceptionsByService.set(exception.service_id, byDate);
+  }
+
+  for (let offset = 0; offset < days; offset++) {
+    const date = dateStringAfter(firstDate, offset);
+    const weekday = new Date(Date.UTC(Number(date.slice(0, 4)), Number(date.slice(4, 6)) - 1, Number(date.slice(6, 8)))).getUTCDay();
+    const calendarWeekdayIndex = (weekday + 6) % 7;
+    for (const serviceId of serviceIds) {
+      const exception = exceptionsByService.get(serviceId)?.get(date);
+      if (exception === '1') return true;
+      if (exception === '2') continue;
+      const calendar = calendarByService.get(serviceId);
+      if (!calendar || date < calendar.start_date || date > calendar.end_date) continue;
+      if (calendar[['monday','tuesday','wednesday','thursday','friday','saturday','sunday'][calendarWeekdayIndex]] === '1') return true;
+    }
+  }
+  return false;
+}
+
+export function summarizeGtfs(files: Record<string, Uint8Array>, now = new Date()): GtfsSummary {
   const text = (name: string) => (files[name] ? strFromU8(files[name]) : '');
   const required = ['agency.txt', 'stops.txt', 'routes.txt', 'trips.txt', 'stop_times.txt'];
   const missingFiles = required.filter((name) => !files[name]);
@@ -55,7 +100,8 @@ export function summarizeGtfs(files: Record<string, Uint8Array>): GtfsSummary {
     stopPoints, agencies: table(text('agency.txt')).length, stops: stops.length, routes: routes.length,
     trips: Math.max(0, text('trips.txt').split(/\r?\n/).filter(Boolean).length - 1),
     stopTimeRows: Math.max(0, stopTimeText.split('\n').filter((line) => line.length > 1).length - 1),
-    badStops, routeTypes, hasCalendar: Boolean(files['calendar.txt'] || files['calendar_dates.txt']), hasShapes: Boolean(files['shapes.txt']), missingFiles,
+    badStops, routeTypes, hasCalendar: Boolean(files['calendar.txt'] || files['calendar_dates.txt']),
+    hasUpcomingService: hasUpcomingService(files, now), hasShapes: Boolean(files['shapes.txt']), missingFiles,
   };
 }
 
@@ -80,7 +126,10 @@ export async function testGtfsConnection(url: string): Promise<ConnectionReport>
   checks.push({ name: 'Stops', ok: summary.stops > 0 && summary.badStops <= stopTolerance, detail: `${summary.stops} stops, ${summary.badStops} with invalid coordinates` });
   checks.push({ name: 'Routes and trips', ok: summary.routes > 0 && summary.trips > 0, detail: `${summary.routes} routes, ${summary.trips} trips` });
   checks.push({ name: 'Calendar', ok: summary.hasCalendar });
+  checks.push({ name: 'Scheduled service in next 7 days', ok: summary.hasUpcomingService,
+    detail: summary.hasUpcomingService ? 'at least one trip is scheduled' : 'no active trip service in the next 7 days' });
   const counts: Record<string, number> = { stops: summary.stops, routes: summary.routes, trips: summary.trips, stopTimes: summary.stopTimeRows, ...Object.fromEntries(Object.entries(summary.routeTypes).map(([type, count]) => [`routes_${type}`, count])) };
   const critical = summary.missingFiles.length === 0 && summary.stops > 0 && summary.routes > 0 && summary.trips > 0;
-  return { health: critical && summary.badStops <= stopTolerance && summary.hasCalendar ? 'healthy' : critical ? 'degraded' : 'offline', checks, counts, responseMs: Date.now() - started, ...(bboxOf(summary.stopPoints) ? { bbox: bboxOf(summary.stopPoints) } : {}), ...(critical ? {} : { error: 'GTFS feed is incomplete' }) };
+  const healthy = critical && summary.badStops <= stopTolerance && summary.hasCalendar && summary.hasUpcomingService;
+  return { health: healthy ? 'healthy' : !summary.hasUpcomingService ? 'offline' : critical ? 'degraded' : 'offline', checks, counts, responseMs: Date.now() - started, ...(bboxOf(summary.stopPoints) ? { bbox: bboxOf(summary.stopPoints) } : {}), ...(critical && summary.hasUpcomingService ? {} : { error: !summary.hasUpcomingService ? 'GTFS feed has no service scheduled in the next 7 days' : 'GTFS feed is incomplete' }) };
 }
