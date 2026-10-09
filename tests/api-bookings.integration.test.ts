@@ -203,7 +203,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(response.status, 200);
     const result = await response.json() as { data: { partial: boolean; blockedProviders: string[]; journeys: Array<{ id: string; offerId: string; strategy: string; confirmedPriceMinor: number | null; totalPriceMinor: number; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string }> }> } };
     assert.equal(result.data.partial, true);
-    assert.ok(result.data.blockedProviders.includes('bus'));
+    assert.ok(result.data.blockedProviders.includes('taxi'));
+    assert.equal(result.data.blockedProviders.includes('bus'), false, 'bus remains searchable when an eligible GTFS provider is available');
     assert.equal(result.data.journeys.length, 1);
     const [journey] = result.data.journeys;
     assert.equal(journey.offerId, ids.journeyOffer);
@@ -1196,7 +1197,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const layers = await fetch(`${apiUrl}/api/v1/transport/layers`, { headers });
       assert.equal(layers.status, 200);
       const ids = (await layers.json() as { data: Array<{ id: string; available: boolean }> }).data.map((item) => item.id);
-      assert.deepEqual(ids, ['PUBLIC_TRANSPORT', 'METRO', 'BUS', 'TRAM', 'TROLLEYBUS', 'STOPS', 'BICYCLE', 'SCOOTER', 'RENTAL_POINTS']);
+      assert.deepEqual(ids, ['PUBLIC_TRANSPORT', 'METRO', 'BUS', 'TRAM', 'TROLLEYBUS', 'STOPS', 'MINIBUS', 'CITY_TRAIN', 'FUNICULAR', 'BICYCLE', 'SCOOTER', 'RENTAL_POINTS']);
       for (const path of ['routes?types=bus', 'routes?bbox=24,49,24.1,49.1', 'routes?bbox=20,45,30,55&types=bus', 'stops?bbox=24,49,25,50&types=bus', 'vehicles?bbox=x&types=bus', 'micromobility?bbox=24,49,25,50&types=scooter', 'micromobility?bbox=24,49,24.1,49.1&types=cars']) {
         assert.equal((await fetch(`${apiUrl}/api/v1/transport/${path}`, { headers })).status, 400, `${path} must be rejected`);
       }
