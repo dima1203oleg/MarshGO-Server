@@ -1203,7 +1203,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const layers = await fetch(`${apiUrl}/api/v1/transport/layers`, { headers });
       assert.equal(layers.status, 200);
       const ids = (await layers.json() as { data: Array<{ id: string; available: boolean }> }).data.map((item) => item.id);
-      assert.deepEqual(ids, ['PUBLIC_TRANSPORT', 'METRO', 'BUS', 'TRAM', 'TROLLEYBUS', 'STOPS', 'MINIBUS', 'CITY_TRAIN', 'FUNICULAR', 'BICYCLE', 'SCOOTER', 'RENTAL_POINTS']);
+      assert.deepEqual(ids, ['PUBLIC_TRANSPORT', 'METRO', 'BUS', 'TRAM', 'TROLLEYBUS', 'STOPS', 'MINIBUS', 'CITY_TRAIN', 'FUNICULAR', 'BICYCLE', 'SCOOTER', 'CARSHARING', 'RENTAL_POINTS']);
       for (const path of ['routes?types=bus', 'routes?bbox=24,49,24.1,49.1', 'routes?bbox=20,45,30,55&types=bus', 'stops?bbox=24,49,25,50&types=bus', 'vehicles?bbox=x&types=bus', 'micromobility?bbox=24,49,25,50&types=scooter', 'micromobility?bbox=24,49,24.1,49.1&types=cars']) {
         assert.equal((await fetch(`${apiUrl}/api/v1/transport/${path}`, { headers })).status, 400, `${path} must be rejected`);
       }
