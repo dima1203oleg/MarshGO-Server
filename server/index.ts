@@ -26,6 +26,7 @@ import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction,
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
 import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
 import { buildTransportCities } from './mobility/cities';
+import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { normalizePlate } from './vehiclePlate';
@@ -500,6 +501,19 @@ app.get('/api/v1/transport/health', requireAuth, asyncHandler(async (_req, res) 
        last_checked_at AS "lastCheckedAt",last_sync_at AS "lastSyncAt",last_report->'counts' AS counts
      FROM mobility_providers ORDER BY city,priority,name`);
   res.json({ data: rows, checkedAt: new Date().toISOString() });
+}));
+
+/** Official Kyiv metro, city-rail and funicular timetable data; these are static schedules, not realtime predictions. */
+app.get('/api/v1/transport/schedules', requireAuth, asyncHandler(async (req, res) => {
+  const rawKind = typeof req.query.mode === 'string' ? req.query.mode : '';
+  if (!['city_train', 'metro', 'funicular'].includes(rawKind)) throw new ApiError(400, 'mode must be city_train, metro, or funicular', 'invalid_transport_query');
+  const station = typeof req.query.station === 'string' ? req.query.station.trim().slice(0, 100) : undefined;
+  const { rows } = await pool.query<{ id: string; name: string; feed_url: string; source_ref: string | null }>(
+    `SELECT id,name,feed_url,source_ref FROM mobility_providers
+      WHERE city='Київ' AND provider_type='public_transit' AND source_type='rest' AND status='enabled' AND health IN ('healthy','degraded')
+      ORDER BY priority,name`);
+  const result = await loadKyivSchedules(rows, rawKind as KyivScheduleKind, station || undefined);
+  sendLayerJson(req, res, result);
 }));
 
 const loadRoutes = async (box: [number, number, number, number], types: LineType[] = []) => {

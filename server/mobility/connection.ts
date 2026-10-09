@@ -4,6 +4,7 @@ import { testGtfsRealtimeConnection } from './gtfsRealtime';
 import { testJsonVehiclesConnection } from './jsonVehicles';
 import { fetchJson, probeUrl, UnsafeUrlError } from './safeFetch';
 import { buildGeoJsonNetwork, geoJsonMode } from './transportLayers';
+import { testKyivScheduleConnection } from './kyivSchedule';
 import type { ConnectionReport } from './types';
 
 export async function testProviderConnection(provider: { id: string; name?: string; source_type: string; feed_url: string }): Promise<ConnectionReport> {
@@ -32,6 +33,14 @@ export async function testProviderConnection(provider: { id: string; name?: stri
     } catch (error) {
       const message = error instanceof UnsafeUrlError ? error.message : error instanceof Error ? error.message : 'GeoJSON feed is unreachable';
       return { health: 'offline', checks: [{ name: 'GeoJSON feed', ok: false, detail: message }], counts: {}, responseMs: Date.now() - started, error: message };
+    }
+  }
+  if (provider.source_type === 'rest' && provider.name?.startsWith('Київ — ') && /розклад|перший\/останній|інтервали|години роботи/.test(provider.name)) {
+    const started = Date.now();
+    try { return await testKyivScheduleConnection(provider.feed_url); }
+    catch (error) {
+      const message = error instanceof UnsafeUrlError ? error.message : error instanceof Error ? error.message : 'Kyiv schedule API is unreachable';
+      return { health: 'offline', checks: [{ name: 'Kyiv Open Data schedule API', ok: false, detail: message }], counts: {}, responseMs: Date.now() - started, error: message };
     }
   }
   const started = Date.now();
