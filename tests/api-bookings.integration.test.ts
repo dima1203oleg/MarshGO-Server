@@ -1101,6 +1101,25 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: headers(ids.driver), body: JSON.stringify({ body: 'Чекаю біля входу.' }),
     });
     assert.equal(driverReply.status, 201);
+    const latestMessagePage = await fetch(`${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?limit=1`, { headers: headers(ids.driver) });
+    assert.equal(latestMessagePage.status, 200);
+    const latestMessagePageBody = await latestMessagePage.json() as {
+      data: { messages: Array<{ body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } };
+    };
+    assert.deepEqual(latestMessagePageBody.data.messages.map((item) => item.body), ['Чекаю біля входу.']);
+    assert.equal(latestMessagePageBody.data.pagination.hasMore, true);
+    assert.ok(latestMessagePageBody.data.pagination.nextCursor);
+    const olderMessagePage = await fetch(
+      `${apiUrl}/api/v1/conversations/${conversation.data.id}/messages?limit=1&before=${encodeURIComponent(latestMessagePageBody.data.pagination.nextCursor!)}`,
+      { headers: headers(ids.driver) },
+    );
+    assert.equal(olderMessagePage.status, 200);
+    const olderMessagePageBody = await olderMessagePage.json() as {
+      data: { messages: Array<{ body: string }>; pagination: { hasMore: boolean; nextCursor: string | null } };
+    };
+    assert.deepEqual(olderMessagePageBody.data.messages.map((item) => item.body), ['Підтверджую час виїзду.']);
+    assert.equal(olderMessagePageBody.data.pagination.hasMore, false);
+    assert.equal(olderMessagePageBody.data.pagination.nextCursor, null);
     const unreadForPassenger = await fetch(`${apiUrl}/api/v1/conversation-unread-counts`, { headers: headers(passengerA) });
     const passengerUnread = await unreadForPassenger.json() as { data: Array<{ conversation_id: string; unread_count: number }> };
     assert.equal(passengerUnread.data.find((item) => item.conversation_id === conversation.data.id)?.unread_count, 1);

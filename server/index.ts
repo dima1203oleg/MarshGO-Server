@@ -4278,14 +4278,29 @@ app.post('/api/v1/realtime/ticket', requireAuth, asyncHandler(async (req, res) =
 }));
 
 app.get('/api/v1/conversations/:id/messages', requireAuth, asyncHandler(async (req, res) => {
-  const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
-  const { rows } = await pool.query(
+  const paged = req.query.limit !== undefined || req.query.before !== undefined;
+  const rawLimit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+  if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 100) throw new ApiError(400, 'limit must be an integer from 1 to 100');
+  let cursor: { createdAt: string; id: string } | null = null;
+  if (typeof req.query.before === 'string') {
+    try {
+      const decoded = Buffer.from(req.query.before, 'base64url').toString('utf8');
+      const separator = decoded.lastIndexOf('|');
+      const createdAt = decoded.slice(0, separator);
+      const id = decoded.slice(separator + 1);
+      if (separator < 1 || !Number.isFinite(new Date(createdAt).getTime())
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new Error('invalid cursor');
+      cursor = { createdAt, id };
+    } catch { throw new ApiError(400, 'before cursor is invalid'); }
+  }
+  const { rows } = await pool.query<{ id: string; sender_id: string; sender_name: string; body: string; created_at: Date }>(
     `SELECT m.id,m.sender_id,u.display_name AS sender_name,m.body,m.created_at
        FROM messages m JOIN users u ON u.id=m.sender_id
       WHERE m.conversation_id=$1 AND EXISTS (
         SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=m.conversation_id AND cm.user_id=$2
-      )
-      ORDER BY m.created_at DESC,m.id DESC LIMIT $3`, [req.params.id, req.userId, limit],
+      ) AND ($3::timestamptz IS NULL OR (m.created_at,m.id)<($3::timestamptz,$4::uuid))
+      ORDER BY m.created_at DESC,m.id DESC LIMIT $5`,
+    [req.params.id, req.userId, cursor?.createdAt ?? null, cursor?.id ?? null, rawLimit + 1],
   );
   const { rows: membership } = await pool.query(
     'SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2', [req.params.id, req.userId],
@@ -4295,7 +4310,17 @@ app.get('/api/v1/conversations/:id/messages', requireAuth, asyncHandler(async (r
     'SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id<>$2 LIMIT 1', [req.params.id, req.userId],
   );
   if (peers[0] && await usersBlockEachOther(req.userId!, peers[0].user_id)) throw new ApiError(404, 'conversation unavailable');
-  res.json({ data: rows.reverse() });
+  const hasMore = rows.length > rawLimit;
+  const messages = rows.slice(0, rawLimit);
+  const oldest = messages.at(-1);
+  const nextCursor = hasMore && oldest
+    ? Buffer.from(`${new Date(oldest.created_at).toISOString()}|${oldest.id}`).toString('base64url')
+    : null;
+  if (!paged) {
+    res.json({ data: messages.reverse() });
+    return;
+  }
+  res.json({ data: { messages: messages.reverse(), pagination: { hasMore, nextCursor } } });
 }));
 
 app.get('/api/v1/conversation-unread-counts', requireAuth, asyncHandler(async (req, res) => {
