@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findDirectGtfsJourneys, findGtfsItineraries, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { findDirectGtfsJourneys, findGtfsItineraries, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string } = {}) {
   const files: Record<string, Uint8Array> = {
@@ -40,6 +40,26 @@ function connectingFeed() {
       'b1,08:20:00,08:20:00,hub,2,0,0',
       'r1,08:35:00,08:35:00,hub,1,0,0',
       'r1,09:00:00,09:00:00,finish,2,0,0',
+    ].join('\n')),
+    'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,0,0,0,0,0,0,20261001,20261031'),
+  };
+  return parseGtfsTimetable(files);
+}
+
+function transferFeed(options: { routeType: string; routeName: string; fromId: string; fromName: string; fromLon: string; fromLat: string; toId: string; toName: string; toLon: string; toLat: string; departure: string; arrival: string }) {
+  const files: Record<string, Uint8Array> = {
+    'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv'),
+    'routes.txt': new TextEncoder().encode(`route_id,agency_id,route_short_name,route_long_name,route_type\nr,a,7,${options.routeName},${options.routeType}`),
+    'stops.txt': new TextEncoder().encode([
+      'stop_id,stop_name,stop_lat,stop_lon',
+      `${options.fromId},${options.fromName},${options.fromLat},${options.fromLon}`,
+      `${options.toId},${options.toName},${options.toLat},${options.toLon}`,
+    ].join('\n')),
+    'trips.txt': new TextEncoder().encode('route_id,service_id,trip_id,trip_headsign\nr,weekday,t1,Finish'),
+    'stop_times.txt': new TextEncoder().encode([
+      'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
+      `t1,${options.departure},${options.departure},${options.fromId},1,0,0`,
+      `t1,${options.arrival},${options.arrival},${options.toId},2,0,0`,
     ].join('\n')),
     'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,0,0,0,0,0,0,20261001,20261031'),
   };
@@ -134,6 +154,33 @@ test('composes a time-feasible bus-to-rail itinerary at the same canonical stop'
   assert.equal(results[0].departureAt.getTime(), results[0].segments[0].departureAt.getTime()
     - Math.ceil(results[0].segments[0].distanceToOriginStopMeters / 1.25) * 1000);
   assert.ok(results[0].arrivalAt.getTime() > results[0].segments.at(-1)!.arrivalAt.getTime());
+});
+
+test('composes a transfer across provider feeds only when stop name and coordinates match closely', () => {
+  const originFeed = transferFeed({ routeType: '3', routeName: 'City bus', fromId: 'start', fromName: 'Start', fromLon: '24.0200', fromLat: '49.8400',
+    toId: 'bus-hub', toName: 'Main station', toLon: '24.0250', toLat: '49.8450', departure: '08:00:00', arrival: '08:20:00' });
+  const destinationFeed = (hubLon: string) => transferFeed({ routeType: '2', routeName: 'Regional train', fromId: 'rail-hub', fromName: 'Main station', fromLon: hubLon, fromLat: '49.8450',
+    toId: 'finish', toName: 'Finish', toLon: '24.0300', toLat: '49.8500', departure: '08:35:00', arrival: '09:00:00' });
+  const sources = (railFeed: ReturnType<typeof destinationFeed>) => [
+    { providerId: 'city-bus', providerName: 'City bus provider', providerCity: 'Львів', feed: originFeed },
+    { providerId: 'regional-rail', providerName: 'Regional rail provider', providerCity: 'Україна', feed: railFeed },
+  ];
+  const options = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+    minimumTransferBufferSeconds: 600,
+  };
+  const merged = mergeGtfsTimetables(sources(destinationFeed('24.02505')))!;
+  const results = findGtfsItineraries(merged, { ...options, providerId: 'merged', providerName: 'Merged providers', providerCity: 'Україна' });
+  assert.equal(results.length, 1);
+  assert.deepEqual(results[0].segments.map((segment) => segment.providerId), ['city-bus', 'regional-rail']);
+  assert.deepEqual(results[0].segments.map((segment) => segment.providerName), ['City bus provider', 'Regional rail provider']);
+  assert.deepEqual(results[0].segments.map((segment) => segment.transportType), ['bus', 'train']);
+  assert.equal(results[0].transfers, 1);
+
+  const tooFar = mergeGtfsTimetables(sources(destinationFeed('24.0260')))!;
+  assert.equal(findGtfsItineraries(tooFar, { ...options, providerId: 'merged', providerName: 'Merged providers', providerCity: 'Україна' }).length, 0);
 });
 
 test('does not invent a feasible transfer when the configured buffer is missed', () => {

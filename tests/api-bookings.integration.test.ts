@@ -1197,7 +1197,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     await pool.query(`INSERT INTO user_roles(user_id,role) VALUES($1,'passenger')`, [devUser]);
     try {
       const headers = { 'x-dev-user-id': devUser };
-      for (const path of ['layers', 'routes?bbox=24,49,24.1,49.1&types=bus', 'stops?bbox=24,49,24.1,49.1&types=bus', 'vehicles?bbox=24,49,24.1,49.1&types=bus', 'micromobility?bbox=24,49,24.1,49.1&types=scooter']) {
+      for (const path of ['layers', 'routes?bbox=24,49,24.1,49.1&types=bus', 'stops?bbox=24,49,24.1,49.1&types=bus', 'vehicles?bbox=24,49,24.1,49.1&types=bus', 'micromobility?bbox=24,49,24.1,49.1&types=scooter', 'micromobility?bbox=24,49,24.1,49.1&types=carsharing']) {
         assert.equal((await fetch(`${apiUrl}/api/v1/transport/${path}`)).status, 401, `${path} requires sign-in`);
       }
       const layers = await fetch(`${apiUrl}/api/v1/transport/layers`, { headers });

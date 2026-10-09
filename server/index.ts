@@ -17,7 +17,7 @@ import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest } from './journey/search';
-import { cachedGtfsTimetable, findGtfsItineraries, type GtfsItinerary, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { selectRepresentativeJourneys } from './journey/scoring';
@@ -471,7 +471,8 @@ app.get('/api/v1/transport/layers', requireAuth, asyncHandler(async (_req, res) 
     { id: 'PUBLIC_TRANSPORT', available: publicTransport }, { id: 'METRO', available: lines.has('metro') }, { id: 'BUS', available: lines.has('bus') || lines.has('marshrutka') },
     { id: 'TRAM', available: lines.has('tram') }, { id: 'TROLLEYBUS', available: lines.has('trolleybus') }, { id: 'STOPS', available: publicTransport || lines.has('train') || lines.has('metro') },
     { id: 'MINIBUS', available: lines.has('marshrutka') }, { id: 'CITY_TRAIN', available: lines.has('city_train') }, { id: 'FUNICULAR', available: lines.has('funicular') },
-    { id: 'BICYCLE', available: micro.has('bike') || micro.has('ebike') }, { id: 'SCOOTER', available: micro.has('scooter') }, { id: 'RENTAL_POINTS', available: stationsAvailable },
+    { id: 'BICYCLE', available: micro.has('bike') || micro.has('ebike') }, { id: 'SCOOTER', available: micro.has('scooter') },
+    { id: 'CARSHARING', available: micro.has('carsharing') }, { id: 'RENTAL_POINTS', available: stationsAvailable },
   ] });
 }));
 
@@ -564,16 +565,16 @@ app.get('/api/v1/transport/vehicles', requireAuth, asyncHandler(async (req, res)
 app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req, res) => {
   const box = parseBbox(req.query.bbox, 0.6);
   const wanted = typeof req.query.types === 'string' ? req.query.types.split(',') : [];
-  const assetTypes = new Set<MobilityAssetType>(wanted.flatMap((type): MobilityAssetType[] => type === 'bike' ? ['BIKE', 'EBIKE'] : type === 'scooter' ? ['SCOOTER'] : []));
+  const assetTypes = new Set<MobilityAssetType>(wanted.flatMap((type): MobilityAssetType[] => type === 'bike' ? ['BIKE', 'EBIKE'] : type === 'scooter' ? ['SCOOTER'] : type === 'carsharing' ? ['CARSHARING'] : []));
   const wantStations = wanted.includes('stations');
-  if (!box || (assetTypes.size === 0 && !wantStations)) throw new ApiError(400, 'bbox (at most 0.6 degree) and types (bike, scooter, stations) are required', 'invalid_transport_query');
-  const providers = (await layerProviders(['gbfs'], ['bike', 'ebike', 'scooter'])).filter((row) => providerTouches(row, box));
+  if (!box || (assetTypes.size === 0 && !wantStations)) throw new ApiError(400, 'bbox (at most 0.6 degree) and types (bike, scooter, carsharing, stations) are required', 'invalid_transport_query');
+  const providers = (await layerProviders(['gbfs'], ['bike', 'ebike', 'scooter', 'carsharing'])).filter((row) => providerTouches(row, box));
   const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url).then((snapshot) => ({ row, snapshot })))));
   const features: unknown[] = [];
   for (const item of settled) {
     if (!item.ok) continue;
     for (const asset of item.value.snapshot.assets) if (asset.available && assetTypes.has(asset.type) && inBbox(box, asset.location[0], asset.location[1]))
-      features.push({ type: 'Feature', properties: { kind: asset.type === 'SCOOTER' ? 'scooter' : 'bike', provider: item.value.row.name.split(' — ')[0], battery: asset.batteryPercent ?? null }, geometry: { type: 'Point', coordinates: asset.location } });
+      features.push({ type: 'Feature', properties: { kind: asset.type === 'SCOOTER' ? 'scooter' : asset.type === 'CARSHARING' ? 'carsharing' : 'bike', provider: item.value.row.name.split(' — ')[0], battery: asset.batteryPercent ?? null }, geometry: { type: 'Point', coordinates: asset.location } });
     if (wantStations) for (const station of item.value.snapshot.stations) if (inBbox(box, station.location[0], station.location[1]))
       features.push({ type: 'Feature', properties: { kind: 'station', name: station.name, available: station.availableAssets ?? null, provider: item.value.row.name.split(' — ')[0] }, geometry: { type: 'Point', coordinates: station.location } });
   }
@@ -2127,40 +2128,73 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     if (mode === 'FUNICULAR') return selected('funicular') ?? true;
     return false;
   };
+  const [originLon, originLat] = search.origin.coordinates;
+  const [destinationLon, destinationLat] = search.destination.coordinates;
+  const latitudeRadians = ((originLat + destinationLat) / 2) * Math.PI / 180;
+  const routeDistanceMeters = (() => {
+    const radians = (value: number) => value * Math.PI / 180;
+    const dLat = radians(destinationLat - originLat), dLon = radians(destinationLon - originLon);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(radians(originLat)) * Math.cos(radians(destinationLat)) * Math.sin(dLon / 2) ** 2;
+    return 6_371_000 * 2 * Math.asin(Math.sqrt(h));
+  })();
+  const corridorWidthMeters = Math.max(12_000, Math.min(60_000, routeDistanceMeters * 0.2));
+  const latitudePadding = corridorWidthMeters / 110_574 + 0.02;
+  const longitudePadding = corridorWidthMeters / (111_320 * Math.max(0.2, Math.cos(latitudeRadians))) + 0.02;
+  const corridorBox: [number, number, number, number] = [
+    Math.min(originLon, destinationLon) - longitudePadding,
+    Math.min(originLat, destinationLat) - latitudePadding,
+    Math.max(originLon, destinationLon) + longitudePadding,
+    Math.max(originLat, destinationLat) + latitudePadding,
+  ];
   const eligibleGtfsProviders = gtfsProviders.filter((provider) => {
-      const box = provider.last_report?.bbox;
-      return Boolean(box && (bboxContains(box, search.origin.coordinates[0], search.origin.coordinates[1])
-        || bboxContains(box, search.destination.coordinates[0], search.destination.coordinates[1])));
-    });
+    const box = provider.last_report?.bbox;
+    return Boolean(box && (bboxContains(box, originLon, originLat) || bboxContains(box, destinationLon, destinationLat) || intersects(box, corridorBox)));
+  });
   const allTransitModes: TransitJourneyMode[] = ['BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO', 'FERRY', 'FUNICULAR'];
   const allowedTransitModes = allTransitModes.filter(transitAllowed);
-  const scheduledCandidates = (await Promise.allSettled(eligibleGtfsProviders.map(async (provider) => {
-      const feed = await cachedGtfsTimetable(provider.id, provider.feed_url);
-      return findGtfsItineraries(feed, {
-        providerId: provider.id, providerName: provider.name, origin: search.origin.coordinates,
-        destination: search.destination.coordinates, earliestDeparture: search.departureAt,
-        latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 20,
-        maximumJourneySeconds: search.preferences.maxTotalDurationSeconds ?? 24 * 60 * 60,
-        maximumTransfers: Math.min(search.preferences.maxTransfers ?? 2, 2),
-        maximumWaitSeconds: 4 * 60 * 60,
-        minimumTransferBufferSeconds: search.preferences.minimumTransferBufferSeconds ?? 600,
-        maximumStopDistanceMeters: 2000,
-        allowedModes: allowedTransitModes,
-        allowedTransportTypes: search.preferences.allowedTransportTypes,
-        providerCity: provider.city,
-      });
-    }))).flatMap((result, index) => {
-      if (result.status === 'rejected') {
-        providerErrors.push(`${eligibleGtfsProviders[index]?.name ?? 'GTFS'}: розклад тимчасово недоступний`);
-        return [];
-      }
-      return result.value.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
-        && (!search.preferences.allowedTransportTypes || search.preferences.allowedTransportTypes.includes(segment.transportType)))
-        && (!search.preferences.allowedTransitProviders?.length
-          || search.preferences.allowedTransitProviders.includes(candidate.providerName.split(' — ')[0]))
-        && (search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
-        && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers));
-    }).sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime()).slice(0, 20);
+  const feedLoads = await Promise.allSettled(eligibleGtfsProviders.map(async (provider) => ({
+    provider,
+    feed: await cachedGtfsTimetable(provider.id, provider.feed_url),
+  })));
+  const feedSources: GtfsTimetableSource[] = [];
+  feedLoads.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      providerErrors.push(`${eligibleGtfsProviders[index]?.name ?? 'GTFS'}: розклад тимчасово недоступний`);
+      return;
+    }
+    feedSources.push({ providerId: result.value.provider.id, providerName: result.value.provider.name,
+      providerCity: result.value.provider.city, feed: result.value.feed });
+  });
+  const sourcesByTimezone = new Map<string, GtfsTimetableSource[]>();
+  for (const source of feedSources) {
+    const sources = sourcesByTimezone.get(source.feed.timezone) ?? [];
+    sources.push(source); sourcesByTimezone.set(source.feed.timezone, sources);
+  }
+  const scheduledCandidates: GtfsItinerary[] = [];
+  for (const sources of sourcesByTimezone.values()) {
+    const mergedFeed = mergeGtfsTimetables(sources);
+    if (!mergedFeed) continue;
+    const itineraries = findGtfsItineraries(mergedFeed, {
+      providerId: sources[0].providerId, providerName: sources[0].providerName, origin: search.origin.coordinates,
+      destination: search.destination.coordinates, earliestDeparture: search.departureAt,
+      latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 100,
+      maximumJourneySeconds: search.preferences.maxTotalDurationSeconds ?? 24 * 60 * 60,
+      maximumTransfers: Math.min(search.preferences.maxTransfers ?? 2, 2),
+      maximumWaitSeconds: 4 * 60 * 60,
+      minimumTransferBufferSeconds: search.preferences.minimumTransferBufferSeconds ?? 600,
+      maximumStopDistanceMeters: 2000,
+      allowedModes: allowedTransitModes,
+      allowedTransportTypes: search.preferences.allowedTransportTypes,
+    });
+    scheduledCandidates.push(...itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
+      && (!search.preferences.allowedTransportTypes || search.preferences.allowedTransportTypes.includes(segment.transportType)))
+      && (!search.preferences.allowedTransitProviders?.length
+        || candidate.segments.every((segment) => search.preferences.allowedTransitProviders!.includes(segment.providerName.split(' — ')[0])))
+      && (search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
+      && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers)));
+  }
+  scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
+  scheduledCandidates.splice(100);
   const rankedCandidates = [
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...scheduledCandidates.map((itinerary) => ({
@@ -2344,7 +2378,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   res.json({ data: {
     journeys,
     partial: true,
-    blockedProviders: ['taxi','carsharing','transfer','bike','scooter','moped','air','cross-provider-transfers','community-transit-combinations'],
+    blockedProviders: ['taxi','carsharing','transfer','bike','scooter','moped','air','walking-transfers-between-distinct-stops','community-transit-combinations'],
     unsupportedPreferences: [
       ...unsupportedSelectedTypes,
       ...(search.preferences.preferredVehicleClass ? ['preferredVehicleClass'] : []),

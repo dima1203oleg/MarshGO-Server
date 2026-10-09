@@ -21,6 +21,14 @@ export interface GtfsTimetableFeed {
   stopTimesByStop: Map<string, Array<{ tripId: string; index: number }>>;
   calendars: Map<string, { start: string; end: string; weekdays: boolean[] }>;
   exceptions: Map<string, Map<string, number>>;
+  providersByRoute?: Map<string, { id: string; name: string; city: string; fetchedAt: Date }>;
+}
+
+export interface GtfsTimetableSource {
+  providerId: string;
+  providerName: string;
+  providerCity: string;
+  feed: GtfsTimetableFeed;
 }
 
 export interface GtfsDirectJourney {
@@ -175,6 +183,77 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
   return { fetchedAt, timezone, routes, stops, trips, stopTimes, stopTimesByStop, calendars, exceptions };
 }
 
+/**
+ * Combines compatible static feeds so transfers can cross provider boundaries.
+ * Stops join only when their normalized names match and coordinates are within
+ * 30 metres; no nearby-but-unnamed transfer is inferred.
+ */
+export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): GtfsTimetableFeed | null {
+  if (sources.length === 0) return null;
+  const ordered = [...sources].sort((a, b) => a.providerId.localeCompare(b.providerId));
+  const timezone = ordered[0].feed.timezone;
+  if (ordered.some((source) => source.feed.timezone !== timezone)) throw new TypeError('GTFS feeds with different timezones cannot be combined');
+
+  const routes: GtfsTimetableFeed['routes'] = new Map();
+  const stops: GtfsTimetableFeed['stops'] = new Map();
+  const trips: GtfsTimetableFeed['trips'] = new Map();
+  const stopTimes: GtfsTimetableFeed['stopTimes'] = new Map();
+  const calendars: GtfsTimetableFeed['calendars'] = new Map();
+  const exceptions: GtfsTimetableFeed['exceptions'] = new Map();
+  const providersByRoute = new Map<string, { id: string; name: string; city: string; fetchedAt: Date }>();
+  const stopsByName = new Map<string, Array<{ id: string; lon: number; lat: number }>>();
+  let canonicalStopIndex = 0;
+
+  for (const source of ordered) {
+    const prefix = `${encodeURIComponent(source.providerId)}:`;
+    const remappedStops = new Map<string, string>();
+    for (const stop of source.feed.stops.values()) {
+      const nameKey = stop.name.normalize('NFKC').toLocaleLowerCase('uk-UA').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      if (!nameKey) continue;
+      const candidates = stopsByName.get(nameKey) ?? [];
+      const match = candidates.find((candidate) => distanceMeters([stop.lon, stop.lat], [candidate.lon, candidate.lat]) <= 30);
+      const id = match?.id ?? `canonical-stop-${++canonicalStopIndex}`;
+      if (!match) {
+        const canonical = { id, name: stop.name, lon: stop.lon, lat: stop.lat };
+        stops.set(id, canonical);
+        candidates.push({ id, lon: stop.lon, lat: stop.lat });
+        stopsByName.set(nameKey, candidates);
+      }
+      remappedStops.set(stop.id, id);
+    }
+
+    for (const [routeId, route] of source.feed.routes) {
+      const mergedRouteId = `${prefix}${routeId}`;
+      routes.set(mergedRouteId, route);
+      providersByRoute.set(mergedRouteId, { id: source.providerId, name: source.providerName, city: source.providerCity, fetchedAt: source.feed.fetchedAt });
+    }
+    for (const [serviceId, calendar] of source.feed.calendars) calendars.set(`${prefix}${serviceId}`, calendar);
+    for (const [serviceId, byDate] of source.feed.exceptions) exceptions.set(`${prefix}${serviceId}`, new Map(byDate));
+    for (const [tripId, trip] of source.feed.trips) {
+      const mergedTripId = `${prefix}${tripId}`;
+      const mergedRouteId = `${prefix}${trip.routeId}`;
+      const mergedServiceId = `${prefix}${trip.serviceId}`;
+      if (!routes.has(mergedRouteId)) continue;
+      trips.set(mergedTripId, { ...trip, routeId: mergedRouteId, serviceId: mergedServiceId });
+      const entries = source.feed.stopTimes.get(tripId)?.flatMap((entry) => {
+        const stopId = remappedStops.get(entry.stopId);
+        return stopId ? [{ ...entry, stopId }] : [];
+      }) ?? [];
+      if (entries.length >= 2) stopTimes.set(mergedTripId, entries);
+      else trips.delete(mergedTripId);
+    }
+  }
+
+  const stopTimesByStop: GtfsTimetableFeed['stopTimesByStop'] = new Map();
+  for (const [tripId, entries] of stopTimes) entries.forEach((entry, index) => {
+    const matches = stopTimesByStop.get(entry.stopId) ?? [];
+    matches.push({ tripId, index });
+    stopTimesByStop.set(entry.stopId, matches);
+  });
+  const fetchedAt = new Date(Math.min(...ordered.map((source) => source.feed.fetchedAt.getTime())));
+  return { fetchedAt, timezone, routes, stops, trips, stopTimes, stopTimesByStop, calendars, exceptions, providersByRoute };
+}
+
 function isValidTimezone(timezone: string): boolean {
   try { new Intl.DateTimeFormat('en', { timeZone: timezone }).format(0); return true; } catch { return false; }
 }
@@ -301,10 +380,9 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
 
 /**
  * Build scheduled itineraries with up to three transit legs. Transfers are
- * composed only at the same canonical GTFS stop in the same feed; we never
- * infer a transfer between similarly named stops or agencies. Walking to and
- * from the first/last stop uses the same conservative straight-line estimate
- * as the direct-results flow and is surfaced separately in the result.
+ * composed at the same stop, including conservatively matched stops across
+ * feeds. Walking to and from the first/last stop uses a conservative straight-
+ * line estimate and is surfaced separately in the result.
  */
 export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerary[] {
   const now = input.now ?? new Date();
@@ -370,7 +448,9 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
     const route = feed.routes.get(trip.routeId);
     const stops = feed.stopTimes.get(tripId);
     if (!route || !stops || stops.length < 2 || (input.allowedModes && !input.allowedModes.includes(route.mode))) continue;
-    const transportType = route.transportType === 'bus' && input.providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
+    const provider = feed.providersByRoute?.get(trip.routeId);
+    const providerCity = provider?.city ?? input.providerCity;
+    const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
     if (input.allowedTransportTypes && !input.allowedTransportTypes.includes(transportType)) continue;
     const eligibleIndexes = stops.flatMap((stop, index) => corridorStops.has(stop.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
@@ -395,12 +475,12 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
           if (seenSegments.has(key)) continue;
           seenSegments.add(key);
           segments.push({
-            providerId: input.providerId, providerName: input.providerName, mode: route.mode,
+            providerId: provider?.id ?? input.providerId, providerName: provider?.name ?? input.providerName, mode: route.mode,
             routeId: trip.routeId, routeName: route.name, headsign: trip.headsign, tripId,
             originStop: { id: originStop.id, name: originStop.name, coordinates: [originStop.lon, originStop.lat] },
             destinationStop: { id: destinationStop.id, name: destinationStop.name, coordinates: [destinationStop.lon, destinationStop.lat] },
             transportType,
-            departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
+            departureAt, arrivalAt, sourceFreshAt: provider?.fetchedAt ?? feed.fetchedAt,
             distanceToOriginStopMeters: originDistances.get(from.stopId) ?? 0,
             distanceFromDestinationStopMeters: destinationDistances.get(to.stopId) ?? 0,
           });
@@ -435,7 +515,8 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
     if (durationSeconds > maximumJourneySeconds) return;
     const id = path.map((segment) => `${segment.providerId}:${segment.tripId}:${segment.originStop.id}:${segment.destinationStop.id}`).join('|');
     if (!results.has(id)) results.set(id, {
-      id, providerId: input.providerId, providerName: input.providerName,
+      id, providerId: first.providerId,
+      providerName: [...new Set(path.map((segment) => segment.providerName))].join(' + '),
       segments: path, departureAt, arrivalAt, durationSeconds,
       transfers: Math.max(0, path.length - 1), walkingMeters: accessMeters + egressMeters,
     });
