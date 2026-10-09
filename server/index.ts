@@ -2932,9 +2932,43 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
           WHERE j.id=$1 AND l.id=$2 AND j.user_id=$3 FOR UPDATE OF j,l`, [journeyId, journeyLegId, userId],
       );
       const journeySelection = selected.rows[0];
-      if (!journeySelection || journeySelection.offer_id !== offerId || journeySelection.leg_state !== 'SELECTED'
-          || journeySelection.booking_id || journeySelection.journey_state !== 'PLANNED' || journeySelection.leg_count !== 1
-          || Number(journeySelection.passenger_count) !== seats) {
+      const normalJourneyBooking = journeySelection?.offer_id === offerId && journeySelection.leg_state === 'SELECTED'
+        && !journeySelection.booking_id && journeySelection.journey_state === 'PLANNED' && journeySelection.leg_count === 1
+        && Number(journeySelection.passenger_count) === seats;
+      let rescueJourneyBooking = false;
+      if (journeySelection?.journey_state === 'REPLANNING' && journeySelection.leg_state === 'CANCELLED'
+          && journeySelection.booking_id && journeySelection.leg_count === 1
+          && Number(journeySelection.passenger_count) === seats) {
+        const rescue = await client.query<{ allowed: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM bookings cancelled
+               JOIN offers original ON original.id=cancelled.offer_id
+               JOIN offers replacement ON replacement.id=$2
+              WHERE cancelled.id=$1 AND cancelled.passenger_id=$3 AND cancelled.status='cancelled'
+                AND original.id<>replacement.id AND replacement.status='published'
+                AND replacement.departure_at>now() AND replacement.available_seats >= $4
+                AND replacement.departure_at BETWEEN GREATEST(now(),original.departure_at-interval '2 hours')
+                                                  AND original.departure_at+interval '4 hours'
+                AND ST_DWithin(replacement.destination,original.destination,20000)
+                AND (
+                  ST_DWithin(replacement.origin,original.origin,20000)
+                  OR (original.route IS NOT NULL AND replacement.route IS NOT NULL
+                    AND replacement.route_source IS NOT NULL AND replacement.route_source<>'development_unrouted'
+                    AND ST_DWithin(replacement.origin,original.route::geography,20000)
+                    AND ST_LineLocatePoint(original.route,replacement.origin::geometry)
+                      < ST_LineLocatePoint(original.route,replacement.destination::geometry))
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM user_blocks blocked
+                   WHERE (blocked.blocker_id=replacement.driver_id AND blocked.blocked_id=cancelled.passenger_id)
+                      OR (blocked.blocker_id=cancelled.passenger_id AND blocked.blocked_id=replacement.driver_id)
+                )
+           ) AS allowed`, [journeySelection.booking_id, offerId, userId, seats],
+        );
+        rescueJourneyBooking = rescue.rows[0]?.allowed === true;
+      }
+      if (!normalJourneyBooking && !rescueJourneyBooking) {
         throw new ApiError(409, 'Journey leg is no longer bookable or does not match this offer and passenger count', 'journey_leg_unavailable');
       }
     }
@@ -2959,10 +2993,30 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
         available_seats: Number(currentOffer.available_seats) - seats,
       });
     if (hasJourneyReference) {
-      await client.query(
-        `UPDATE journey_legs SET booking_id=$2,state='CONFIRMED',price_status='LOCKED',price_minor=$3,
-           price_min_minor=$3,price_max_minor=$3,updated_at=now() WHERE id=$1`, [journeyLegId, booking.rows[0].id, total],
+      const selectedLeg = await client.query<{ state: string; ordinal: number }>(
+        'SELECT state,ordinal FROM journey_legs WHERE id=$1 AND journey_id=$2', [journeyLegId, journeyId],
       );
+      if (selectedLeg.rows[0]?.state === 'CANCELLED') {
+        await client.query("UPDATE journey_legs SET state='REPLACED',updated_at=now() WHERE id=$1", [journeyLegId]);
+        await client.query(
+          `INSERT INTO journey_legs(
+             journey_id,ordinal,mode,origin,origin_name,destination,destination_name,
+             scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,
+             price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,
+             offer_id,booking_id,state,data_source,last_updated_at,metadata
+           )
+           SELECT $1,$2,'COMMUNITY',o.origin,o.origin_name,o.destination,o.destination_name,
+                  o.departure_at,o.arrival_at,o.duration_s,o.distance_m,$3,$3,$3,o.currency,'LOCKED','AVAILABLE',
+                  o.id,$4,'CONFIRMED','MARSHGO Community',now(),jsonb_build_object('rescue_from_leg_id',$6::text)
+             FROM offers o WHERE o.id=$5`,
+          [journeyId, selectedLeg.rows[0].ordinal + 1, total, booking.rows[0].id, offerId, journeyLegId],
+        );
+      } else {
+        await client.query(
+          `UPDATE journey_legs SET booking_id=$2,state='CONFIRMED',price_status='LOCKED',price_minor=$3,
+             price_min_minor=$3,price_max_minor=$3,updated_at=now() WHERE id=$1`, [journeyLegId, booking.rows[0].id, total],
+        );
+      }
       await client.query(
         `UPDATE journeys SET confirmed_price_minor=$2,total_price_minor=$2,estimated_price_min_minor=$2,
            estimated_price_max_minor=$2,state='READY',updated_at=now() WHERE id=$1`, [journeyId, total],
