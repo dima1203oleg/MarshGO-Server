@@ -60,6 +60,10 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         ST_SetSRID(ST_MakePoint(24.0297,49.8397),4326)::geography,
         ST_SetSRID(ST_GeomFromGeoJSON('{"type":"LineString","coordinates":[[23.8561,49.2567],[24.0297,49.8397]]}'),4326),
         now()+interval '10 days',now()+interval '10 days 1 hour',78000,3600,'osrm',15000,1,1)`, [ids.journeyOffer, ids.driver, ids.vehicle]);
+    const ratingBookingId = crypto.randomUUID();
+    await pool.query(`INSERT INTO bookings(id,offer_id,passenger_id,seat_count,unit_price_minor,total_price_minor,status,idempotency_key)
+      VALUES ($1,$2,$3,1,15000,15000,'completed',$4)`, [ratingBookingId, ids.journeyOffer, passengerB, `rating-fixture-${ratingBookingId}`]);
+    await pool.query(`INSERT INTO reviews(booking_id,author_id,target_id,rating) VALUES ($1,$2,$3,5)`, [ratingBookingId, passengerB, ids.driver]);
     await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
       VALUES ($1,$2,$3,'Pickup point','Rendezvous destination',
         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
@@ -201,7 +205,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA }, body: JSON.stringify(body),
     });
     assert.equal(response.status, 200);
-    const result = await response.json() as { data: { partial: boolean; blockedProviders: string[]; journeys: Array<{ id: string; offerId: string; strategy: string; confirmedPriceMinor: number | null; totalPriceMinor: number; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string }> }> } };
+    const result = await response.json() as { data: { partial: boolean; blockedProviders: string[]; journeys: Array<{ id: string; offerId: string; strategy: string; confirmedPriceMinor: number | null; totalPriceMinor: number; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
     assert.equal(result.data.partial, true);
     assert.ok(result.data.blockedProviders.includes('taxi'));
     assert.equal(result.data.blockedProviders.includes('bus'), false, 'bus remains searchable when an eligible GTFS provider is available');
@@ -211,6 +215,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(journey.strategy, 'CHEAPEST');
     assert.equal(journey.confirmedPriceMinor, null);
     assert.equal(journey.totalPriceMinor, 15000);
+    assert.equal(journey.legs[0].driver?.averageRating, 5);
+    assert.equal(typeof journey.legs[0].driver?.averageRating, 'number');
     assert.deepEqual(journey.legs.map((leg) => [leg.mode, leg.priceStatus, leg.availabilityStatus]), [['COMMUNITY', 'ESTIMATED', 'AVAILABLE']]);
     const sourceOffer = await fetch(`${apiUrl}/api/v1/offers/${ids.journeyOffer}`);
     assert.equal(sourceOffer.status, 200);
@@ -1057,7 +1063,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const ratedOffers = await fetch(`${apiUrl}/api/v1/offers?origin=API%20Publish%20Origin&destination=API%20Publish%20Destination&date=${localOfferDate}&seats=2`);
     const rated = (await ratedOffers.json() as { data: Array<{ average_rating: string | number; review_count: number }> }).data[0];
     assert.equal(Number(rated.average_rating), 5);
-    assert.equal(rated.review_count, 1);
+    assert.equal(rated.review_count, 2, 'one seeded Journey rating plus the completed lifecycle review');
     const bookingEvents = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/events`, { headers: headers(ids.driver) });
     assert.deepEqual((await bookingEvents.json() as { data: Array<{ to_status: string }> }).data.map((event) => event.to_status), [
       'confirmed', 'boarding', 'in_progress', 'completed',
