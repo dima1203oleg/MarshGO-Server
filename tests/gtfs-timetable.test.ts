@@ -140,8 +140,14 @@ test('recognizes city train and funicular routes and respects selected route sub
   const cityTrain = findGtfsItineraries(feed({ routeType: '2', routeName: 'Київська міська електричка' }), {
     ...interval, allowedModes: ['RAIL'], allowedTransportTypes: ['city_train'], maximumStopDistanceMeters: 2000,
   });
+  const canonicalTrain = findGtfsItineraries(feed({ routeType: '2', routeName: 'Київська міська електричка' }), {
+    ...interval, allowedModes: ['RAIL'], allowedTransportTypes: ['train'], maximumStopDistanceMeters: 2000,
+  });
   const suburbanTrain = findGtfsItineraries(feed({ routeType: '109' }), {
     ...interval, allowedModes: ['RAIL'], allowedTransportTypes: ['city_train'], maximumStopDistanceMeters: 2000,
+  });
+  const suburbanTrainViaCanonicalType = findGtfsItineraries(feed({ routeType: '109' }), {
+    ...interval, allowedModes: ['RAIL'], allowedTransportTypes: ['train'], maximumStopDistanceMeters: 2000,
   });
   const funicular = findGtfsItineraries(feed({ routeType: '3', routeName: 'Фунікулер Поділ — Верхня станція' }), {
     ...interval, allowedModes: ['FUNICULAR'], allowedTransportTypes: ['funicular'], maximumStopDistanceMeters: 2000,
@@ -152,11 +158,17 @@ test('recognizes city train and funicular routes and respects selected route sub
   const intercityBus = findGtfsItineraries(feed({ routeType: '3', routeName: 'Міжміський автобус' }), {
     ...interval, allowedModes: ['BUS'], allowedTransportTypes: ['intercity_bus'], maximumStopDistanceMeters: 2000,
   });
+  const intercityBusViaCanonicalType = findGtfsItineraries(feed({ routeType: '3', routeName: 'Міжміський автобус' }), {
+    ...interval, allowedModes: ['BUS'], allowedTransportTypes: ['bus'], maximumStopDistanceMeters: 2000,
+  });
   assert.equal(cityTrain[0]?.segments[0]?.transportType, 'city_train');
+  assert.equal(canonicalTrain[0]?.segments[0]?.transportType, 'city_train');
   assert.equal(suburbanTrain.length, 0);
+  assert.equal(suburbanTrainViaCanonicalType[0]?.segments[0]?.transportType, 'suburban_train');
   assert.equal(funicular[0]?.segments[0]?.mode, 'FUNICULAR');
   assert.equal(minibus[0]?.segments[0]?.mode, 'MINIBUS');
   assert.equal(intercityBus[0]?.segments[0]?.transportType, 'intercity_bus');
+  assert.equal(intercityBusViaCanonicalType[0]?.segments[0]?.transportType, 'intercity_bus');
 });
 
 test('composes a time-feasible bus-to-rail itinerary at the same canonical stop', () => {

@@ -1,6 +1,7 @@
 import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
+import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
@@ -68,7 +69,7 @@ export interface GtfsItinerarySearchInput extends SearchInput {
   minimumTransferBufferSeconds?: number;
   maximumWaitSeconds?: number;
   allowedModes?: readonly TransitJourneyMode[];
-  allowedTransportTypes?: readonly string[];
+  allowedTransportTypes?: readonly JourneyTransportType[];
   providerCity?: string;
 }
 
@@ -541,7 +542,7 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
     const provider = feed.providersByRoute?.get(trip.routeId);
     const providerCity = provider?.city ?? input.providerCity;
     const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
-    if (input.allowedTransportTypes && !input.allowedTransportTypes.includes(transportType)) continue;
+    if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
     const eligibleIndexes = stops.flatMap((stop, index) => corridorStops.has(stop.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
     for (const serviceDate of serviceDates) {
@@ -624,7 +625,14 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
     });
   };
 
+  // Dense city feeds contain many equivalent transfer permutations. Bound the
+  // graph walk as well as the returned list so a popular feed cannot exhaust
+  // the API process while searching a short urban trip.
+  let searchSteps = 0;
+  const MAX_SEARCH_STEPS = 1500;
   const walk = (path: GtfsDirectJourney[]) => {
+    if (searchSteps > MAX_SEARCH_STEPS || results.size >= limit * 5) return;
+    searchSteps++;
     const last = path.at(-1)!;
     if (destinationStopIds.has(last.destinationStop.id)) addPath(path);
     const remainingLegs = maxTransitLegs - path.length;
@@ -642,6 +650,7 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
       else high = middle;
     }
     for (let index = low; index < choices.length; index++) {
+      if (searchSteps > MAX_SEARCH_STEPS || results.size >= limit * 5) break;
       const next = choices[index];
       if (next.departureAt.getTime() > latestNext) break;
       if (!reachableWithin[remainingLegs - 1].has(next.destinationStop.id)) continue;
@@ -654,6 +663,7 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
   };
 
   for (const segment of segments) {
+      if (searchSteps > MAX_SEARCH_STEPS || results.size >= limit * 5) break;
       if (!originStopIds.has(segment.originStop.id) || segment.departureAt.getTime() > maxFirstDeparture) continue;
       if (segment.departureAt.getTime() < input.earliestDeparture.getTime() + walkingSeconds(segment.distanceToOriginStopMeters) * 1000) continue;
       walk([segment]);

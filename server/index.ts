@@ -18,10 +18,11 @@ import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { selectRepresentativeJourneys, strategiesWithComparablePrices } from './journey/scoring';
-import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
+import { JOURNEY_STRATEGIES, journeyTransportTypeSelected, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
 import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
@@ -2084,11 +2085,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,25000)
         AND o.departure_at>now()
       ORDER BY o.departure_at ASC LIMIT 100`,
-    [search.origin.coordinates[0], search.origin.coordinates[1], search.destination.coordinates[0], search.destination.coordinates[1], search.departureAt, search.passengers, req.userId, search.preferences.allowCommunity !== false],
+    [search.origin.coordinates[0], search.origin.coordinates[1], search.destination.coordinates[0], search.destination.coordinates[1], search.departureAt, search.passengers, req.userId,
+      search.preferences.allowCommunity !== false && journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes)],
   );
 
   const candidates = rows.flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number }> => {
-    if (search.preferences.preferredVehicleClass || search.preferences.allowCommunity === false) return [];
+    if (search.preferences.preferredVehicleClass || search.preferences.allowCommunity === false
+      || !journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes)) return [];
     const arrivalAt = offer.arrival_at ?? new Date(offer.departure_at.getTime() + offer.duration_s * 1000);
     const durationSeconds = Math.ceil((arrivalAt.getTime() - offer.departure_at.getTime()) / 1000);
     const totalPriceMinor = Number(offer.price_per_seat_minor) * search.passengers;
@@ -2108,7 +2111,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const strategies: JourneyStrategy[] = [search.strategy, ...JOURNEY_STRATEGIES.filter((strategy) => strategy !== search.strategy)];
   const preferenceValues = search.preferences;
   const providerErrors: string[] = [];
-  const { rows: gtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number] } }>(
+  const { rows: gtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
     `SELECT id,name,city,feed_url,last_sync_at,last_report FROM mobility_providers
       WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
         AND status='enabled' AND health IN ('healthy','degraded')
@@ -2130,7 +2133,6 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   };
   const [originLon, originLat] = search.origin.coordinates;
   const [destinationLon, destinationLat] = search.destination.coordinates;
-  const latitudeRadians = ((originLat + destinationLat) / 2) * Math.PI / 180;
   const routeDistanceMeters = (() => {
     const radians = (value: number) => value * Math.PI / 180;
     const dLat = radians(destinationLat - originLat), dLon = radians(destinationLon - originLon);
@@ -2138,20 +2140,22 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     return 6_371_000 * 2 * Math.asin(Math.sqrt(h));
   })();
   const corridorWidthMeters = Math.max(12_000, Math.min(60_000, routeDistanceMeters * 0.2));
-  const latitudePadding = corridorWidthMeters / 110_574 + 0.02;
-  const longitudePadding = corridorWidthMeters / (111_320 * Math.max(0.2, Math.cos(latitudeRadians))) + 0.02;
-  const corridorBox: [number, number, number, number] = [
-    Math.min(originLon, destinationLon) - longitudePadding,
-    Math.min(originLat, destinationLat) - latitudePadding,
-    Math.max(originLon, destinationLon) + longitudePadding,
-    Math.max(originLat, destinationLat) + latitudePadding,
-  ];
-  const eligibleGtfsProviders = gtfsProviders.filter((provider) => {
+  const spatiallyEligibleGtfsProviders = gtfsProviders.filter((provider) => {
     const box = provider.last_report?.bbox;
-    return Boolean(box && (bboxContains(box, originLon, originLat) || bboxContains(box, destinationLon, destinationLat) || intersects(box, corridorBox)));
+    return Boolean(box && (bboxContains(box, originLon, originLat) || bboxContains(box, destinationLon, destinationLat)
+      || bboxIntersectsRouteCorridor(box, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters)));
   });
   const allTransitModes: TransitJourneyMode[] = ['BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO', 'FERRY', 'FUNICULAR'];
   const allowedTransitModes = allTransitModes.filter(transitAllowed);
+  const typeKeysByMode: Record<TransitJourneyMode, string[]> = {
+    BUS: ['bus', 'intercity_bus'], MINIBUS: ['marshrutka'], RAIL: ['train', 'suburban', 'city_train'],
+    TRAM: ['tram'], TROLLEYBUS: ['trolleybus'], METRO: ['metro'], FERRY: ['ferry'], FUNICULAR: ['funicular'],
+  };
+  const eligibleGtfsProviders = allowedTransitModes.length === 0 ? [] : spatiallyEligibleGtfsProviders.filter((provider) => {
+    const counts = provider.last_report?.counts;
+    if (!counts) return true;
+    return allowedTransitModes.some((mode) => typeKeysByMode[mode].some((type) => Number(counts[`routes_${type}`] ?? 0) > 0));
+  });
   const feedLoads = await Promise.allSettled(eligibleGtfsProviders.map(async (provider) => ({
     provider,
     feed: await cachedGtfsTimetable(provider.id, provider.feed_url),
@@ -2171,6 +2175,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     sources.push(source); sourcesByTimezone.set(source.feed.timezone, sources);
   }
   const scheduledCandidates: GtfsItinerary[] = [];
+  let hasUnpricedTransitCandidates = false;
   for (const sources of sourcesByTimezone.values()) {
     const mergedFeed = mergeGtfsTimetables(sources);
     if (!mergedFeed) continue;
@@ -2186,11 +2191,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       allowedModes: allowedTransitModes,
       allowedTransportTypes: search.preferences.allowedTransportTypes,
     });
-    scheduledCandidates.push(...itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
-      && (!search.preferences.allowedTransportTypes || search.preferences.allowedTransportTypes.includes(segment.transportType)))
+    const feasibleItineraries = itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
+      && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes))
       && candidate.segments.every((segment) => transitProviderAllowed(search.preferences, segment.transportType, segment.providerName))
       && (search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
-      && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers)));
+      && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers));
+    if (search.preferences.maxPriceMinor !== undefined && feasibleItineraries.length > 0) hasUnpricedTransitCandidates = true;
+    else scheduledCandidates.push(...feasibleItineraries);
   }
   scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
   scheduledCandidates.splice(100);
@@ -2217,11 +2224,28 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       itinerary,
     })),
   ];
-  const representatives = selectRepresentativeJourneys(rankedCandidates, strategiesWithComparablePrices(rankedCandidates, strategies));
-  const routePlannerTypes = new Set(['carpool','walk','bus','marshrutka','intercity_bus','train','suburban_train','city_train','tram','trolleybus','metro','ferry','funicular']);
-  const unsupportedSelectedTypes = (search.preferences.allowedTransportTypes ?? [])
+  const availableStrategies = strategiesWithComparablePrices(rankedCandidates, strategies)
+    .filter((strategy) => strategy !== 'CHEAPEST' || !hasUnpricedTransitCandidates);
+  const representatives = selectRepresentativeJourneys(rankedCandidates, availableStrategies);
+  const routePlannerTypes = new Set<string>(['carpool']);
+  for (const source of feedSources) {
+    for (const route of source.feed.routes.values()) {
+      routePlannerTypes.add(route.transportType);
+      if (route.transportType === 'intercity_bus') routePlannerTypes.add('bus');
+      if (route.transportType === 'suburban_train' || route.transportType === 'city_train') routePlannerTypes.add('train');
+    }
+  }
+  const canonicalRouteTypes = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'];
+  const requestedRouteTypes = search.preferences.allowedTransportTypes ?? canonicalRouteTypes;
+  const unsupportedSelectedTypes = requestedRouteTypes
     .filter((type) => !routePlannerTypes.has(type))
     .map((type) => `transportType:${type}:not-in-route-engine`);
+  const blockedProviders = [
+    ...canonicalRouteTypes.filter((type) => !routePlannerTypes.has(type))
+      .map((type) => `transportType:${type}:no-routed-provider-in-corridor`),
+    'community-transit-combinations',
+    'walking-transfers-between-unmatched-stops',
+  ];
   const client = await pool.connect();
   const journeys: Array<Record<string, unknown>> = [];
   try {
@@ -2366,7 +2390,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           departureAt: segment.departureAt, arrivalAt: segment.arrivalAt, durationSeconds,
           distanceMeters: null, priceMinor: null, priceStatus: 'UNKNOWN', availabilityStatus: 'UNKNOWN',
           source: 'gtfs-static', lastUpdatedAt: segment.sourceFreshAt, providerName: segment.providerName,
-          routeName: segment.routeName, headsign: segment.headsign, driver: null, vehicle: null });
+          routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign, driver: null, vehicle: null });
       }
       await saveWalkLeg(
         { name: last.destinationStop.name, coordinates: last.destinationStop.coordinates },
@@ -2387,17 +2411,19 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   } finally {
     client.release();
   }
+  const unsupportedPreferences = [
+    ...unsupportedSelectedTypes,
+    ...(search.preferences.preferredVehicleClass ? ['preferredVehicleClass'] : []),
+    ...(hasUnpricedTransitCandidates ? ['maxPriceMinor:public-transit-fare-unavailable'] : []),
+    ...(search.strategy === 'CHEAPEST' && (scheduledCandidates.length > 0 || hasUnpricedTransitCandidates) ? ['CHEAPEST:public-transit-fares-unavailable'] : []),
+    ...(search.preferences.maxTransfers !== undefined && search.preferences.maxTransfers > 2 ? ['maxTransfers:limited-to-2'] : []),
+  ];
   res.json({ data: {
     journeys,
-    partial: true,
-    blockedProviders: ['taxi','carsharing','transfer','bike','scooter','moped','air','walking-transfers-between-unmatched-stops','community-transit-combinations'],
-    unsupportedPreferences: [
-      ...unsupportedSelectedTypes,
-      ...(search.preferences.preferredVehicleClass ? ['preferredVehicleClass'] : []),
-      ...(search.preferences.maxPriceMinor !== undefined && scheduledCandidates.length > 0 ? ['maxPriceMinor:public-transit-fare-unavailable'] : []),
-      ...(search.strategy === 'CHEAPEST' && scheduledCandidates.length > 0 ? ['CHEAPEST:public-transit-fares-unavailable'] : []),
-      ...(search.preferences.maxTransfers !== undefined && search.preferences.maxTransfers > 2 ? ['maxTransfers:limited-to-2'] : []),
-    ],
+    partial: journeys.length === 0 || providerErrors.length > 0 || unsupportedPreferences.length > 0
+      || journeys.some((journey) => journey.source === 'gtfs-static'),
+    blockedProviders,
+    unsupportedPreferences,
     providerErrors,
   } });
 }));
