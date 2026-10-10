@@ -31,12 +31,16 @@ describe('OSRM-compatible routing adapter', () => {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
     process.env.ROUTING_ENGINE_URL = `http://127.0.0.1:${address.port}/route/v1/driving`;
-    assert.deepEqual(await getRoadRoute([23.86, 49.25], [24.03, 49.84]), {
+    const road = await getRoadRoute([23.86, 49.25], [24.03, 49.84]);
+    assert.deepEqual({ ...road, maneuvers: undefined }, {
       geometry: [[23.86, 49.25], [23.95, 49.51], [24.03, 49.84]],
       distanceMeters: 10400,
       durationSeconds: 930,
       legs: [{ distanceMeters: 10400, durationSeconds: 930 }],
+      maneuvers: undefined,
     });
+    // Turn-by-turn steps travel with the road route so navigation can guide and speak them.
+    assert.deepEqual(road.maneuvers?.map((step) => [step.type, step.modifier ?? null, step.streetName ?? null]), [['DEPART', null, null], ['TURN', 'LEFT', 'Highway'], ['ARRIVE', null, null]]);
     const canonical = await calculateCanonicalRoute({ origin: [23.86, 49.25], destination: [24.03, 49.84], profile: { mode: 'CAR' }, requestId: 'route-contract-test' });
     assert.equal(canonical.geometry.encoding, 'polyline6');
     assert.equal(canonical.maneuvers[0].type, 'DEPART');
