@@ -21,8 +21,8 @@ import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, type Gtf
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
-import { selectRepresentativeJourneys, strategiesWithComparablePrices } from './journey/scoring';
-import { JOURNEY_STRATEGIES, journeyTransportTypeSelected, type JourneyOption, type JourneyStrategy } from './journey/types';
+import { selectStrategyRecommendations, strategiesWithComparablePrices } from './journey/scoring';
+import { journeyTransportTypeSelected, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
 import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
@@ -2108,7 +2108,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }];
   });
 
-  const strategies: JourneyStrategy[] = [search.strategy, ...JOURNEY_STRATEGIES.filter((strategy) => strategy !== search.strategy)];
+  const userFacingStrategies: JourneyStrategy[] = ['BALANCED', 'FASTEST', 'CHEAPEST'];
+  const strategies: JourneyStrategy[] = [search.strategy, ...userFacingStrategies.filter((strategy) => strategy !== search.strategy)];
   const preferenceValues = search.preferences;
   const providerErrors: string[] = [];
   const { rows: gtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
@@ -2226,7 +2227,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   ];
   const availableStrategies = strategiesWithComparablePrices(rankedCandidates, strategies)
     .filter((strategy) => strategy !== 'CHEAPEST' || !hasUnpricedTransitCandidates);
-  const representatives = selectRepresentativeJourneys(rankedCandidates, availableStrategies);
+  const representatives = selectStrategyRecommendations(rankedCandidates, availableStrategies);
   const routePlannerTypes = new Set<string>(['carpool']);
   for (const source of feedSources) {
     for (const route of source.feed.routes.values()) {
@@ -2288,7 +2289,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       );
       await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, leg.rows[0].id]);
       journeys.push({
-        id: journeyId, offerId: offer.offer_id, strategy: representative.strategy, score: representative.score, state: 'PLANNED',
+        id: journeyId, offerId: offer.offer_id, strategy: representative.strategy,
+        recommendedStrategies: representative.recommendedStrategies, score: representative.score, state: 'PLANNED',
         source: 'community-offer',
         totalDurationSeconds: candidate.durationSeconds, totalPriceMinor: candidate.totalPriceMinor,
         confirmedPriceMinor: null, estimatedPriceMinMinor: candidate.totalPriceMinor, estimatedPriceMaxMinor: candidate.totalPriceMinor,
@@ -2299,6 +2301,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           departureAt: offer.departure_at, arrivalAt: candidate.arrivalAt, durationSeconds: offer.duration_s,
           distanceMeters: offer.distance_m, priceMinor: candidate.totalPriceMinor, priceStatus: 'ESTIMATED',
           availabilityStatus: 'AVAILABLE', source: 'community-offer', lastUpdatedAt: offer.snapshot_at,
+          transportType: 'carpool', liveStatus: 'SCHEDULED',
+          dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshot_at.getTime()) / 1000)),
           driver: { id: offer.driver_id, name: offer.driver_name,
             averageRating: offer.average_rating === null ? null : Number(offer.average_rating), reviewCount: offer.review_count },
           vehicle: { id: offer.vehicle_id, make: offer.vehicle_make, model: offer.vehicle_model } }],
@@ -2355,7 +2359,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         responseLegs.push({ id: inserted.rows[0].id, mode: 'WALK', offerId: null, origin, destination,
           departureAt, arrivalAt, durationSeconds, distanceMeters: meters, priceMinor: null,
           priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source: 'walking-estimate',
-          lastUpdatedAt: new Date().toISOString(), driver: null, vehicle: null, title: label });
+          lastUpdatedAt: new Date().toISOString(), dataFreshnessSeconds: 0, liveStatus: 'UNVERIFIED',
+          driver: null, vehicle: null, title: label });
       };
 
       await saveWalkLeg(
@@ -2389,6 +2394,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
           departureAt: segment.departureAt, arrivalAt: segment.arrivalAt, durationSeconds,
           distanceMeters: null, priceMinor: null, priceStatus: 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+          liveStatus: 'SCHEDULED',
+          dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - segment.sourceFreshAt.getTime()) / 1000)),
           source: 'gtfs-static', lastUpdatedAt: segment.sourceFreshAt, providerName: segment.providerName,
           routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign, driver: null, vehicle: null });
       }
@@ -2399,7 +2406,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       );
       if (firstTransitLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstTransitLegId]);
       journeys.push({ id: journeyId, offerId: null, source: 'gtfs-static', providerName: itinerary.providerName,
-        strategy: representative.strategy, score: representative.score, state: 'PLANNED',
+        strategy: representative.strategy, recommendedStrategies: representative.recommendedStrategies,
+        score: representative.score, state: 'PLANNED',
         totalDurationSeconds: itinerary.durationSeconds, totalPriceMinor: null, confirmedPriceMinor: null,
         estimatedPriceMinMinor: null, estimatedPriceMaxMinor: null, walkingMeters: itinerary.walkingMeters,
         transfers: itinerary.transfers, reliabilityScore: null, legs: responseLegs });

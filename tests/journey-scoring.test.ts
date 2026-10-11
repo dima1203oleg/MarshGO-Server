@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { scoreJourneys, selectRepresentativeJourneys, strategiesWithComparablePrices } from '../server/journey/scoring';
+import { JOURNEY_SCORE_WEIGHTS, paretoFrontier, scoreJourneys, selectRepresentativeJourneys, selectStrategyRecommendations, strategiesWithComparablePrices } from '../server/journey/scoring';
 import type { JourneyOption } from '../server/journey/types';
 
 const candidates: JourneyOption[] = [
@@ -13,6 +13,42 @@ describe('Journey strategy scoring', () => {
   it('ranks door-to-door FASTEST and CHEAPEST alternatives by their strategy', () => {
     assert.equal(scoreJourneys(candidates, 'FASTEST')[0].journey.id, 'community-taxi');
     assert.equal(scoreJourneys(candidates, 'CHEAPEST')[0].journey.id, 'bus');
+  });
+
+  it('uses the documented normalized weights for the default balanced mode', () => {
+    assert.deepEqual(JOURNEY_SCORE_WEIGHTS.BALANCED, {
+      time: 0.35, price: 0.25, transfers: 0.10, walking: 0.10, risk: 0.20, comfort: 0,
+    });
+  });
+
+  it('keeps the Pareto frontier and never treats an unknown fare as zero', () => {
+    const fast = { ...candidates[2], id: 'fast' };
+    const cheap = { ...candidates[0], id: 'cheap' };
+    const dominated = { ...candidates[0], id: 'dominated', durationSeconds: 7000, priceMinor: 13000, transfers: 1, walkingMeters: 400 };
+    const unknown = { ...candidates[0], id: 'unknown', priceMinor: null };
+    const frontier = paretoFrontier([fast, cheap, dominated, unknown]);
+    assert.deepEqual(frontier.map((journey) => journey.id).sort(), ['cheap', 'fast', 'unknown']);
+  });
+
+  it('exposes one winner per strategy and groups an identical winner across tabs', () => {
+    const recommendations = selectStrategyRecommendations([candidates[0]], ['BALANCED', 'FASTEST', 'CHEAPEST']);
+    assert.equal(recommendations.length, 1);
+    assert.deepEqual(recommendations[0].recommendedStrategies, ['BALANCED', 'FASTEST', 'CHEAPEST']);
+  });
+
+  it('keeps distinct winners for distinct strategies', () => {
+    const recommendations = selectStrategyRecommendations(candidates, ['BALANCED', 'FASTEST', 'CHEAPEST']);
+    assert.equal(recommendations.length, 3);
+    assert.equal(recommendations.find((item) => item.strategy === 'FASTEST')?.journey.id, 'community-taxi');
+    assert.equal(recommendations.find((item) => item.strategy === 'CHEAPEST')?.journey.id, 'bus');
+  });
+
+  it('suppresses near-identical routes while retaining their strategy recommendations', () => {
+    const faster = { ...candidates[0], id: 'same-bus-fast', durationSeconds: 4000, priceMinor: 10000, legs: [{ mode: 'BUS' as const }] };
+    const cheaper = { ...faster, id: 'same-bus-cheap', durationSeconds: 4100, priceMinor: 9600 };
+    const recommendations = selectStrategyRecommendations([faster, cheaper], ['FASTEST', 'CHEAPEST']);
+    assert.equal(recommendations.length, 1);
+    assert.deepEqual(recommendations[0].recommendedStrategies, ['FASTEST', 'CHEAPEST']);
   });
 
   it('keeps FASTEST and CHEAPEST strict across direct and chained alternatives', () => {

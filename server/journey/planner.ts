@@ -1,6 +1,6 @@
 import type { ProviderOption } from '../providers/types';
 import type { JourneyOption, JourneyStrategy } from './types';
-import { scoreJourneys } from './scoring';
+import { paretoFrontier, scoreJourneys } from './scoring';
 import { evaluateTransfer, type TransferEvaluation } from './transferEngine';
 
 export interface RouteConnection {
@@ -140,7 +140,7 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
   }
 
   const unique = [...new Map(routes.map((route) => [pathSignature(route.legs), route])).values()];
-  return scoreJourneys(unique, input.strategy).slice(0, maximumResults).map(({ journey }) => journey);
+  return scoreJourneys(paretoFrontier(unique), input.strategy).slice(0, maximumResults).map(({ journey }) => journey);
 }
 
 function summarize(legs: JourneyPlanLeg[]): PlannedJourney {

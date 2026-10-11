@@ -12,7 +12,7 @@ export interface ScoreWeights {
 export const JOURNEY_SCORE_WEIGHTS: Record<JourneyStrategy, ScoreWeights> = {
   FASTEST:  { time: 0.62, price: 0.08, transfers: 0.08, walking: 0.04, risk: 0.12, comfort: 0.06 },
   CHEAPEST: { time: 0.10, price: 0.62, transfers: 0.09, walking: 0.04, risk: 0.10, comfort: 0.05 },
-  BALANCED: { time: 0.34, price: 0.24, transfers: 0.12, walking: 0.08, risk: 0.14, comfort: 0.08 },
+  BALANCED: { time: 0.35, price: 0.25, transfers: 0.10, walking: 0.10, risk: 0.20, comfort: 0 },
   PREMIUM:  { time: 0.14, price: 0.10, transfers: 0.15, walking: 0.19, risk: 0.15, comfort: 0.27 },
   RELIABLE: { time: 0.20, price: 0.10, transfers: 0.10, walking: 0.06, risk: 0.46, comfort: 0.08 },
   CUSTOM:   { time: 0.34, price: 0.24, transfers: 0.12, walking: 0.08, risk: 0.14, comfort: 0.08 },
@@ -34,6 +34,61 @@ export function strategiesWithComparablePrices<T extends JourneyOption>(
 }
 
 type Metric = 'durationSeconds' | 'priceMinor' | 'transfers' | 'walkingMeters' | 'risk' | 'comfortPenalty';
+
+function riskMetric(journey: JourneyOption): number {
+  return Math.max(journey.transferRisk, journey.reliability === null ? 1 : 1 - journey.reliability);
+}
+
+function dominates(a: JourneyOption, b: JourneyOption): boolean {
+  if ((a.priceMinor === null) !== (b.priceMinor === null)) return false;
+  const aPrice = a.priceMinor ?? 0;
+  const bPrice = b.priceMinor ?? 0;
+  const metricsA = [a.durationSeconds, aPrice, a.transfers, a.walkingMeters, riskMetric(a)];
+  const metricsB = [b.durationSeconds, bPrice, b.transfers, b.walkingMeters, riskMetric(b)];
+  return metricsA.every((value, index) => value <= metricsB[index])
+    && metricsA.some((value, index) => value < metricsB[index]);
+}
+
+/** Keep candidates that are not worse in every measurable dimension. Unknown fares are incomparable with known fares. */
+export function paretoFrontier<T extends JourneyOption>(journeys: readonly T[]): T[] {
+  return journeys.filter((candidate) => !journeys.some((other) => other !== candidate && dominates(other, candidate)));
+}
+
+export interface StrategyRecommendation<T extends JourneyOption> {
+  journey: T;
+  strategy: JourneyStrategy;
+  recommendedStrategies: JourneyStrategy[];
+  score: number;
+}
+
+/** Return one winner per strategy, grouping exact same candidates across tabs. */
+export function selectStrategyRecommendations<T extends JourneyOption>(
+  journeys: readonly T[],
+  strategies: readonly JourneyStrategy[],
+): StrategyRecommendation<T>[] {
+  const frontier = paretoFrontier(journeys);
+  const recommendations: StrategyRecommendation<T>[] = [];
+  for (const strategy of strategies) {
+    const winner = scoreJourneys(frontier, strategy)[0];
+    if (!winner) continue;
+    const representative = recommendations.find((item) => {
+      const sameModes = item.journey.legs.map((leg) => leg.mode).join(',') === winner.journey.legs.map((leg) => leg.mode).join(',');
+      const similarTime = Math.abs(item.journey.durationSeconds - winner.journey.durationSeconds)
+        <= Math.max(item.journey.durationSeconds, winner.journey.durationSeconds) * 0.05;
+      const aPrice = item.journey.priceMinor;
+      const bPrice = winner.journey.priceMinor;
+      const similarPrice = aPrice === bPrice || (aPrice !== null && bPrice !== null
+        && Math.abs(aPrice - bPrice) <= Math.max(aPrice, bPrice, 1) * 0.05);
+      return item.journey === winner.journey || (sameModes && item.journey.transfers === winner.journey.transfers && similarTime && similarPrice);
+    });
+    if (representative) {
+      representative.recommendedStrategies.push(strategy);
+    } else {
+      recommendations.push({ journey: winner.journey, strategy, recommendedStrategies: [strategy], score: winner.score });
+    }
+  }
+  return recommendations;
+}
 
 function normalized(value: number, min: number, max: number): number {
   if (max === min) return 0;
@@ -63,7 +118,7 @@ export function scoreJourneys<T extends JourneyOption>(
     priceMinor: (journey) => journey.priceMinor ?? Number.MAX_SAFE_INTEGER,
     transfers: (journey) => journey.transfers,
     walkingMeters: (journey) => journey.walkingMeters,
-    risk: (journey) => Math.max(journey.transferRisk, journey.reliability === null ? 1 : 1 - journey.reliability),
+    risk: riskMetric,
     comfortPenalty: (journey) => journey.comfort === null ? 0.5 : 1 - journey.comfort,
   };
   const ranges = Object.fromEntries(Object.entries(metrics).map(([key, valueOf]) => {
