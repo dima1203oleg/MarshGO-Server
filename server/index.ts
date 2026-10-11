@@ -17,7 +17,7 @@ import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
-import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
@@ -2084,12 +2084,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         AND ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,25000)
         AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,25000)
         AND o.departure_at>now()
-      ORDER BY o.departure_at ASC LIMIT 100`,
+      ORDER BY o.departure_at ASC LIMIT 101`,
     [search.origin.coordinates[0], search.origin.coordinates[1], search.destination.coordinates[0], search.destination.coordinates[1], search.departureAt, search.passengers, req.userId,
       search.preferences.allowCommunity !== false && journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes)],
   );
 
-  const candidates = rows.flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number }> => {
+  let candidateGenerationTruncated = rows.length > 100;
+  const candidates = rows.slice(0, 100).flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number }> => {
     if (search.preferences.preferredVehicleClass || search.preferences.allowCommunity === false
       || !journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes)) return [];
     const arrivalAt = offer.arrival_at ?? new Date(offer.departure_at.getTime() + offer.duration_s * 1000);
@@ -2116,12 +2117,14 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
   );
   const providerErrors: string[] = [];
-  const { rows: gtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
+  const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
     `SELECT id,name,city,feed_url,last_sync_at,last_report FROM mobility_providers
       WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
         AND status='enabled' AND health IN ('healthy','degraded')
-      ORDER BY priority,name LIMIT 100`,
+      ORDER BY priority,name LIMIT 101`,
   );
+  if (discoveredGtfsProviders.length > 100) candidateGenerationTruncated = true;
+  const gtfsProviders = discoveredGtfsProviders.slice(0, 100);
   const transitAllowed = (mode: TransitJourneyMode) => transitModeAllowed(mode, search.preferences);
   const [originLon, originLat] = search.origin.coordinates;
   const [destinationLon, destinationLat] = search.destination.coordinates;
@@ -2171,7 +2174,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   for (const sources of sourcesByTimezone.values()) {
     const mergedFeed = mergeGtfsTimetables(sources);
     if (!mergedFeed) continue;
-    const itineraries = findGtfsItineraries(mergedFeed, {
+    const itinerarySearch = findGtfsItinerariesWithStats(mergedFeed, {
       providerId: sources[0].providerId, providerName: sources[0].providerName, origin: search.origin.coordinates,
       destination: search.destination.coordinates, earliestDeparture: search.departureAt,
       latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 100,
@@ -2183,6 +2186,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       allowedModes: allowedTransitModes,
       allowedTransportTypes: search.preferences.allowedTransportTypes,
     });
+    candidateGenerationTruncated ||= itinerarySearch.searchTruncated || itinerarySearch.resultLimitReached;
+    const itineraries = itinerarySearch.itineraries;
     const feasibleItineraries = itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
       && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes))
       && candidate.segments.every((segment) => transitProviderAllowed(search.preferences, segment.transportType, segment.providerName))
@@ -2192,6 +2197,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     else scheduledCandidates.push(...feasibleItineraries);
   }
   scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
+  if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
   scheduledCandidates.splice(100);
   const rankedCandidates = [
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
@@ -2431,8 +2437,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     paretoCount: paretoCandidates.length,
     returnedCount: journeys.length,
     alternativeLimitPerStrategy,
-    resultsTruncated: paretoCandidates.some((candidate) => !selectedCandidateIds.has(candidate.id)),
-    partial: journeys.length === 0 || providerErrors.length > 0 || unsupportedPreferences.length > 0
+    resultsTruncated: candidateGenerationTruncated || paretoCandidates.some((candidate) => !selectedCandidateIds.has(candidate.id)),
+    candidateGenerationTruncated,
+    partial: journeys.length === 0 || candidateGenerationTruncated || providerErrors.length > 0 || unsupportedPreferences.length > 0
       || journeys.some((journey) => journey.source === 'gtfs-static'),
     blockedProviders,
     unsupportedPreferences,

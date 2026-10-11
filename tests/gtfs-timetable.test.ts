@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string } = {}) {
   const files: Record<string, Uint8Array> = {
@@ -133,6 +133,28 @@ test('finds a scheduled direct bus, preserves route/stops, and converts agency l
   assert.equal(journeys[0].arrivalAt.toISOString(), '2026-10-12T05:40:00.000Z');
 });
 
+test('reports when the itinerary result limit hides additional route chains', () => {
+  const timetable = feed();
+  timetable.routes.set('r2', { name: 'Tram 2', mode: 'TRAM', transportType: 'tram' });
+  timetable.trips.set('t2', { routeId: 'r2', serviceId: 'weekday', headsign: 'Central station' });
+  const alternateStops = (timetable.stopTimes.get('t1') ?? []).map((stop) => ({ ...stop }));
+  timetable.stopTimes.set('t2', alternateStops);
+  for (const [index, stop] of alternateStops.entries()) {
+    timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: 't2', index },
+    ]);
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), limit: 1,
+    maximumTransfers: 0, maximumStopDistanceMeters: 1000,
+  });
+
+  assert.equal(result.itineraries.length, 1);
+  assert.equal(result.resultLimitReached, true);
+  assert.equal(result.searchTruncated, false);
+});
+
 test('uses calendar date exceptions before weekly service and excludes removed service', () => {
   const added = findDirectGtfsJourneys(feed({ monday: '0', exceptionDate: '20261012' }), request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'));
   const removed = findDirectGtfsJourneys(feed({ exceptionDate: '20261012', exceptionType: '2' }), request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'));
@@ -246,7 +268,7 @@ test('composes four scheduled transport segments with three feasible transfers',
     && journey.segments.map((segment) => segment.mode).join(',') === 'BUS,TRAM,METRO,RAIL'));
 });
 
-test('keeps the nearest stop for each transport type when dense city stops crowd out a station', () => {
+test('keeps the nearest stop for each transport type and reports the bounded stop search', () => {
   const rail = transferFeed({ routeType: '2', routeName: 'Regional train', fromId: 'rail-origin', fromName: 'Rail station',
     fromLon: '24.0203', fromLat: '49.8401', toId: 'rail-destination', toName: 'Rail destination',
     toLon: '24.0300', toLat: '49.8500', departure: '08:00:00', arrival: '08:40:00' });
@@ -254,14 +276,15 @@ test('keeps the nearest stop for each transport type when dense city stops crowd
     { providerId: 'busy-city', providerName: 'Busy city buses', providerCity: 'Львів', feed: crowdedBusStops() },
     { providerId: 'rail', providerName: 'Regional rail', providerCity: 'Україна', feed: rail },
   ])!;
-  const results = findGtfsItineraries(merged, {
+  const result = findGtfsItinerariesWithStats(merged, {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
     maximumStopDistanceMeters: 1000,
     maximumTransfers: 0,
   });
-  assert.equal(results.length, 1);
-  assert.equal(results[0].segments[0].transportType, 'train');
-  assert.equal(results[0].segments[0].providerId, 'rail');
+  assert.equal(result.itineraries.length, 1);
+  assert.equal(result.itineraries[0].segments[0].transportType, 'train');
+  assert.equal(result.itineraries[0].segments[0].providerId, 'rail');
+  assert.equal(result.searchTruncated, true);
 });
 
 test('composes across provider feeds using equivalent Kyiv timezone names and closely matched stops', () => {

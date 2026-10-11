@@ -90,6 +90,12 @@ export interface GtfsItinerary {
   transferWalkingMeters: number[];
 }
 
+export interface GtfsItinerarySearchResult {
+  itineraries: GtfsItinerary[];
+  searchTruncated: boolean;
+  resultLimitReached: boolean;
+}
+
 function csvRows(text: string | undefined): CsvRow[] {
   if (!text) return [];
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.length > 0);
@@ -459,7 +465,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
  * feeds. Walking to and from the first/last stop uses a conservative straight-
  * line estimate and is surfaced separately in the result.
  */
-export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerary[] {
+export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerarySearchResult {
   const now = input.now ?? new Date();
   const maximumJourneySeconds = input.maximumJourneySeconds ?? 24 * 60 * 60;
   const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
@@ -478,6 +484,7 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
 
+  let stopSelectionTruncated = false;
   const closestStops = (point: [number, number]) => {
     const ranked = [...feed.stops.values()]
       .filter((stop) => feed.stopTimesByStop.has(stop.id))
@@ -503,11 +510,14 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
         selectedByType.set(type, count + 1);
       }
     }
+    if (selected.size < ranked.length) stopSelectionTruncated = true;
     return [...selected.values()];
   };
   const originStops = closestStops(input.origin);
   const destinationStops = closestStops(input.destination);
-  if (!originStops.length || !destinationStops.length) return [];
+  if (!originStops.length || !destinationStops.length) {
+    return { itineraries: [], searchTruncated: false, resultLimitReached: false };
+  }
 
   const routeDistance = distanceMeters(input.origin, input.destination);
   const corridorWidth = Math.max(12_000, Math.min(60_000, routeDistance * 0.2));
@@ -681,9 +691,17 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
       walk([segment]);
   }
 
-  return [...results.values()]
-    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || a.id.localeCompare(b.id))
-    .slice(0, limit);
+  const rankedResults = [...results.values()]
+    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || a.id.localeCompare(b.id));
+  return {
+    itineraries: rankedResults.slice(0, limit),
+    searchTruncated: stopSelectionTruncated || searchSteps >= MAX_SEARCH_STEPS || results.size >= limit * 5,
+    resultLimitReached: rankedResults.length > limit,
+  };
+}
+
+export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerary[] {
+  return findGtfsItinerariesWithStats(feed, input).itineraries;
 }
 
 const feedCache = new Map<string, { cachedAt: number; promise: Promise<GtfsTimetableFeed> }>();
