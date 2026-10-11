@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findDirectGtfsJourneys, findGtfsItineraries, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string } = {}) {
   const files: Record<string, Uint8Array> = {
@@ -23,10 +23,10 @@ function feed(overrides: { monday?: string; exceptionDate?: string; exceptionTyp
   return parseGtfsTimetable(files);
 }
 
-function connectingFeed() {
+function connectingFeed(options: { secondRouteType?: string; secondDeparture?: string } = {}) {
   const files: Record<string, Uint8Array> = {
     'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv'),
-    'routes.txt': new TextEncoder().encode('route_id,agency_id,route_short_name,route_long_name,route_type\nbus,a,7,City bus,3\nrail,a,IC 743,Train,2'),
+    'routes.txt': new TextEncoder().encode(`route_id,agency_id,route_short_name,route_long_name,route_type\nbus,a,7,City bus,3\nrail,a,IC 743,${options.secondRouteType === '3' ? 'Next city bus' : 'Train'},${options.secondRouteType ?? '2'}`),
     'stops.txt': new TextEncoder().encode([
       'stop_id,stop_name,stop_lat,stop_lon',
       'start,Start,49.8400,24.0200',
@@ -38,7 +38,7 @@ function connectingFeed() {
       'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
       'b1,08:00:00,08:00:00,start,1,0,0',
       'b1,08:20:00,08:20:00,hub,2,0,0',
-      'r1,08:35:00,08:35:00,hub,1,0,0',
+      `r1,${options.secondDeparture ?? '08:35:00'},${options.secondDeparture ?? '08:35:00'},hub,1,0,0`,
       'r1,09:00:00,09:00:00,finish,2,0,0',
     ].join('\n')),
     'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,0,0,0,0,0,0,20261001,20261031'),
@@ -217,6 +217,22 @@ test('composes a time-feasible bus-to-rail itinerary at the same canonical stop'
   assert.equal(results[0].departureAt.getTime(), results[0].segments[0].departureAt.getTime()
     - Math.ceil(results[0].segments[0].distanceToOriginStopMeters / 1.25) * 1000);
   assert.ok(results[0].arrivalAt.getTime() > results[0].segments.at(-1)!.arrivalAt.getTime());
+});
+
+test('uses a short urban transfer buffer and a longer buffer when boarding intercity rail', () => {
+  assert.equal(DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, 180);
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300, maximumTransfers: 1,
+  };
+  const urbanFourMinutes = findGtfsItineraries(connectingFeed({ secondRouteType: '3', secondDeparture: '08:24:00' }), query);
+  const urbanTwoMinutes = findGtfsItineraries(connectingFeed({ secondRouteType: '3', secondDeparture: '08:22:00' }), query);
+  const railNineMinutes = findGtfsItineraries(connectingFeed({ secondDeparture: '08:29:00' }), query);
+  const railTenMinutes = findGtfsItineraries(connectingFeed({ secondDeparture: '08:30:00' }), query);
+  assert.ok(urbanFourMinutes.some((journey) => journey.transfers === 1));
+  assert.equal(urbanTwoMinutes.length, 0);
+  assert.equal(railNineMinutes.length, 0);
+  assert.ok(railTenMinutes.some((journey) => journey.transfers === 1));
 });
 
 test('composes four scheduled transport segments with three feasible transfers', () => {

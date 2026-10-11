@@ -9,6 +9,9 @@ const MAX_STOPS_PER_SIDE = 12;
 const MAX_STOPS_PER_TRANSPORT_TYPE = 2;
 const EARTH_RADIUS_M = 6_371_000;
 export const MAX_GTFS_TRANSFERS = 4;
+export const DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS = 180;
+const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
+const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
 
 type CsvRow = Record<string, string>;
 export type TransitJourneyMode = 'BUS' | 'MINIBUS' | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'FERRY' | 'FUNICULAR';
@@ -460,7 +463,7 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
   const now = input.now ?? new Date();
   const maximumJourneySeconds = input.maximumJourneySeconds ?? 24 * 60 * 60;
   const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
-  const minimumTransferBufferSeconds = input.minimumTransferBufferSeconds ?? 600;
+  const minimumTransferBufferSeconds = input.minimumTransferBufferSeconds ?? DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS;
   const maximumWaitSeconds = input.maximumWaitSeconds ?? 4 * 60 * 60;
   const radius = input.maximumStopDistanceMeters ?? 2000;
   const limit = input.limit ?? 20;
@@ -593,6 +596,14 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
   for (const choices of outgoing.values()) choices.sort((a, b) => a.departureAt.getTime() - b.departureAt.getTime() || a.arrivalAt.getTime() - b.arrivalAt.getTime());
 
   const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
+  const transferBufferSeconds = (previous: GtfsDirectJourney, next: GtfsDirectJourney) => {
+    const isLongDistance = (segment: GtfsDirectJourney) => ['train', 'intercity_bus'].includes(segment.transportType);
+    if (isLongDistance(previous) || isLongDistance(next)) return MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS;
+    if (previous.transportType === 'suburban_train' || next.transportType === 'suburban_train') {
+      return MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS;
+    }
+    return DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS;
+  };
   const results = new Map<string, GtfsItinerary>();
   const maxTransitLegs = maximumTransfers + 1;
   // Most city-feed stops cannot lead to this destination. Exclude those dead
@@ -642,12 +653,11 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
     const visitedStops = new Set(path.map((segment) => segment.originStop.id));
     visitedStops.add(last.destinationStop.id);
     const choices = outgoing.get(last.destinationStop.id) ?? [];
-    const earliestNext = last.arrivalAt.getTime() + minimumTransferBufferSeconds * 1000;
     const latestNext = Math.min(last.arrivalAt.getTime() + maximumWaitSeconds * 1000, journeyEnd.getTime());
     let low = 0, high = choices.length;
     while (low < high) {
       const middle = (low + high) >>> 1;
-      if (choices[middle].departureAt.getTime() < earliestNext) low = middle + 1;
+      if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime() + minimumTransferBufferSeconds * 1000) low = middle + 1;
       else high = middle;
     }
     for (let index = low; index < choices.length; index++) {
@@ -658,7 +668,8 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
       if (previousIds.has(next.tripId) || visitedStops.has(next.destinationStop.id)) continue;
       const transferWalkSeconds = walkingSeconds(distanceMeters(last.destinationStop.coordinates, next.originStop.coordinates));
       const waitSeconds = (next.departureAt.getTime() - last.arrivalAt.getTime()) / 1000;
-      if (waitSeconds < minimumTransferBufferSeconds + transferWalkSeconds) continue;
+      const requiredBufferSeconds = Math.max(minimumTransferBufferSeconds, transferBufferSeconds(last, next)) + transferWalkSeconds;
+      if (waitSeconds < requiredBufferSeconds) continue;
       walk([...path, next]);
     }
   };

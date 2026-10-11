@@ -17,7 +17,7 @@ import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
-import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
@@ -2111,6 +2111,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const userFacingStrategies: JourneyStrategy[] = ['BALANCED', 'FASTEST', 'CHEAPEST'];
   const strategies: JourneyStrategy[] = [search.strategy, ...userFacingStrategies.filter((strategy) => strategy !== search.strategy)];
   const preferenceValues = search.preferences;
+  const configuredTransferBufferSeconds = Math.max(
+    preferenceValues.minimumTransferBufferSeconds ?? DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+  );
   const providerErrors: string[] = [];
   const { rows: gtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
     `SELECT id,name,city,feed_url,last_sync_at,last_report FROM mobility_providers
@@ -2174,7 +2178,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       maximumJourneySeconds: search.preferences.maxTotalDurationSeconds ?? 24 * 60 * 60,
       maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
       maximumWaitSeconds: 4 * 60 * 60,
-      minimumTransferBufferSeconds: search.preferences.minimumTransferBufferSeconds ?? 600,
+      minimumTransferBufferSeconds: configuredTransferBufferSeconds,
       maximumStopDistanceMeters: 2000,
       allowedModes: allowedTransitModes,
       allowedTransportTypes: search.preferences.allowedTransportTypes,
@@ -2263,7 +2267,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
           preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
           preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
-          preferenceValues.minimumTransferBufferSeconds ?? 600, preferenceValues.maxCommunityDetourSeconds ?? 900,
+          configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
           preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
           JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
       );
@@ -2323,7 +2327,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
           preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
           preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
-          preferenceValues.minimumTransferBufferSeconds ?? 600, preferenceValues.maxCommunityDetourSeconds ?? 900,
+          configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
           preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
           JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
       );
