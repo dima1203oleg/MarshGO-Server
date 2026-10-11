@@ -1,4 +1,5 @@
-import { JOURNEY_STRATEGIES, JOURNEY_TRANSPORT_TYPES, type JourneyPreferences, type JourneyStrategy } from './types';
+import { JOURNEY_STRATEGIES, JOURNEY_TRANSPORT_TYPES, journeyTransportTypeSelected, type JourneyPreferences, type JourneyStrategy } from './types';
+import type { TransitJourneyMode } from './gtfsTimetable';
 
 export interface JourneySearchRequest {
   origin: { name: string; coordinates: [number, number] };
@@ -129,4 +130,21 @@ export function transitProviderAllowed(preferences: JourneyPreferences, transpor
   const selectedForType = preferences.allowedTransitProvidersByType?.[transportType as keyof NonNullable<JourneyPreferences['allowedTransitProvidersByType']>];
   if (selectedForType !== undefined) return selectedForType.includes(operator);
   return !preferences.allowedTransitProviders?.length || preferences.allowedTransitProviders.includes(operator);
+}
+
+const transportTypesByTransitMode: Record<TransitJourneyMode, readonly NonNullable<JourneyPreferences['allowedTransportTypes']>[number][]> = {
+  BUS: ['bus', 'intercity_bus'], MINIBUS: ['marshrutka'], RAIL: ['train', 'suburban_train', 'city_train'],
+  TRAM: ['tram'], TROLLEYBUS: ['trolleybus'], METRO: ['metro'], FERRY: ['ferry'], FUNICULAR: ['funicular'],
+};
+
+/** Apply specific selected modes first; legacy booleans only gate their matching mode. */
+export function transitModeAllowed(mode: TransitJourneyMode, preferences: JourneyPreferences): boolean {
+  if (preferences.allowPublicTransport === false) return false;
+  if (preferences.allowedTransportTypes !== undefined) {
+    return transportTypesByTransitMode[mode].some((type) => journeyTransportTypeSelected(type, preferences.allowedTransportTypes));
+  }
+  if (mode === 'BUS') return preferences.allowBus !== false;
+  if (mode === 'MINIBUS') return preferences.allowMinibus !== false;
+  if (mode === 'RAIL') return preferences.allowRail !== false;
+  return true;
 }

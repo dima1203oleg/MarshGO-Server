@@ -16,7 +16,7 @@ import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, Routi
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
-import { parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
+import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
 import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
@@ -2118,20 +2118,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         AND status='enabled' AND health IN ('healthy','degraded')
       ORDER BY priority,name LIMIT 100`,
   );
-  const transitAllowed = (mode: TransitJourneyMode) => {
-    if (search.preferences.allowPublicTransport === false) return false;
-    const selectedTypes = search.preferences.allowedTransportTypes;
-    const selected = (...types: string[]) => selectedTypes ? types.some((type) => selectedTypes.includes(type as NonNullable<typeof selectedTypes>[number])) : undefined;
-    if (mode === 'BUS') return selected('bus', 'intercity_bus') ?? search.preferences.allowBus !== false;
-    if (mode === 'TRAM') return selected('tram') ?? search.preferences.allowBus !== false;
-    if (mode === 'TROLLEYBUS') return selected('trolleybus') ?? search.preferences.allowBus !== false;
-    if (mode === 'METRO') return selected('metro') ?? search.preferences.allowBus !== false;
-    if (mode === 'MINIBUS') return selected('marshrutka') ?? search.preferences.allowMinibus !== false;
-    if (mode === 'RAIL') return selected('train', 'suburban_train', 'city_train') ?? search.preferences.allowRail !== false;
-    if (mode === 'FERRY') return selected('ferry') ?? true;
-    if (mode === 'FUNICULAR') return selected('funicular') ?? true;
-    return false;
-  };
+  const transitAllowed = (mode: TransitJourneyMode) => transitModeAllowed(mode, search.preferences);
   const [originLon, originLat] = search.origin.coordinates;
   const [destinationLon, destinationLat] = search.destination.coordinates;
   const routeDistanceMeters = (() => {
