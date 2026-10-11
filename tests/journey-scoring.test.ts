@@ -59,6 +59,16 @@ describe('Journey strategy scoring', () => {
     assert.throws(() => selectStrategyAlternatives(candidates, ['FASTEST'], 51), /between 1 and 50/);
   });
 
+  it('limits repeated scheduled runs from the same transport chain', () => {
+    const sameChain: JourneyOption[] = Array.from({ length: 6 }, (_, index) => ({
+      ...candidates[0], id: `bus-run-${index}`, diversityKey: 'transit:bus>tram',
+      durationSeconds: 3000 + index * 600, priceMinor: 18000 - index * 1000,
+    }));
+    const selected = selectStrategyAlternatives(sameChain, ['BALANCED'], 12);
+    assert.equal(selected.length, 3);
+    assert.equal(new Set(selected.map((item) => item.journey.diversityKey)).size, 1);
+  });
+
   it('keeps distinct winners for distinct strategies', () => {
     const recommendations = selectStrategyRecommendations(candidates, ['BALANCED', 'FASTEST', 'CHEAPEST']);
     assert.equal(recommendations.length, 3);

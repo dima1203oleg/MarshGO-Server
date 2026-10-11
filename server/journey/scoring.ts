@@ -74,20 +74,28 @@ export function selectStrategyAlternatives<T extends JourneyOption>(
   const frontier = paretoFrontier(journeys);
   const alternatives = new Map<string, StrategyRecommendation<T>>();
   for (const strategy of strategies) {
-    const ranked = scoreJourneys(frontier, strategy).slice(0, maximumPerStrategy);
-    ranked.forEach(({ journey, score }, index) => {
+    const chainCounts = new Map<string, number>();
+    let rank = 0;
+    for (const { journey, score } of scoreJourneys(frontier, strategy)) {
+      const modeChain = journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.mode).join('>') || 'WALK';
+      const diversityKey = journey.diversityKey ?? modeChain;
+      const count = chainCounts.get(diversityKey) ?? 0;
+      if (count >= 3) continue;
+      chainCounts.set(diversityKey, count + 1);
+      rank += 1;
       const existing = alternatives.get(journey.id);
       if (existing) {
         existing.recommendedStrategies.push(strategy);
         existing.strategyRanks ??= {};
-        existing.strategyRanks[strategy] = index + 1;
+        existing.strategyRanks[strategy] = rank;
       } else {
         alternatives.set(journey.id, {
           journey, strategy, recommendedStrategies: [strategy], score,
-          strategyRanks: { [strategy]: index + 1 },
+          strategyRanks: { [strategy]: rank },
         });
       }
-    });
+      if (rank >= maximumPerStrategy) break;
+    }
   }
   return [...alternatives.values()];
 }

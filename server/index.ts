@@ -2102,7 +2102,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     if (search.preferences.minDriverRating !== undefined && search.preferences.minDriverRating > 0
       && (rating === null || offer.review_count < 1 || rating < search.preferences.minDriverRating)) return [];
     return [{
-      id: offer.offer_id, source: offer, departureAt: offer.departure_at, arrivalAt,
+      id: offer.offer_id, diversityKey: `offer:${offer.offer_id}`, source: offer, departureAt: offer.departure_at, arrivalAt,
       durationSeconds, priceMinor: totalPriceMinor, transfers: 0, walkingMeters: 0,
       reliability: null, transferRisk: 0, comfort: null, legs: [{ mode: 'COMMUNITY' }], totalPriceMinor,
     }];
@@ -2193,6 +2193,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...scheduledCandidates.map((itinerary) => ({
       id: itinerary.id,
+      diversityKey: `transit:${itinerary.segments.map((segment) => segment.transportType).join('>')}`,
       durationSeconds: itinerary.durationSeconds,
       priceMinor: null,
       transfers: itinerary.transfers,

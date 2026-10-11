@@ -30,6 +30,8 @@ export interface JourneyOption {
   reliability: number | null;
   transferRisk: number;
   comfort: number | null;
+  /** Stable grouping key used to avoid filling the result list with near-identical runs. */
+  diversityKey?: string | null;
   legs: Array<{ mode: JourneyLegMode; providerId?: string | null }>;
 }
 
