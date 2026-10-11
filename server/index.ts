@@ -17,7 +17,7 @@ import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
-import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, findGtfsItineraries, mergeGtfsTimetables, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
@@ -2185,7 +2185,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       destination: search.destination.coordinates, earliestDeparture: search.departureAt,
       latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 100,
       maximumJourneySeconds: search.preferences.maxTotalDurationSeconds ?? 24 * 60 * 60,
-      maximumTransfers: Math.min(search.preferences.maxTransfers ?? 2, 2),
+      maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
       maximumWaitSeconds: 4 * 60 * 60,
       minimumTransferBufferSeconds: search.preferences.minimumTransferBufferSeconds ?? 600,
       maximumStopDistanceMeters: 2000,
@@ -2424,7 +2424,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...(search.preferences.preferredVehicleClass ? ['preferredVehicleClass'] : []),
     ...(hasUnpricedTransitCandidates ? ['maxPriceMinor:public-transit-fare-unavailable'] : []),
     ...(search.strategy === 'CHEAPEST' && (scheduledCandidates.length > 0 || hasUnpricedTransitCandidates) ? ['CHEAPEST:public-transit-fares-unavailable'] : []),
-    ...(search.preferences.maxTransfers !== undefined && search.preferences.maxTransfers > 2 ? ['maxTransfers:limited-to-2'] : []),
+    ...(search.preferences.maxTransfers !== undefined && search.preferences.maxTransfers > MAX_GTFS_TRANSFERS ? [`maxTransfers:limited-to-${MAX_GTFS_TRANSFERS}`] : []),
   ];
   res.json({ data: {
     journeys,

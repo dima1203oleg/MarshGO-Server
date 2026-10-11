@@ -46,6 +46,34 @@ function connectingFeed() {
   return parseGtfsTimetable(files);
 }
 
+function fourModeTransferFeed() {
+  const files: Record<string, Uint8Array> = {
+    'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv'),
+    'routes.txt': new TextEncoder().encode([
+      'route_id,agency_id,route_short_name,route_long_name,route_type',
+      'bus,a,7,City bus,3', 'tram,a,2,City tram,0', 'metro,a,M1,Metro,1', 'rail,a,R1,Regional rail,2',
+    ].join('\n')),
+    'stops.txt': new TextEncoder().encode([
+      'stop_id,stop_name,stop_lat,stop_lon',
+      'start,Start,49.8400,24.0200', 'hub1,Hub 1,49.8420,24.0220', 'hub2,Hub 2,49.8440,24.0240',
+      'hub3,Hub 3,49.8460,24.0260', 'finish,Finish,49.8500,24.0300',
+    ].join('\n')),
+    'trips.txt': new TextEncoder().encode([
+      'route_id,service_id,trip_id,trip_headsign', 'bus,weekday,b1,Hub 1', 'tram,weekday,t1,Hub 2',
+      'metro,weekday,m1,Hub 3', 'rail,weekday,r1,Finish',
+    ].join('\n')),
+    'stop_times.txt': new TextEncoder().encode([
+      'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
+      'b1,08:00:00,08:00:00,start,1,0,0', 'b1,08:10:00,08:10:00,hub1,2,0,0',
+      't1,08:20:00,08:20:00,hub1,1,0,0', 't1,08:30:00,08:30:00,hub2,2,0,0',
+      'm1,08:40:00,08:40:00,hub2,1,0,0', 'm1,08:50:00,08:50:00,hub3,2,0,0',
+      'r1,09:00:00,09:00:00,hub3,1,0,0', 'r1,09:15:00,09:15:00,finish,2,0,0',
+    ].join('\n')),
+    'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,0,0,0,0,0,0,20261001,20261031'),
+  };
+  return parseGtfsTimetable(files);
+}
+
 function crowdedBusStops() {
   const result = feed();
   result.stops.clear();
@@ -189,6 +217,17 @@ test('composes a time-feasible bus-to-rail itinerary at the same canonical stop'
   assert.equal(results[0].departureAt.getTime(), results[0].segments[0].departureAt.getTime()
     - Math.ceil(results[0].segments[0].distanceToOriginStopMeters / 1.25) * 1000);
   assert.ok(results[0].arrivalAt.getTime() > results[0].segments.at(-1)!.arrivalAt.getTime());
+});
+
+test('composes four scheduled transport segments with three feasible transfers', () => {
+  const results = findGtfsItineraries(fourModeTransferFeed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 3,
+    minimumTransferBufferSeconds: 600,
+  });
+  assert.ok(results.some((journey) => journey.transfers === 3
+    && journey.segments.map((segment) => segment.mode).join(',') === 'BUS,TRAM,METRO,RAIL'));
 });
 
 test('keeps the nearest stop for each transport type when dense city stops crowd out a station', () => {

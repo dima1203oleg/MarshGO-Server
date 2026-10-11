@@ -108,7 +108,7 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
     if (previous && legs.length > 0) {
       const arrivalAt = previous.arrivalAt!;
       if (previous.destinationNodeId === input.destinationNodeId) {
-        routes.push(summarize(legs));
+        routes.push(summarize(legs, input.departureAt));
         return;
       }
       if (legs.length >= maximumLegs) return;
@@ -143,13 +143,13 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
   return scoreJourneys(paretoFrontier(unique), input.strategy).slice(0, maximumResults).map(({ journey }) => journey);
 }
 
-function summarize(legs: JourneyPlanLeg[]): PlannedJourney {
-  const first = legs[0];
+function summarize(legs: JourneyPlanLeg[], requestedDepartureAt: Date): PlannedJourney {
   const last = legs.at(-1)!;
-  const departureAt = first.departureAt!;
   const arrivalAt = last.arrivalAt!;
   const etaUncertaintySeconds = legs.reduce((sum, leg) => sum + leg.etaUncertaintySeconds, 0);
-  const walkingMeters = legs.reduce((sum, leg) => sum + (leg.connectionFromPrevious?.walkingMeters ?? 0), 0);
+  const walkingMeters = legs.reduce((sum, leg) => sum
+    + (leg.connectionFromPrevious?.walkingMeters ?? 0)
+    + (leg.mode === 'WALK' ? leg.distanceMeters ?? 0 : 0), 0);
   const knownPrices = legs.flatMap((leg) => leg.priceMinor === null ? [] : [leg.priceMinor]);
   const hasUnknownPrice = legs.some((leg) => leg.priceMinor === null);
   const priceMinMinor = legs.every((leg) => leg.priceMinMinor !== null)
@@ -157,16 +157,20 @@ function summarize(legs: JourneyPlanLeg[]): PlannedJourney {
   const priceMaxMinor = legs.every((leg) => leg.priceMaxMinor !== null)
     ? legs.reduce((sum, leg) => sum + (leg.priceMaxMinor ?? 0), 0) : null;
   const priceMinor = hasUnknownPrice ? null : knownPrices.reduce((sum, price) => sum + price, 0);
-  const elapsedSeconds = Math.max(0, Math.floor((arrivalAt.getTime() - departureAt.getTime()) / 1000));
+  // Count from the requested start time so a scheduled first departure does
+  // not hide the initial wait from the door-to-door duration.
+  const elapsedSeconds = Math.max(0, Math.floor((arrivalAt.getTime() - requestedDepartureAt.getTime()) / 1000));
+  const boardedLegs = legs.filter((leg) => leg.mode !== 'WALK');
   const transferRisk = legs.slice(1).reduce((risk, leg) => Math.max(risk, riskFor(leg.transferBefore)), 0);
   const reliabilityValues = legs.map((leg) => leg.reliability).filter((value): value is number => value !== null);
   const comfortValues = legs.map((leg) => leg.comfort).filter((value): value is number => value !== null);
 
   return {
-    id: pathSignature(legs), departureAt, arrivalAt, etaUncertaintySeconds,
+    id: pathSignature(legs), departureAt: requestedDepartureAt, arrivalAt, etaUncertaintySeconds,
     durationSeconds: elapsedSeconds,
     priceMinor, priceMinMinor, priceMaxMinor,
-    transfers: Math.max(0, legs.length - 1), walkingMeters,
+    // Access, egress, and transfer walks are not separate vehicle changes.
+    transfers: Math.max(0, boardedLegs.length - 1), walkingMeters,
     reliability: reliabilityValues.length === legs.length ? Math.min(...reliabilityValues) : null,
     transferRisk, comfort: comfortValues.length === legs.length ? Math.min(...comfortValues) : null,
     legs,

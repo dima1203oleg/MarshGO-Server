@@ -8,6 +8,7 @@ const CACHE_TTL_MS = 6 * 60 * 60_000;
 const MAX_STOPS_PER_SIDE = 12;
 const MAX_STOPS_PER_TRANSPORT_TYPE = 2;
 const EARTH_RADIUS_M = 6_371_000;
+export const MAX_GTFS_TRANSFERS = 4;
 
 type CsvRow = Record<string, string>;
 export type TransitJourneyMode = 'BUS' | 'MINIBUS' | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'FERRY' | 'FUNICULAR';
@@ -450,7 +451,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
 }
 
 /**
- * Build scheduled itineraries with up to three transit legs. Transfers are
+ * Build scheduled itineraries with up to five transit legs. Transfers are
  * composed at the same stop, including conservatively matched stops across
  * feeds. Walking to and from the first/last stop uses a conservative straight-
  * line estimate and is surfaced separately in the result.
@@ -458,7 +459,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
 export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerary[] {
   const now = input.now ?? new Date();
   const maximumJourneySeconds = input.maximumJourneySeconds ?? 24 * 60 * 60;
-  const maximumTransfers = input.maximumTransfers ?? 2;
+  const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
   const minimumTransferBufferSeconds = input.minimumTransferBufferSeconds ?? 600;
   const maximumWaitSeconds = input.maximumWaitSeconds ?? 4 * 60 * 60;
   const radius = input.maximumStopDistanceMeters ?? 2000;
@@ -466,7 +467,7 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
   if (!Number.isFinite(input.earliestDeparture.getTime()) || !Number.isFinite(input.latestDeparture.getTime())
     || input.latestDeparture < input.earliestDeparture || input.earliestDeparture < now
     || !Number.isInteger(maximumJourneySeconds) || maximumJourneySeconds < 60 || maximumJourneySeconds > 7 * 24 * 60 * 60
-    || !Number.isInteger(maximumTransfers) || maximumTransfers < 0 || maximumTransfers > 2
+    || !Number.isInteger(maximumTransfers) || maximumTransfers < 0 || maximumTransfers > MAX_GTFS_TRANSFERS
     || !Number.isInteger(minimumTransferBufferSeconds) || minimumTransferBufferSeconds < 0 || minimumTransferBufferSeconds > 7200
     || !Number.isInteger(maximumWaitSeconds) || maximumWaitSeconds < 0 || maximumWaitSeconds > maximumJourneySeconds
     || !Number.isFinite(radius) || radius < 100 || radius > 10_000

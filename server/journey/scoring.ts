@@ -71,16 +71,10 @@ export function selectStrategyRecommendations<T extends JourneyOption>(
   for (const strategy of strategies) {
     const winner = scoreJourneys(frontier, strategy)[0];
     if (!winner) continue;
-    const representative = recommendations.find((item) => {
-      const sameModes = item.journey.legs.map((leg) => leg.mode).join(',') === winner.journey.legs.map((leg) => leg.mode).join(',');
-      const similarTime = Math.abs(item.journey.durationSeconds - winner.journey.durationSeconds)
-        <= Math.max(item.journey.durationSeconds, winner.journey.durationSeconds) * 0.05;
-      const aPrice = item.journey.priceMinor;
-      const bPrice = winner.journey.priceMinor;
-      const similarPrice = aPrice === bPrice || (aPrice !== null && bPrice !== null
-        && Math.abs(aPrice - bPrice) <= Math.max(aPrice, bPrice, 1) * 0.05);
-      return item.journey === winner.journey || (sameModes && item.journey.transfers === winner.journey.transfers && similarTime && similarPrice);
-    });
+    // Strategy labels are factual promises. Two distinct journeys can share
+    // the same mode chain and be close in time/price while still having
+    // different winners, so only the same candidate may be grouped.
+    const representative = recommendations.find((item) => item.journey.id === winner.journey.id);
     if (representative) {
       representative.recommendedStrategies.push(strategy);
     } else {

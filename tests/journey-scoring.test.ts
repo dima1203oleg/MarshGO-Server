@@ -43,12 +43,13 @@ describe('Journey strategy scoring', () => {
     assert.equal(recommendations.find((item) => item.strategy === 'CHEAPEST')?.journey.id, 'bus');
   });
 
-  it('suppresses near-identical routes while retaining their strategy recommendations', () => {
+  it('does not merge distinct close routes under an inaccurate strategy label', () => {
     const faster = { ...candidates[0], id: 'same-bus-fast', durationSeconds: 4000, priceMinor: 10000, legs: [{ mode: 'BUS' as const }] };
     const cheaper = { ...faster, id: 'same-bus-cheap', durationSeconds: 4100, priceMinor: 9600 };
     const recommendations = selectStrategyRecommendations([faster, cheaper], ['FASTEST', 'CHEAPEST']);
-    assert.equal(recommendations.length, 1);
-    assert.deepEqual(recommendations[0].recommendedStrategies, ['FASTEST', 'CHEAPEST']);
+    assert.equal(recommendations.length, 2);
+    assert.equal(recommendations.find((item) => item.strategy === 'FASTEST')?.journey.id, 'same-bus-fast');
+    assert.equal(recommendations.find((item) => item.strategy === 'CHEAPEST')?.journey.id, 'same-bus-cheap');
   });
 
   it('keeps FASTEST and CHEAPEST strict across direct and chained alternatives', () => {

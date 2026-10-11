@@ -92,3 +92,25 @@ test('does not continue past the requested destination to append extra legs', ()
   assert.equal(routes.length, 1);
   assert.deepEqual(routes[0].legs.map((leg) => leg.id), ['direct']);
 });
+
+test('counts initial wait and access walking door-to-door without counting walking as a transfer', () => {
+  const access = option('access-walk', 'A', 'H', 0, 600, 0);
+  access.mode = 'WALK';
+  access.distanceMeters = 400;
+  const firstRide = option('bus-1', 'H', 'M', 900, 1800, 1000);
+  const secondRide = option('bus-2', 'M', 'B', 2400, 3600, 1000);
+  const routes = planJourneys({
+    options: [access, firstRide, secondRide], originNodeId: 'A', destinationNodeId: 'B', departureAt: at(0),
+    strategy: 'BALANCED', minimumTransferBufferSeconds: 0,
+    connections: createConnectionMap([
+      { fromNodeId: 'H', toNodeId: 'H', connection: connection(0, 0) },
+      { fromNodeId: 'M', toNodeId: 'M', connection: connection(0, 0) },
+    ]),
+  });
+
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].durationSeconds, 3600);
+  assert.equal(routes[0].departureAt.getTime(), at(0).getTime());
+  assert.equal(routes[0].walkingMeters, 400);
+  assert.equal(routes[0].transfers, 1);
+});
