@@ -158,21 +158,17 @@ export function scoreJourneys<T extends JourneyOption>(
 export function selectRepresentativeJourneys<T extends JourneyOption>(
   journeys: readonly T[],
   strategies: readonly JourneyStrategy[] = ['FASTEST', 'CHEAPEST', 'PREMIUM', 'BALANCED', 'RELIABLE'],
-  maxSimilarityRatio = 0.05,
+  maxResults = 200,
 ): Array<{ strategy: JourneyStrategy; journey: T; score: number }> {
   const selected: Array<{ strategy: JourneyStrategy; journey: T; score: number }> = [];
+  const selectedIds = new Set<string>();
   for (const strategy of strategies) {
     const winner = scoreJourneys(journeys, strategy)[0];
     if (!winner) continue;
-    const isDuplicate = selected.some((existing) => {
-      const sameModes = existing.journey.legs.map((leg) => leg.mode).join(',') === winner.journey.legs.map((leg) => leg.mode).join(',');
-      const similarTime = Math.abs(existing.journey.durationSeconds - winner.journey.durationSeconds) <= Math.max(existing.journey.durationSeconds, winner.journey.durationSeconds) * maxSimilarityRatio;
-      const aPrice = existing.journey.priceMinor;
-      const bPrice = winner.journey.priceMinor;
-      const similarPrice = aPrice === bPrice || (aPrice !== null && bPrice !== null && Math.abs(aPrice - bPrice) <= Math.max(aPrice, bPrice, 1) * maxSimilarityRatio);
-      return sameModes && existing.journey.transfers === winner.journey.transfers && similarTime && similarPrice;
-    });
-    if (!isDuplicate) selected.push({ strategy, journey: winner.journey, score: winner.score });
+    if (selectedIds.has(winner.journey.id)) continue;
+    if (selected.length >= maxResults) break;
+    selectedIds.add(winner.journey.id);
+    selected.push({ strategy, journey: winner.journey, score: winner.score });
   }
   return selected;
 }
