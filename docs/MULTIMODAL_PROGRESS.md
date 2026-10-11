@@ -7,10 +7,10 @@
 **DONE**
 - Added additive migration `020_journeys.sql` for `journeys`, ordered `journey_legs`, and one-to-one `journey_preferences`, with PostGIS geography indexes, foreign keys to existing offers/bookings/demands/navigation candidates, enum-like state checks, money/score bounds and ETA uncertainty/freshness fields.
 - Added shared journey modes, strategies, candidate types and preference types under `server/journey/types.ts`.
-- Added server-only strategy weights/scoring for FASTEST, CHEAPEST, BALANCED, PREMIUM, RELIABLE and CUSTOM, plus representative-route similarity suppression.
+- Added server-only strategy weights/scoring, Pareto filtering, cross-strategy result de-duplication, and bounded alternative ranks (up to 12 per available user-facing strategy).
 - Added transfer feasibility that includes predicted arrival, cumulative ETA uncertainty, walking time, boarding grace and minimum transfer buffer, with a dynamic connection window and LOW/MEDIUM/HIGH/CRITICAL risk.
 - Added provider option/quote/availability/booking contracts. They do not return or imply live provider inventory by themselves.
-- Added authenticated `POST /api/v1/journeys/search`, owner-scoped `GET /api/v1/journeys/me`, and `GET /api/v1/journeys/:id`. Search normalizes the full timezone-aware request, queries only real current Community offers with stored road routes, filters seat/date/geographic/price/rating preferences, scores representative strategy winners, and persists one planned Journey/Leg per selected result.
+- Added authenticated `POST /api/v1/journeys/search`, owner-scoped `GET /api/v1/journeys/me`, and `GET /api/v1/journeys/:id`. Search normalizes the full timezone-aware request, queries real current Community offers and eligible open GTFS schedules, filters supported preferences, and persists the bounded, de-duplicated Pareto alternatives with per-strategy ranks.
 - Added public `GET /api/v1/offers/:id` so a result can load the current, privacy-filtered offer detail before the existing atomic booking flow.
 - Journey API marks itself partial and explicitly lists unavailable external modes. It labels the unbooked offer fare as `ESTIMATED`, returns no confirmed fare, uses a database query timestamp for inventory freshness, and leaves route ETA uncertainty/reliability/comfort null when those values are not measured.
 

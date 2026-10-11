@@ -252,7 +252,11 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       }),
     });
     assert.equal(multiResponse.status, 200);
-    const multiData = (await multiResponse.json() as { data: { journeys: Array<{ offerId: string | null; legs: Array<{ mode: string; transportType?: string }> }> } }).data;
+    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; legs: Array<{ mode: string; transportType?: string }> }> } }).data;
+    assert.equal(multiData.returnedCount, multiData.journeys.length, 'response metadata matches persisted alternatives');
+    assert.ok(multiData.availableStrategies.includes('BALANCED'));
+    assert.ok(multiData.journeys.some((journey) => typeof journey.strategyRanks?.BALANCED === 'number'),
+      'each returned result exposes its place in the selected strategy ranking');
     for (const journey of multiData.journeys) {
       assert.equal(journey.offerId, null, 'a bus + tram selection excludes direct carpool offers');
       for (const leg of journey.legs) {

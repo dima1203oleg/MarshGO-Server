@@ -59,6 +59,37 @@ export interface StrategyRecommendation<T extends JourneyOption> {
   strategy: JourneyStrategy;
   recommendedStrategies: JourneyStrategy[];
   score: number;
+  strategyRanks?: Partial<Record<JourneyStrategy, number>>;
+}
+
+/** Keep a bounded, diverse-enough set of Pareto alternatives for each visible strategy. */
+export function selectStrategyAlternatives<T extends JourneyOption>(
+  journeys: readonly T[],
+  strategies: readonly JourneyStrategy[],
+  maximumPerStrategy = 12,
+): StrategyRecommendation<T>[] {
+  if (!Number.isInteger(maximumPerStrategy) || maximumPerStrategy < 1 || maximumPerStrategy > 50) {
+    throw new TypeError('maximum alternatives per strategy must be between 1 and 50');
+  }
+  const frontier = paretoFrontier(journeys);
+  const alternatives = new Map<string, StrategyRecommendation<T>>();
+  for (const strategy of strategies) {
+    const ranked = scoreJourneys(frontier, strategy).slice(0, maximumPerStrategy);
+    ranked.forEach(({ journey, score }, index) => {
+      const existing = alternatives.get(journey.id);
+      if (existing) {
+        existing.recommendedStrategies.push(strategy);
+        existing.strategyRanks ??= {};
+        existing.strategyRanks[strategy] = index + 1;
+      } else {
+        alternatives.set(journey.id, {
+          journey, strategy, recommendedStrategies: [strategy], score,
+          strategyRanks: { [strategy]: index + 1 },
+        });
+      }
+    });
+  }
+  return [...alternatives.values()];
 }
 
 /** Return one winner per strategy, grouping exact same candidates across tabs. */

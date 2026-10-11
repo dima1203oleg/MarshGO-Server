@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { JOURNEY_SCORE_WEIGHTS, paretoFrontier, scoreJourneys, selectRepresentativeJourneys, selectStrategyRecommendations, strategiesWithComparablePrices } from '../server/journey/scoring';
+import { JOURNEY_SCORE_WEIGHTS, paretoFrontier, scoreJourneys, selectRepresentativeJourneys, selectStrategyAlternatives, selectStrategyRecommendations, strategiesWithComparablePrices } from '../server/journey/scoring';
 import type { JourneyOption } from '../server/journey/types';
 
 const candidates: JourneyOption[] = [
@@ -34,6 +34,29 @@ describe('Journey strategy scoring', () => {
     const recommendations = selectStrategyRecommendations([candidates[0]], ['BALANCED', 'FASTEST', 'CHEAPEST']);
     assert.equal(recommendations.length, 1);
     assert.deepEqual(recommendations[0].recommendedStrategies, ['BALANCED', 'FASTEST', 'CHEAPEST']);
+  });
+
+  it('returns a bounded union of ranked alternatives and records each strategy rank', () => {
+    const alternatives: JourneyOption[] = [
+      { ...candidates[0], id: 'balanced-choice', durationSeconds: 6000, priceMinor: 12000, transfers: 0, walkingMeters: 200 },
+      { ...candidates[1], id: 'fast-choice', durationSeconds: 3000, priceMinor: 40000, transfers: 0, walkingMeters: 100 },
+      { ...candidates[0], id: 'cheap-choice', durationSeconds: 12000, priceMinor: 3000, transfers: 1, walkingMeters: 700 },
+      { ...candidates[0], id: 'dominated-choice', durationSeconds: 13000, priceMinor: 4000, transfers: 2, walkingMeters: 900 },
+    ];
+    const selected = selectStrategyAlternatives(alternatives, ['BALANCED', 'FASTEST', 'CHEAPEST'], 2);
+    assert.ok(selected.length >= 3);
+    assert.equal(selected.some((item) => item.journey.id === 'dominated-choice'), false);
+    for (const recommendation of selected) {
+      assert.ok(recommendation.recommendedStrategies.length > 0);
+      for (const strategy of recommendation.recommendedStrategies) {
+        assert.ok(Number.isInteger(recommendation.strategyRanks?.[strategy]));
+        assert.ok((recommendation.strategyRanks?.[strategy] ?? 0) <= 2);
+      }
+    }
+  });
+
+  it('rejects unbounded result limits', () => {
+    assert.throws(() => selectStrategyAlternatives(candidates, ['FASTEST'], 51), /between 1 and 50/);
   });
 
   it('keeps distinct winners for distinct strategies', () => {
