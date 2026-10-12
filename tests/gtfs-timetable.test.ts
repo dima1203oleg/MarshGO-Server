@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
-function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string } = {}) {
+function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean } = {}) {
   const files: Record<string, Uint8Array> = {
     'agency.txt': new TextEncoder().encode(['agency_id,agency_name,agency_url,agency_timezone', 'a,Test,https://example.test,Europe/Kyiv'].join('\n')),
     'routes.txt': new TextEncoder().encode(['route_id,agency_id,route_short_name,route_long_name,route_type', `r,a,7,${overrides.routeName ?? 'Test bus'},${overrides.routeType ?? '3'}`].join('\n')),
@@ -12,7 +12,7 @@ function feed(overrides: { monday?: string; exceptionDate?: string; exceptionTyp
       'origin,Origin stop,49.8400,24.0200',
       'destination,Destination stop,49.8500,24.0300',
     ].join('\n')),
-    'trips.txt': new TextEncoder().encode('route_id,service_id,trip_id,trip_headsign\nr,weekday,t1,Central station'),
+    'trips.txt': new TextEncoder().encode(`route_id,service_id,trip_id,trip_headsign${overrides.withShape ? ',shape_id' : ''}\nr,weekday,t1,Central station${overrides.withShape ? ',shape-1' : ''}`),
     'stop_times.txt': new TextEncoder().encode([
       'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
       `t1,${overrides.departure ?? '08:00:00'},${overrides.departure ?? '08:00:00'},origin,1,${overrides.pickup ?? '0'},0`,
@@ -20,6 +20,12 @@ function feed(overrides: { monday?: string; exceptionDate?: string; exceptionTyp
     ].join('\n')),
     'calendar.txt': new TextEncoder().encode(`service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,${overrides.monday ?? '1'},0,0,0,0,0,0,20261001,20261031`),
   };
+  if (overrides.withShape) files['shapes.txt'] = new TextEncoder().encode([
+    'shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence',
+    'shape-1,49.8400,24.0200,1',
+    'shape-1,49.8450,24.0240,2',
+    'shape-1,49.8500,24.0300,3',
+  ].join('\n'));
   if (overrides.exceptionDate) files['calendar_dates.txt'] = new TextEncoder().encode(`service_id,date,exception_type\nweekday,${overrides.exceptionDate},${overrides.exceptionType ?? '1'}`);
   return parseGtfsTimetable(files);
 }
@@ -130,8 +136,31 @@ test('finds a scheduled direct bus, preserves route/stops, and converts agency l
   assert.equal(journeys[0].routeName, '7');
   assert.equal(journeys[0].headsign, 'Central station');
   assert.equal(journeys[0].originStop.name, 'Origin stop');
+  assert.equal(journeys[0].routeGeometry, undefined, 'a missing source shape must not be replaced with a straight line');
   assert.equal(journeys[0].departureAt.toISOString(), '2026-10-12T05:00:00.000Z');
   assert.equal(journeys[0].arrivalAt.toISOString(), '2026-10-12T05:40:00.000Z');
+});
+
+test('carries clipped source GTFS shape geometry on a routed segment', () => {
+  const result = findGtfsItinerariesWithStats(feed({ withShape: true }), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+  const geometry = result.itineraries[0]?.segments[0]?.routeGeometry;
+  assert.ok(geometry);
+  assert.deepEqual(geometry[0], [24.02, 49.84]);
+  assert.deepEqual(geometry.at(-1), [24.03, 49.85]);
+  assert.deepEqual(geometry[1], [24.024, 49.845]);
+});
+
+test('preserves shape identifiers and geometry when compatible GTFS providers are merged', () => {
+  const merged = mergeGtfsTimetables([{ providerId: 'p1', providerName: 'Test Transit', providerCity: 'Львів', feed: feed({ withShape: true }) }]);
+  assert.ok(merged);
+  assert.equal(merged.trips.get('p1:t1')?.shapeId, 'p1:shape-1');
+  assert.equal(merged.shapes?.get('p1:shape-1')?.length, 3);
+  const result = findGtfsItinerariesWithStats(merged, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+  assert.equal(result.itineraries[0]?.segments[0]?.routeGeometry?.length, 3);
 });
 
 test('reports when the itinerary result limit hides additional route chains', () => {

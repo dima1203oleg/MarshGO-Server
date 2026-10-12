@@ -2037,7 +2037,7 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
          'priceMaxMinor',l.price_max_minor,'currency',l.currency,'priceStatus',l.price_status,
          'availabilityStatus',l.availability_status,'providerType',l.provider_type,'offerId',l.offer_id,
          'bookingId',l.booking_id,'demandId',l.demand_id,'state',l.state,'dataSource',l.data_source,
-         'lastUpdatedAt',l.last_updated_at,'metadata',l.metadata
+         'lastUpdatedAt',l.last_updated_at,'metadata',l.metadata,'routeGeometry',l.metadata->'routeGeometry'
        ) ORDER BY l.ordinal) FILTER (WHERE l.id IS NOT NULL),'[]'::json) AS legs
   FROM journeys j LEFT JOIN journey_legs l ON l.journey_id=j.id`;
 
@@ -2391,7 +2391,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
             segment.departureAt, segment.arrivalAt, durationSeconds, segment.providerId, provider?.last_sync_at ?? segment.sourceFreshAt,
           JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
-              headsign: segment.headsign, tripId: segment.tripId, fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id })],
+              headsign: segment.headsign, tripId: segment.tripId, fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+              ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
         );
         firstTransitLegId ??= inserted.rows[0].id;
         responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, offerId: null,
@@ -2402,7 +2403,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           liveStatus: 'SCHEDULED',
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - segment.sourceFreshAt.getTime()) / 1000)),
           source: 'gtfs-static', lastUpdatedAt: segment.sourceFreshAt, providerName: segment.providerName,
-          routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign, driver: null, vehicle: null });
+          routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign,
+          ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}), driver: null, vehicle: null });
       }
       await saveWalkLeg(
         { name: last.destinationStop.name, coordinates: last.destinationStop.coordinates },
