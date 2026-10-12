@@ -190,3 +190,20 @@
 **LIMITATIONS**
 - This returns suggestions only. It does not book replacements, search transit/taxi partners, or monitor an active multi-leg Journey.
 - Road geometry must exist and be trustworthy; deployments without a configured routing provider must not fabricate geometry.
+
+## 2026-10-12 — Door-to-door GTFS duration and live Lviv verification
+
+**DONE**
+- GTFS results now measure the complete elapsed time from the requested departure through arrival, including initial wait, scheduled transfers and walking access/egress. The API exposes `requestedDepartureAt` and `waitingSeconds`, including the wait before a direct Community offer departs.
+- Added a regression test showing that FASTEST ranks by the earliest realistic arrival when a later service has shorter in-vehicle time.
+- Verified the active Lviv GTFS URL directly and registered only that source in a new loopback-only test database. The source was healthy at verification time: 1,071 stops, 72 routes, 15,835 trips, including 62 bus, 8 tram and 2 city-train routes.
+
+**TESTS**
+- Unit: 120 passed, 1 opt-in integration test skipped. Typecheck and lint passed.
+- Full `npm run test:integration`: PASS — Journey schema 2/2; booking/search 19/19; navigation 2/2; Redis multi-instance realtime 1/1; process-restart durability 1/1; shared rate limit 1/1.
+- The live Lviv API test returned 3 bus itineraries, 3 tram itineraries and 3 bus/tram mixed alternatives for its fixed corridor. All 12 categories were checked; only modes backed by this Lviv schedule and the test Community ride returned trips.
+
+**LIMITATIONS**
+- A first clean-database run correctly exposed that the integration harness had no provider registry rows. With only the publicly listed Lviv schedule enabled, the full run passed; the test database provider was created from the audited catalog and not from mock trips.
+- This verifies one live city feed, not nationwide coverage or real-time location. Separate active marshrutka, taxi, transfer, carsharing and micromobility supplies are not established by this run.
+- Street-routed pedestrian access, verified public-transport fares/seats, rescue/rebooking during transit disruption, and measured load p95 are still outstanding. Do not treat the full 12-mode production acceptance criteria as complete.

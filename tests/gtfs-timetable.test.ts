@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string } = {}) {
   const files: Record<string, Uint8Array> = {
@@ -234,11 +235,37 @@ test('composes a time-feasible bus-to-rail itinerary at the same canonical stop'
   assert.deepEqual(results[0].segments.map((segment) => [segment.originStop.id, segment.destinationStop.id]), [['start', 'hub'], ['hub', 'finish']]);
   assert.equal(results[0].transfers, 1);
   assert.ok(results[0].walkingMeters > 0);
-  assert.equal(results[0].durationSeconds, Math.ceil((results[0].arrivalAt.getTime() - results[0].departureAt.getTime()) / 1000));
-  assert.ok(results[0].departureAt.getTime() >= Date.parse('2026-10-12T04:55:00Z'));
-  assert.equal(results[0].departureAt.getTime(), results[0].segments[0].departureAt.getTime()
-    - Math.ceil(results[0].segments[0].distanceToOriginStopMeters / 1.25) * 1000);
+  assert.equal(results[0].departureAt.toISOString(), '2026-10-12T04:55:00.000Z');
+  assert.equal(results[0].durationSeconds, Math.ceil((results[0].arrivalAt.getTime() - Date.parse('2026-10-12T04:55:00Z')) / 1000));
+  const initialWalkSeconds = Math.ceil(results[0].segments[0].distanceToOriginStopMeters / 1.25);
+  const initialWaitSeconds = Math.ceil((results[0].segments[0].departureAt.getTime()
+    - results[0].departureAt.getTime() - initialWalkSeconds * 1000) / 1000);
+  const transferWaitSeconds = Math.ceil((results[0].segments[1].departureAt.getTime()
+    - results[0].segments[0].arrivalAt.getTime()) / 1000);
+  assert.equal(results[0].waitingSeconds, initialWaitSeconds + transferWaitSeconds);
   assert.ok(results[0].arrivalAt.getTime() > results[0].segments.at(-1)!.arrivalAt.getTime());
+});
+
+test('counts initial schedule wait in door-to-door time so fastest ranking favors earliest arrival', () => {
+  const interval = request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z');
+  const earliestArrival = findGtfsItinerariesWithStats(feed({ departure: '08:00:00', arrival: '08:30:00' }), {
+    ...interval, maximumStopDistanceMeters: 1000, maximumTransfers: 0,
+  }).itineraries[0];
+  const shorterRideLater = findGtfsItinerariesWithStats(feed({ departure: '08:10:00', arrival: '08:35:00' }), {
+    ...interval, maximumStopDistanceMeters: 1000, maximumTransfers: 0,
+  }).itineraries[0];
+
+  assert.ok(earliestArrival && shorterRideLater);
+  assert.ok(earliestArrival.arrivalAt < shorterRideLater.arrivalAt);
+  assert.ok(earliestArrival.durationSeconds < shorterRideLater.durationSeconds);
+  assert.ok(earliestArrival.waitingSeconds < shorterRideLater.waitingSeconds);
+  const candidates = [earliestArrival, shorterRideLater].map((itinerary, index) => ({
+    id: index === 0 ? 'earliest-arrival' : 'shorter-ride-later',
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: null, transfers: 0, walkingMeters: itinerary.walkingMeters,
+    reliability: null, transferRisk: 0, comfort: null, legs: [{ mode: 'BUS' as const }],
+  }));
+  assert.equal(scoreJourneys(candidates, 'FASTEST')[0].journey.id, 'earliest-arrival');
 });
 
 test('uses a short urban transfer buffer and a longer buffer when boarding intercity rail', () => {

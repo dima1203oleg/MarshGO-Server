@@ -2027,6 +2027,7 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
        j.requested_departure_at,j.requested_arrival_at,j.strategy,j.state,j.passenger_count,j.total_price_minor,
        j.confirmed_price_minor,j.estimated_price_min_minor,j.estimated_price_max_minor,j.total_duration_s,
        j.walking_distance_m,j.transfer_count,j.reliability_score,j.comfort_score,j.current_leg_id,j.created_at,j.updated_at,
+       GREATEST(j.total_duration_s-COALESCE(SUM(l.duration_s),0),0)::int AS "waitingSeconds",
        COALESCE(json_agg(json_build_object(
          'id',l.id,'ordinal',l.ordinal,'mode',l.mode,'originName',l.origin_name,'originCoordinates',
          json_build_array(ST_X(l.origin::geometry),ST_Y(l.origin::geometry)),'destinationName',l.destination_name,
@@ -2090,11 +2091,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   );
 
   let candidateGenerationTruncated = rows.length > 100;
-  const candidates = rows.slice(0, 100).flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number }> => {
+  const candidates = rows.slice(0, 100).flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number; waitingSeconds: number }> => {
     if (search.preferences.preferredVehicleClass || search.preferences.allowCommunity === false
       || !journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes)) return [];
     const arrivalAt = offer.arrival_at ?? new Date(offer.departure_at.getTime() + offer.duration_s * 1000);
-    const durationSeconds = Math.ceil((arrivalAt.getTime() - offer.departure_at.getTime()) / 1000);
+    const durationSeconds = Math.ceil((arrivalAt.getTime() - search.departureAt.getTime()) / 1000);
+    const waitingSeconds = Math.max(0, Math.ceil((offer.departure_at.getTime() - search.departureAt.getTime()) / 1000));
     const totalPriceMinor = Number(offer.price_per_seat_minor) * search.passengers;
     const rating = offer.average_rating === null ? null : Number(offer.average_rating);
     if (!Number.isSafeInteger(totalPriceMinor) || totalPriceMinor < 0 || durationSeconds <= 0) return [];
@@ -2104,7 +2106,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       && (rating === null || offer.review_count < 1 || rating < search.preferences.minDriverRating)) return [];
     return [{
       id: offer.offer_id, diversityKey: `offer:${offer.offer_id}`, source: offer, departureAt: offer.departure_at, arrivalAt,
-      durationSeconds, priceMinor: totalPriceMinor, transfers: 0, walkingMeters: 0,
+      durationSeconds, waitingSeconds, priceMinor: totalPriceMinor, transfers: 0, walkingMeters: 0,
       reliability: null, transferRisk: 0, comfort: null, legs: [{ mode: 'COMMUNITY' }], totalPriceMinor,
     }];
   });
@@ -2291,6 +2293,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, leg.rows[0].id]);
       journeys.push({
         id: journeyId, offerId: offer.offer_id, strategy: representative.strategy,
+        requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: candidate.waitingSeconds,
         recommendedStrategies: representative.recommendedStrategies, strategyRanks: representative.strategyRanks,
         score: representative.score, state: 'PLANNED',
         source: 'community-offer',
@@ -2408,6 +2411,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       );
       if (firstTransitLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstTransitLegId]);
       journeys.push({ id: journeyId, offerId: null, source: 'gtfs-static', providerName: itinerary.providerName,
+        requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: itinerary.waitingSeconds,
         strategy: representative.strategy, recommendedStrategies: representative.recommendedStrategies,
         strategyRanks: representative.strategyRanks,
         score: representative.score, state: 'PLANNED',

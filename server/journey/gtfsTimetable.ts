@@ -85,6 +85,8 @@ export interface GtfsItinerary {
   departureAt: Date;
   arrivalAt: Date;
   durationSeconds: number;
+  /** Scheduled waiting from the requested start time, excluding walking and in-vehicle time. */
+  waitingSeconds: number;
   transfers: number;
   walkingMeters: number;
   transferWalkingMeters: number[];
@@ -632,16 +634,28 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const egressMeters = last.distanceFromDestinationStopMeters;
     const transferWalkingMeters = path.slice(1).map((segment, index) =>
       Math.round(distanceMeters(path[index].destinationStop.coordinates, segment.originStop.coordinates)));
-    const departureAt = new Date(first.departureAt.getTime() - walkingSeconds(accessMeters) * 1000);
+    // Search time means when the passenger is ready to start, so initial access
+    // walking and waiting for the first service are part of the door-to-door
+    // duration. Ranking only the interval between the first and last vehicle
+    // would incorrectly prefer a later departure with an earlier onboard start.
+    const departureAt = new Date(input.earliestDeparture);
     const egressSeconds = walkingSeconds(egressMeters);
     const arrivalAt = new Date(last.arrivalAt.getTime() + egressSeconds * 1000);
     const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
     if (durationSeconds > maximumJourneySeconds) return;
+    const initialWaitSeconds = Math.max(0, Math.ceil((first.departureAt.getTime()
+      - departureAt.getTime() - walkingSeconds(accessMeters) * 1000) / 1000));
+    const transferWaitingSeconds = path.slice(1).reduce((total, segment, index) => {
+      const transferWalkSeconds = walkingSeconds(transferWalkingMeters[index] ?? 0);
+      const readyAt = path[index].arrivalAt.getTime() + transferWalkSeconds * 1000;
+      return total + Math.max(0, Math.ceil((segment.departureAt.getTime() - readyAt) / 1000));
+    }, 0);
     const id = path.map((segment) => `${segment.providerId}:${segment.tripId}:${segment.originStop.id}:${segment.destinationStop.id}`).join('|');
     if (!results.has(id)) results.set(id, {
       id, providerId: first.providerId,
       providerName: [...new Set(path.map((segment) => segment.providerName))].join(' + '),
       segments: path, departureAt, arrivalAt, durationSeconds,
+      waitingSeconds: initialWaitSeconds + transferWaitingSeconds,
       transfers: Math.max(0, path.length - 1), walkingMeters: accessMeters + egressMeters + transferWalkingMeters.reduce((sum, meters) => sum + meters, 0),
       transferWalkingMeters,
     });
