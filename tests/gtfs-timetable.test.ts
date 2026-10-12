@@ -433,6 +433,15 @@ test('uses GTFS pathways for platform transfer time and geometry, and fails clos
   assert.deepEqual(connected.transferWalkingGeometries[0], [[24.025, 49.845], [24.025025, 49.84502], [24.02505, 49.845]]);
   assert.equal(connected.transfers, 1);
 
+  const differentlyNamedPlatforms = platformTransferFeed('08:40:00');
+  differentlyNamedPlatforms.stops.get('rail-platform')!.name = 'East concourse platform 4';
+  differentlyNamedPlatforms.stopTimes.get('r1')![0].sourceStopName = 'East concourse platform 4';
+  const separateNodes = mergeGtfsTimetables([{ providerId: 'city', providerName: 'City transit', providerCity: 'Львів', feed: differentlyNamedPlatforms }])!;
+  const crossPlatform = findGtfsItineraries(separateNodes, query).find((journey) => journey.segments.length === 2);
+  assert.ok(crossPlatform, 'nearby platforms with distinct canonical IDs are considered as transfer candidates');
+  assert.notEqual(crossPlatform.segments[0].destinationStop.id, crossPlatform.segments[1].originStop.id);
+  assert.equal(crossPlatform.transferWalkingSeconds[0], 360);
+
   const disconnected = mergeGtfsTimetables([{ providerId: 'city', providerName: 'City transit', providerCity: 'Львів', feed: platformTransferFeed('08:40:00', false) }])!;
   assert.equal(findGtfsItineraries(disconnected, query).filter((journey) => journey.segments.length === 2).length, 0,
     'if the feed provides a station pathway graph but no path connects platforms, straight-line proximity is insufficient');

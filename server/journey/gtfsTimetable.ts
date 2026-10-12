@@ -935,6 +935,28 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   }
   for (const choices of outgoing.values()) choices.sort((a, b) => a.departureAt.getTime() - b.departureAt.getTime() || a.arrivalAt.getTime() - b.arrivalAt.getTime());
 
+  // GTFS transfer and pathway links often join distinct platform IDs that do
+  // not share a canonical stop name. Index departure platforms geographically
+  // so search can discover those real nearby connections without scanning
+  // every scheduled segment at each search step.
+  const transferCellMeters = Math.max(100, transferRadius);
+  const transferCell = (coordinates: [number, number]) => {
+    const [lon, lat] = coordinates;
+    const x = lon * 111_320 * Math.cos(lat * Math.PI / 180);
+    const y = lat * 111_132;
+    return [Math.floor(x / transferCellMeters), Math.floor(y / transferCellMeters)] as const;
+  };
+  const outgoingByCell = new Map<string, GtfsDirectJourney[]>();
+  for (const segment of segments) {
+    const [x, y] = transferCell(segment.originStop.coordinates);
+    const key = `${x}:${y}`;
+    const choices = outgoingByCell.get(key) ?? [];
+    choices.push(segment);
+    outgoingByCell.set(key, choices);
+  }
+  for (const choices of outgoingByCell.values()) choices.sort((a, b) => a.departureAt.getTime() - b.departureAt.getTime() || a.arrivalAt.getTime() - b.arrivalAt.getTime());
+  const transferCandidateCache = new WeakMap<GtfsDirectJourney, GtfsDirectJourney[]>();
+
   const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
   type TransferMeasure = { walkingMeters: number; walkingSeconds: number; geometry: Array<[number, number]> | null; inSeat: boolean };
   type TransferDecision = { feasible: boolean; measure: TransferMeasure; requiredSeconds: number; rule: GtfsTransferRule | null };
@@ -1090,6 +1112,30 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     return { feasible: availableSeconds >= requiredSeconds, measure, requiredSeconds, rule };
   };
 
+  const transferCandidates = (previous: GtfsDirectJourney) => {
+    const cached = transferCandidateCache.get(previous);
+    if (cached) return cached;
+    const [centerX, centerY] = transferCell(previous.destinationStop.coordinates);
+    const choices = new Set<GtfsDirectJourney>(outgoing.get(previous.destinationStop.id) ?? []);
+    for (let x = centerX - 1; x <= centerX + 1; x++) for (let y = centerY - 1; y <= centerY + 1; y++) {
+      for (const candidate of outgoingByCell.get(`${x}:${y}`) ?? []) {
+        if (distanceMeters(previous.destinationStop.coordinates, candidate.originStop.coordinates) > transferRadius) continue;
+        const hasTransferRule = (feed.transfers ?? []).some((rule) => previous.destinationTransferNodeIds.includes(rule.fromStopId)
+          && candidate.originTransferNodeIds.includes(rule.toStopId));
+        const hasStationPathways = previous.providerId === candidate.providerId
+          && previous.destinationTransferNodeIds.some((id) => pathwayNodes.has(id))
+          && candidate.originTransferNodeIds.some((id) => pathwayNodes.has(id));
+        // Different canonical nodes require explicit station topology or an
+        // operator transfer rule. Proximity alone is not evidence that two
+        // nearby stops are a valid interchange.
+        if (hasTransferRule || hasStationPathways) choices.add(candidate);
+      }
+    }
+    const sorted = [...choices].sort((a, b) => a.departureAt.getTime() - b.departureAt.getTime() || a.arrivalAt.getTime() - b.arrivalAt.getTime());
+    transferCandidateCache.set(previous, sorted);
+    return sorted;
+  };
+
   const results = new Map<string, GtfsItinerary>();
   const maxTransitLegs = maximumTransfers + 1;
   // Most city-feed stops cannot lead to this destination. Exclude those dead
@@ -1097,7 +1143,15 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const reachableWithin = [destinationStopIds];
   for (let legCount = 1; legCount <= maxTransitLegs; legCount++) {
     const reachable = new Set(reachableWithin[legCount - 1]);
-    for (const segment of segments) if (reachable.has(segment.destinationStop.id)) reachable.add(segment.originStop.id);
+    for (const previous of segments) {
+      // Reachability is queried at the arrival end of the current itinerary
+      // leg. Keep that arrival stop reachable when a valid onward segment can
+      // reach the destination within the remaining leg budget, including when
+      // an explicit GTFS transfer/pathway joins distinct canonical stop IDs.
+      if (transferCandidates(previous).some((next) => reachable.has(next.destinationStop.id))) {
+        reachable.add(previous.destinationStop.id);
+      }
+    }
     reachableWithin.push(reachable);
   }
   const maxFirstDeparture = input.latestDeparture.getTime();
@@ -1161,7 +1215,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const previousIds = new Set(path.map((segment) => segment.tripId));
     const visitedStops = new Set(path.map((segment) => segment.originStop.id));
     visitedStops.add(last.destinationStop.id);
-    const choices = outgoing.get(last.destinationStop.id) ?? [];
+    const choices = transferCandidates(last);
     const latestNext = Math.min(last.arrivalAt.getTime() + maximumWaitSeconds * 1000, journeyEnd.getTime());
     let low = 0, high = choices.length;
     while (low < high) {
