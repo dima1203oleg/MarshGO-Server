@@ -2037,7 +2037,7 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
          'priceMaxMinor',l.price_max_minor,'currency',l.currency,'priceStatus',l.price_status,
          'availabilityStatus',l.availability_status,'providerType',l.provider_type,'offerId',l.offer_id,
          'bookingId',l.booking_id,'demandId',l.demand_id,'state',l.state,'dataSource',l.data_source,
-         'lastUpdatedAt',l.last_updated_at,'metadata',l.metadata,'routeGeometry',l.metadata->'routeGeometry'
+         'lastUpdatedAt',l.last_updated_at,'metadata',l.metadata,'routeGeometry',l.metadata->'routeGeometry','stops',l.metadata->'stops'
        ) ORDER BY l.ordinal) FILTER (WHERE l.id IS NOT NULL),'[]'::json) AS legs
   FROM journeys j LEFT JOIN journey_legs l ON l.journey_id=j.id`;
 
@@ -2410,6 +2410,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               ...(itinerary.fare?.allocations[segmentIndex] ? { fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
                 fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
                 fareSource: itinerary.fare.source } : {}),
+              ...(segment.stops ? { stops: segment.stops } : {}),
               ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
         );
         firstTransitLegId ??= inserted.rows[0].id;
@@ -2424,6 +2425,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
             fareSource: itinerary.fare.source,
           } : {}),
+          ...(segment.stops ? { stops: segment.stops } : {}),
           liveStatus: 'SCHEDULED',
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - segment.sourceFreshAt.getTime()) / 1000)),
           source: 'gtfs-static', lastUpdatedAt: segment.sourceFreshAt, providerName: segment.providerName,

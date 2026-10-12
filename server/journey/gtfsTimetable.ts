@@ -65,6 +65,8 @@ export interface GtfsDirectJourney {
   distanceFromDestinationStopMeters: number;
   /** Present only when the source supplied a usable GTFS shape for this ride segment. */
   routeGeometry?: Array<[number, number]>;
+  /** Timed stop calls copied from this exact GTFS trip segment. */
+  stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string; pickupType: number; dropOffType: number }>;
   originZoneId?: string;
   destinationZoneId?: string;
   traveledZoneIds: string[];
@@ -498,6 +500,21 @@ function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex
   );
 }
 
+function stopCallsForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number, serviceDate: string) {
+  const calls = feed.stopTimes.get(tripId)?.slice(fromIndex, toIndex + 1) ?? [];
+  const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
+  return calls.flatMap((call) => {
+    const stop = feed.stops.get(call.stopId);
+    const arrivalAt = serviceTimeToUtc(serviceDate, call.arrivalSeconds);
+    const departureAt = serviceTimeToUtc(serviceDate, call.departureSeconds);
+    if (!stop || !arrivalAt || !departureAt) return [];
+    return [{ id: stop.id, name: call.sourceStopName ?? stop.name,
+      coordinates: call.sourceStopCoordinates ?? [stop.lon, stop.lat] as [number, number],
+      arrivalAt: arrivalAt.toISOString(), departureAt: departureAt.toISOString(),
+      pickupType: call.pickupType, dropOffType: call.dropOffType }];
+  });
+}
+
 export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInput): GtfsDirectJourney[] {
   const now = input.now ?? new Date();
   if (!Number.isFinite(input.earliestDeparture.getTime()) || !Number.isFinite(input.latestDeparture.getTime())
@@ -521,6 +538,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
   // trips such as Monday 24:15 can be found for a Tuesday 00:15 departure.
   const serviceDates = [...new Set([dateStringAfter(firstDate, -1), firstDate, lastDate])];
   const results: GtfsDirectJourney[] = [];
+  const segmentIndexes = new WeakMap<GtfsDirectJourney, { fromIndex: number; toIndex: number; serviceDate: string }>();
   const originEntriesByTrip = new Map<string, Array<{ index: number; originStopId: string }>>();
   for (const { stop } of originStops) for (const entry of feed.stopTimesByStop.get(stop.id) ?? []) {
     const entries = originEntriesByTrip.get(entry.tripId) ?? [];
@@ -546,19 +564,32 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
         if (!originMatch || from.pickupType !== 0) continue;
         const departureAt = serviceTimeToUtc(serviceDate, from.departureSeconds);
         if (!departureAt || departureAt < input.earliestDeparture || departureAt > input.latestDeparture) continue;
+        let selectedDestination: { toIndex: number; arrivalAt: Date; distance: number } | undefined;
         for (let toIndex = fromIndex + 1; toIndex < stops.length; toIndex++) {
           const to = stops[toIndex];
           const destinationMatch = destinationById.get(to.stopId);
           if (!destinationMatch || to.dropOffType !== 0 || to.arrivalSeconds < from.departureSeconds) continue;
           const arrivalAt = serviceTimeToUtc(serviceDate, to.arrivalSeconds);
           if (!arrivalAt || arrivalAt < departureAt) continue;
+          const coordinates = to.sourceStopCoordinates ?? [destinationMatch.stop.lon, destinationMatch.stop.lat] as [number, number];
+          const distance = distanceMeters(input.destination, coordinates);
+          if (!selectedDestination || distance < selectedDestination.distance
+            || (distance === selectedDestination.distance && arrivalAt < selectedDestination.arrivalAt)) {
+            selectedDestination = { toIndex, arrivalAt, distance };
+          }
+        }
+        if (!selectedDestination) continue;
+        const toIndex = selectedDestination.toIndex;
+        const to = stops[toIndex];
+        const destinationMatch = destinationById.get(to.stopId);
+        if (!destinationMatch) continue;
+        const arrivalAt = selectedDestination.arrivalAt;
           const resultKey = `${tripId}:${from.stopId}:${to.stopId}:${departureAt.toISOString()}`;
-          if (searched.has(resultKey)) break;
+          if (searched.has(resultKey)) continue;
           searched.add(resultKey);
           const originCoordinates = from.sourceStopCoordinates ?? [originMatch.stop.lon, originMatch.stop.lat] as [number, number];
           const destinationCoordinates = to.sourceStopCoordinates ?? [destinationMatch.stop.lon, destinationMatch.stop.lat] as [number, number];
-          const routeGeometry = routeGeometryForTrip(feed, tripId, fromIndex, toIndex);
-          results.push({ providerId: input.providerId, providerName: input.providerName, mode: route.mode,
+          const result: GtfsDirectJourney = { providerId: input.providerId, providerName: input.providerName, mode: route.mode,
             routeId: trip.routeId, routeName: route.name, headsign: trip.headsign, tripId,
             originStop: { id: originMatch.stop.id, name: from.sourceStopName ?? originMatch.stop.name, coordinates: originCoordinates },
             destinationStop: { id: destinationMatch.stop.id, name: to.sourceStopName ?? destinationMatch.stop.name, coordinates: destinationCoordinates },
@@ -566,21 +597,27 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
             departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, originCoordinates)),
             distanceFromDestinationStopMeters: Math.round(distanceMeters(input.destination, destinationCoordinates)),
-            ...(routeGeometry ? { routeGeometry } : {}),
             ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
             ...(to.sourceZoneId ? { destinationZoneId: to.sourceZoneId } : {}),
             traveledZoneIds: stops.slice(fromIndex, toIndex + 1).flatMap((entry) => {
               const zoneId = entry.sourceZoneId;
               return zoneId ? [zoneId] : [];
             }),
-          });
-          break;
-        }
+          };
+          segmentIndexes.set(result, { fromIndex, toIndex, serviceDate });
+          results.push(result);
       }
     }
   }
-  return [...new Map(results.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime())
+  const selected = [...new Map(results.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime())
     .map((journey) => [`${journey.providerId}:${journey.tripId}:${journey.originStop.id}:${journey.destinationStop.id}:${journey.departureAt.toISOString()}`, journey])).values()].slice(0, limit);
+  for (const journey of selected) {
+    const indexes = segmentIndexes.get(journey);
+    if (!indexes) continue;
+    journey.routeGeometry = routeGeometryForTrip(feed, journey.tripId, indexes.fromIndex, indexes.toIndex);
+    journey.stops = stopCallsForTrip(feed, journey.tripId, indexes.fromIndex, indexes.toIndex, indexes.serviceDate);
+  }
+  return selected;
 }
 
 /**
@@ -740,7 +777,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   // A national feed can produce a very large number of stop-pair candidates.
   // Keep only the stop-time indexes during graph construction and materialize
   // route shapes for the small set of itineraries that will actually be shown.
-  const shapeIndexesBySegment = new WeakMap<GtfsDirectJourney, { fromIndex: number; toIndex: number }>();
+  const shapeIndexesBySegment = new WeakMap<GtfsDirectJourney, { fromIndex: number; toIndex: number; serviceDate: string }>();
   const seenSegments = new Set<string>();
   for (const [tripId, trip] of feed.trips) {
     const route = feed.routes.get(trip.routeId);
@@ -789,7 +826,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
             ...(to.sourceZoneId ? { destinationZoneId: to.sourceZoneId } : {}),
             traveledZoneIds: stops.slice(fromIndex, toIndex + 1).flatMap((entry) => entry.sourceZoneId ? [entry.sourceZoneId] : []),
           };
-          shapeIndexesBySegment.set(segment, { fromIndex, toIndex });
+          shapeIndexesBySegment.set(segment, { fromIndex, toIndex, serviceDate });
           segments.push(segment);
         }
       }
@@ -918,11 +955,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const itineraries = rankedResults.slice(0, limit);
   for (const itinerary of itineraries) {
     for (const segment of itinerary.segments) {
-      if (segment.routeGeometry) continue;
       const indexes = shapeIndexesBySegment.get(segment);
       if (!indexes) continue;
-      const routeGeometry = routeGeometryForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex);
-      if (routeGeometry) segment.routeGeometry = routeGeometry;
+      segment.routeGeometry ??= routeGeometryForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex);
+      segment.stops ??= stopCallsForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex, indexes.serviceDate);
     }
   }
   return {
