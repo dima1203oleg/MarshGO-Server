@@ -150,6 +150,10 @@ export interface GtfsItinerary {
   transferWalkingMeters: number[];
   transferWalkingSeconds: number[];
   transferWalkingGeometries: Array<Array<[number, number]> | null>;
+  /** Preserve the exact feasibility inputs so routed footpaths can be revalidated. */
+  transferInSeat: boolean[];
+  transferMinimumBufferSeconds: number[];
+  transferRuleMinimumSeconds: Array<number | null>;
   fare: ReturnType<typeof calculateGtfsItineraryFare>;
 }
 
@@ -1026,7 +1030,14 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
 
   const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
   type TransferMeasure = { walkingMeters: number; walkingSeconds: number; geometry: Array<[number, number]> | null; inSeat: boolean };
-  type TransferDecision = { feasible: boolean; measure: TransferMeasure; requiredSeconds: number; rule: GtfsTransferRule | null };
+  type TransferDecision = {
+    feasible: boolean;
+    measure: TransferMeasure;
+    requiredSeconds: number;
+    minimumBufferSeconds: number;
+    ruleMinimumSeconds: number | null;
+    rule: GtfsTransferRule | null;
+  };
 
   const transferRuleFor = (previous: GtfsDirectJourney, next: GtfsDirectJourney): { rule: GtfsTransferRule | null; ambiguous: boolean } => {
     const matches = (feed.transfers ?? []).filter((rule) => previous.destinationTransferNodeIds.includes(rule.fromStopId)
@@ -1146,7 +1157,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const transferDecision = (previous: GtfsDirectJourney, next: GtfsDirectJourney): TransferDecision => {
     const { rule, ambiguous } = transferRuleFor(previous, next);
     if (ambiguous || rule?.transferType === 3) {
-      return { feasible: false, measure: { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: false }, requiredSeconds: Infinity, rule };
+      return { feasible: false, measure: { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: false }, requiredSeconds: Infinity,
+        minimumBufferSeconds: 0, ruleMinimumSeconds: null, rule };
     }
     const inSeat = rule?.transferType === 4;
     const fromPathwayNodes = previous.destinationTransferNodeIds.filter((id) => pathwayNodes.has(id));
@@ -1160,7 +1172,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       .sort((a, b) => a.walkingSeconds - b.walkingSeconds || a.walkingMeters - b.walkingMeters)[0]
       ?? (candidatePaths.includes(null) ? null : false);
     if (routedPath === null) {
-      return { feasible: false, measure: { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: false }, requiredSeconds: Infinity, rule };
+      return { feasible: false, measure: { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: false }, requiredSeconds: Infinity,
+        minimumBufferSeconds: 0, ruleMinimumSeconds: null, rule };
     }
     const meters = inSeat ? 0 : typeof routedPath === 'object'
       ? routedPath.walkingMeters : Math.round(distanceMeters(previous.destinationStop.coordinates, next.originStop.coordinates));
@@ -1168,15 +1181,18 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       ? routedPath.walkingSeconds : walkingSeconds(meters);
     const measure: TransferMeasure = inSeat ? { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: true }
       : typeof routedPath === 'object' ? routedPath : { walkingMeters: meters, walkingSeconds: seconds, geometry: null, inSeat: false };
-    if (meters > transferRadius) return { feasible: false, measure, requiredSeconds: Infinity, rule };
+    if (meters > transferRadius) return { feasible: false, measure, requiredSeconds: Infinity,
+      minimumBufferSeconds: 0, ruleMinimumSeconds: null, rule };
     const modeBuffer = Math.max(minimumTransferBufferSeconds, transferBufferSeconds(previous, next));
+    const ruleMinimumSeconds = rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? null : null;
     // GTFS min_transfer_time covers the complete connection, including the
     // walk and its variance buffer; do not add it twice to the walking time.
-    const requiredSeconds = inSeat ? 0 : rule?.transferType === 2 && rule.minTransferTimeSeconds !== undefined
-      ? Math.max(modeBuffer + seconds, rule.minTransferTimeSeconds)
+    const requiredSeconds = inSeat ? 0 : ruleMinimumSeconds !== null
+      ? Math.max(modeBuffer + seconds, ruleMinimumSeconds)
       : modeBuffer + seconds;
     const availableSeconds = Math.floor((next.departureAt.getTime() - previous.arrivalAt.getTime()) / 1000);
-    return { feasible: availableSeconds >= requiredSeconds, measure, requiredSeconds, rule };
+    return { feasible: availableSeconds >= requiredSeconds, measure, requiredSeconds,
+      minimumBufferSeconds: inSeat ? 0 : modeBuffer, ruleMinimumSeconds, rule };
   };
 
   const transferCandidates = (previous: GtfsDirectJourney) => {
@@ -1256,6 +1272,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       transfers: transferDecisions.filter(({ measure }) => !measure.inSeat).length,
       walkingMeters: accessMeters + egressMeters + transferWalkingMeters.reduce((sum, meters) => sum + meters, 0),
       transferWalkingMeters, transferWalkingSeconds, transferWalkingGeometries,
+      transferInSeat: transferDecisions.map(({ measure }) => measure.inSeat),
+      transferMinimumBufferSeconds: transferDecisions.map(({ minimumBufferSeconds }) => minimumBufferSeconds),
+      transferRuleMinimumSeconds: transferDecisions.map(({ ruleMinimumSeconds }) => ruleMinimumSeconds),
       fare: calculateGtfsItineraryFare({ products: feed.fareProducts ?? new Map(), rules: feed.fareRules ?? new Map(), faresV2Present: feed.faresV2Present === true }, path.map((segment) => ({
         providerId: segment.providerId, routeId: segment.routeId,
         ...(feed.routes.get(segment.routeId)?.agencyId ? { agencyId: feed.routes.get(segment.routeId)!.agencyId } : {}),

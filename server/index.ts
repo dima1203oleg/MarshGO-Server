@@ -19,6 +19,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
+import { applyRoutedWalkingPaths, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg } from './journey/liveVehicles';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
@@ -2048,7 +2049,8 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
          'priceMaxMinor',l.price_max_minor,'currency',l.currency,'priceStatus',l.price_status,
          'availabilityStatus',l.availability_status,'providerType',l.provider_type,'offerId',l.offer_id,
          'bookingId',l.booking_id,'demandId',l.demand_id,'state',l.state,'dataSource',l.data_source,
-         'lastUpdatedAt',l.last_updated_at,'metadata',l.metadata,'routeGeometry',l.metadata->'routeGeometry','stops',l.metadata->'stops'
+         'lastUpdatedAt',l.last_updated_at,'source',l.data_source,'dataSource',l.data_source,
+         'metadata',l.metadata,'routeGeometry',l.metadata->'routeGeometry','stops',l.metadata->'stops'
        ) ORDER BY l.ordinal) FILTER (WHERE l.id IS NOT NULL),'[]'::json) AS legs
   FROM journeys j LEFT JOIN journey_legs l ON l.journey_id=j.id`;
 
@@ -2190,6 +2192,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     preferenceValues.minimumTransferBufferSeconds ?? DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
     DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
   );
+  const walkingRoutingUrl = process.env.WALKING_ROUTING_URL?.trim();
   const providerErrors: string[] = [];
   const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
     `SELECT id,name,city,feed_url,realtime_url,last_sync_at,last_report FROM mobility_providers
@@ -2261,7 +2264,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const sources = sourcesByTimezone.get(source.feed.timezone) ?? [];
     sources.push(source); sourcesByTimezone.set(source.feed.timezone, sources);
   }
-  const scheduledCandidates: GtfsItinerary[] = [];
+  type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary, 'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified'>>;
+  let scheduledCandidates: SearchItinerary[] = [];
+  let pedestrianRoutesUnavailable = false;
+  let pedestrianCandidatesRejected = false;
   let hasUnpricedTransitCandidates = false;
   for (const sources of sourcesByTimezone.values()) {
     const mergedFeed = mergeGtfsTimetables(sources);
@@ -2285,7 +2291,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const feasibleItineraries = itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
       && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes))
       && candidate.segments.every((segment) => transitProviderAllowed(search.preferences, segment.transportType, segment.providerName))
-      && (search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
+      && (walkingRoutingUrl || (search.preferences.maxWalkingMeters === undefined && search.preferences.maxTotalDurationSeconds === undefined)
+        || (candidate.segments[0]?.distanceToOriginStopMeters === 0
+          && candidate.segments.at(-1)?.distanceFromDestinationStopMeters === 0
+          && candidate.transferWalkingMeters.every((meters, index) => meters === 0 || candidate.transferInSeat[index]
+            || Boolean(candidate.transferWalkingGeometries[index]))))
+      && (walkingRoutingUrl || search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
       && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers));
     for (const itinerary of feasibleItineraries) {
       const comparableUahFare = itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
@@ -2297,6 +2308,53 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         if (comparableUahFare > search.preferences.maxPriceMinor) continue;
       }
       scheduledCandidates.push(itinerary);
+    }
+  }
+  if (walkingRoutingUrl) {
+    const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary): Promise<SearchItinerary | null> => {
+      const first = itinerary.segments[0];
+      const last = itinerary.segments.at(-1);
+      if (!first || !last) return null;
+      const transferRequests = itinerary.transferWalkingMeters.map(async (meters, index) => {
+        const previous = itinerary.segments[index];
+        const next = itinerary.segments[index + 1];
+        if (!previous || !next || itinerary.transferInSeat[index] || meters <= 0 || itinerary.transferWalkingGeometries[index]) return null;
+        return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates, walkingRoutingUrl);
+      });
+      const [access, egress, ...transfers] = await Promise.all([
+        first.distanceToOriginStopMeters > 0
+          ? routePedestrianPath(search.origin.coordinates, first.originStop.coordinates, walkingRoutingUrl) : null,
+        last.distanceFromDestinationStopMeters > 0
+          ? routePedestrianPath(last.destinationStop.coordinates, search.destination.coordinates, walkingRoutingUrl) : null,
+        ...transferRequests,
+      ]);
+      const missingRequiredPath = (first.distanceToOriginStopMeters > 0 && !access)
+        || (last.distanceFromDestinationStopMeters > 0 && !egress)
+        || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
+          && !itinerary.transferWalkingGeometries[index] && !transfers[index]);
+      if (missingRequiredPath) {
+        pedestrianRoutesUnavailable = true;
+        return null;
+      }
+      const routed = applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
+        maximumAccessMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+        maximumEgressMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+        maximumTransferMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+      });
+      if (!routed) {
+        pedestrianCandidatesRejected = true;
+        return null;
+      }
+      return routed;
+    }));
+    scheduledCandidates = routedCandidates.filter((itinerary): itinerary is SearchItinerary => itinerary !== null)
+      .filter((itinerary) => (search.preferences.maxWalkingMeters === undefined || itinerary.walkingMeters <= search.preferences.maxWalkingMeters)
+        && (search.preferences.maxTotalDurationSeconds === undefined || itinerary.durationSeconds <= search.preferences.maxTotalDurationSeconds));
+    if (pedestrianRoutesUnavailable) {
+      providerErrors.push('Пішохідний маршрутизатор не повернув підтверджений шлях для частини варіантів; ці варіанти приховано.');
+    }
+    if (pedestrianCandidatesRejected) {
+      providerErrors.push('Частину варіантів відхилено: фактичний час або відстань пішохідного шляху не дозволяє здійснити маршрут.');
     }
   }
   scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
@@ -2349,6 +2407,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...canonicalRouteTypes.filter((type) => !routePlannerTypes.has(type))
       .map((type) => `transportType:${type}:no-routed-provider-in-corridor`),
     'community-transit-combinations',
+    ...(!walkingRoutingUrl ? ['door-to-door-walking:requires-WALKING_ROUTING_URL'] : []),
     'walking-transfers-between-unmatched-stops',
   ];
   const client = await pool.connect();
@@ -2417,7 +2476,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     for (const representative of representatives) {
       const ranked = representative.journey;
       if (ranked.kind !== 'gtfs') continue;
-      const itinerary: GtfsItinerary = ranked.itinerary;
+      const itinerary: SearchItinerary = ranked.itinerary;
       const first = itinerary.segments[0];
       const last = itinerary.segments.at(-1)!;
       const stored = await client.query<{ id: string }>(
@@ -2452,24 +2511,25 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         departureAt: Date,
         meters: number,
         label: string,
-        options: { durationSeconds?: number; routeGeometry?: Array<[number, number]> | null } = {},
+        options: { durationSeconds?: number; routeGeometry?: Array<[number, number]> | null; source?: string } = {},
       ) => {
         if (meters <= 0) return;
         const durationSeconds = options.durationSeconds ?? Math.ceil(meters / 1.25);
         const arrivalAt = new Date(departureAt.getTime() + durationSeconds * 1000);
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_status,availability_status,provider_type,state,data_source,last_updated_at,metadata)
-           VALUES($1,$2,'WALK',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$12,'UAH','UNKNOWN','AVAILABLE','walking','SUGGESTED','straight-line-estimate',now(),$13::jsonb) RETURNING id`,
+           VALUES($1,$2,'WALK',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$12,'UAH','UNKNOWN','AVAILABLE','walking','SUGGESTED',$14,now(),$13::jsonb) RETURNING id`,
           [journeyId, ordinal++, origin.coordinates[0], origin.coordinates[1], origin.name,
             destination.coordinates[0], destination.coordinates[1], destination.name, departureAt, arrivalAt,
-            durationSeconds, meters, JSON.stringify({ estimate: true,
-              method: options.routeGeometry ? 'gtfs-pathways' : 'straight-line-distance',
+            durationSeconds, meters, JSON.stringify({ estimate: !options.source,
+              method: options.source ?? (options.routeGeometry ? 'gtfs-pathways' : 'straight-line-distance'),
               ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
-              walkingSpeedMetersPerSecond: 1.25 })],
+              ...(!options.source ? { walkingSpeedMetersPerSecond: 1.25 } : {}) }),
+            options.source ?? 'straight-line-estimate'],
         );
         responseLegs.push({ id: inserted.rows[0].id, mode: 'WALK', offerId: null, origin, destination,
           departureAt, arrivalAt, durationSeconds, distanceMeters: meters, priceMinor: null,
-          priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source: 'walking-estimate',
+          priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source: options.source ?? 'walking-estimate',
           ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
           lastUpdatedAt: new Date().toISOString(), dataFreshnessSeconds: 0, liveStatus: 'UNVERIFIED',
           driver: null, vehicle: null, title: label });
@@ -2478,7 +2538,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       await saveWalkLeg(
         { name: search.origin.name, coordinates: search.origin.coordinates },
         { name: first.originStop.name, coordinates: first.originStop.coordinates },
-        itinerary.departureAt, first.distanceToOriginStopMeters, 'До першої зупинки',
+        itinerary.departureAt, itinerary.accessWalk?.distanceMeters ?? first.distanceToOriginStopMeters, 'До першої зупинки',
+        itinerary.accessWalk ? { durationSeconds: itinerary.accessWalk.durationSeconds, routeGeometry: itinerary.accessWalk.geometry, source: 'osrm-foot-route' } : {},
       );
       for (const [segmentIndex, segment] of itinerary.segments.entries()) {
         if (segmentIndex > 0) {
@@ -2488,7 +2549,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
             previous.arrivalAt, itinerary.transferWalkingMeters[segmentIndex - 1], 'Пересадка між зупинками',
             { durationSeconds: itinerary.transferWalkingSeconds[segmentIndex - 1],
-              routeGeometry: itinerary.transferWalkingGeometries[segmentIndex - 1] },
+              routeGeometry: itinerary.transferWalks?.[segmentIndex - 1]?.geometry ?? itinerary.transferWalkingGeometries[segmentIndex - 1],
+              source: itinerary.transferWalks?.[segmentIndex - 1] ? 'osrm-foot-route'
+                : itinerary.transferWalkingGeometries[segmentIndex - 1] ? 'gtfs-pathway' : undefined },
           );
         }
         const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
@@ -2541,7 +2604,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       await saveWalkLeg(
         { name: last.destinationStop.name, coordinates: last.destinationStop.coordinates },
         { name: search.destination.name, coordinates: search.destination.coordinates },
-        last.arrivalAt, last.distanceFromDestinationStopMeters, 'Від останньої зупинки',
+        last.arrivalAt, itinerary.egressWalk?.distanceMeters ?? last.distanceFromDestinationStopMeters, 'Від останньої зупинки',
+        itinerary.egressWalk ? { durationSeconds: itinerary.egressWalk.durationSeconds, routeGeometry: itinerary.egressWalk.geometry, source: 'osrm-foot-route' } : {},
       );
       if (firstTransitLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstTransitLegId]);
       journeys.push({ id: journeyId, offerId: null, source: 'gtfs-static', providerName: itinerary.providerName,
@@ -2581,6 +2645,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     resultsTruncated: candidateGenerationTruncated || paretoCandidates.some((candidate) => !selectedCandidateIds.has(candidate.id)),
     candidateGenerationTruncated,
     partial: journeys.length === 0 || candidateGenerationTruncated || providerErrors.length > 0 || unsupportedPreferences.length > 0
+      || (scheduledCandidates.length > 0 && !walkingRoutingUrl)
       || journeys.some((journey) => journey.source === 'gtfs-static'),
     blockedProviders,
     unsupportedPreferences,
