@@ -60,7 +60,8 @@ function validTransitPath(path: TransitPathSummary): boolean {
     && path.arrivalAt >= path.departureAt
     && Number.isInteger(path.waitingSeconds) && path.waitingSeconds >= 0
     && Number.isInteger(path.walkingMeters) && path.walkingMeters >= 0
-    && Number.isInteger(path.transfers) && path.transfers >= 0;
+    && Number.isInteger(path.transfers) && path.transfers >= 0
+    && path.transfers <= Math.max(0, path.segments.length - 1);
 }
 
 function fareInUah(path: TransitPathSummary | null): number | null {
@@ -131,6 +132,10 @@ export function composeCommunityTransitJourneys(input: ComposeCommunityTransitIn
         { mode: 'COMMUNITY' as const, providerId: 'marshgo-community' },
         ...(suffix?.segments.map((segment) => ({ mode: segment.mode as JourneyLegMode, providerId: segment.providerId })) ?? []),
       ];
+      // GTFS paths already carry the count of actual alighting transfers;
+      // segment count alone overcounts in-seat continuation connections.
+      const transfers = (prefix?.transfers ?? 0) + (suffix?.transfers ?? 0)
+        + Number(prefix !== null) + Number(suffix !== null);
       const waitingBeforeRide = Math.max(0, Math.floor((offer.departureAt.getTime() - pickupReadyAt.getTime()) / 1000));
       const waitingAfterRide = suffix
         ? Math.max(0, Math.floor((suffixStart.getTime() - offer.arrivalAt.getTime()) / 1000)) + suffix.waitingSeconds
@@ -148,7 +153,7 @@ export function composeCommunityTransitJourneys(input: ComposeCommunityTransitIn
         durationSeconds,
         priceMinor,
         currency: priceMinor === null ? null : 'UAH',
-        transfers: Math.max(0, transitLegs.length - 1),
+        transfers,
         walkingMeters,
         reliability: null,
         // A transfer through an unscored private ride remains conservatively

@@ -52,6 +52,36 @@ test('composes measured public-transit prefix and suffix around a published priv
   assert.equal(result.reliability, null);
 });
 
+test('counts actual GTFS transfers and does not treat an in-seat continuation as a transfer', () => {
+  const oneRide = transitPath('bus-prefix', 'BUS', 0, 30);
+  const inSeatPrefix: TransitPathSummary = {
+    ...oneRide,
+    id: 'in-seat-bus-prefix',
+    segments: [oneRide.segments[0]!, { ...oneRide.segments[0]!, tripId: 'continuation-trip' }],
+    transfers: 0,
+  };
+  const suffix = transitPath('tram-suffix', 'TRAM', 80, 110);
+  const input = {
+    offer: ride(), prefixes: [inSeatPrefix], suffixes: [suffix], requestedDepartureAt: at(0),
+    origin: [24.0315, 49.8419] as [number, number], destination: [24.0628, 49.7915] as [number, number], passengers: 1,
+    minimumTransferBufferSeconds: 600, maximumDurationSeconds: 4 * 60 * 60,
+  };
+
+  const [inSeatResult] = composeCommunityTransitJourneys(input);
+  assert.equal(inSeatResult?.transfers, 2); // bus → private ride → tram
+
+  const [realTransferResult] = composeCommunityTransitJourneys({
+    ...input,
+    prefixes: [{ ...inSeatPrefix, transfers: 1 }],
+  });
+  assert.equal(realTransferResult?.transfers, 3); // plus one actual change within the bus itinerary
+
+  assert.deepEqual(composeCommunityTransitJourneys({
+    ...input,
+    prefixes: [{ ...inSeatPrefix, transfers: 2 }],
+  }), []); // a two-leg GTFS path cannot contain more than one transfer
+});
+
 test('rejects a missed pickup connection and insufficient seat inventory', () => {
   const latePrefix = transitPath('late-bus', 'BUS', 0, 31);
   assert.deepEqual(composeCommunityTransitJourneys({

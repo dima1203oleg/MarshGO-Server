@@ -261,3 +261,19 @@
 
 **LIMITATIONS**
 - This is a guard against an unapproved transport category; it does not add a real metro feed, provider coverage or fare source.
+
+## 2026-10-12 — Preserve actual in-seat transfer counts in composed journeys
+
+**Status:** COMPLETE for candidate scoring and transfer-limit accounting.
+
+**DONE**
+- Community + GTFS composition now uses each transit itinerary's validated physical-transfer count, then adds the actual mode changes between transit and the private ride.
+- In-seat GTFS continuation connections no longer count as passenger transfers merely because they are represented by multiple trip records.
+- Rejects malformed transit summaries whose transfer count exceeds their number of ride-to-ride boundaries.
+
+**TESTS**
+- Regression covers an in-seat two-trip transit path, one real transfer in that path, and an impossible transfer count.
+- Server TypeScript, ESLint and unit suite pass; one opt-in DB integration test is skipped when no isolated DB is configured.
+
+**LIMITATIONS**
+- This fixes transfer accounting; it does not resolve incomplete provider coverage or replace an end-to-end DB integration for composite Journey persistence/booking.
