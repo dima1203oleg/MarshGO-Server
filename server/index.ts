@@ -17,7 +17,7 @@ import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
-import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
@@ -2184,7 +2184,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
       maximumWaitSeconds: 4 * 60 * 60,
       minimumTransferBufferSeconds: configuredTransferBufferSeconds,
-      maximumStopDistanceMeters: 2000,
+      maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+      maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+      maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
       allowedModes: allowedTransitModes,
       allowedTransportTypes: search.preferences.allowedTransportTypes,
     });

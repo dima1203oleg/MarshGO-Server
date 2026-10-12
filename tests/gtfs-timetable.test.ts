@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean } = {}) {
@@ -202,6 +202,28 @@ test('honors GTFS pickup/drop-off restrictions and only searches nearby stops', 
   assert.equal(findDirectGtfsJourneys(feed(), farAway).length, 0);
 });
 
+test('applies separate conservative first-mile and last-mile walking limits', () => {
+  assert.equal(DEFAULT_MAX_ACCESS_WALKING_METERS, 900);
+  assert.equal(DEFAULT_MAX_EGRESS_WALKING_METERS, 1000);
+  assert.equal(DEFAULT_MAX_TRANSFER_WALKING_METERS, 400);
+
+  const accessRequest = request('2026-10-12T04:35:00Z', '2026-10-12T05:10:00Z');
+  accessRequest.origin = [24.0200, 49.8482];
+  assert.equal(findGtfsItinerariesWithStats(feed(), accessRequest).itineraries.length, 0,
+    'the default access walk shed must reject a stop more than 900 m away');
+  assert.equal(findGtfsItinerariesWithStats(feed(), {
+    ...accessRequest, maximumAccessWalkingMeters: 1200,
+  }).itineraries.length, 1, 'a caller may explicitly request a wider access walk shed');
+
+  const egressRequest = request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z');
+  egressRequest.destination = [24.0300, 49.8600];
+  assert.equal(findGtfsItinerariesWithStats(feed(), egressRequest).itineraries.length, 0,
+    'the default egress walk shed must reject a stop more than 1,000 m away');
+  assert.equal(findGtfsItinerariesWithStats(feed(), {
+    ...egressRequest, maximumEgressWalkingMeters: 1200,
+  }).itineraries.length, 1, 'a caller may explicitly request a wider egress walk shed');
+});
+
 test('finds service after midnight when GTFS uses a 24-hour stop time', () => {
   const journeys = findDirectGtfsJourneys(feed({ departure: '24:15:00', arrival: '24:55:00' }), request('2026-10-12T21:10:00Z', '2026-10-12T21:30:00Z'));
   assert.equal(journeys.length, 1);
@@ -397,6 +419,12 @@ test('composes a city bus and rail itinerary across differently named railway pl
   assert.ok(connected.walkingMeters >= connected.transferWalkingMeters[0]);
   assert.equal(connected.segments[0].destinationStop.name, 'Залізничний вокзал (117)');
   assert.equal(connected.segments[1].originStop.name, 'Львів-Головний');
+  const walkShedLimited = findGtfsItineraries(merged, {
+    ...options, maximumTransferWalkingMeters: 50,
+    providerId: 'merged', providerName: 'Lviv corridor', providerCity: 'Україна',
+  });
+  assert.equal(walkShedLimited.some((itinerary) => itinerary.segments.length === 2), false,
+    'a cross-platform transfer outside the configured walk shed must not be composed');
 
   const kyivAlias = mergeGtfsTimetables(sources(railFeed('23.993864', 'Київ-Пас.')))!;
   const kyivAliasResults = findGtfsItineraries(kyivAlias, {

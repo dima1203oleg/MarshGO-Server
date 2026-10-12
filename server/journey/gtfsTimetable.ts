@@ -11,6 +11,9 @@ const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
 export const MAX_GTFS_TRANSFERS = 4;
 export const DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS = 180;
+export const DEFAULT_MAX_ACCESS_WALKING_METERS = 900;
+export const DEFAULT_MAX_EGRESS_WALKING_METERS = 1000;
+export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
 const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
 const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
 
@@ -77,6 +80,10 @@ export interface GtfsItinerarySearchInput extends SearchInput {
   maximumTransfers?: number;
   minimumTransferBufferSeconds?: number;
   maximumWaitSeconds?: number;
+  /** Separate walk-shed limits keep the first and last mile explicit. */
+  maximumAccessWalkingMeters?: number;
+  maximumEgressWalkingMeters?: number;
+  maximumTransferWalkingMeters?: number;
   allowedModes?: readonly TransitJourneyMode[];
   allowedTransportTypes?: readonly JourneyTransportType[];
   providerCity?: string;
@@ -548,7 +555,11 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
   const minimumTransferBufferSeconds = input.minimumTransferBufferSeconds ?? DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS;
   const maximumWaitSeconds = input.maximumWaitSeconds ?? 4 * 60 * 60;
-  const radius = input.maximumStopDistanceMeters ?? 2000;
+  // Keep the older common radius as an explicit override for callers that
+  // still use it. Production search uses the distinct access/egress values.
+  const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
+  const egressRadius = input.maximumEgressWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_EGRESS_WALKING_METERS;
+  const transferRadius = input.maximumTransferWalkingMeters ?? DEFAULT_MAX_TRANSFER_WALKING_METERS;
   const limit = input.limit ?? 20;
   if (!Number.isFinite(input.earliestDeparture.getTime()) || !Number.isFinite(input.latestDeparture.getTime())
     || input.latestDeparture < input.earliestDeparture || input.earliestDeparture < now
@@ -556,13 +567,15 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     || !Number.isInteger(maximumTransfers) || maximumTransfers < 0 || maximumTransfers > MAX_GTFS_TRANSFERS
     || !Number.isInteger(minimumTransferBufferSeconds) || minimumTransferBufferSeconds < 0 || minimumTransferBufferSeconds > 7200
     || !Number.isInteger(maximumWaitSeconds) || maximumWaitSeconds < 0 || maximumWaitSeconds > maximumJourneySeconds
-    || !Number.isFinite(radius) || radius < 100 || radius > 10_000
+    || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > 10_000
+    || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > 10_000
+    || !Number.isFinite(transferRadius) || transferRadius < 0 || transferRadius > 10_000
     || !Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
 
   let stopSelectionTruncated = false;
-  const closestStops = (point: [number, number]) => {
+  const closestStops = (point: [number, number], radius: number) => {
     const ranked = [...feed.stops.values()]
       .filter((stop) => feed.stopTimesByStop.has(stop.id))
       .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]), types: new Set<GtfsTransportType>() }))
@@ -590,8 +603,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     if (selected.size < ranked.length) stopSelectionTruncated = true;
     return [...selected.values()];
   };
-  const originStops = closestStops(input.origin);
-  const destinationStops = closestStops(input.destination);
+  const originStops = closestStops(input.origin, accessRadius);
+  const destinationStops = closestStops(input.destination, egressRadius);
   if (!originStops.length || !destinationStops.length) {
     return { itineraries: [], searchTruncated: false, resultLimitReached: false };
   }
@@ -767,7 +780,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       if (next.departureAt.getTime() > latestNext) break;
       if (!reachableWithin[remainingLegs - 1].has(next.destinationStop.id)) continue;
       if (previousIds.has(next.tripId) || visitedStops.has(next.destinationStop.id)) continue;
-      const transferWalkSeconds = walkingSeconds(distanceMeters(last.destinationStop.coordinates, next.originStop.coordinates));
+      const transferWalkingMeters = Math.round(distanceMeters(last.destinationStop.coordinates, next.originStop.coordinates));
+      if (transferWalkingMeters > transferRadius) continue;
+      const transferWalkSeconds = walkingSeconds(transferWalkingMeters);
       const waitSeconds = (next.departureAt.getTime() - last.arrivalAt.getTime()) / 1000;
       const requiredBufferSeconds = Math.max(minimumTransferBufferSeconds, transferBufferSeconds(last, next)) + transferWalkSeconds;
       if (waitSeconds < requiredBufferSeconds) continue;
