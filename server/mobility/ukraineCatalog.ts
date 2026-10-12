@@ -6,12 +6,12 @@
  */
 export interface CatalogEntry {
   name: string; city: string; providerType: 'public_transit' | 'scooter'; sourceType: 'gtfs' | 'gtfs_rt' | 'gbfs' | 'json' | 'geojson' | 'rest';
-  feedUrl: string; access: 'open' | 'requires_credentials' | 'requires_partner_access' | 'insecure_endpoint'; license?: string; updateFrequency?: string; coverage: string; sourceRef: string; priority?: number;
+  feedUrl: string; realtimeUrl?: string; access: 'open' | 'requires_credentials' | 'requires_partner_access' | 'insecure_endpoint'; license?: string; updateFrequency?: string; coverage: string; sourceRef: string; priority?: number;
 }
 
 const lvivLicense = 'Open data portal of Lviv city (opendata.city-adm.lviv.ua)';
 export const ukraineCatalog: CatalogEntry[] = [
-  { name: 'Львівавтодор — розклад (GTFS)', city: 'Львів', providerType: 'public_transit', sourceType: 'gtfs', feedUrl: 'https://track.ua-gis.com/gtfs/lviv/static.zip', access: 'open', license: lvivLicense, updateFrequency: 'періодично (статичний розклад)', coverage: 'Громадський транспорт Львова: автобуси, трамваї', sourceRef: 'mdb:ua-lviv-lvivavtodor-gtfs-2374', priority: 10 },
+  { name: 'Львівавтодор — розклад (GTFS)', city: 'Львів', providerType: 'public_transit', sourceType: 'gtfs', feedUrl: 'https://track.ua-gis.com/gtfs/lviv/static.zip', realtimeUrl: 'https://track.ua-gis.com/gtfs/lviv/trip_updates', access: 'open', license: lvivLicense, updateFrequency: 'періодично (статичний розклад) + GTFS-Realtime затримки', coverage: 'Громадський транспорт Львова: автобуси, трамваї та поточні оновлення рейсів', sourceRef: 'mdb:ua-lviv-lvivavtodor-gtfs-2374', priority: 10 },
   { name: 'Львівавтодор — realtime позиції (GTFS-RT)', city: 'Львів', providerType: 'public_transit', sourceType: 'gtfs_rt', feedUrl: 'https://track.ua-gis.com/gtfs/lviv/vehicle_position', access: 'open', license: lvivLicense, updateFrequency: 'реальний час (секунди)', coverage: 'Позиції транспорту Львова', sourceRef: 'mdb:ua-lviv-lvivavtodor-gtfs-rt-vp-2376', priority: 10 },
   { name: 'Львівавтодор — затримки (GTFS-RT)', city: 'Львів', providerType: 'public_transit', sourceType: 'gtfs_rt', feedUrl: 'https://track.ua-gis.com/gtfs/lviv/trip_updates', access: 'open', license: lvivLicense, updateFrequency: 'реальний час', coverage: 'Оновлення рейсів і затримки Львова', sourceRef: 'mdb:ua-lviv-lvivavtodor-gtfs-rt-tu-2375', priority: 20 },
   { name: 'Стрийська міська рада — розклад (GTFS)', city: 'Стрий', providerType: 'public_transit', sourceType: 'gtfs', feedUrl: 'https://track.ua-gis.com/gtfs/stryi/static.zip', access: 'open', updateFrequency: 'періодично', coverage: 'Міський транспорт Стрия', sourceRef: 'mdb:ua-stryi-gtfs-2932', priority: 10 },

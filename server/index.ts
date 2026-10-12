@@ -18,6 +18,7 @@ import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
@@ -2032,7 +2033,16 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
          'id',l.id,'ordinal',l.ordinal,'mode',l.mode,'originName',l.origin_name,'originCoordinates',
          json_build_array(ST_X(l.origin::geometry),ST_Y(l.origin::geometry)),'destinationName',l.destination_name,
          'destinationCoordinates',json_build_array(ST_X(l.destination::geometry),ST_Y(l.destination::geometry)),
-         'departureAt',l.scheduled_departure_at,'arrivalAt',l.scheduled_arrival_at,'durationSeconds',l.duration_s,
+         'departureAt',CASE WHEN l.predicted_departure_at IS NOT NULL AND l.data_source='gtfs-realtime-trip-updates'
+           AND l.last_updated_at >= now()-interval '5 minutes' THEN l.predicted_departure_at ELSE l.scheduled_departure_at END,
+         'arrivalAt',CASE WHEN l.predicted_arrival_at IS NOT NULL AND l.data_source='gtfs-realtime-trip-updates'
+           AND l.last_updated_at >= now()-interval '5 minutes' THEN l.predicted_arrival_at ELSE l.scheduled_arrival_at END,
+         'scheduledDepartureAt',l.scheduled_departure_at,'scheduledArrivalAt',l.scheduled_arrival_at,
+         'predictedDepartureAt',l.predicted_departure_at,'predictedArrivalAt',l.predicted_arrival_at,
+         'liveStatus',CASE WHEN (l.predicted_departure_at IS NOT NULL OR l.predicted_arrival_at IS NOT NULL)
+           AND l.data_source='gtfs-realtime-trip-updates' AND l.last_updated_at >= now()-interval '5 minutes'
+           THEN 'PREDICTED' ELSE 'SCHEDULED' END,
+         'durationSeconds',l.duration_s,
          'distanceMeters',l.distance_m,'priceMinor',l.price_minor,'priceMinMinor',l.price_min_minor,
          'priceMaxMinor',l.price_max_minor,'currency',l.currency,'priceStatus',l.price_status,
          'availabilityStatus',l.availability_status,'providerType',l.provider_type,'offerId',l.offer_id,
@@ -2119,8 +2129,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
   );
   const providerErrors: string[] = [];
-  const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
-    `SELECT id,name,city,feed_url,last_sync_at,last_report FROM mobility_providers
+  const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
+    `SELECT id,name,city,feed_url,realtime_url,last_sync_at,last_report FROM mobility_providers
       WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
         AND status='enabled' AND health IN ('healthy','degraded')
       ORDER BY priority,name LIMIT 101`,
@@ -2157,6 +2167,23 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     provider,
     feed: await cachedGtfsTimetable(provider.id, provider.feed_url),
   })));
+  const realtimeProviders = eligibleGtfsProviders.filter((provider) => provider.realtime_url);
+  const realtimeLoads = await Promise.allSettled(realtimeProviders.map(async (provider) => ({
+    provider,
+    realtime: await cachedGtfsRealtimeTripUpdates(provider.id, provider.realtime_url!),
+  })));
+  const realtimeByProvider = new Map<string, Awaited<ReturnType<typeof cachedGtfsRealtimeTripUpdates>>>();
+  realtimeLoads.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      providerErrors.push(`${realtimeProviders[index]?.name ?? 'GTFS-Realtime'}: оновлення рейсів тимчасово недоступні; використовується розклад`);
+      return;
+    }
+    if (!result.value.realtime.fresh) {
+      providerErrors.push(`${result.value.provider.name}: GTFS-Realtime відхилено (${result.value.realtime.reason ?? 'дані неповні'}); використовується розклад`);
+      return;
+    }
+    realtimeByProvider.set(result.value.provider.id, result.value.realtime);
+  });
   const feedSources: GtfsTimetableSource[] = [];
   feedLoads.forEach((result, index) => {
     if (result.status === 'rejected') {
@@ -2164,7 +2191,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       return;
     }
     feedSources.push({ providerId: result.value.provider.id, providerName: result.value.provider.name,
-      providerCity: result.value.provider.city, feed: result.value.feed });
+      providerCity: result.value.provider.city, feed: result.value.feed,
+      ...(realtimeByProvider.get(result.value.provider.id) ? { realtime: realtimeByProvider.get(result.value.provider.id)! } : {}) });
   });
   const sourcesByTimezone = new Map<string, GtfsTimetableSource[]>();
   for (const source of feedSources) {
@@ -2404,14 +2432,18 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
         const provider = eligibleGtfsProviders.find((item) => item.id === segment.providerId);
         const inserted = await client.query<{ id: string }>(
-          `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
-           VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$13,$13,$14,$15,'UNKNOWN',$16,'public_transit','SUGGESTED','gtfs-static',$17,$18::jsonb) RETURNING id`,
+          `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
+           VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb) RETURNING id`,
           [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
             segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
-            segment.departureAt, segment.arrivalAt, durationSeconds,
+            segment.scheduledDepartureAt, segment.scheduledArrivalAt,
+            segment.realtimeUpdatedAt ? segment.departureAt : null,
+            segment.realtimeUpdatedAt ? segment.arrivalAt : null,
+            durationSeconds,
             itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
             itinerary.fare?.currency ?? 'UAH', itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', segment.providerId,
-            provider?.last_sync_at ?? segment.sourceFreshAt,
+            segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+            segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
           JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
               headsign: segment.headsign, tripId: segment.tripId, fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
               ...(itinerary.fare?.allocations[segmentIndex] ? { fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
@@ -2424,7 +2456,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, offerId: null,
           origin: { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
           destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
-          departureAt: segment.departureAt, arrivalAt: segment.arrivalAt, durationSeconds,
+          departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
+          scheduledDepartureAt: segment.scheduledDepartureAt, scheduledArrivalAt: segment.scheduledArrivalAt,
+          ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
+          durationSeconds,
           distanceMeters: null, priceMinor: itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
           currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
           ...(itinerary.fare?.allocations[segmentIndex] ? {
@@ -2433,9 +2468,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             fareSource: itinerary.fare.source,
           } : {}),
           ...(segment.stops ? { stops: segment.stops } : {}),
-          liveStatus: 'SCHEDULED',
-          dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - segment.sourceFreshAt.getTime()) / 1000)),
-          source: 'gtfs-static', lastUpdatedAt: segment.sourceFreshAt, providerName: segment.providerName,
+          liveStatus: segment.realtimeUpdatedAt ? 'PREDICTED' : 'SCHEDULED',
+          dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - (segment.realtimeUpdatedAt ?? segment.sourceFreshAt).getTime()) / 1000)),
+          source: segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+          lastUpdatedAt: segment.realtimeUpdatedAt ?? segment.sourceFreshAt, providerName: segment.providerName,
           routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign,
           ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}), driver: null, vehicle: null });
       }

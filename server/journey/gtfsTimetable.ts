@@ -3,6 +3,7 @@ import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
 import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
+import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
@@ -37,6 +38,7 @@ export interface GtfsTimetableFeed {
   calendars: Map<string, { start: string; end: string; weekdays: boolean[] }>;
   exceptions: Map<string, Map<string, number>>;
   providersByRoute?: Map<string, { id: string; name: string; city: string; fetchedAt: Date }>;
+  realtimeTripUpdates?: Map<string, GtfsRealtimeTripUpdate>;
   fareProducts?: Map<string, GtfsFareProduct>;
   fareRules?: Map<string, GtfsFareRule[]>;
   faresV2Present?: boolean;
@@ -69,6 +71,7 @@ export interface GtfsTimetableSource {
   providerName: string;
   providerCity: string;
   feed: GtfsTimetableFeed;
+  realtime?: GtfsRealtimeTripUpdates;
 }
 
 export interface GtfsDirectJourney {
@@ -85,6 +88,10 @@ export interface GtfsDirectJourney {
   originTransferNodeIds: string[];
   destinationTransferNodeIds: string[];
   transportType: GtfsTransportType;
+  /** Original provider timetable values, preserved when realtime predictions are available. */
+  scheduledDepartureAt: Date;
+  scheduledArrivalAt: Date;
+  /** Effective departure and arrival used for search and transfer feasibility. */
   departureAt: Date;
   arrivalAt: Date;
   sourceFreshAt: Date;
@@ -93,7 +100,8 @@ export interface GtfsDirectJourney {
   /** Present only when the source supplied a usable GTFS shape for this ride segment. */
   routeGeometry?: Array<[number, number]>;
   /** Timed stop calls copied from this exact GTFS trip segment. */
-  stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string; pickupType: number; dropOffType: number }>;
+  stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string; pickupType: number; dropOffType: number; skipped?: boolean }>;
+  realtimeUpdatedAt?: Date;
   originZoneId?: string;
   destinationZoneId?: string;
   traveledZoneIds: string[];
@@ -346,6 +354,7 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
   const pathways: NonNullable<GtfsTimetableFeed['pathways']> = [];
   const fareProducts: NonNullable<GtfsTimetableFeed['fareProducts']> = new Map();
   const fareRules: NonNullable<GtfsTimetableFeed['fareRules']> = new Map();
+  const realtimeTripUpdates: NonNullable<GtfsTimetableFeed['realtimeTripUpdates']> = new Map();
   let faresV2Present = false;
   const providersByRoute = new Map<string, { id: string; name: string; city: string; fetchedAt: Date }>();
   const stopsByName = new Map<string, Array<{ id: string; lon: number; lat: number }>>();
@@ -358,6 +367,12 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
 
   for (const source of ordered) {
     const prefix = `${encodeURIComponent(source.providerId)}:`;
+    for (const update of (source.realtime?.fresh ? source.realtime.updates.values() : [])) {
+      const trip = source.feed.trips.get(update.tripId);
+      if (!trip || update.relationship === 'OTHER' || (update.routeId && update.routeId !== trip.routeId)) continue;
+      const tripId = `${prefix}${update.tripId}`;
+      realtimeTripUpdates.set(gtfsRealtimeTripUpdateKey(tripId, update.startDate), { ...update, tripId });
+    }
     const remappedStops = new Map<string, string>();
     const railServedStops = new Set<string>();
     for (const [stopId, entries] of source.feed.stopTimesByStop) {
@@ -461,7 +476,7 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
   });
   const fetchedAt = new Date(Math.min(...ordered.map((source) => source.feed.fetchedAt.getTime())));
   return { fetchedAt, timezone, routes, stops, trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions, transfers, pathways,
-    providersByRoute, fareProducts, fareRules, faresV2Present };
+    providersByRoute, fareProducts, fareRules, faresV2Present, realtimeTripUpdates };
 }
 
 function isValidTimezone(timezone: string): boolean {
@@ -589,19 +604,57 @@ function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex
   );
 }
 
-function stopCallsForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number, serviceDate: string) {
+type DatedTripStop = { arrivalAt: Date; departureAt: Date; skipped: boolean; updated: boolean };
+
+function stopCallsForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number, serviceDate: string, datedStops?: DatedTripStop[]) {
   const calls = feed.stopTimes.get(tripId)?.slice(fromIndex, toIndex + 1) ?? [];
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
-  return calls.flatMap((call) => {
+  return calls.flatMap((call, relativeIndex) => {
     const stop = feed.stops.get(call.stopId);
-    const arrivalAt = serviceTimeToUtc(serviceDate, call.arrivalSeconds);
-    const departureAt = serviceTimeToUtc(serviceDate, call.departureSeconds);
+    const datedStop = datedStops?.[fromIndex + relativeIndex];
+    const arrivalAt = datedStop?.arrivalAt ?? serviceTimeToUtc(serviceDate, call.arrivalSeconds);
+    const departureAt = datedStop?.departureAt ?? serviceTimeToUtc(serviceDate, call.departureSeconds);
     if (!stop || !arrivalAt || !departureAt) return [];
     return [{ id: stop.id, name: call.sourceStopName ?? stop.name,
       coordinates: call.sourceStopCoordinates ?? [stop.lon, stop.lat] as [number, number],
       arrivalAt: arrivalAt.toISOString(), departureAt: departureAt.toISOString(),
-      pickupType: call.pickupType, dropOffType: call.dropOffType }];
+      pickupType: datedStop?.skipped ? 1 : call.pickupType, dropOffType: datedStop?.skipped ? 1 : call.dropOffType,
+      ...(datedStop?.skipped ? { skipped: true } : {}) }];
   });
+}
+
+function datedTripStops(feed: GtfsTimetableFeed, tripId: string, serviceDate: string): { stops: DatedTripStop[]; update?: GtfsRealtimeTripUpdate } {
+  const scheduled = feed.stopTimes.get(tripId) ?? [];
+  const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
+  const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
+  if (update?.relationship === 'CANCELED' || update?.relationship === 'DELETED') return { stops: [], update };
+  const updatesBySequence = new Map((update?.stops ?? []).map((stop) => [stop.stopSequence, stop]));
+  let inheritedDelaySeconds: number | undefined;
+  const stops = scheduled.flatMap((stopTime): DatedTripStop[] => {
+    const scheduledArrival = serviceTimeToUtc(serviceDate, stopTime.arrivalSeconds);
+    const scheduledDeparture = serviceTimeToUtc(serviceDate, stopTime.departureSeconds);
+    if (!scheduledArrival || !scheduledDeparture) return [];
+    const stopUpdate = updatesBySequence.get(stopTime.sequence);
+    if (stopUpdate?.relationship === 'NO_DATA') {
+      inheritedDelaySeconds = undefined;
+      return [{ arrivalAt: scheduledArrival, departureAt: scheduledDeparture, skipped: false, updated: false }];
+    }
+    const arrivalDelay = stopUpdate?.arrival?.delaySeconds
+      ?? (stopUpdate?.arrival?.time ? Math.round((stopUpdate.arrival.time.getTime() - scheduledArrival.getTime()) / 1000) : undefined)
+      ?? stopUpdate?.departure?.delaySeconds
+      ?? (stopUpdate?.departure?.time ? Math.round((stopUpdate.departure.time.getTime() - scheduledDeparture.getTime()) / 1000) : undefined)
+      ?? inheritedDelaySeconds;
+    const departureDelay = stopUpdate?.departure?.delaySeconds
+      ?? (stopUpdate?.departure?.time ? Math.round((stopUpdate.departure.time.getTime() - scheduledDeparture.getTime()) / 1000) : undefined)
+      ?? arrivalDelay;
+    const arrivalAt = stopUpdate?.arrival?.time ?? new Date(scheduledArrival.getTime() + (arrivalDelay ?? 0) * 1000);
+    const departureAt = stopUpdate?.departure?.time ?? new Date(scheduledDeparture.getTime() + (departureDelay ?? 0) * 1000);
+    if (stopUpdate) inheritedDelaySeconds = departureDelay;
+    const skipped = stopUpdate?.relationship === 'SKIPPED';
+    return [{ arrivalAt, departureAt, skipped,
+      updated: skipped || arrivalAt.getTime() !== scheduledArrival.getTime() || departureAt.getTime() !== scheduledDeparture.getTime() }];
+  });
+  return { stops, ...(update ? { update } : {}) };
 }
 
 export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInput): GtfsDirectJourney[] {
@@ -685,6 +738,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
             originTransferNodeIds: [from.sourceStopId ?? from.stopId, ...(from.sourceParentStationId ? [from.sourceParentStationId] : [])],
             destinationTransferNodeIds: [to.sourceStopId ?? to.stopId, ...(to.sourceParentStationId ? [to.sourceParentStationId] : [])],
             transportType: route.transportType,
+            scheduledDepartureAt: departureAt, scheduledArrivalAt: arrivalAt,
             departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, originCoordinates)),
             distanceFromDestinationStopMeters: Math.round(distanceMeters(input.destination, destinationCoordinates)),
@@ -884,18 +938,26 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     if (eligibleIndexes.length < 2) continue;
     for (const serviceDate of serviceDates) {
       if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
+      const realtimeUpdate = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
+      if (realtimeUpdate?.relationship === 'CANCELED' || realtimeUpdate?.relationship === 'DELETED') continue;
+      const dated = realtimeUpdate?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
+      if (dated && dated.stops.length !== stops.length) continue;
       for (let fromCursor = 0; fromCursor < eligibleIndexes.length - 1; fromCursor++) {
         const fromIndex = eligibleIndexes[fromCursor];
         const from = stops[fromIndex];
-        if (from.pickupType !== 0) continue;
-        const departureAt = serviceTimeToUtc(serviceDate, from.departureSeconds);
-        if (!departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
+        const datedFrom = dated?.stops[fromIndex];
+        if (from.pickupType !== 0 || datedFrom?.skipped) continue;
+        const scheduledDepartureAt = serviceTimeToUtc(serviceDate, from.departureSeconds);
+        const departureAt = datedFrom?.departureAt ?? scheduledDepartureAt;
+        if (!scheduledDepartureAt || !departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
         for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length && toCursor <= fromCursor + 20; toCursor++) {
           const toIndex = eligibleIndexes[toCursor];
           const to = stops[toIndex];
-          if (to.dropOffType !== 0 || to.arrivalSeconds < from.departureSeconds) continue;
-          const arrivalAt = serviceTimeToUtc(serviceDate, to.arrivalSeconds);
-          if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
+          const datedTo = dated?.stops[toIndex];
+          if (to.dropOffType !== 0 || datedTo?.skipped || to.arrivalSeconds < from.departureSeconds) continue;
+          const scheduledArrivalAt = serviceTimeToUtc(serviceDate, to.arrivalSeconds);
+          const arrivalAt = datedTo?.arrivalAt ?? scheduledArrivalAt;
+          if (!scheduledArrivalAt || !arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
             || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
           const originStop = feed.stops.get(from.stopId), destinationStop = feed.stops.get(to.stopId);
           if (!originStop || !destinationStop) continue;
@@ -911,8 +973,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
               coordinates: to.sourceStopCoordinates ?? [destinationStop.lon, destinationStop.lat] },
             originTransferNodeIds: [from.sourceStopId ?? from.stopId, ...(from.sourceParentStationId ? [from.sourceParentStationId] : [])],
             destinationTransferNodeIds: [to.sourceStopId ?? to.stopId, ...(to.sourceParentStationId ? [to.sourceParentStationId] : [])],
-            transportType,
+            transportType, scheduledDepartureAt, scheduledArrivalAt,
             departureAt, arrivalAt, sourceFreshAt: provider?.fetchedAt ?? feed.fetchedAt,
+            ...(dated?.update && dated.stops.slice(fromIndex, toIndex + 1).some((stop) => stop.updated)
+              ? { realtimeUpdatedAt: dated.update.updatedAt } : {}),
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, from.sourceStopCoordinates ?? [originStop.lon, originStop.lat])),
             distanceFromDestinationStopMeters: Math.round(distanceMeters(input.destination, to.sourceStopCoordinates ?? [destinationStop.lon, destinationStop.lat])),
             ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
@@ -920,6 +984,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
             traveledZoneIds: stops.slice(fromIndex, toIndex + 1).flatMap((entry) => entry.sourceZoneId ? [entry.sourceZoneId] : []),
           };
           shapeIndexesBySegment.set(segment, { fromIndex, toIndex, serviceDate });
+          if (dated?.update?.stops.length) segment.stops = stopCallsForTrip(feed, tripId, fromIndex, toIndex, serviceDate, dated.stops);
           segments.push(segment);
         }
       }
