@@ -839,6 +839,41 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal((await tooMany.json() as { data: unknown[] }).data.length, 0);
   });
 
+  it('matches community rides along the route in direction and flags date fallback', async () => {
+    const corridorOfferId = crypto.randomUUID();
+    const departureAt = new Date(Date.now() + 4 * 86_400_000);
+    const arrivalAt = new Date(departureAt.getTime() + 6 * 60 * 60_000);
+    await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
+      VALUES($1,$2,$3,'Дрогобич','Київ',
+        ST_SetSRID(ST_MakePoint(23.5,49.35),4326)::geography,
+        ST_SetSRID(ST_MakePoint(30.52,50.45),4326)::geography,
+        ST_MakeLine(ARRAY[
+          ST_SetSRID(ST_MakePoint(23.5,49.35),4326),
+          ST_SetSRID(ST_MakePoint(23.8556,49.2603),4326),
+          ST_SetSRID(ST_MakePoint(24.0297,49.8397),4326),
+          ST_SetSRID(ST_MakePoint(30.52,50.45),4326)
+        ]),$4,$5,600000,21600,'osrm',20000,4,3)`, [corridorOfferId, ids.driver, ids.vehicle, departureAt, arrivalAt]);
+
+    const tripDay = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Kyiv' }).format(departureAt);
+    const search = async (from: number[], to: number[], date: string, seats = 1) => {
+      const query = new URLSearchParams({
+        origin: 'Стрий', destination: 'Львів', originLon: String(from[0]), originLat: String(from[1]),
+        destinationLon: String(to[0]), destinationLat: String(to[1]), date, seats: String(seats),
+      });
+      const response = await fetch(`${apiUrl}/api/v1/offers?${query}`);
+      assert.equal(response.status, 200);
+      return (await response.json() as { data: Array<{ id: string; other_date: boolean }> }).data;
+    };
+
+    const stryi = [23.8556, 49.2603], lviv = [24.0297, 49.8397];
+    const onRoute = await search(stryi, lviv, tripDay);
+    assert.ok(onRoute.some((offer) => offer.id === corridorOfferId && !offer.other_date), 'a passenger along the route matches in the same direction on the chosen day');
+    assert.equal((await search(lviv, stryi, tripDay)).some((offer) => offer.id === corridorOfferId), false, 'the route geometry must not match reverse travel');
+    assert.equal((await search(stryi, lviv, tripDay, 4)).some((offer) => offer.id === corridorOfferId), false, 'a corridor match must still respect seat inventory');
+    const fallback = await search(stryi, lviv, '2031-01-01');
+    assert.ok(fallback.some((offer) => offer.id === corridorOfferId && offer.other_date), 'an empty requested day can return real inventory clearly marked as another date');
+  });
+
   it('keeps verification evidence staff-only and updates a vehicle only after both approvals', async () => {
     assert.ok(apiCreatedVehicleId);
     const vehicleRecord = crypto.randomUUID();
