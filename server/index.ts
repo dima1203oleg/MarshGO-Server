@@ -2362,20 +2362,25 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         departureAt: Date,
         meters: number,
         label: string,
+        options: { durationSeconds?: number; routeGeometry?: Array<[number, number]> | null } = {},
       ) => {
         if (meters <= 0) return;
-        const durationSeconds = Math.ceil(meters / 1.25);
+        const durationSeconds = options.durationSeconds ?? Math.ceil(meters / 1.25);
         const arrivalAt = new Date(departureAt.getTime() + durationSeconds * 1000);
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_status,availability_status,provider_type,state,data_source,last_updated_at,metadata)
            VALUES($1,$2,'WALK',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$12,'UAH','UNKNOWN','AVAILABLE','walking','SUGGESTED','straight-line-estimate',now(),$13::jsonb) RETURNING id`,
           [journeyId, ordinal++, origin.coordinates[0], origin.coordinates[1], origin.name,
             destination.coordinates[0], destination.coordinates[1], destination.name, departureAt, arrivalAt,
-            durationSeconds, meters, JSON.stringify({ estimate: true, method: 'straight-line-distance', walkingSpeedMetersPerSecond: 1.25 })],
+            durationSeconds, meters, JSON.stringify({ estimate: true,
+              method: options.routeGeometry ? 'gtfs-pathways' : 'straight-line-distance',
+              ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
+              walkingSpeedMetersPerSecond: 1.25 })],
         );
         responseLegs.push({ id: inserted.rows[0].id, mode: 'WALK', offerId: null, origin, destination,
           departureAt, arrivalAt, durationSeconds, distanceMeters: meters, priceMinor: null,
           priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source: 'walking-estimate',
+          ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
           lastUpdatedAt: new Date().toISOString(), dataFreshnessSeconds: 0, liveStatus: 'UNVERIFIED',
           driver: null, vehicle: null, title: label });
       };
@@ -2392,6 +2397,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             { name: previous.destinationStop.name, coordinates: previous.destinationStop.coordinates },
             { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
             previous.arrivalAt, itinerary.transferWalkingMeters[segmentIndex - 1], 'Пересадка між зупинками',
+            { durationSeconds: itinerary.transferWalkingSeconds[segmentIndex - 1],
+              routeGeometry: itinerary.transferWalkingGeometries[segmentIndex - 1] },
           );
         }
         const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));

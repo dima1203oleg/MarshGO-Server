@@ -32,7 +32,7 @@ function feed(overrides: { monday?: string; exceptionDate?: string; exceptionTyp
   return parseGtfsTimetable(files);
 }
 
-function connectingFeed(options: { secondRouteType?: string; secondDeparture?: string } = {}) {
+function connectingFeed(options: { secondRouteType?: string; secondDeparture?: string; transferType?: string; minimumTransferTime?: string; inSeat?: boolean; withPathway?: boolean } = {}) {
   const files: Record<string, Uint8Array> = {
     'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv'),
     'routes.txt': new TextEncoder().encode(`route_id,agency_id,route_short_name,route_long_name,route_type\nbus,a,7,City bus,3\nrail,a,IC 743,${options.secondRouteType === '3' ? 'Next city bus' : 'Train'},${options.secondRouteType ?? '2'}`),
@@ -40,6 +40,7 @@ function connectingFeed(options: { secondRouteType?: string; secondDeparture?: s
       'stop_id,stop_name,stop_lat,stop_lon',
       'start,Start,49.8400,24.0200',
       'hub,Transfer hub,49.8450,24.0250',
+      ...(options.withPathway ? ['walkway,Station walkway,49.8451,24.0251'] : []),
       'finish,Finish,49.8500,24.0300',
     ].join('\n')),
     'trips.txt': new TextEncoder().encode('route_id,service_id,trip_id,trip_headsign\nbus,weekday,b1,Transfer hub\nrail,weekday,r1,Finish'),
@@ -52,7 +53,42 @@ function connectingFeed(options: { secondRouteType?: string; secondDeparture?: s
     ].join('\n')),
     'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,0,0,0,0,0,0,20261001,20261031'),
   };
+  if (options.transferType) files['transfers.txt'] = new TextEncoder().encode(
+    `from_stop_id,to_stop_id,transfer_type${options.minimumTransferTime ? ',min_transfer_time' : ''}${options.inSeat ? ',from_trip_id,to_trip_id' : ''}\nhub,hub,${options.transferType}${options.minimumTransferTime ? `,${options.minimumTransferTime}` : ''}${options.inSeat ? ',b1,r1' : ''}`,
+  );
+  if (options.withPathway) files['pathways.txt'] = new TextEncoder().encode(
+    'from_stop_id,to_stop_id,pathway_mode,is_bidirectional,traversal_time,length\nhub,walkway,1,1,180,200',
+  );
   return parseGtfsTimetable(files);
+}
+
+function platformTransferFeed(secondDeparture: string, connectPathways = true) {
+  const transit = connectingFeed({ secondRouteType: '3', secondDeparture });
+  transit.stops.delete('hub');
+  transit.stops.set('bus-platform', { id: 'bus-platform', name: 'Transfer station', lon: 24.025, lat: 49.845, parentStation: 'shared-station' });
+  transit.stops.set('rail-platform', { id: 'rail-platform', name: 'Transfer station', lon: 24.02505, lat: 49.845, parentStation: 'shared-station' });
+  transit.stops.set('shared-station', { id: 'shared-station', name: 'Shared station', lon: 24.025025, lat: 49.845, locationType: 1 });
+  transit.stops.set('walkway-node', { id: 'walkway-node', name: 'Station walkway node', lon: 24.025025, lat: 49.84502, locationType: 3 });
+  transit.stopTimes.get('b1')![1].stopId = 'bus-platform';
+  transit.stopTimes.get('b1')![1].sourceStopId = 'bus-platform';
+  transit.stopTimes.get('b1')![1].sourceStopName = 'Transfer station';
+  transit.stopTimes.get('b1')![1].sourceStopCoordinates = [24.025, 49.845];
+  transit.stopTimes.get('b1')![1].sourceParentStationId = 'shared-station';
+  transit.stopTimes.get('r1')![0].stopId = 'rail-platform';
+  transit.stopTimes.get('r1')![0].sourceStopId = 'rail-platform';
+  transit.stopTimes.get('r1')![0].sourceStopName = 'Transfer station';
+  transit.stopTimes.get('r1')![0].sourceStopCoordinates = [24.02505, 49.845];
+  transit.stopTimes.get('r1')![0].sourceParentStationId = 'shared-station';
+  transit.stopTimesByStop = new Map();
+  for (const [tripId, entries] of transit.stopTimes) entries.forEach((entry, index) => {
+    const atStop = transit.stopTimesByStop.get(entry.stopId) ?? [];
+    atStop.push({ tripId, index }); transit.stopTimesByStop.set(entry.stopId, atStop);
+  });
+  transit.pathways = [
+    { fromStopId: 'bus-platform', toStopId: 'walkway-node', fromCoordinates: [24.025, 49.845], toCoordinates: [24.025025, 49.84502], pathwayMode: 1, bidirectional: true, traversalTimeSeconds: 180, lengthMeters: 200 },
+    ...(connectPathways ? [{ fromStopId: 'walkway-node', toStopId: 'rail-platform', fromCoordinates: [24.025025, 49.84502] as [number, number], toCoordinates: [24.02505, 49.845] as [number, number], pathwayMode: 1, bidirectional: true, traversalTimeSeconds: 180, lengthMeters: 200 }] : []),
+  ];
+  return transit;
 }
 
 function fourModeTransferFeed() {
@@ -344,6 +380,66 @@ test('uses a short urban transfer buffer and a longer buffer when boarding inter
   assert.equal(urbanTwoMinutes.length, 0);
   assert.equal(railNineMinutes.length, 0);
   assert.ok(railTenMinutes.some((journey) => journey.transfers === 1));
+});
+
+test('honors GTFS forbidden and minimum-time transfer rules', () => {
+  const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumStopDistanceMeters: 300, maximumTransfers: 1 };
+  const forbiddenFeed = connectingFeed({ secondRouteType: '3', secondDeparture: '08:40:00', transferType: '3' });
+  assert.equal(forbiddenFeed.transfers?.[0]?.transferType, 3, 'the optional transfers.txt file is parsed');
+  assert.equal(findGtfsItineraries(forbiddenFeed, query).length, 0, 'a prohibited connection is never composed');
+
+  const constrainedFeed = connectingFeed({ secondRouteType: '3', secondDeparture: '08:40:00', transferType: '2', minimumTransferTime: '900' });
+  assert.equal(constrainedFeed.transfers?.[0]?.minTransferTimeSeconds, 900);
+  assert.ok(findGtfsItineraries(constrainedFeed, query).some((journey) => journey.segments.length === 2));
+  const tooShort = connectingFeed({ secondRouteType: '3', secondDeparture: '08:30:00', transferType: '2', minimumTransferTime: '900' });
+  assert.equal(findGtfsItineraries(tooShort, query).length, 0, 'min_transfer_time is a hard feasibility constraint');
+});
+
+test('applies parent-station transfer rules and preserves explicit in-seat transfers', () => {
+  const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumStopDistanceMeters: 300, maximumTransfers: 1 };
+  const parentRestricted = platformTransferFeed('08:40:00');
+  parentRestricted.transfers = [{ fromStopId: 'shared-station', toStopId: 'shared-station', transferType: 3 }];
+  const mergedRestricted = mergeGtfsTimetables([{ providerId: 'city', providerName: 'City transit', providerCity: 'Львів', feed: parentRestricted }])!;
+  assert.equal(findGtfsItineraries(mergedRestricted, query).filter((journey) => journey.segments.length === 2).length, 0,
+    'station-level transfer rules apply to child platforms');
+
+  const inSeat = connectingFeed({ secondRouteType: '3', secondDeparture: '08:21:00', transferType: '4', inSeat: true });
+  const inSeatJourney = findGtfsItineraries(inSeat, query).find((journey) => journey.segments.length === 2);
+  assert.ok(inSeatJourney);
+  assert.equal(inSeatJourney.transfers, 0);
+  assert.deepEqual(inSeatJourney.transferWalkingMeters, [0]);
+  assert.deepEqual(inSeatJourney.transferWalkingSeconds, [0]);
+});
+
+test('parses optional GTFS station pathways and their authoritative time and distance', () => {
+  const timetable = connectingFeed({ withPathway: true });
+  assert.deepEqual(timetable.pathways, [{
+    fromStopId: 'hub', toStopId: 'walkway', fromCoordinates: [24.025, 49.845], toCoordinates: [24.0251, 49.8451],
+    pathwayMode: 1, bidirectional: true, traversalTimeSeconds: 180, lengthMeters: 200,
+  }]);
+});
+
+test('uses GTFS pathways for platform transfer time and geometry, and fails closed for disconnected station pathways', () => {
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300, maximumTransfers: 1, maximumTransferWalkingMeters: 500,
+  };
+  const feedWithPathways = platformTransferFeed('08:32:00');
+  const merged = mergeGtfsTimetables([{ providerId: 'city', providerName: 'City transit', providerCity: 'Львів', feed: feedWithPathways }])!;
+  const connected = findGtfsItineraries(merged, query).find((journey) => journey.segments.length === 2);
+  assert.ok(connected);
+  assert.deepEqual(connected.transferWalkingSeconds, [360]);
+  assert.deepEqual(connected.transferWalkingMeters, [400]);
+  assert.deepEqual(connected.transferWalkingGeometries[0], [[24.025, 49.845], [24.025025, 49.84502], [24.02505, 49.845]]);
+  assert.equal(connected.transfers, 1);
+
+  const disconnected = mergeGtfsTimetables([{ providerId: 'city', providerName: 'City transit', providerCity: 'Львів', feed: platformTransferFeed('08:40:00', false) }])!;
+  assert.equal(findGtfsItineraries(disconnected, query).filter((journey) => journey.segments.length === 2).length, 0,
+    'if the feed provides a station pathway graph but no path connects platforms, straight-line proximity is insufficient');
+
+  const shortConnection = mergeGtfsTimetables([{ providerId: 'city', providerName: 'City transit', providerCity: 'Львів', feed: platformTransferFeed('08:28:00') }])!;
+  assert.equal(findGtfsItineraries(shortConnection, query).filter((journey) => journey.segments.length === 2).length, 0,
+    'a 400 m / 6 minute station transfer cannot fit in an 8 minute connection with the safety buffer');
 });
 
 test('composes four scheduled transport segments with three feasible transfers', () => {

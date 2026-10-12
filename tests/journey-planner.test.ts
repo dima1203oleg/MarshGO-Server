@@ -27,13 +27,13 @@ function connection(walkingSeconds: number, walkingMeters = 100): RouteConnectio
   return { walkingSeconds, walkingMeters, source: 'routing-fixture', measuredAt: at(0) };
 }
 
-test('plans only complete multi-leg routes with canonical nodes and routed transfers', () => {
+test('plans complete routes across distinct platform IDs when a measured transfer connects them', () => {
   const first = option('minibus', 'A', 'C', 0, 3600, 3000, 480);
-  const second = option('community', 'C', 'B', 4500, 6000, 15000);
+  const second = option('community', 'C2', 'B', 4500, 6000, 15000);
   const routes = planJourneys({
     options: [first, second], originNodeId: 'A', destinationNodeId: 'B', departureAt: at(0),
     strategy: 'BALANCED', connections: createConnectionMap([
-      { fromNodeId: 'C', toNodeId: 'C', connection: connection(0, 0) },
+      { fromNodeId: 'C', toNodeId: 'C2', connection: connection(180, 240) },
     ]), minimumTransferBufferSeconds: 120,
   });
 
@@ -42,11 +42,13 @@ test('plans only complete multi-leg routes with canonical nodes and routed trans
   assert.equal(routes[0].priceMinor, 18000);
   assert.equal(routes[0].transfers, 1);
   assert.equal(routes[0].etaUncertaintySeconds, 480);
+  assert.equal(routes[0].walkingMeters, 240);
+  assert.equal(routes[0].legs[1].connectionFromPrevious?.walkingSeconds, 180);
 });
 
 test('fails closed for missing or infeasible transfer evidence and incomplete destination paths', () => {
   const first = option('first', 'A', 'C', 0, 3600, 3000, 480);
-  const second = option('second', 'C', 'B', 3900, 6000, 15000);
+  const second = option('second', 'C2', 'B', 4300, 6000, 15000);
   const input = {
     options: [first, second], originNodeId: 'A', destinationNodeId: 'B', departureAt: at(0),
     strategy: 'FASTEST' as const, minimumTransferBufferSeconds: 120,
@@ -54,7 +56,7 @@ test('fails closed for missing or infeasible transfer evidence and incomplete de
   assert.equal(planJourneys({ ...input, connections: new Map() }).length, 0);
   assert.equal(planJourneys({
     ...input,
-    connections: createConnectionMap([{ fromNodeId: 'C', toNodeId: 'C2', connection: connection(0) }]),
+    connections: createConnectionMap([{ fromNodeId: 'C', toNodeId: 'C2', connection: connection(180, 240) }]),
   }).length, 0);
   assert.throws(() => createConnectionMap([
     { fromNodeId: 'C', toNodeId: 'C2', connection: { ...connection(-1) } },

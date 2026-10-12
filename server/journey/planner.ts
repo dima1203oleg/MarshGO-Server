@@ -114,7 +114,10 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
       if (legs.length >= maximumLegs) return;
       for (const next of options) {
         if (legs.some((leg) => leg.id === next.id) || next.departureAt!.getTime() < arrivalAt.getTime()
-          || !previous.destinationNodeId || next.originNodeId !== previous.destinationNodeId) continue;
+          || !previous.destinationNodeId || !next.originNodeId) continue;
+        // Provider node IDs deliberately remain provider-scoped. Two nearby
+        // platforms can have different IDs and still be connected by a real
+        // pedestrian path; only the measured connection map may join them.
         const connection = input.connections.get(connectionKey(previous.destinationNodeId, next.originNodeId));
         if (!connection) continue;
         const wait = Math.floor((next.departureAt!.getTime() - arrivalAt.getTime()) / 1000);

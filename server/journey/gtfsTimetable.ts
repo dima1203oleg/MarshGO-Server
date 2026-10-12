@@ -26,18 +26,42 @@ export interface GtfsTimetableFeed {
   fetchedAt: Date;
   timezone: string;
   routes: Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType; agencyId?: string }>;
-  stops: Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string }>;
+  stops: Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string; parentStation?: string; locationType?: number }>;
   trips: Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string }>;
   /** Actual GTFS shape coordinates, keyed by the feed's shape_id. */
   shapes?: Map<string, Array<[number, number]>>;
-  stopTimes: Map<string, Array<{ stopId: string; sequence: number; arrivalSeconds: number; departureSeconds: number; pickupType: number; dropOffType: number; sourceStopName?: string; sourceStopCoordinates?: [number, number]; sourceZoneId?: string }>>;
+  stopTimes: Map<string, Array<{ stopId: string; sequence: number; arrivalSeconds: number; departureSeconds: number; pickupType: number; dropOffType: number; sourceStopId?: string; sourceParentStationId?: string; sourceStopName?: string; sourceStopCoordinates?: [number, number]; sourceZoneId?: string }>>;
   stopTimesByStop: Map<string, Array<{ tripId: string; index: number }>>;
+  transfers?: GtfsTransferRule[];
+  pathways?: GtfsPathway[];
   calendars: Map<string, { start: string; end: string; weekdays: boolean[] }>;
   exceptions: Map<string, Map<string, number>>;
   providersByRoute?: Map<string, { id: string; name: string; city: string; fetchedAt: Date }>;
   fareProducts?: Map<string, GtfsFareProduct>;
   fareRules?: Map<string, GtfsFareRule[]>;
   faresV2Present?: boolean;
+}
+
+export interface GtfsTransferRule {
+  fromStopId: string;
+  toStopId: string;
+  transferType: number;
+  minTransferTimeSeconds?: number;
+  fromRouteId?: string;
+  toRouteId?: string;
+  fromTripId?: string;
+  toTripId?: string;
+}
+
+export interface GtfsPathway {
+  fromStopId: string;
+  toStopId: string;
+  fromCoordinates: [number, number];
+  toCoordinates: [number, number];
+  pathwayMode: number;
+  bidirectional: boolean;
+  traversalTimeSeconds?: number;
+  lengthMeters?: number;
 }
 
 export interface GtfsTimetableSource {
@@ -57,6 +81,9 @@ export interface GtfsDirectJourney {
   tripId: string;
   originStop: { id: string; name: string; coordinates: [number, number] };
   destinationStop: { id: string; name: string; coordinates: [number, number] };
+  /** Provider-scoped GTFS stop and parent-station IDs used by transfers/pathways. */
+  originTransferNodeIds: string[];
+  destinationTransferNodeIds: string[];
   transportType: GtfsTransportType;
   departureAt: Date;
   arrivalAt: Date;
@@ -111,6 +138,8 @@ export interface GtfsItinerary {
   transfers: number;
   walkingMeters: number;
   transferWalkingMeters: number[];
+  transferWalkingSeconds: number[];
+  transferWalkingGeometries: Array<Array<[number, number]> | null>;
   fare: ReturnType<typeof calculateGtfsItineraryFare>;
 }
 
@@ -177,12 +206,16 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
     routes.set(row.route_id, { name, ...route, ...(row.agency_id?.trim() ? { agencyId: row.agency_id.trim() } : {}) });
   }
 
-  const stops = new Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string }>();
+  const stops = new Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string; parentStation?: string; locationType?: number }>();
   for (const row of csvRows(text('stops.txt'))) {
     const lon = Number(row.stop_lon), lat = Number(row.stop_lat);
-    if (!row.stop_id || !Number.isFinite(lon) || !Number.isFinite(lat) || Math.abs(lon) > 180 || Math.abs(lat) > 90 || (lon === 0 && lat === 0)) continue;
+    const locationType = row.location_type?.trim() ? integer(row.location_type, -1) : 0;
+    if (!row.stop_id || !Number.isFinite(lon) || !Number.isFinite(lat) || Math.abs(lon) > 180 || Math.abs(lat) > 90
+      || (lon === 0 && lat === 0) || locationType < 0 || locationType > 4) continue;
     stops.set(row.stop_id, { id: row.stop_id, name: row.stop_name?.trim() || row.stop_id, lon, lat,
-      ...(row.zone_id?.trim() ? { zoneId: row.zone_id.trim() } : {}) });
+      ...(row.zone_id?.trim() ? { zoneId: row.zone_id.trim() } : {}),
+      ...(row.parent_station?.trim() ? { parentStation: row.parent_station.trim() } : {}),
+      ...(locationType !== 0 ? { locationType } : {}) });
   }
 
   const trips = new Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string }>();
@@ -214,7 +247,9 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
     if (arrivalSeconds === null || departureSeconds === null) continue;
     const list = stopTimes.get(row.trip_id) ?? [];
     const sourceStop = stops.get(row.stop_id);
-    list.push({ stopId: row.stop_id, sequence: integer(row.stop_sequence, -1), arrivalSeconds, departureSeconds,
+    list.push({ stopId: row.stop_id, sourceStopId: row.stop_id,
+      ...(sourceStop?.parentStation ? { sourceParentStationId: sourceStop.parentStation } : {}),
+      sequence: integer(row.stop_sequence, -1), arrivalSeconds, departureSeconds,
       pickupType: integer(row.pickup_type), dropOffType: integer(row.drop_off_type),
       ...(sourceStop ? { sourceStopName: sourceStop.name, sourceStopCoordinates: [sourceStop.lon, sourceStop.lat] as [number, number],
         ...(sourceStop.zoneId ? { sourceZoneId: sourceStop.zoneId } : {}) } : {}) });
@@ -242,8 +277,48 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
     exceptions.set(row.service_id, byDate);
   }
 
+  const transfers: GtfsTransferRule[] = [];
+  for (const row of csvRows(text('transfers.txt'))) {
+    const transferType = row.transfer_type?.trim() ? integer(row.transfer_type, -1) : -1;
+    const rawMinimum = row.min_transfer_time?.trim();
+    const minTransferTimeSeconds = rawMinimum ? integer(rawMinimum, -1) : undefined;
+    const fromRouteId = row.from_route_id?.trim() || undefined;
+    const toRouteId = row.to_route_id?.trim() || undefined;
+    const fromTripId = row.from_trip_id?.trim() || undefined;
+    const toTripId = row.to_trip_id?.trim() || undefined;
+    if (!stops.has(row.from_stop_id) || !stops.has(row.to_stop_id) || transferType < 0 || transferType > 5
+      || (rawMinimum && (!Number.isInteger(minTransferTimeSeconds) || minTransferTimeSeconds! < 0))
+      || (transferType === 2 && minTransferTimeSeconds === undefined)
+      || (fromRouteId && !routes.has(fromRouteId)) || (toRouteId && !routes.has(toRouteId))
+      || (fromTripId && !trips.has(fromTripId)) || (toTripId && !trips.has(toTripId))
+      || ([4, 5].includes(transferType) && (!fromTripId || !toTripId))) continue;
+    transfers.push({ fromStopId: row.from_stop_id, toStopId: row.to_stop_id, transferType,
+      ...(minTransferTimeSeconds !== undefined ? { minTransferTimeSeconds } : {}),
+      ...(fromRouteId ? { fromRouteId } : {}), ...(toRouteId ? { toRouteId } : {}),
+      ...(fromTripId ? { fromTripId } : {}), ...(toTripId ? { toTripId } : {}) });
+  }
+
+  const pathways: GtfsPathway[] = [];
+  for (const row of csvRows(text('pathways.txt'))) {
+    const pathwayMode = integer(row.pathway_mode, -1);
+    const bidirectional = row.is_bidirectional === '1';
+    const rawTraversalTime = row.traversal_time?.trim();
+    const traversalTimeSeconds = rawTraversalTime ? integer(rawTraversalTime, -1) : undefined;
+    const rawLength = row.length?.trim();
+    const lengthMeters = rawLength ? Number(rawLength) : undefined;
+    if (!stops.has(row.from_stop_id) || !stops.has(row.to_stop_id) || pathwayMode < 1 || pathwayMode > 7
+      || !['0', '1'].includes(row.is_bidirectional)
+      || (rawTraversalTime && (!Number.isInteger(traversalTimeSeconds) || traversalTimeSeconds! < 0))
+      || (rawLength && (!Number.isFinite(lengthMeters) || lengthMeters! < 0))) continue;
+    const fromStop = stops.get(row.from_stop_id)!, toStop = stops.get(row.to_stop_id)!;
+    pathways.push({ fromStopId: row.from_stop_id, toStopId: row.to_stop_id,
+      fromCoordinates: [fromStop.lon, fromStop.lat], toCoordinates: [toStop.lon, toStop.lat], pathwayMode, bidirectional,
+      ...(traversalTimeSeconds !== undefined ? { traversalTimeSeconds } : {}),
+      ...(lengthMeters !== undefined ? { lengthMeters } : {}) });
+  }
+
   const parsedFares: ParsedGtfsFares = parseGtfsFares(files);
-  return { fetchedAt, timezone, routes, stops, trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions,
+  return { fetchedAt, timezone, routes, stops, trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions, transfers, pathways,
     fareProducts: parsedFares.products, fareRules: parsedFares.rules, faresV2Present: parsedFares.faresV2Present };
 }
 
@@ -267,6 +342,8 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
   const stopTimes: GtfsTimetableFeed['stopTimes'] = new Map();
   const calendars: GtfsTimetableFeed['calendars'] = new Map();
   const exceptions: GtfsTimetableFeed['exceptions'] = new Map();
+  const transfers: NonNullable<GtfsTimetableFeed['transfers']> = [];
+  const pathways: NonNullable<GtfsTimetableFeed['pathways']> = [];
   const fareProducts: NonNullable<GtfsTimetableFeed['fareProducts']> = new Map();
   const fareRules: NonNullable<GtfsTimetableFeed['fareRules']> = new Map();
   let faresV2Present = false;
@@ -347,6 +424,16 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
     for (const [shapeId, coordinates] of source.feed.shapes ?? []) shapes.set(`${prefix}${shapeId}`, coordinates);
     for (const [serviceId, calendar] of source.feed.calendars) calendars.set(`${prefix}${serviceId}`, calendar);
     for (const [serviceId, byDate] of source.feed.exceptions) exceptions.set(`${prefix}${serviceId}`, new Map(byDate));
+    for (const rule of source.feed.transfers ?? []) transfers.push({
+      ...rule, fromStopId: `${prefix}${rule.fromStopId}`, toStopId: `${prefix}${rule.toStopId}`,
+      ...(rule.fromRouteId ? { fromRouteId: `${prefix}${rule.fromRouteId}` } : {}),
+      ...(rule.toRouteId ? { toRouteId: `${prefix}${rule.toRouteId}` } : {}),
+      ...(rule.fromTripId ? { fromTripId: `${prefix}${rule.fromTripId}` } : {}),
+      ...(rule.toTripId ? { toTripId: `${prefix}${rule.toTripId}` } : {}),
+    });
+    for (const pathway of source.feed.pathways ?? []) pathways.push({
+      ...pathway, fromStopId: `${prefix}${pathway.fromStopId}`, toStopId: `${prefix}${pathway.toStopId}`,
+    });
     for (const [tripId, trip] of source.feed.trips) {
       const mergedTripId = `${prefix}${tripId}`;
       const mergedRouteId = `${prefix}${trip.routeId}`;
@@ -357,6 +444,8 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
       const entries = source.feed.stopTimes.get(tripId)?.flatMap((entry) => {
         const stopId = remappedStops.get(entry.stopId);
         return stopId ? [{ ...entry, stopId,
+          ...(entry.sourceStopId ? { sourceStopId: `${prefix}${entry.sourceStopId}` } : { sourceStopId: `${prefix}${entry.stopId}` }),
+          ...(entry.sourceParentStationId ? { sourceParentStationId: `${prefix}${entry.sourceParentStationId}` } : {}),
           ...(entry.sourceZoneId ? { sourceZoneId: `${prefix}${entry.sourceZoneId}` } : {}) }] : [];
       }) ?? [];
       if (entries.length >= 2) stopTimes.set(mergedTripId, entries);
@@ -371,7 +460,7 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
     stopTimesByStop.set(entry.stopId, matches);
   });
   const fetchedAt = new Date(Math.min(...ordered.map((source) => source.feed.fetchedAt.getTime())));
-  return { fetchedAt, timezone, routes, stops, trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions,
+  return { fetchedAt, timezone, routes, stops, trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions, transfers, pathways,
     providersByRoute, fareProducts, fareRules, faresV2Present };
 }
 
@@ -593,6 +682,8 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
             routeId: trip.routeId, routeName: route.name, headsign: trip.headsign, tripId,
             originStop: { id: originMatch.stop.id, name: from.sourceStopName ?? originMatch.stop.name, coordinates: originCoordinates },
             destinationStop: { id: destinationMatch.stop.id, name: to.sourceStopName ?? destinationMatch.stop.name, coordinates: destinationCoordinates },
+            originTransferNodeIds: [from.sourceStopId ?? from.stopId, ...(from.sourceParentStationId ? [from.sourceParentStationId] : [])],
+            destinationTransferNodeIds: [to.sourceStopId ?? to.stopId, ...(to.sourceParentStationId ? [to.sourceParentStationId] : [])],
             transportType: route.transportType,
             departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, originCoordinates)),
@@ -818,6 +909,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
               coordinates: from.sourceStopCoordinates ?? [originStop.lon, originStop.lat] },
             destinationStop: { id: destinationStop.id, name: to.sourceStopName ?? destinationStop.name,
               coordinates: to.sourceStopCoordinates ?? [destinationStop.lon, destinationStop.lat] },
+            originTransferNodeIds: [from.sourceStopId ?? from.stopId, ...(from.sourceParentStationId ? [from.sourceParentStationId] : [])],
+            destinationTransferNodeIds: [to.sourceStopId ?? to.stopId, ...(to.sourceParentStationId ? [to.sourceParentStationId] : [])],
             transportType,
             departureAt, arrivalAt, sourceFreshAt: provider?.fetchedAt ?? feed.fetchedAt,
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, from.sourceStopCoordinates ?? [originStop.lon, originStop.lat])),
@@ -843,6 +936,116 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   for (const choices of outgoing.values()) choices.sort((a, b) => a.departureAt.getTime() - b.departureAt.getTime() || a.arrivalAt.getTime() - b.arrivalAt.getTime());
 
   const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
+  type TransferMeasure = { walkingMeters: number; walkingSeconds: number; geometry: Array<[number, number]> | null; inSeat: boolean };
+  type TransferDecision = { feasible: boolean; measure: TransferMeasure; requiredSeconds: number; rule: GtfsTransferRule | null };
+
+  const transferRuleFor = (previous: GtfsDirectJourney, next: GtfsDirectJourney): { rule: GtfsTransferRule | null; ambiguous: boolean } => {
+    const matches = (feed.transfers ?? []).filter((rule) => previous.destinationTransferNodeIds.includes(rule.fromStopId)
+      && next.originTransferNodeIds.includes(rule.toStopId)
+      && (!rule.fromTripId || rule.fromTripId === previous.tripId)
+      && (!rule.toTripId || rule.toTripId === next.tripId)
+      && (!rule.fromRouteId || rule.fromRouteId === previous.routeId)
+      && (!rule.toRouteId || rule.toRouteId === next.routeId));
+    const specificity = (rule: GtfsTransferRule) => {
+      if (rule.fromTripId && rule.toTripId) return 6;
+      if ((rule.fromTripId && rule.toRouteId) || (rule.fromRouteId && rule.toTripId)) return 5;
+      if (rule.fromTripId || rule.toTripId) return 4;
+      if (rule.fromRouteId && rule.toRouteId) return 3;
+      if (rule.fromRouteId || rule.toRouteId) return 2;
+      return 1;
+    };
+    if (!matches.length) return { rule: null, ambiguous: false };
+    const max = Math.max(...matches.map(specificity));
+    const best = matches.filter((rule) => specificity(rule) === max);
+    const signatures = new Set(best.map((rule) => `${rule.transferType}:${rule.minTransferTimeSeconds ?? ''}`));
+    if (signatures.size > 1) return { rule: null, ambiguous: true };
+    return { rule: best[0], ambiguous: false };
+  };
+
+  const pathwayAdjacency = new Map<string, Array<{
+    to: string; seconds: number; meters: number; from: [number, number]; toCoordinates: [number, number];
+  }>>();
+  const pathwayNodes = new Set<string>();
+  const pathwayCoordinates = new Map<string, [number, number]>();
+  for (const pathway of feed.pathways ?? []) {
+    const meters = pathway.lengthMeters ?? distanceMeters(pathway.fromCoordinates, pathway.toCoordinates);
+    // GTFS traversal_time is authoritative when supplied. A walkway without
+    // traversal_time is an explicit geometry/length based estimate at the same
+    // conservative walking speed used for first/last-mile estimates.
+    const seconds = pathway.traversalTimeSeconds ?? walkingSeconds(meters);
+    const forward = pathwayAdjacency.get(pathway.fromStopId) ?? [];
+    forward.push({ to: pathway.toStopId, seconds, meters, from: pathway.fromCoordinates, toCoordinates: pathway.toCoordinates });
+    pathwayAdjacency.set(pathway.fromStopId, forward);
+    pathwayNodes.add(pathway.fromStopId); pathwayNodes.add(pathway.toStopId);
+    pathwayCoordinates.set(pathway.fromStopId, pathway.fromCoordinates);
+    pathwayCoordinates.set(pathway.toStopId, pathway.toCoordinates);
+    if (pathway.bidirectional) {
+      const reverse = pathwayAdjacency.get(pathway.toStopId) ?? [];
+      reverse.push({ to: pathway.fromStopId, seconds, meters, from: pathway.toCoordinates, toCoordinates: pathway.fromCoordinates });
+      pathwayAdjacency.set(pathway.toStopId, reverse);
+    }
+  }
+
+  const pathwayCache = new Map<string, TransferMeasure | null | false>();
+  const pathwayConnection = (fromStopId: string, toStopId: string): TransferMeasure | null | false => {
+    // false means this provider does not describe a path for these stops,
+    // null means both stops are in its pathway graph but no physical path joins them.
+    if (fromStopId === toStopId) return { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: false };
+    const key = `${fromStopId}\u0000${toStopId}`;
+    if (pathwayCache.has(key)) return pathwayCache.get(key)!;
+    if (!pathwayNodes.has(fromStopId) || !pathwayNodes.has(toStopId)) {
+      // Once either transfer endpoint is modeled by pathways.txt, the feed has
+      // opted into station-level topology. Do not fall back to straight-line
+      // proximity for a missing/disconnected endpoint.
+      const result = pathwayNodes.has(fromStopId) || pathwayNodes.has(toStopId) ? null : false;
+      pathwayCache.set(key, result);
+      return result;
+    }
+
+    const bestSeconds = new Map<string, number>([[fromStopId, 0]]);
+    const bestMeters = new Map<string, number>([[fromStopId, 0]]);
+    type PathwayEdge = { to: string; seconds: number; meters: number; from: [number, number]; toCoordinates: [number, number] };
+    const previous = new Map<string, { node: string; edge: PathwayEdge }>();
+    const queue: Array<{ node: string; seconds: number }> = [{ node: fromStopId, seconds: 0 }];
+    const visited = new Set<string>();
+    while (queue.length) {
+      queue.sort((a, b) => a.seconds - b.seconds || a.node.localeCompare(b.node));
+      const current = queue.shift()!;
+      if (visited.has(current.node)) continue;
+      visited.add(current.node);
+      if (current.node === toStopId) break;
+      for (const edge of pathwayAdjacency.get(current.node) ?? []) {
+        const nextSeconds = current.seconds + edge.seconds;
+        const nextMeters = (bestMeters.get(current.node) ?? 0) + edge.meters;
+        const priorSeconds = bestSeconds.get(edge.to);
+        const priorMeters = bestMeters.get(edge.to);
+        if (priorSeconds !== undefined && (priorSeconds < nextSeconds || (priorSeconds === nextSeconds && (priorMeters ?? Infinity) <= nextMeters))) continue;
+        bestSeconds.set(edge.to, nextSeconds); bestMeters.set(edge.to, nextMeters);
+        previous.set(edge.to, { node: current.node, edge });
+        queue.push({ node: edge.to, seconds: nextSeconds });
+      }
+    }
+    if (!bestSeconds.has(toStopId)) {
+      pathwayCache.set(key, null);
+      return null;
+    }
+    const path: Array<[number, number]> = [];
+    let cursor = toStopId;
+    while (cursor !== fromStopId) {
+      const step = previous.get(cursor);
+      if (!step) { pathwayCache.set(key, null); return null; }
+      path.push(step.edge.toCoordinates);
+      cursor = step.node;
+    }
+    const fromCoordinates = pathwayCoordinates.get(fromStopId);
+    if (fromCoordinates) path.push(fromCoordinates);
+    path.reverse();
+    const result: TransferMeasure = { walkingMeters: Math.round(bestMeters.get(toStopId) ?? 0),
+      walkingSeconds: Math.ceil(bestSeconds.get(toStopId) ?? 0), geometry: path, inSeat: false };
+    pathwayCache.set(key, result);
+    return result;
+  };
+
   const transferBufferSeconds = (previous: GtfsDirectJourney, next: GtfsDirectJourney) => {
     const isLongDistance = (segment: GtfsDirectJourney) => ['train', 'intercity_bus'].includes(segment.transportType);
     if (isLongDistance(previous) || isLongDistance(next)) return MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS;
@@ -851,6 +1054,42 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     }
     return DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS;
   };
+  const transferDecision = (previous: GtfsDirectJourney, next: GtfsDirectJourney): TransferDecision => {
+    const { rule, ambiguous } = transferRuleFor(previous, next);
+    if (ambiguous || rule?.transferType === 3) {
+      return { feasible: false, measure: { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: false }, requiredSeconds: Infinity, rule };
+    }
+    const inSeat = rule?.transferType === 4;
+    const fromPathwayNodes = previous.destinationTransferNodeIds.filter((id) => pathwayNodes.has(id));
+    const toPathwayNodes = next.originTransferNodeIds.filter((id) => pathwayNodes.has(id));
+    const candidatePaths: Array<TransferMeasure | null | false> = previous.providerId === next.providerId && (fromPathwayNodes.length || toPathwayNodes.length)
+      ? fromPathwayNodes.length && toPathwayNodes.length
+        ? fromPathwayNodes.flatMap((fromId) => toPathwayNodes.map((toId) => pathwayConnection(fromId, toId)))
+        : [null]
+      : [false];
+    const routedPath = candidatePaths.filter((candidate): candidate is TransferMeasure => candidate !== null && typeof candidate === 'object')
+      .sort((a, b) => a.walkingSeconds - b.walkingSeconds || a.walkingMeters - b.walkingMeters)[0]
+      ?? (candidatePaths.includes(null) ? null : false);
+    if (routedPath === null) {
+      return { feasible: false, measure: { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: false }, requiredSeconds: Infinity, rule };
+    }
+    const meters = inSeat ? 0 : typeof routedPath === 'object'
+      ? routedPath.walkingMeters : Math.round(distanceMeters(previous.destinationStop.coordinates, next.originStop.coordinates));
+    const seconds = inSeat ? 0 : typeof routedPath === 'object'
+      ? routedPath.walkingSeconds : walkingSeconds(meters);
+    const measure: TransferMeasure = inSeat ? { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: true }
+      : typeof routedPath === 'object' ? routedPath : { walkingMeters: meters, walkingSeconds: seconds, geometry: null, inSeat: false };
+    if (meters > transferRadius) return { feasible: false, measure, requiredSeconds: Infinity, rule };
+    const modeBuffer = Math.max(minimumTransferBufferSeconds, transferBufferSeconds(previous, next));
+    // GTFS min_transfer_time covers the complete connection, including the
+    // walk and its variance buffer; do not add it twice to the walking time.
+    const requiredSeconds = inSeat ? 0 : rule?.transferType === 2 && rule.minTransferTimeSeconds !== undefined
+      ? Math.max(modeBuffer + seconds, rule.minTransferTimeSeconds)
+      : modeBuffer + seconds;
+    const availableSeconds = Math.floor((next.departureAt.getTime() - previous.arrivalAt.getTime()) / 1000);
+    return { feasible: availableSeconds >= requiredSeconds, measure, requiredSeconds, rule };
+  };
+
   const results = new Map<string, GtfsItinerary>();
   const maxTransitLegs = maximumTransfers + 1;
   // Most city-feed stops cannot lead to this destination. Exclude those dead
@@ -867,8 +1106,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const last = path.at(-1)!;
     const accessMeters = first.distanceToOriginStopMeters;
     const egressMeters = last.distanceFromDestinationStopMeters;
-    const transferWalkingMeters = path.slice(1).map((segment, index) =>
-      Math.round(distanceMeters(path[index].destinationStop.coordinates, segment.originStop.coordinates)));
+    const transferDecisions = path.slice(1).map((segment, index) => transferDecision(path[index], segment));
+    const transferWalkingMeters = transferDecisions.map(({ measure }) => measure.walkingMeters);
+    const transferWalkingSeconds = transferDecisions.map(({ measure }) => measure.walkingSeconds);
+    const transferWalkingGeometries = transferDecisions.map(({ measure }) => measure.geometry);
     // Search time means when the passenger is ready to start, so initial access
     // walking and waiting for the first service are part of the door-to-door
     // duration. Ranking only the interval between the first and last vehicle
@@ -881,7 +1122,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const initialWaitSeconds = Math.max(0, Math.ceil((first.departureAt.getTime()
       - departureAt.getTime() - walkingSeconds(accessMeters) * 1000) / 1000));
     const transferWaitingSeconds = path.slice(1).reduce((total, segment, index) => {
-      const transferWalkSeconds = walkingSeconds(transferWalkingMeters[index] ?? 0);
+      const transferWalkSeconds = transferWalkingSeconds[index] ?? 0;
       const readyAt = path[index].arrivalAt.getTime() + transferWalkSeconds * 1000;
       return total + Math.max(0, Math.ceil((segment.departureAt.getTime() - readyAt) / 1000));
     }, 0);
@@ -891,8 +1132,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       providerName: [...new Set(path.map((segment) => segment.providerName))].join(' + '),
       segments: path, departureAt, arrivalAt, durationSeconds,
       waitingSeconds: initialWaitSeconds + transferWaitingSeconds,
-      transfers: Math.max(0, path.length - 1), walkingMeters: accessMeters + egressMeters + transferWalkingMeters.reduce((sum, meters) => sum + meters, 0),
-      transferWalkingMeters,
+      transfers: transferDecisions.filter(({ measure }) => !measure.inSeat).length,
+      walkingMeters: accessMeters + egressMeters + transferWalkingMeters.reduce((sum, meters) => sum + meters, 0),
+      transferWalkingMeters, transferWalkingSeconds, transferWalkingGeometries,
       fare: calculateGtfsItineraryFare({ products: feed.fareProducts ?? new Map(), rules: feed.fareRules ?? new Map(), faresV2Present: feed.faresV2Present === true }, path.map((segment) => ({
         providerId: segment.providerId, routeId: segment.routeId,
         ...(feed.routes.get(segment.routeId)?.agencyId ? { agencyId: feed.routes.get(segment.routeId)!.agencyId } : {}),
@@ -924,7 +1166,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     let low = 0, high = choices.length;
     while (low < high) {
       const middle = (low + high) >>> 1;
-      if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime() + minimumTransferBufferSeconds * 1000) low = middle + 1;
+      if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) low = middle + 1;
       else high = middle;
     }
     for (let index = low; index < choices.length; index++) {
@@ -933,12 +1175,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       if (next.departureAt.getTime() > latestNext) break;
       if (!reachableWithin[remainingLegs - 1].has(next.destinationStop.id)) continue;
       if (previousIds.has(next.tripId) || visitedStops.has(next.destinationStop.id)) continue;
-      const transferWalkingMeters = Math.round(distanceMeters(last.destinationStop.coordinates, next.originStop.coordinates));
-      if (transferWalkingMeters > transferRadius) continue;
-      const transferWalkSeconds = walkingSeconds(transferWalkingMeters);
-      const waitSeconds = (next.departureAt.getTime() - last.arrivalAt.getTime()) / 1000;
-      const requiredBufferSeconds = Math.max(minimumTransferBufferSeconds, transferBufferSeconds(last, next)) + transferWalkSeconds;
-      if (waitSeconds < requiredBufferSeconds) continue;
+      if (!transferDecision(last, next).feasible) continue;
       walk([...path, next]);
     }
   };
@@ -979,7 +1216,7 @@ export function cachedGtfsTimetable(providerId: string, url: string, now = Date.
   if (hit && now - hit.cachedAt < CACHE_TTL_MS) return hit.promise;
   const promise = (async () => {
     const { data } = await fetchBinary(url, MAX_FEED_BYTES, 30_000);
-    const unzipped = unzipSync(data, { filter: (file) => /(^|\/)(agency|routes|stops|trips|stop_times|calendar|calendar_dates|shapes|fare_attributes|fare_rules|fare_media|fare_products|fare_leg_rules|fare_leg_join_rules|fare_transfer_rules|rider_categories|timeframes|networks|route_networks|areas|stop_areas)\.txt$/.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
+    const unzipped = unzipSync(data, { filter: (file) => /(^|\/)(agency|routes|stops|trips|stop_times|calendar|calendar_dates|shapes|transfers|pathways|levels|fare_attributes|fare_rules|fare_media|fare_products|fare_leg_rules|fare_leg_join_rules|fare_transfer_rules|rider_categories|timeframes|networks|route_networks|areas|stop_areas)\.txt$/.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
     const files = Object.fromEntries(Object.entries(unzipped).map(([name, content]) => [name.split('/').pop() as string, content]));
     return parseGtfsTimetable(files);
   })();
