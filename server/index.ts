@@ -19,7 +19,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
-import { applyRoutedWalkingPaths, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg } from './journey/liveVehicles';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
@@ -2193,6 +2193,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
   );
   const walkingRoutingUrl = process.env.WALKING_ROUTING_URL?.trim();
+  const walkingRouteBudget = createWalkingRouteBudget();
   const providerErrors: string[] = [];
   const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
     `SELECT id,name,city,feed_url,realtime_url,last_sync_at,last_report FROM mobility_providers
@@ -2319,13 +2320,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const previous = itinerary.segments[index];
         const next = itinerary.segments[index + 1];
         if (!previous || !next || itinerary.transferInSeat[index] || meters <= 0 || itinerary.transferWalkingGeometries[index]) return null;
-        return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates, walkingRoutingUrl);
+        return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates, walkingRoutingUrl, walkingRouteBudget);
       });
       const [access, egress, ...transfers] = await Promise.all([
         first.distanceToOriginStopMeters > 0
-          ? routePedestrianPath(search.origin.coordinates, first.originStop.coordinates, walkingRoutingUrl) : null,
+          ? routePedestrianPath(search.origin.coordinates, first.originStop.coordinates, walkingRoutingUrl, walkingRouteBudget) : null,
         last.distanceFromDestinationStopMeters > 0
-          ? routePedestrianPath(last.destinationStop.coordinates, search.destination.coordinates, walkingRoutingUrl) : null,
+          ? routePedestrianPath(last.destinationStop.coordinates, search.destination.coordinates, walkingRoutingUrl, walkingRouteBudget) : null,
         ...transferRequests,
       ]);
       const missingRequiredPath = (first.distanceToOriginStopMeters > 0 && !access)
@@ -2355,6 +2356,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
     if (pedestrianCandidatesRejected) {
       providerErrors.push('Частину варіантів відхилено: фактичний час або відстань пішохідного шляху не дозволяє здійснити маршрут.');
+    }
+    if (walkingRouteBudget.exhausted) {
+      candidateGenerationTruncated = true;
+      providerErrors.push(`Пішохідний маршрутизатор обмежив пошук ${walkingRouteBudget.limit} маршрутами; частину альтернатив не перевірено.`);
     }
   }
   scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());

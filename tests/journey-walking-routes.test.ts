@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
-import { applyRoutedWalkingPaths, routePedestrianPath, type WalkingRoutePath } from '../server/journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutePath } from '../server/journey/walkingRoutes';
 
 const start = Date.parse('2026-10-01T08:00:00Z');
 const at = (seconds: number) => new Date(start + seconds * 1000);
@@ -88,4 +88,51 @@ test('uses the configured OSRM foot profile and preserves its routed geometry', 
   assert.deepEqual(routed, {
     distanceMeters: 1481, durationSeconds: 501, geometry: [[24, 49], [24.01, 49.01]],
   });
+});
+
+test('caps external foot-route requests per search without caching a budget miss', async (t) => {
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount++;
+    return new Response(JSON.stringify({
+      code: 'Ok', routes: [{ distance: 100, duration: 80, geometry: { coordinates: [[24, 49], [24.01, 49.01]] }, legs: [] }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const budget = createWalkingRouteBudget(1);
+  const endpoint = 'https://walking-budget.example/route/v1/foot';
+  assert.ok(await routePedestrianPath([25, 49], [25.01, 49.01], endpoint, budget));
+  assert.equal(await routePedestrianPath([25.02, 49], [25.03, 49.01], endpoint, budget), null);
+  assert.equal(budget.remaining, 0);
+  assert.equal(budget.exhausted, true);
+  assert.equal(fetchCount, 1);
+});
+
+test('bounds concurrent provider work and drops excess queued walking paths', async (t) => {
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+  let active = 0;
+  let peakActive = 0;
+  globalThis.fetch = async () => {
+    fetchCount++;
+    active++;
+    peakActive = Math.max(peakActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    active--;
+    return new Response(JSON.stringify({
+      code: 'Ok', routes: [{ distance: 100, duration: 80, geometry: { coordinates: [[24, 49], [24.01, 49.01]] }, legs: [] }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const endpoint = 'https://walking-capacity.example/route/v1/foot';
+  const attempts = Array.from({ length: 40 }, (_, index) => routePedestrianPath(
+    [26 + index / 1000, 49], [26 + index / 1000, 49.01], endpoint,
+  ));
+  const routes = await Promise.all(attempts);
+  assert.equal(routes.filter(Boolean).length, 36);
+  assert.equal(fetchCount, 36);
+  assert.equal(peakActive, 12);
 });

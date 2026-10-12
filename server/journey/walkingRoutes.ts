@@ -16,28 +16,42 @@ export type WalkingRoutedItinerary = GtfsItinerary & {
   walkingRoutesVerified: true;
 };
 
-const WALKING_ROUTE_TIMEOUT_MS = 3500;
+const WALKING_ROUTE_TIMEOUT_MS = 1500;
 const WALKING_ROUTE_CACHE_TTL_MS = 5 * 60_000;
 const WALKING_ROUTE_FAILURE_TTL_MS = 15_000;
 const MAX_WALKING_ROUTE_CACHE_ENTRIES = 20_000;
-const MAX_CONCURRENT_WALKING_ROUTES = 8;
+const MAX_CONCURRENT_WALKING_ROUTES = 12;
+const MAX_QUEUED_WALKING_ROUTES = 24;
+export const MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH = 32;
 
 type CachedRoute = { expiresAt: number; value: Promise<WalkingRoutePath | null> };
 const routeCache = new Map<string, CachedRoute>();
 let activeRouteRequests = 0;
 const waitingRouteRequests: Array<() => void> = [];
 
+export interface WalkingRouteBudget {
+  readonly limit: number;
+  remaining: number;
+  exhausted: boolean;
+}
+
+export function createWalkingRouteBudget(limit = MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH): WalkingRouteBudget {
+  const boundedLimit = Number.isSafeInteger(limit) ? Math.max(0, Math.min(limit, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH)) : 0;
+  return { limit: boundedLimit, remaining: boundedLimit, exhausted: false };
+}
+
 function coordinateKey(point: [number, number]): string {
   return `${point[0].toFixed(6)},${point[1].toFixed(6)}`;
 }
 
-async function withWalkingRouteSlot<T>(operation: () => Promise<T>): Promise<T> {
+async function withWalkingRouteSlot<T>(operation: () => Promise<T>): Promise<{ acquired: boolean; value: T | null }> {
   if (activeRouteRequests >= MAX_CONCURRENT_WALKING_ROUTES) {
+    if (waitingRouteRequests.length >= MAX_QUEUED_WALKING_ROUTES) return { acquired: false, value: null };
     await new Promise<void>((resolve) => waitingRouteRequests.push(resolve));
   }
   activeRouteRequests++;
   try {
-    return await operation();
+    return { acquired: true, value: await operation() };
   } finally {
     activeRouteRequests--;
     waitingRouteRequests.shift()?.();
@@ -53,6 +67,7 @@ export async function routePedestrianPath(
   from: [number, number],
   to: [number, number],
   endpoint = process.env.WALKING_ROUTING_URL,
+  budget?: WalkingRouteBudget,
 ): Promise<WalkingRoutePath | null> {
   if (!endpoint) return null;
   const key = `${endpoint}\u0000${coordinateKey(from)}\u0000${coordinateKey(to)}`;
@@ -60,8 +75,15 @@ export async function routePedestrianPath(
   const cached = routeCache.get(key);
   if (cached && cached.expiresAt > now) return cached.value;
   if (cached) routeCache.delete(key);
+  if (budget) {
+    if (budget.remaining <= 0) {
+      budget.exhausted = true;
+      return null;
+    }
+    budget.remaining--;
+  }
 
-  const value = withWalkingRouteSlot(async () => {
+  const attempt = withWalkingRouteSlot(async () => {
     try {
       const route = await fetchOsrmRoute([from, to], endpoint, WALKING_ROUTE_TIMEOUT_MS);
       return {
@@ -73,6 +95,7 @@ export async function routePedestrianPath(
       return null;
     }
   });
+  const value = attempt.then((result) => result.acquired ? result.value : null);
   routeCache.set(key, { expiresAt: now + WALKING_ROUTE_CACHE_TTL_MS, value });
   if (routeCache.size > MAX_WALKING_ROUTE_CACHE_ENTRIES) {
     for (const [oldKey, entry] of routeCache) {
@@ -80,9 +103,13 @@ export async function routePedestrianPath(
       else break;
     }
   }
-  const result = await value;
-  if (!result) routeCache.set(key, { expiresAt: Date.now() + WALKING_ROUTE_FAILURE_TTL_MS, value: Promise.resolve(null) });
-  return result;
+  const result = await attempt;
+  if (!result.acquired) {
+    if (routeCache.get(key)?.value === value) routeCache.delete(key);
+    return null;
+  }
+  if (!result.value) routeCache.set(key, { expiresAt: Date.now() + WALKING_ROUTE_FAILURE_TTL_MS, value: Promise.resolve(null) });
+  return result.value;
 }
 
 /**
