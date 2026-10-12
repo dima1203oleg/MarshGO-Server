@@ -624,7 +624,7 @@ app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) 
       stopId: scopedStopId, routeId: arrival.routeId, mode: arrival.transportType,
       tripId: arrival.tripId, scheduledArrival: arrival.scheduledArrivalAt.toISOString(),
       predictedArrival: arrival.predictedArrivalAt.toISOString(), arrivalSource: arrival.source,
-      confidence: arrival.confidence, ...(arrival.realtimeUpdatedAt ? { observedAt: arrival.realtimeUpdatedAt.toISOString() } : {}),
+      confidence: arrival.confidence, ...(arrival.realtimeUpdatedAt ? { realtimeUpdatedAt: arrival.realtimeUpdatedAt.toISOString() } : {}),
       isRealtime: live, etaSeconds: arrival.etaSeconds,
       displayLabel: live ? `${routeName} — орієнтовно ${etaMinutes} хв · GTFS-RT` : `${routeName} — ${etaMinutes} хв за розкладом`,
     };
