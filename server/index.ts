@@ -19,6 +19,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
+import { isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg } from './journey/liveVehicles';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
@@ -2065,6 +2066,67 @@ app.get('/api/v1/journeys/:id', requireAuth, asyncHandler(async (req, res) => {
   res.json({ data: rows[0] });
 }));
 
+app.get('/api/v1/journeys/:id/live', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid Journey ID', 'invalid_journey_id');
+  }
+  const { rows } = await pool.query<{
+    journey_id: string; leg_id: string; mode: string; provider_id: string | null; vehicle_position_url: string | null;
+    metadata: Record<string, unknown>; scheduled_departure_at: Date | null; scheduled_arrival_at: Date | null;
+  }>(
+    `SELECT j.id AS journey_id,l.id AS leg_id,l.mode,l.provider_id,
+       CASE WHEN p.status='enabled' AND p.health IN ('healthy','degraded') THEN p.vehicle_position_url ELSE NULL END AS vehicle_position_url,
+       l.metadata,l.scheduled_departure_at,l.scheduled_arrival_at
+     FROM journeys j JOIN journey_legs l ON l.journey_id=j.id
+     LEFT JOIN mobility_providers p ON p.id=l.provider_id
+     WHERE j.id=$1 AND j.user_id=$2
+       AND l.mode IN ('BUS','MINIBUS','RAIL','TRAM','TROLLEYBUS','METRO','FERRY','FUNICULAR')
+     ORDER BY l.ordinal`, [req.params.id, req.userId],
+  );
+  if (rows.length === 0) {
+    const journey = await pool.query('SELECT 1 FROM journeys WHERE id=$1 AND user_id=$2', [req.params.id, req.userId]);
+    if (!journey.rows[0]) throw new ApiError(404, 'Journey not found');
+  }
+
+  const now = Date.now();
+  const providerFeeds = new Map<string, Promise<{ ok: true; vehicles: Awaited<ReturnType<typeof cachedVehicles>> } | { ok: false }>>();
+  for (const leg of rows) {
+    if (!leg.provider_id || !leg.vehicle_position_url || providerFeeds.has(leg.provider_id)
+      || !isJourneyLegGpsWindowOpen(leg.scheduled_departure_at, leg.scheduled_arrival_at, now)) continue;
+    providerFeeds.set(leg.provider_id, cachedVehicles(leg.provider_id, 'gtfs_rt', leg.vehicle_position_url, new Map())
+      .then((vehicles) => ({ ok: true as const, vehicles }), () => ({ ok: false as const })));
+  }
+
+  const segments = await Promise.all(rows.map(async (leg) => {
+    const identity = {
+      providerId: leg.provider_id,
+      tripId: typeof leg.metadata.tripId === 'string' ? leg.metadata.tripId : null,
+      routeId: typeof leg.metadata.routeId === 'string' ? leg.metadata.routeId : null,
+      serviceDate: typeof leg.metadata.serviceDate === 'string' ? leg.metadata.serviceDate : null,
+      scheduledDepartureAt: leg.scheduled_departure_at,
+      scheduledArrivalAt: leg.scheduled_arrival_at,
+    };
+    if (!leg.vehicle_position_url || !leg.provider_id) return { legId: leg.leg_id, status: 'SCHEDULED' as const };
+    if (!isJourneyLegGpsWindowOpen(leg.scheduled_departure_at, leg.scheduled_arrival_at, now)) return { legId: leg.leg_id, status: 'SCHEDULED' as const };
+    const feed = await providerFeeds.get(leg.provider_id)!;
+    if (!feed.ok) return { legId: leg.leg_id, status: 'UNVERIFIED' as const, reason: 'provider_unavailable' as const };
+    const vehicle = matchLiveVehicleForJourneyLeg(identity, feed.vehicles, now);
+    if (!vehicle) return { legId: leg.leg_id, status: 'UNVERIFIED' as const, reason: 'no_fresh_matching_vehicle' as const };
+    return {
+      legId: leg.leg_id,
+      status: 'LIVE' as const,
+      vehicle: {
+        coordinates: [vehicle.lon, vehicle.lat] as [number, number],
+        bearing: vehicle.bearing,
+        speed: vehicle.speed,
+        route: typeof leg.metadata.routeName === 'string' ? leg.metadata.routeName : vehicle.route,
+        updatedAt: vehicle.timestamp!.toISOString(),
+      },
+    };
+  }));
+  res.json({ data: { journeyId: req.params.id, checkedAt: new Date(now).toISOString(), segments } });
+}));
+
 app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) => {
   let search;
   try {
@@ -2445,7 +2507,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
             segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
           JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
-              headsign: segment.headsign, tripId: segment.tripId, fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+              headsign: segment.headsign, tripId: segment.tripId, serviceDate: segment.serviceDate,
+              fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
               ...(itinerary.fare?.allocations[segmentIndex] ? { fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
                 fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
                 fareSource: itinerary.fare.source } : {}),

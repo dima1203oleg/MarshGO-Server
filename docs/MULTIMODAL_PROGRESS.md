@@ -1,5 +1,15 @@
 # MARSHGO Multimodal Progress
 
+## Fresh GTFS VehiclePosition journey display
+
+**Status:** IMPLEMENTED, subject to provider timestamp coverage.
+
+- Journey legs now persist the GTFS `routeId`, `tripId`, and service date used by the scheduled itinerary. The mobility catalog stores a distinct VehiclePositions URL for the Lviv static provider.
+- Authenticated `GET /api/v1/journeys/:id/live` checks Journey ownership and returns a map position only when the vehicle has an entity timestamp no older than 90 seconds and matches the exact provider, route, trip, and service date within the scheduled service window. It reports scheduled/unverified status instead of fabricating LIVE state.
+- The Site route map polls only near scheduled transit and renders a separate public-transport GPS marker; it does not reuse the user's own navigation puck.
+- Current live probe of the catalogued Lviv VehiclePositions feed returned 626 positions, of which 593 had fresh per-vehicle timestamps and 587 had both trip and route identity. The GTFS-Realtime decoder represents its uint64 timestamps as protobuf `Long`; the parser now converts that representation instead of silently discarding it. This feed omits `startDate`, so matching additionally requires the persisted trip to be inside its scheduled service window.
+- Verification: Server typecheck/lint passed; 142 tests passed and one opt-in integration test skipped. Site typecheck/lint/build passed; 55 tests passed. Database-backed migration/API integration was not run in this environment.
+
 ## Phase A — Journey domain foundation
 
 **Status:** PARTIAL.

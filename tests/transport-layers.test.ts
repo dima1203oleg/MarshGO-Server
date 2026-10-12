@@ -87,12 +87,13 @@ describe('realtime vehicle freshness', () => {
     assert.equal(parseVehicleTimestamp('1700000000')?.getTime(), 1_700_000_000_000);
     assert.equal(parseVehicleTimestamp('1700000000000')?.getTime(), 1_700_000_000_000);
     assert.equal(parseVehicleTimestamp('2026-10-08T12:00:00.000Z')?.toISOString(), '2026-10-08T12:00:00.000Z');
+    assert.equal(parseVehicleTimestamp({ toNumber: () => 1_700_000_000 })?.getTime(), 1_700_000_000_000);
     assert.equal(parseVehicleTimestamp('not a timestamp'), null);
   });
   it('hides missing, stale, or implausibly future timestamps', () => {
     const now = Date.parse('2026-10-08T12:00:00.000Z');
-    assert.equal(isFreshVehicleTimestamp(new Date(now - 120_000), now), true);
-    assert.equal(isFreshVehicleTimestamp(new Date(now - 120_001), now), false);
+    assert.equal(isFreshVehicleTimestamp(new Date(now - 90_000), now), true);
+    assert.equal(isFreshVehicleTimestamp(new Date(now - 90_001), now), false);
     assert.equal(isFreshVehicleTimestamp(new Date(now + 30_000), now), true);
     assert.equal(isFreshVehicleTimestamp(new Date(now + 30_001), now), false);
     assert.equal(isFreshVehicleTimestamp(null, now), false);

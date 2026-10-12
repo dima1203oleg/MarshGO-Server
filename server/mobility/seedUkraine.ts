@@ -9,11 +9,11 @@ async function main() {
   try {
     for (const entry of [...ukraineCatalog, ...ukraineCatalogWave2, ...kyivOpenDataCatalog]) {
       const { rows } = await pool.query<{ id: string; status: string }>(
-        `INSERT INTO mobility_providers(name,city,provider_type,source_type,feed_url,realtime_url,priority,access,license,update_frequency,coverage,source_ref,country,commercial_use,attribution_required,discovery_status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'UA',$13,$14,$15)
-         ON CONFLICT (name,city) DO UPDATE SET feed_url=EXCLUDED.feed_url,realtime_url=COALESCE(EXCLUDED.realtime_url,mobility_providers.realtime_url),access=EXCLUDED.access,license=EXCLUDED.license,update_frequency=EXCLUDED.update_frequency,coverage=EXCLUDED.coverage,source_ref=EXCLUDED.source_ref,commercial_use=EXCLUDED.commercial_use,attribution_required=EXCLUDED.attribution_required,discovery_status=EXCLUDED.discovery_status,updated_at=now()
+        `INSERT INTO mobility_providers(name,city,provider_type,source_type,feed_url,realtime_url,vehicle_position_url,priority,access,license,update_frequency,coverage,source_ref,country,commercial_use,attribution_required,discovery_status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'UA',$14,$15,$16)
+         ON CONFLICT (name,city) DO UPDATE SET feed_url=EXCLUDED.feed_url,realtime_url=COALESCE(EXCLUDED.realtime_url,mobility_providers.realtime_url),vehicle_position_url=COALESCE(EXCLUDED.vehicle_position_url,mobility_providers.vehicle_position_url),access=EXCLUDED.access,license=EXCLUDED.license,update_frequency=EXCLUDED.update_frequency,coverage=EXCLUDED.coverage,source_ref=EXCLUDED.source_ref,commercial_use=EXCLUDED.commercial_use,attribution_required=EXCLUDED.attribution_required,discovery_status=EXCLUDED.discovery_status,updated_at=now()
          RETURNING id,status`,
-        [entry.name, entry.city, entry.providerType, entry.sourceType, entry.feedUrl, entry.realtimeUrl ?? null, entry.priority ?? 100, entry.access, entry.license ?? null, entry.updateFrequency ?? null, entry.coverage, entry.sourceRef,
+        [entry.name, entry.city, entry.providerType, entry.sourceType, entry.feedUrl, entry.realtimeUrl ?? null, entry.vehiclePositionUrl ?? null, entry.priority ?? 100, entry.access, entry.license ?? null, entry.updateFrequency ?? null, entry.coverage, entry.sourceRef,
           entry.access === 'open' && Boolean(entry.license), entry.access === 'open' && Boolean(entry.license), entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP' : entry.access === 'open' && Boolean(entry.license) ? 'VALIDATED' : 'DISCOVERED'],
       );
       const provider = rows[0];

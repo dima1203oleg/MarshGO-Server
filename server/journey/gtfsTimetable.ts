@@ -88,6 +88,8 @@ export interface GtfsDirectJourney {
   originTransferNodeIds: string[];
   destinationTransferNodeIds: string[];
   transportType: GtfsTransportType;
+  /** GTFS service date (YYYYMMDD) identifies which daily instance of tripId is used. */
+  serviceDate: string;
   /** Original provider timetable values, preserved when realtime predictions are available. */
   scheduledDepartureAt: Date;
   scheduledArrivalAt: Date;
@@ -737,7 +739,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
             destinationStop: { id: destinationMatch.stop.id, name: to.sourceStopName ?? destinationMatch.stop.name, coordinates: destinationCoordinates },
             originTransferNodeIds: [from.sourceStopId ?? from.stopId, ...(from.sourceParentStationId ? [from.sourceParentStationId] : [])],
             destinationTransferNodeIds: [to.sourceStopId ?? to.stopId, ...(to.sourceParentStationId ? [to.sourceParentStationId] : [])],
-            transportType: route.transportType,
+            transportType: route.transportType, serviceDate,
             scheduledDepartureAt: departureAt, scheduledArrivalAt: arrivalAt,
             departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, originCoordinates)),
@@ -973,7 +975,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
               coordinates: to.sourceStopCoordinates ?? [destinationStop.lon, destinationStop.lat] },
             originTransferNodeIds: [from.sourceStopId ?? from.stopId, ...(from.sourceParentStationId ? [from.sourceParentStationId] : [])],
             destinationTransferNodeIds: [to.sourceStopId ?? to.stopId, ...(to.sourceParentStationId ? [to.sourceParentStationId] : [])],
-            transportType, scheduledDepartureAt, scheduledArrivalAt,
+            transportType, serviceDate, scheduledDepartureAt, scheduledArrivalAt,
             departureAt, arrivalAt, sourceFreshAt: provider?.fetchedAt ?? feed.fetchedAt,
             ...(dated?.update && dated.stops.slice(fromIndex, toIndex + 1).some((stop) => stop.updated)
               ? { realtimeUpdatedAt: dated.update.updatedAt } : {}),

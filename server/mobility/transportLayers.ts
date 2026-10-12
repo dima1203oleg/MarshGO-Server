@@ -218,7 +218,12 @@ export function intersects(a: Bbox, b: Bbox): boolean { return a[0] <= b[2] && a
 /** A feed's route is drawn when any of its points is inside the viewport (keeps payloads small without clipping lines). */
 export function routeInBbox(route: NetworkRoute, bbox: Bbox): boolean { return route.coordinates.some(([lon, lat]) => inBbox(bbox, lon, lat)); }
 
-export interface LiveVehicle { id: string; lon: number; lat: number; type: LineType | 'other'; route: string; bearing: number | null; speed: number | null; timestamp: Date | null; providerId: string }
+export interface LiveVehicle {
+  id: string; lon: number; lat: number; type: LineType | 'other'; route: string;
+  bearing: number | null; speed: number | null; timestamp: Date | null; providerId: string;
+  /** Present only for GTFS-Realtime VehiclePositions with an identified scheduled trip. */
+  tripId?: string; routeId?: string; startDate?: string;
+}
 
 export function parseVehicleTimestamp(value: unknown): Date | null {
   let milliseconds: number;
@@ -226,6 +231,10 @@ export function parseVehicleTimestamp(value: unknown): Date | null {
   else if (typeof value === 'string' && value.trim()) {
     const numeric = Number(value);
     milliseconds = Number.isFinite(numeric) ? (numeric < 1_000_000_000_000 ? numeric * 1000 : numeric) : Date.parse(value);
+  } else if (value && typeof value === 'object' && 'toNumber' in value && typeof value.toNumber === 'function') {
+    const numeric = value.toNumber();
+    if (!Number.isFinite(numeric)) return null;
+    milliseconds = numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
   } else return null;
   const date = new Date(milliseconds);
   return Number.isFinite(date.getTime()) ? date : null;
@@ -234,7 +243,7 @@ export function parseVehicleTimestamp(value: unknown): Date | null {
 export function isFreshVehicleTimestamp(timestamp: Date | null, now = Date.now()): boolean {
   if (!timestamp) return false;
   const age = now - timestamp.getTime();
-  return age >= -30_000 && age <= 120_000;
+  return age >= -30_000 && age <= 90_000;
 }
 
 const VEHICLE_TTL_MS = 10_000;
@@ -251,11 +260,14 @@ async function loadVehicles(providerId: string, sourceType: string, url: string,
       if (!position || !Number.isFinite(position.latitude) || !Number.isFinite(position.longitude)) continue;
       if (Math.abs(position.latitude) > 90 || Math.abs(position.longitude) > 180 || (position.latitude === 0 && position.longitude === 0)) continue;
       const routeId = entity.vehicle?.trip?.routeId ?? '';
+      const tripId = entity.vehicle?.trip?.tripId?.trim();
+      const startDate = entity.vehicle?.trip?.startDate;
       const known = routeNames.get(routeId);
       const speed = Number(position.speed);
       out.push({ id: `${providerId}:${entity.id}`, lon: position.longitude, lat: position.latitude, type: known?.type ?? 'other', route: known?.name ?? routeId,
         bearing: Number.isFinite(position.bearing) ? Number(position.bearing) : null, speed: Number.isFinite(speed) && speed >= 0 ? speed : null,
-        timestamp: parseVehicleTimestamp(entity.vehicle?.timestamp), providerId });
+        timestamp: parseVehicleTimestamp(entity.vehicle?.timestamp), providerId,
+        ...(tripId ? { tripId } : {}), ...(routeId ? { routeId } : {}), ...(startDate && /^\d{8}$/.test(startDate) ? { startDate } : {}) });
     }
     return out;
   }
