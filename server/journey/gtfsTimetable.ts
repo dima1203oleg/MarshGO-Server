@@ -666,6 +666,65 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   originStops.forEach(({ stop }) => corridorStops.add(stop.id));
   destinationStops.forEach(({ stop }) => corridorStops.add(stop.id));
 
+  // For an intercity query, city feeds should contribute first/last-mile links
+  // and links around intercity stations. Scanning every urban trip inside a
+  // 10+ km corridor creates millions of irrelevant stop-pair edges (and can
+  // exhaust the API heap), even when the route only touches that city at one
+  // endpoint. Keep the urban graph around endpoints and actual rail/intercity
+  // bus stops, while national feeds continue to use the full route corridor.
+  const intercitySearch = routeDistance > 30_000;
+  const localCityCatchmentStops = new Set<string>([
+    ...originStops.map(({ stop }) => stop.id),
+    ...destinationStops.map(({ stop }) => stop.id),
+  ]);
+  if (intercitySearch) {
+    const anchorPoints = new Map<string, [number, number]>();
+    for (const [tripId, trip] of feed.trips) {
+      const route = feed.routes.get(trip.routeId);
+      const providerCity = feed.providersByRoute?.get(trip.routeId)?.city ?? input.providerCity;
+      const transportType = route?.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route?.transportType;
+      if (!transportType || !['train', 'suburban_train', 'intercity_bus'].includes(transportType)) continue;
+      for (const stopTime of feed.stopTimes.get(tripId) ?? []) {
+        if (!corridorStops.has(stopTime.stopId)) continue;
+        const stop = feed.stops.get(stopTime.stopId);
+        const coordinates = stopTime.sourceStopCoordinates ?? (stop ? [stop.lon, stop.lat] as [number, number] : undefined);
+        if (coordinates) anchorPoints.set(stopTime.stopId, coordinates);
+      }
+    }
+
+    const anchorCellSizeMeters = 2_500;
+    const anchorCells = new Map<string, Array<[number, number]>>();
+    for (const point of anchorPoints.values()) {
+      const [x, y] = toXY(point);
+      const key = `${Math.floor(x / anchorCellSizeMeters)}:${Math.floor(y / anchorCellSizeMeters)}`;
+      const points = anchorCells.get(key) ?? [];
+      points.push(point);
+      anchorCells.set(key, points);
+    }
+    let excludedCityStops = false;
+    for (const stop of feed.stops.values()) {
+      if (!corridorStops.has(stop.id) || !feed.stopTimesByStop.has(stop.id)) continue;
+      const coordinates: [number, number] = [stop.lon, stop.lat];
+      const nearEndpoint = Math.min(distanceMeters(input.origin, coordinates), distanceMeters(input.destination, coordinates)) <= anchorCellSizeMeters;
+      const [x, y] = toXY(coordinates);
+      const cellX = Math.floor(x / anchorCellSizeMeters), cellY = Math.floor(y / anchorCellSizeMeters);
+      let nearIntercityStop = false;
+      for (let dx = -1; dx <= 1 && !nearIntercityStop; dx++) {
+        for (let dy = -1; dy <= 1 && !nearIntercityStop; dy++) {
+          for (const anchor of anchorCells.get(`${cellX + dx}:${cellY + dy}`) ?? []) {
+            if (distanceMeters(coordinates, anchor) <= anchorCellSizeMeters) {
+              nearIntercityStop = true;
+              break;
+            }
+          }
+        }
+      }
+      if (nearEndpoint || nearIntercityStop) localCityCatchmentStops.add(stop.id);
+      else excludedCityStops = true;
+    }
+    if (excludedCityStops) stopSelectionTruncated = true;
+  }
+
   const journeyEnd = new Date(input.earliestDeparture.getTime() + maximumJourneySeconds * 1000);
   const firstServiceDate = localDate(input.earliestDeparture, feed.timezone);
   const lastServiceDate = localDate(journeyEnd, feed.timezone);
@@ -678,6 +737,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   }
 
   const segments: GtfsDirectJourney[] = [];
+  // A national feed can produce a very large number of stop-pair candidates.
+  // Keep only the stop-time indexes during graph construction and materialize
+  // route shapes for the small set of itineraries that will actually be shown.
+  const shapeIndexesBySegment = new WeakMap<GtfsDirectJourney, { fromIndex: number; toIndex: number }>();
   const seenSegments = new Set<string>();
   for (const [tripId, trip] of feed.trips) {
     const route = feed.routes.get(trip.routeId);
@@ -687,7 +750,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const providerCity = provider?.city ?? input.providerCity;
     const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
     if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
-    const eligibleIndexes = stops.flatMap((stop, index) => corridorStops.has(stop.stopId) ? [index] : []);
+    const localFeedInIntercitySearch = intercitySearch && providerCity !== undefined && providerCity !== 'Україна';
+    const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : corridorStops;
+    const eligibleIndexes = stops.flatMap((stop, index) => eligibleStopIds.has(stop.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
     for (const serviceDate of serviceDates) {
       if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
@@ -709,8 +774,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
           const key = `${tripId}:${from.stopId}:${to.stopId}:${departureAt.toISOString()}`;
           if (seenSegments.has(key)) continue;
           seenSegments.add(key);
-          const routeGeometry = routeGeometryForTrip(feed, tripId, fromIndex, toIndex);
-          segments.push({
+          const segment: GtfsDirectJourney = {
             providerId: provider?.id ?? input.providerId, providerName: provider?.name ?? input.providerName, mode: route.mode,
             routeId: trip.routeId, routeName: route.name, headsign: trip.headsign, tripId,
             originStop: { id: originStop.id, name: from.sourceStopName ?? originStop.name,
@@ -721,11 +785,12 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
             departureAt, arrivalAt, sourceFreshAt: provider?.fetchedAt ?? feed.fetchedAt,
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, from.sourceStopCoordinates ?? [originStop.lon, originStop.lat])),
             distanceFromDestinationStopMeters: Math.round(distanceMeters(input.destination, to.sourceStopCoordinates ?? [destinationStop.lon, destinationStop.lat])),
-            ...(routeGeometry ? { routeGeometry } : {}),
             ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
             ...(to.sourceZoneId ? { destinationZoneId: to.sourceZoneId } : {}),
             traveledZoneIds: stops.slice(fromIndex, toIndex + 1).flatMap((entry) => entry.sourceZoneId ? [entry.sourceZoneId] : []),
-          });
+          };
+          shapeIndexesBySegment.set(segment, { fromIndex, toIndex });
+          segments.push(segment);
         }
       }
     }
@@ -850,8 +915,18 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
 
   const rankedResults = [...results.values()]
     .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || a.id.localeCompare(b.id));
+  const itineraries = rankedResults.slice(0, limit);
+  for (const itinerary of itineraries) {
+    for (const segment of itinerary.segments) {
+      if (segment.routeGeometry) continue;
+      const indexes = shapeIndexesBySegment.get(segment);
+      if (!indexes) continue;
+      const routeGeometry = routeGeometryForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex);
+      if (routeGeometry) segment.routeGeometry = routeGeometry;
+    }
+  }
   return {
-    itineraries: rankedResults.slice(0, limit),
+    itineraries,
     searchTruncated: stopSelectionTruncated || searchSteps >= MAX_SEARCH_STEPS || results.size >= limit * 5,
     resultLimitReached: rankedResults.length > limit,
   };
