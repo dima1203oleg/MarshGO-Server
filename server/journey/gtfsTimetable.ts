@@ -2,6 +2,7 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
 import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
+import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
@@ -24,16 +25,19 @@ export type GtfsTransportType = 'bus' | 'marshrutka' | 'intercity_bus' | 'train'
 export interface GtfsTimetableFeed {
   fetchedAt: Date;
   timezone: string;
-  routes: Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType }>;
-  stops: Map<string, { id: string; name: string; lon: number; lat: number }>;
+  routes: Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType; agencyId?: string }>;
+  stops: Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string }>;
   trips: Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string }>;
   /** Actual GTFS shape coordinates, keyed by the feed's shape_id. */
   shapes?: Map<string, Array<[number, number]>>;
-  stopTimes: Map<string, Array<{ stopId: string; sequence: number; arrivalSeconds: number; departureSeconds: number; pickupType: number; dropOffType: number; sourceStopName?: string; sourceStopCoordinates?: [number, number] }>>;
+  stopTimes: Map<string, Array<{ stopId: string; sequence: number; arrivalSeconds: number; departureSeconds: number; pickupType: number; dropOffType: number; sourceStopName?: string; sourceStopCoordinates?: [number, number]; sourceZoneId?: string }>>;
   stopTimesByStop: Map<string, Array<{ tripId: string; index: number }>>;
   calendars: Map<string, { start: string; end: string; weekdays: boolean[] }>;
   exceptions: Map<string, Map<string, number>>;
   providersByRoute?: Map<string, { id: string; name: string; city: string; fetchedAt: Date }>;
+  fareProducts?: Map<string, GtfsFareProduct>;
+  fareRules?: Map<string, GtfsFareRule[]>;
+  faresV2Present?: boolean;
 }
 
 export interface GtfsTimetableSource {
@@ -61,6 +65,9 @@ export interface GtfsDirectJourney {
   distanceFromDestinationStopMeters: number;
   /** Present only when the source supplied a usable GTFS shape for this ride segment. */
   routeGeometry?: Array<[number, number]>;
+  originZoneId?: string;
+  destinationZoneId?: string;
+  traveledZoneIds: string[];
 }
 
 interface SearchInput {
@@ -102,6 +109,7 @@ export interface GtfsItinerary {
   transfers: number;
   walkingMeters: number;
   transferWalkingMeters: number[];
+  fare: ReturnType<typeof calculateGtfsItineraryFare>;
 }
 
 export interface GtfsItinerarySearchResult {
@@ -159,19 +167,20 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
   // participate in one cross-provider itinerary search.
   const timezone = reportedTimezone.toLocaleLowerCase('en-US') === 'europe/kiev' ? 'Europe/Kyiv' : reportedTimezone;
 
-  const routes = new Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType }>();
+  const routes = new Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType; agencyId?: string }>();
   for (const row of csvRows(text('routes.txt'))) {
     const name = row.route_short_name?.trim() || row.route_long_name?.trim() || row.route_id;
     const route = routeMode(integer(row.route_type, -1), `${row.route_short_name ?? ''} ${row.route_long_name ?? ''} ${row.route_desc ?? ''}`);
     if (!route || !row.route_id) continue;
-    routes.set(row.route_id, { name, ...route });
+    routes.set(row.route_id, { name, ...route, ...(row.agency_id?.trim() ? { agencyId: row.agency_id.trim() } : {}) });
   }
 
-  const stops = new Map<string, { id: string; name: string; lon: number; lat: number }>();
+  const stops = new Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string }>();
   for (const row of csvRows(text('stops.txt'))) {
     const lon = Number(row.stop_lon), lat = Number(row.stop_lat);
     if (!row.stop_id || !Number.isFinite(lon) || !Number.isFinite(lat) || Math.abs(lon) > 180 || Math.abs(lat) > 90 || (lon === 0 && lat === 0)) continue;
-    stops.set(row.stop_id, { id: row.stop_id, name: row.stop_name?.trim() || row.stop_id, lon, lat });
+    stops.set(row.stop_id, { id: row.stop_id, name: row.stop_name?.trim() || row.stop_id, lon, lat,
+      ...(row.zone_id?.trim() ? { zoneId: row.zone_id.trim() } : {}) });
   }
 
   const trips = new Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string }>();
@@ -205,7 +214,8 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
     const sourceStop = stops.get(row.stop_id);
     list.push({ stopId: row.stop_id, sequence: integer(row.stop_sequence, -1), arrivalSeconds, departureSeconds,
       pickupType: integer(row.pickup_type), dropOffType: integer(row.drop_off_type),
-      ...(sourceStop ? { sourceStopName: sourceStop.name, sourceStopCoordinates: [sourceStop.lon, sourceStop.lat] as [number, number] } : {}) });
+      ...(sourceStop ? { sourceStopName: sourceStop.name, sourceStopCoordinates: [sourceStop.lon, sourceStop.lat] as [number, number],
+        ...(sourceStop.zoneId ? { sourceZoneId: sourceStop.zoneId } : {}) } : {}) });
     stopTimes.set(row.trip_id, list);
   }
   for (const list of stopTimes.values()) list.sort((a, b) => a.sequence - b.sequence);
@@ -230,7 +240,9 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
     exceptions.set(row.service_id, byDate);
   }
 
-  return { fetchedAt, timezone, routes, stops, trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions };
+  const parsedFares: ParsedGtfsFares = parseGtfsFares(files);
+  return { fetchedAt, timezone, routes, stops, trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions,
+    fareProducts: parsedFares.products, fareRules: parsedFares.rules, faresV2Present: parsedFares.faresV2Present };
 }
 
 /**
@@ -253,6 +265,9 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
   const stopTimes: GtfsTimetableFeed['stopTimes'] = new Map();
   const calendars: GtfsTimetableFeed['calendars'] = new Map();
   const exceptions: GtfsTimetableFeed['exceptions'] = new Map();
+  const fareProducts: NonNullable<GtfsTimetableFeed['fareProducts']> = new Map();
+  const fareRules: NonNullable<GtfsTimetableFeed['fareRules']> = new Map();
+  let faresV2Present = false;
   const providersByRoute = new Map<string, { id: string; name: string; city: string; fetchedAt: Date }>();
   const stopsByName = new Map<string, Array<{ id: string; lon: number; lat: number }>>();
   let canonicalStopIndex = 0;
@@ -291,7 +306,8 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
       const match = candidates.find((candidate) => distanceMeters([stop.lon, stop.lat], [candidate.lon, candidate.lat]) <= interchangeRadiusMeters);
       const id = match?.id ?? `canonical-stop-${++canonicalStopIndex}`;
       if (!match) {
-        const canonical = { id, name: stop.name, lon: stop.lon, lat: stop.lat };
+        const canonical = { id, name: stop.name, lon: stop.lon, lat: stop.lat,
+          ...(stop.zoneId ? { zoneId: `${prefix}${stop.zoneId}` } : {}) };
         stops.set(id, canonical);
         candidates.push({ id, lon: stop.lon, lat: stop.lat });
         stopsByName.set(nameKey, candidates);
@@ -311,6 +327,21 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
       routes.set(mergedRouteId, route);
       providersByRoute.set(mergedRouteId, { id: source.providerId, name: source.providerName, city: source.providerCity, fetchedAt: source.feed.fetchedAt });
     }
+    faresV2Present ||= source.feed.faresV2Present === true;
+    for (const [fareId, product] of source.feed.fareProducts ?? []) {
+      const mergedFareId = `${prefix}${fareId}`;
+      fareProducts.set(mergedFareId, { ...product, id: mergedFareId, providerId: source.providerId });
+    }
+    for (const [fareId, rules] of source.feed.fareRules ?? []) {
+      const mergedFareId = `${prefix}${fareId}`;
+      fareRules.set(mergedFareId, rules.map((rule) => ({
+        ...rule, fareId: mergedFareId,
+        ...(rule.routeId ? { routeId: `${prefix}${rule.routeId}` } : {}),
+        ...(rule.originZoneId ? { originZoneId: `${prefix}${rule.originZoneId}` } : {}),
+        ...(rule.destinationZoneId ? { destinationZoneId: `${prefix}${rule.destinationZoneId}` } : {}),
+        ...(rule.containsZoneId ? { containsZoneId: `${prefix}${rule.containsZoneId}` } : {}),
+      })));
+    }
     for (const [shapeId, coordinates] of source.feed.shapes ?? []) shapes.set(`${prefix}${shapeId}`, coordinates);
     for (const [serviceId, calendar] of source.feed.calendars) calendars.set(`${prefix}${serviceId}`, calendar);
     for (const [serviceId, byDate] of source.feed.exceptions) exceptions.set(`${prefix}${serviceId}`, new Map(byDate));
@@ -323,7 +354,8 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
         ...(trip.shapeId ? { shapeId: `${prefix}${trip.shapeId}` } : {}) });
       const entries = source.feed.stopTimes.get(tripId)?.flatMap((entry) => {
         const stopId = remappedStops.get(entry.stopId);
-        return stopId ? [{ ...entry, stopId }] : [];
+        return stopId ? [{ ...entry, stopId,
+          ...(entry.sourceZoneId ? { sourceZoneId: `${prefix}${entry.sourceZoneId}` } : {}) }] : [];
       }) ?? [];
       if (entries.length >= 2) stopTimes.set(mergedTripId, entries);
       else trips.delete(mergedTripId);
@@ -337,7 +369,8 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
     stopTimesByStop.set(entry.stopId, matches);
   });
   const fetchedAt = new Date(Math.min(...ordered.map((source) => source.feed.fetchedAt.getTime())));
-  return { fetchedAt, timezone, routes, stops, trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions, providersByRoute };
+  return { fetchedAt, timezone, routes, stops, trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions,
+    providersByRoute, fareProducts, fareRules, faresV2Present };
 }
 
 function isValidTimezone(timezone: string): boolean {
@@ -533,7 +566,14 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
             departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, originCoordinates)),
             distanceFromDestinationStopMeters: Math.round(distanceMeters(input.destination, destinationCoordinates)),
-            ...(routeGeometry ? { routeGeometry } : {}) });
+            ...(routeGeometry ? { routeGeometry } : {}),
+            ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
+            ...(to.sourceZoneId ? { destinationZoneId: to.sourceZoneId } : {}),
+            traveledZoneIds: stops.slice(fromIndex, toIndex + 1).flatMap((entry) => {
+              const zoneId = entry.sourceZoneId;
+              return zoneId ? [zoneId] : [];
+            }),
+          });
           break;
         }
       }
@@ -682,6 +722,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, from.sourceStopCoordinates ?? [originStop.lon, originStop.lat])),
             distanceFromDestinationStopMeters: Math.round(distanceMeters(input.destination, to.sourceStopCoordinates ?? [destinationStop.lon, destinationStop.lat])),
             ...(routeGeometry ? { routeGeometry } : {}),
+            ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
+            ...(to.sourceZoneId ? { destinationZoneId: to.sourceZoneId } : {}),
+            traveledZoneIds: stops.slice(fromIndex, toIndex + 1).flatMap((entry) => entry.sourceZoneId ? [entry.sourceZoneId] : []),
           });
         }
       }
@@ -748,6 +791,14 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       waitingSeconds: initialWaitSeconds + transferWaitingSeconds,
       transfers: Math.max(0, path.length - 1), walkingMeters: accessMeters + egressMeters + transferWalkingMeters.reduce((sum, meters) => sum + meters, 0),
       transferWalkingMeters,
+      fare: calculateGtfsItineraryFare({ products: feed.fareProducts ?? new Map(), rules: feed.fareRules ?? new Map(), faresV2Present: feed.faresV2Present === true }, path.map((segment) => ({
+        providerId: segment.providerId, routeId: segment.routeId,
+        ...(feed.routes.get(segment.routeId)?.agencyId ? { agencyId: feed.routes.get(segment.routeId)!.agencyId } : {}),
+        departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
+        ...(segment.originZoneId ? { originZoneId: segment.originZoneId } : {}),
+        ...(segment.destinationZoneId ? { destinationZoneId: segment.destinationZoneId } : {}),
+        traveledZoneIds: segment.traveledZoneIds,
+      }))),
     });
   };
 
@@ -817,7 +868,7 @@ export function cachedGtfsTimetable(providerId: string, url: string, now = Date.
   if (hit && now - hit.cachedAt < CACHE_TTL_MS) return hit.promise;
   const promise = (async () => {
     const { data } = await fetchBinary(url, MAX_FEED_BYTES, 30_000);
-    const unzipped = unzipSync(data, { filter: (file) => /(^|\/)(agency|routes|stops|trips|stop_times|calendar|calendar_dates|shapes)\.txt$/.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
+    const unzipped = unzipSync(data, { filter: (file) => /(^|\/)(agency|routes|stops|trips|stop_times|calendar|calendar_dates|shapes|fare_attributes|fare_rules|fare_media|fare_products|fare_leg_rules|fare_leg_join_rules|fare_transfer_rules|rider_categories|timeframes|networks|route_networks|areas|stop_areas)\.txt$/.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
     const files = Object.fromEntries(Object.entries(unzipped).map(([name, content]) => [name.split('/').pop() as string, content]));
     return parseGtfsTimetable(files);
   })();

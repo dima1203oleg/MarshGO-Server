@@ -2197,8 +2197,17 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       && candidate.segments.every((segment) => transitProviderAllowed(search.preferences, segment.transportType, segment.providerName))
       && (search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
       && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers));
-    if (search.preferences.maxPriceMinor !== undefined && feasibleItineraries.length > 0) hasUnpricedTransitCandidates = true;
-    else scheduledCandidates.push(...feasibleItineraries);
+    for (const itinerary of feasibleItineraries) {
+      const comparableUahFare = itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
+      if (search.preferences.maxPriceMinor !== undefined) {
+        if (comparableUahFare === null) {
+          hasUnpricedTransitCandidates = true;
+          continue;
+        }
+        if (comparableUahFare > search.preferences.maxPriceMinor) continue;
+      }
+      scheduledCandidates.push(itinerary);
+    }
   }
   scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
   if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
@@ -2209,7 +2218,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       id: itinerary.id,
       diversityKey: `transit:${itinerary.segments.map((segment) => segment.transportType).join('>')}`,
       durationSeconds: itinerary.durationSeconds,
-      priceMinor: null,
+      priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
       transfers: itinerary.transfers,
       walkingMeters: itinerary.walkingMeters,
       reliability: null,
@@ -2323,11 +2332,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const last = itinerary.segments.at(-1)!;
       const stored = await client.query<{ id: string }>(
         `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
-         VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,NULL,NULL,NULL,$11,$12,$13,NULL,NULL) RETURNING id`,
+         VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$14,$14,$14,$11,$12,$13,NULL,NULL) RETURNING id`,
         [req.userId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
           search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
           search.departureAt, representative.strategy, search.passengers, itinerary.durationSeconds,
-          itinerary.walkingMeters, itinerary.transfers],
+          itinerary.walkingMeters, itinerary.transfers,
+          itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null],
       );
       const journeyId = stored.rows[0].id;
       await client.query(
@@ -2388,12 +2398,18 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const provider = eligibleGtfsProviders.find((item) => item.id === segment.providerId);
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
-           VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,NULL,NULL,NULL,'UAH','UNKNOWN','UNKNOWN',$13,'public_transit','SUGGESTED','gtfs-static',$14,$15::jsonb) RETURNING id`,
+           VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$13,$13,$14,$15,'UNKNOWN',$16,'public_transit','SUGGESTED','gtfs-static',$17,$18::jsonb) RETURNING id`,
           [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
             segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
-            segment.departureAt, segment.arrivalAt, durationSeconds, segment.providerId, provider?.last_sync_at ?? segment.sourceFreshAt,
+            segment.departureAt, segment.arrivalAt, durationSeconds,
+            itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
+            itinerary.fare?.currency ?? 'UAH', itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', segment.providerId,
+            provider?.last_sync_at ?? segment.sourceFreshAt,
           JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
               headsign: segment.headsign, tripId: segment.tripId, fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+              ...(itinerary.fare?.allocations[segmentIndex] ? { fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
+                fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
+                fareSource: itinerary.fare.source } : {}),
               ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
         );
         firstTransitLegId ??= inserted.rows[0].id;
@@ -2401,7 +2417,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           origin: { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
           destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
           departureAt: segment.departureAt, arrivalAt: segment.arrivalAt, durationSeconds,
-          distanceMeters: null, priceMinor: null, priceStatus: 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+          distanceMeters: null, priceMinor: itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
+          currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+          ...(itinerary.fare?.allocations[segmentIndex] ? {
+            fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
+            fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
+            fareSource: itinerary.fare.source,
+          } : {}),
           liveStatus: 'SCHEDULED',
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - segment.sourceFreshAt.getTime()) / 1000)),
           source: 'gtfs-static', lastUpdatedAt: segment.sourceFreshAt, providerName: segment.providerName,
@@ -2419,8 +2441,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         strategy: representative.strategy, recommendedStrategies: representative.recommendedStrategies,
         strategyRanks: representative.strategyRanks,
         score: representative.score, state: 'PLANNED',
-        totalDurationSeconds: itinerary.durationSeconds, totalPriceMinor: null, confirmedPriceMinor: null,
-        estimatedPriceMinMinor: null, estimatedPriceMaxMinor: null, walkingMeters: itinerary.walkingMeters,
+        totalDurationSeconds: itinerary.durationSeconds,
+        totalPriceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null, confirmedPriceMinor: null,
+        estimatedPriceMinMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+        estimatedPriceMaxMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+        currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', walkingMeters: itinerary.walkingMeters,
         transfers: itinerary.transfers, reliabilityScore: null, legs: responseLegs });
     }
     await client.query('COMMIT');
