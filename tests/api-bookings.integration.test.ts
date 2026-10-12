@@ -14,6 +14,7 @@ if (enabled && database && !['127.0.0.1', 'localhost', '::1'].includes(database.
 
 describe('API booking transaction (opt-in local integration test)', { skip: !enabled }, () => {
   const pool = new Pool({ connectionString: databaseUrl });
+  let healthyLvivGtfsEnabled = false;
   const ids = {
     driver: crypto.randomUUID(),
     passengers: Array.from({ length: 20 }, () => crypto.randomUUID()),
@@ -34,6 +35,11 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
   let otpUserId: string | null = null;
 
   before(async () => {
+    const lvivProvider = await pool.query<{ enabled: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM mobility_providers
+        WHERE city='Львів' AND source_type='gtfs' AND status='enabled' AND health='healthy') AS enabled`,
+    );
+    healthyLvivGtfsEnabled = lvivProvider.rows[0]?.enabled === true;
     await pool.query(`INSERT INTO users(id,display_name,roles) VALUES
       ($1,'API test driver',ARRAY['driver']),($2,'API test administrator',ARRAY['admin'])`,
     [ids.driver, ids.admin]);
@@ -229,9 +235,13 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       }
       assert.equal(modeData.journeys.some((journey) => journey.offerId === ids.journeyOffer), transportType === 'carpool',
         `${transportType} selection controls the direct carpool offer`);
-      if (transportType === 'tram') {
+      if (transportType === 'tram' && healthyLvivGtfsEnabled) {
         assert.ok(modeData.journeys.some((journey) => journey.legs.some((leg) => leg.transportType === 'tram')),
-          'the real Lviv GTFS feed builds the selected tram route');
+          'the enabled real Lviv GTFS feed builds the selected tram route');
+      } else if (['bus','tram'].includes(transportType) && !healthyLvivGtfsEnabled) {
+        assert.equal(modeData.journeys.length, 0, `${transportType} does not invent trips without an enabled Lviv GTFS provider`);
+        assert.ok(modeData.blockedProviders.some((value) => value.startsWith(`transportType:${transportType}:`)),
+          `${transportType} search reports the missing routed provider`);
       }
       modeMatrix.push({
         type: transportType,
@@ -252,11 +262,17 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       }),
     });
     assert.equal(multiResponse.status, 200);
-    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; legs: Array<{ mode: string; transportType?: string }> }> } }).data;
+    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; legs: Array<{ mode: string; transportType?: string }> }> } }).data;
     assert.equal(multiData.returnedCount, multiData.journeys.length, 'response metadata matches persisted alternatives');
-    assert.ok(multiData.availableStrategies.includes('BALANCED'));
-    assert.ok(multiData.journeys.some((journey) => typeof journey.strategyRanks?.BALANCED === 'number'),
-      'each returned result exposes its place in the selected strategy ranking');
+    if (healthyLvivGtfsEnabled) {
+      assert.ok(multiData.availableStrategies.includes('BALANCED'));
+      assert.ok(multiData.journeys.some((journey) => typeof journey.strategyRanks?.BALANCED === 'number'),
+        'each returned result exposes its place in the selected strategy ranking');
+    } else {
+      assert.equal(multiData.journeys.length, 0, 'an empty provider registry must not produce fabricated transit alternatives');
+      assert.ok(multiData.blockedProviders.some((value) => value.startsWith('transportType:bus:')));
+      assert.ok(multiData.blockedProviders.some((value) => value.startsWith('transportType:tram:')));
+    }
     for (const journey of multiData.journeys) {
       assert.equal(journey.offerId, null, 'a bus + tram selection excludes direct carpool offers');
       for (const leg of journey.legs) {
@@ -277,8 +293,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const result = await response.json() as { data: { partial: boolean; blockedProviders: string[]; unsupportedPreferences: string[]; journeys: Array<{ id: string; offerId: string | null; strategy: string; confirmedPriceMinor: number | null; totalPriceMinor: number | null; source?: string; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
     assert.equal(result.data.partial, true);
     assert.ok(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:taxi:')));
-    assert.equal(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:bus:')), false,
-      'the local GTFS bus feed is used for this corridor');
+    assert.equal(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:bus:')), !healthyLvivGtfsEnabled,
+      healthyLvivGtfsEnabled ? 'the enabled local GTFS bus feed is recognized' : 'a missing GTFS source is reported instead of being implied available');
     const communityJourneys = result.data.journeys.filter((item) => item.offerId === ids.journeyOffer);
     assert.equal(communityJourneys.length, 1);
     const journey = communityJourneys[0];

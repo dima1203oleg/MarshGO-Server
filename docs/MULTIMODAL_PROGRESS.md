@@ -200,10 +200,10 @@
 
 **TESTS**
 - Unit: 120 passed, 1 opt-in integration test skipped. Typecheck and lint passed.
-- Full `npm run test:integration`: PASS — Journey schema 2/2; booking/search 19/19; navigation 2/2; Redis multi-instance realtime 1/1; process-restart durability 1/1; shared rate limit 1/1.
-- The live Lviv API test returned 3 bus itineraries, 3 tram itineraries and 3 bus/tram mixed alternatives for its fixed corridor. All 12 categories were checked; only modes backed by this Lviv schedule and the test Community ride returned trips.
+- Full `npm run test:integration` against an empty provider registry: PASS — Journey schema 2/2; booking/search 19/19; navigation 2/2; Redis multi-instance realtime 1/1; process-restart durability 1/1; shared rate limit 1/1. The API reported unavailable bus/tram providers and returned zero transit alternatives rather than inventing schedules.
+- The same full integration suite against the healthy Lviv GTFS registry: PASS with the same case counts. The live Lviv API test returned 3 bus itineraries, 3 tram itineraries and 3 bus/tram mixed alternatives for its fixed corridor. All 12 categories were checked; only modes backed by this Lviv schedule and the test Community ride returned trips.
 
 **LIMITATIONS**
-- A first clean-database run correctly exposed that the integration harness had no provider registry rows. With only the publicly listed Lviv schedule enabled, the full run passed; the test database provider was created from the audited catalog and not from mock trips.
+- The integration assertion now follows provider health: it requires real Lviv routes when the healthy provider is configured and otherwise requires zero trips plus an explicit blocked-provider reason. GitHub CI does not depend on an external timetable feed.
 - This verifies one live city feed, not nationwide coverage or real-time location. Separate active marshrutka, taxi, transfer, carsharing and micromobility supplies are not established by this run.
 - Street-routed pedestrian access, verified public-transport fares/seats, rescue/rebooking during transit disruption, and measured load p95 are still outstanding. Do not treat the full 12-mode production acceptance criteria as complete.
