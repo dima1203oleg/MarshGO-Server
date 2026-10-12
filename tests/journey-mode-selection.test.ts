@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { transitModeAllowed } from '../server/journey/search';
+import { JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, transitModeAllowed } from '../server/journey/search';
 
 describe('Transit mode selection', () => {
   it('does not let the legacy bus toggle disable tram, trolleybus, metro, ferry, or funicular', () => {
@@ -29,5 +29,15 @@ describe('Transit mode selection', () => {
     assert.equal(transitModeAllowed('RAIL', { allowedTransportTypes: ['train'] }), true);
     assert.equal(transitModeAllowed('MINIBUS', { allowedTransportTypes: [] }), false);
     assert.equal(transitModeAllowed('TRAM', { allowPublicTransport: false, allowedTransportTypes: ['tram'] }), false);
+  });
+
+  it('keeps feed-only ferry and funicular modes out of canonical Journey search', () => {
+    const defaults = { allowPublicTransport: true };
+    assert.deepEqual(JOURNEY_SEARCH_TRANSIT_MODES, ['BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO']);
+    assert.equal(journeySearchTransitModeAllowed('FERRY', defaults), false);
+    assert.equal(journeySearchTransitModeAllowed('FUNICULAR', defaults), false);
+    assert.equal(journeySearchTransitModeAllowed('FERRY', { ...defaults, allowedTransportTypes: ['ferry'] }), false);
+    assert.equal(journeySearchTransitModeAllowed('FUNICULAR', { ...defaults, allowedTransportTypes: ['funicular'] }), false);
+    assert.equal(journeySearchTransitModeAllowed('TRAM', { ...defaults, allowedTransportTypes: ['tram'] }), true);
   });
 });

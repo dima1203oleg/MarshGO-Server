@@ -16,7 +16,7 @@ import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, Routi
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
-import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
+import { JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
@@ -2221,13 +2221,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   );
   if (discoveredGtfsProviders.length > 100) candidateGenerationTruncated = true;
   const gtfsProviders = discoveredGtfsProviders.slice(0, 100);
-  const transitAllowed = (mode: TransitJourneyMode) => transitModeAllowed(mode, search.preferences);
+  const transitAllowed = (mode: TransitJourneyMode) => journeySearchTransitModeAllowed(mode, search.preferences);
   const spatiallyEligibleGtfsProviders = gtfsProviders.filter((provider) => {
     const box = provider.last_report?.bbox;
     return Boolean(box && (bboxContains(box, originLon, originLat) || bboxContains(box, destinationLon, destinationLat)
       || bboxIntersectsRouteCorridor(box, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters)));
   });
-  const allTransitModes: TransitJourneyMode[] = ['BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO', 'FERRY', 'FUNICULAR'];
+  const allTransitModes = JOURNEY_SEARCH_TRANSIT_MODES;
   const allowedTransitModes = allTransitModes.filter(transitAllowed);
   const typeKeysByMode: Record<TransitJourneyMode, string[]> = {
     BUS: ['bus', 'intercity_bus'], MINIBUS: ['marshrutka'], RAIL: ['train', 'suburban', 'city_train'],
@@ -2559,6 +2559,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const routePlannerTypes = new Set<string>(['carpool']);
   for (const source of feedSources) {
     for (const route of source.feed.routes.values()) {
+      // Provider inventory is not permission to expand the canonical route
+      // product. Ferry/funicular feeds may be parsed for diagnostics, but this
+      // Journey API only routes the approved GTFS-backed categories.
+      if (!JOURNEY_SEARCH_TRANSIT_MODES.includes(route.mode)) continue;
       routePlannerTypes.add(route.transportType);
       if (route.transportType === 'intercity_bus') routePlannerTypes.add('bus');
       if (route.transportType === 'suburban_train' || route.transportType === 'city_train') routePlannerTypes.add('train');

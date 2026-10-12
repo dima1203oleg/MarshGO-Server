@@ -245,3 +245,19 @@
 - Only the driver's published route endpoints are eligible. Intermediate pickup/dropoff requires an explicit driver-approved stop and is intentionally unsupported.
 - The server does not issue or sell the transit tickets in a composite Journey. The saved plan and Community reservation are separate from any third-party transit purchase.
 - Taxi, commercial bus/rail purchasing, taxi/car-share/bike/scooter/transfer inventory, transit disruption Rescue, nationwide coverage, provider credentials, production load p95 and real-provider end-to-end acceptance remain open. Production stays NOT RELEASED.
+
+## 2026-10-12 — Enforce canonical transit modes at Journey search
+
+**Status:** COMPLETE for the route-search mode boundary; it does not add new provider coverage.
+
+**DONE**
+- Journey search now has an explicit allowlist for GTFS-backed canonical modes: bus, marshrutka, rail, tram, trolleybus and metro.
+- GTFS ferry/funicular records can still be parsed for feed diagnostics, but neither default search nor a crafted mode preference can route them. The API also does not report those feed-only types as routable providers.
+- This preserves train subtypes (intercity, suburban and city train) under the canonical train category and does not change the approved twelve-category client catalogue.
+
+**TESTS**
+- Added a regression test asserting ferry and funicular are excluded under default and explicit selections while an approved tram selection remains routable.
+- Server TypeScript and ESLint pass; unit suite passes 155 tests with 0 failures and 1 opt-in database test skipped.
+
+**LIMITATIONS**
+- This is a guard against an unapproved transport category; it does not add a real metro feed, provider coverage or fare source.

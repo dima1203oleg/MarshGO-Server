@@ -10,6 +10,15 @@ export interface JourneySearchRequest {
   preferences: JourneyPreferences;
 }
 
+/**
+ * GTFS modes that may participate in a MARSHGO Journey. This is deliberately
+ * narrower than the feed parser's enum: feed ingestion may understand other
+ * GTFS route types for diagnostics, but a feed cannot add a product category.
+ */
+export const JOURNEY_SEARCH_TRANSIT_MODES: readonly TransitJourneyMode[] = [
+  'BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO',
+];
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -147,4 +156,9 @@ export function transitModeAllowed(mode: TransitJourneyMode, preferences: Journe
   if (mode === 'MINIBUS') return preferences.allowMinibus !== false;
   if (mode === 'RAIL') return preferences.allowRail !== false;
   return true;
+}
+
+/** Product route-search guard; unsupported feed modes never become journeys. */
+export function journeySearchTransitModeAllowed(mode: TransitJourneyMode, preferences: JourneyPreferences): boolean {
+  return JOURNEY_SEARCH_TRANSIT_MODES.includes(mode) && transitModeAllowed(mode, preferences);
 }
