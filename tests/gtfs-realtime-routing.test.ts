@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import bindings from 'gtfs-realtime-bindings';
-import { findGtfsItinerariesWithStats, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
 import { gtfsRealtimeTripUpdateKey, parseGtfsRealtimeTripUpdates } from '../server/journey/gtfsRealtime';
 
 const { transit_realtime } = bindings;
@@ -87,6 +87,20 @@ test('a fresh delay moves timetable departure and arrival and marks the result p
   assert.equal(segment.scheduledArrivalAt.toISOString(), '2026-10-12T05:40:00.000Z');
   assert.equal(segment.realtimeUpdatedAt?.toISOString(), now.toISOString());
   assert.equal(segment.stops?.[0]?.departureAt, '2026-10-12T05:15:00.000Z');
+});
+
+test('stop-arrival response uses a matching fresh trip update and preserves schedule separately', () => {
+  const feed = timetable();
+  const realtime = parseGtfsRealtimeTripUpdates(realtimeBytes({ stopSequence: 2, arrivalDelay: 600 }), now);
+  const predicted = findGtfsStopArrivals({ ...feed, realtimeTripUpdates: realtime.updates }, 'destination', {
+    now: new Date('2026-10-12T05:20:00Z'),
+  });
+  assert.equal(predicted.length, 1);
+  assert.equal(predicted[0].scheduledArrivalAt.toISOString(), '2026-10-12T05:40:00.000Z');
+  assert.equal(predicted[0].predictedArrivalAt.toISOString(), '2026-10-12T05:50:00.000Z');
+  assert.equal(predicted[0].source, 'TRIP_UPDATE');
+  assert.equal(predicted[0].confidence, 'HIGH');
+  assert.equal(predicted[0].realtimeUpdatedAt?.toISOString(), now.toISOString());
 });
 
 test('a canceled trip from the matching service date is not returned', () => {

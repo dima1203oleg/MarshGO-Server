@@ -194,6 +194,16 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(oldAccess.status, 401);
   });
 
+  it('rejects unscoped stop IDs rather than guessing among provider feeds', async () => {
+    const invalid = await fetch(`${apiUrl}/api/v1/transit/stops/unscoped-stop/arrivals?lat=49.84&lon=24.02`);
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json() as { error: { code: string } }).error.code, 'invalid_stop_id');
+
+    const missingProvider = await fetch(`${apiUrl}/api/v1/transit/stops/${crypto.randomUUID()}:sample-stop/arrivals?lat=49.84&lon=24.02`);
+    assert.equal(missingProvider.status, 404);
+    assert.equal((await missingProvider.json() as { error: { code: string } }).error.code, 'provider_unavailable');
+  });
+
   it('searches real Community offer snapshots and persists representative Journey alternatives', async () => {
     const body = {
       origin: { name: 'Journey Test Origin', coordinates: [23.8561, 49.2567] },

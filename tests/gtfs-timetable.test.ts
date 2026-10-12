@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean } = {}) {
@@ -186,6 +186,30 @@ test('returns every source stop and its scheduled times for expandable route det
     ['Middle stop', '2026-10-12T05:20:00.000Z'],
     ['Destination stop', '2026-10-12T05:40:00.000Z'],
   ]);
+});
+
+test('lists upcoming stop arrivals from the provider-scoped schedule without claiming they are live', () => {
+  const arrivals = findGtfsStopArrivals(feed(), 'destination', {
+    now: new Date('2026-10-12T05:20:00Z'), limit: 10,
+  });
+  assert.equal(arrivals.length, 1);
+  assert.equal(arrivals[0].routeName, '7');
+  assert.equal(arrivals[0].scheduledArrivalAt.toISOString(), '2026-10-12T05:40:00.000Z');
+  assert.equal(arrivals[0].predictedArrivalAt.toISOString(), '2026-10-12T05:40:00.000Z');
+  assert.equal(arrivals[0].etaSeconds, 1200);
+  assert.equal(arrivals[0].source, 'SCHEDULE');
+  assert.equal(arrivals[0].confidence, 'LOW');
+});
+
+test('filters skipped, past, and non-service-day stop arrivals', () => {
+  const mondayOnly = feed();
+  assert.equal(findGtfsStopArrivals(mondayOnly, 'destination', {
+    now: new Date('2026-10-13T05:20:00Z'),
+  }).length, 0);
+  assert.equal(findGtfsStopArrivals(mondayOnly, 'destination', {
+    now: new Date('2026-10-12T05:45:00Z'),
+  }).length, 0);
+  assert.throws(() => findGtfsStopArrivals(feed(), 'destination', { limit: 0 }), /between 1 and 50/);
 });
 
 test('carries clipped source GTFS shape geometry on a routed segment', () => {

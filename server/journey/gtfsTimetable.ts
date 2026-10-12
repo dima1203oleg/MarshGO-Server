@@ -163,6 +163,22 @@ export interface GtfsItinerarySearchResult {
   resultLimitReached: boolean;
 }
 
+export interface GtfsStopArrival {
+  stopId: string;
+  stopName: string;
+  routeId: string;
+  routeName: string;
+  transportType: GtfsTransportType;
+  tripId: string;
+  headsign: string;
+  scheduledArrivalAt: Date;
+  predictedArrivalAt: Date;
+  etaSeconds: number;
+  source: 'SCHEDULE' | 'TRIP_UPDATE';
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  realtimeUpdatedAt?: Date;
+}
+
 function csvRows(text: string | undefined): CsvRow[] {
   if (!text) return [];
   const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.length > 0);
@@ -552,6 +568,73 @@ function createServiceTimeConverter(timezone: string): (serviceDate: string, sec
 function dateStringAfter(date: string, days: number): string {
   const value = new Date(Date.UTC(Number(date.slice(0, 4)), Number(date.slice(4, 6)) - 1, Number(date.slice(6, 8)) + days));
   return `${value.getUTCFullYear()}${String(value.getUTCMonth() + 1).padStart(2, '0')}${String(value.getUTCDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Return upcoming arrivals at one provider-scoped GTFS stop. Predictions only
+ * use a fresh, exact-trip GTFS-Realtime TripUpdate; vehicle GPS alone is not
+ * converted into an ETA here.
+ */
+export function findGtfsStopArrivals(
+  feed: GtfsTimetableFeed,
+  stopId: string,
+  options: { now?: Date; horizonSeconds?: number; limit?: number } = {},
+): GtfsStopArrival[] {
+  const now = options.now ?? new Date();
+  const horizonSeconds = options.horizonSeconds ?? 6 * 60 * 60;
+  const limit = options.limit ?? 20;
+  if (!stopId || stopId.length > 255) throw new TypeError('stop ID must contain 1 to 255 characters');
+  if (!Number.isFinite(now.getTime())) throw new TypeError('now must be a valid date');
+  if (!Number.isInteger(horizonSeconds) || horizonSeconds < 60 || horizonSeconds > 48 * 60 * 60) {
+    throw new TypeError('arrival horizon must be between 60 and 172800 seconds');
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new TypeError('arrival limit must be between 1 and 50');
+
+  const stop = feed.stops.get(stopId);
+  if (!stop) return [];
+  const horizonAt = new Date(now.getTime() + horizonSeconds * 1000);
+  const firstServiceDate = localDate(now, feed.timezone);
+  const lastServiceDate = localDate(horizonAt, feed.timezone);
+  // GTFS permits stop times through 71:59:59, so an arrival just after
+  // midnight can belong to a service day up to two calendar days earlier.
+  const serviceDates = new Set<string>();
+  const firstRelevantDate = dateStringAfter(firstServiceDate, -2);
+  const daysToLast = Math.round((Date.UTC(Number(lastServiceDate.slice(0, 4)), Number(lastServiceDate.slice(4, 6)) - 1, Number(lastServiceDate.slice(6, 8)))
+    - Date.UTC(Number(firstRelevantDate.slice(0, 4)), Number(firstRelevantDate.slice(4, 6)) - 1, Number(firstRelevantDate.slice(6, 8)))) / 86_400_000);
+  for (let offset = 0; offset <= daysToLast; offset++) serviceDates.add(dateStringAfter(firstRelevantDate, offset));
+  const toUtc = createServiceTimeConverter(feed.timezone);
+  const arrivals: GtfsStopArrival[] = [];
+  for (const entry of feed.stopTimesByStop.get(stopId) ?? []) {
+    const trip = feed.trips.get(entry.tripId);
+    const route = trip && feed.routes.get(trip.routeId);
+    const stopTime = feed.stopTimes.get(entry.tripId)?.[entry.index];
+    if (!trip || !route || !stopTime || stopTime.pickupType !== 0) continue;
+
+    for (const serviceDate of serviceDates) {
+      if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
+      const scheduledArrivalAt = toUtc(serviceDate, stopTime.arrivalSeconds);
+      if (!scheduledArrivalAt || scheduledArrivalAt > horizonAt) continue;
+      const dated = datedTripStops(feed, entry.tripId, serviceDate);
+      const predicted = dated.stops[entry.index];
+      if (!predicted || predicted.skipped || predicted.arrivalAt < now || predicted.arrivalAt > horizonAt) continue;
+
+      const update = dated.update?.stops.find((item) => item.stopSequence === stopTime.sequence);
+      const hasRealtimeEvent = update?.relationship !== 'NO_DATA'
+        && Boolean(update?.arrival?.time || update?.arrival?.delaySeconds !== undefined
+          || update?.departure?.time || update?.departure?.delaySeconds !== undefined);
+      const exactArrival = Boolean(update?.arrival?.time || update?.arrival?.delaySeconds !== undefined);
+      const source = hasRealtimeEvent ? 'TRIP_UPDATE' : 'SCHEDULE';
+      arrivals.push({ stopId, stopName: stopTime.sourceStopName ?? stop.name,
+        routeId: trip.routeId, routeName: route.name, transportType: route.transportType,
+        tripId: entry.tripId, headsign: trip.headsign,
+        scheduledArrivalAt, predictedArrivalAt: predicted.arrivalAt,
+        etaSeconds: Math.max(0, Math.ceil((predicted.arrivalAt.getTime() - now.getTime()) / 1000)),
+        source, confidence: exactArrival ? 'HIGH' : hasRealtimeEvent ? 'MEDIUM' : 'LOW',
+        ...(hasRealtimeEvent && dated.update ? { realtimeUpdatedAt: dated.update.updatedAt } : {}) });
+    }
+  }
+  return arrivals.sort((a, b) => a.predictedArrivalAt.getTime() - b.predictedArrivalAt.getTime()
+    || a.routeId.localeCompare(b.routeId) || a.tripId.localeCompare(b.tripId)).slice(0, limit);
 }
 
 function distanceMeters(a: [number, number], b: [number, number]): number {

@@ -19,7 +19,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, findGtfsStopArrivals, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg } from './journey/liveVehicles';
@@ -550,6 +550,89 @@ app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) =>
   const features = loaded.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat) && stop.types.some((type) => types.includes(type)))
     .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: stop.types.join(','), provider: row.name.split(' — ')[0] }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } })));
   sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 2500) }, meta: { failedProviders: settled.length - loaded.length, truncated: features.length > 2500 } });
+}));
+
+/**
+ * Compatibility endpoint used by the legacy map UI. Stop IDs emitted by the
+ * stop layer are provider-scoped (`providerUuid:gtfsStopId`); predictions are
+ * read from that exact provider's schedule and fresh GTFS-Realtime updates.
+ */
+app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) => {
+  const scopedStopId = req.params.stopId;
+  const separator = scopedStopId.indexOf(':');
+  if (separator < 1 || separator === scopedStopId.length - 1 || scopedStopId.length > 380) {
+    throw new ApiError(400, 'stop ID must include its provider scope', 'invalid_stop_id');
+  }
+  const providerId = scopedStopId.slice(0, separator);
+  const stopId = scopedStopId.slice(separator + 1);
+  if (!/^[0-9a-f-]{36}$/i.test(providerId) || stopId.length > 255) {
+    throw new ApiError(400, 'invalid provider-scoped stop ID', 'invalid_stop_id');
+  }
+  const latRaw = typeof req.query.lat === 'string' ? req.query.lat.trim() : '';
+  const lonRaw = typeof req.query.lon === 'string' ? req.query.lon.trim() : '';
+  const lat = Number(latRaw); const lon = Number(lonRaw);
+  if (!latRaw || !lonRaw || !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180) {
+    throw new ApiError(400, 'lat and lon are required', 'invalid_coordinates');
+  }
+  const requestedLimit = req.query.limit === undefined ? 20 : Number(req.query.limit);
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) {
+    throw new ApiError(400, 'limit must be between 1 and 50', 'invalid_limit');
+  }
+
+  const { rows } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; source_type: string }>(
+    `SELECT id,name,city,feed_url,realtime_url,source_type FROM mobility_providers
+      WHERE id=$1 AND provider_type='public_transit' AND access='open' AND status='enabled'
+        AND health IN ('healthy','degraded')`, [providerId]);
+  const provider = rows[0];
+  if (!provider) throw new ApiError(404, 'transit provider is unavailable', 'provider_unavailable');
+  if (provider.source_type !== 'gtfs') {
+    res.json({ data: { stopId: scopedStopId, lat, lon, arrivals: [] },
+      meta: { availability: 'SCHEDULE_UNSUPPORTED', realtimeStatus: 'NOT_CONFIGURED' } });
+    return;
+  }
+
+  let baseFeed: GtfsTimetableFeed;
+  try {
+    baseFeed = await cachedGtfsTimetable(provider.id, provider.feed_url);
+  } catch {
+    console.error(JSON.stringify({ level: 'warn', event: 'transit.stop_arrivals.schedule_unavailable', providerId }));
+    throw new ApiError(503, 'transit schedule is temporarily unavailable', 'schedule_unavailable');
+  }
+  let realtimeStatus: 'AVAILABLE' | 'STALE' | 'UNAVAILABLE' | 'NOT_CONFIGURED' | 'TEMPORARILY_UNAVAILABLE' = provider.realtime_url ? 'UNAVAILABLE' : 'NOT_CONFIGURED';
+  let realtimeUpdatedAt: Date | undefined;
+  let feed = baseFeed;
+  if (provider.realtime_url) {
+    try {
+      const realtime = await cachedGtfsRealtimeTripUpdates(provider.id, provider.realtime_url);
+      if (realtime.fresh) {
+        feed = { ...baseFeed, realtimeTripUpdates: realtime.updates };
+        realtimeStatus = 'AVAILABLE';
+        realtimeUpdatedAt = realtime.feedTimestamp;
+      } else if (realtime.reason === 'STALE') {
+        realtimeStatus = 'STALE';
+      }
+    } catch {
+      realtimeStatus = 'TEMPORARILY_UNAVAILABLE';
+      console.error(JSON.stringify({ level: 'warn', event: 'transit.stop_arrivals.realtime_unavailable', providerId }));
+    }
+  }
+  const arrivals = findGtfsStopArrivals(feed, stopId, { now: new Date(), limit: requestedLimit }).map((arrival) => {
+    const etaMinutes = Math.ceil(arrival.etaSeconds / 60);
+    const routeName = arrival.routeName || arrival.routeId;
+    const live = arrival.source === 'TRIP_UPDATE';
+    return {
+      stopId: scopedStopId, routeId: arrival.routeId, mode: arrival.transportType,
+      tripId: arrival.tripId, scheduledArrival: arrival.scheduledArrivalAt.toISOString(),
+      predictedArrival: arrival.predictedArrivalAt.toISOString(), arrivalSource: arrival.source,
+      confidence: arrival.confidence, ...(arrival.realtimeUpdatedAt ? { observedAt: arrival.realtimeUpdatedAt.toISOString() } : {}),
+      isRealtime: live, etaSeconds: arrival.etaSeconds,
+      displayLabel: live ? `${routeName} — орієнтовно ${etaMinutes} хв · GTFS-RT` : `${routeName} — ${etaMinutes} хв за розкладом`,
+    };
+  });
+  const stopKnown = baseFeed.stops.has(stopId);
+  res.json({ data: { stopId: scopedStopId, lat, lon, arrivals },
+    meta: { availability: stopKnown ? 'AVAILABLE' : 'STOP_NOT_IN_FEED', scheduleUpdatedAt: baseFeed.fetchedAt.toISOString(),
+      realtimeStatus, ...(realtimeUpdatedAt ? { realtimeUpdatedAt: realtimeUpdatedAt.toISOString() } : {}) } });
 }));
 
 app.get('/api/v1/transport/vehicles', requireAuth, asyncHandler(async (req, res) => {
