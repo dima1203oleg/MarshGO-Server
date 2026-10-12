@@ -51,6 +51,22 @@ export interface GtfsItineraryFare {
   source: 'gtfs-v1';
 }
 
+/** GTFS fares are per rider; scale them for the passenger count in a search. */
+export function scaleGtfsFareForPassengers(
+  fare: GtfsItineraryFare | null,
+  passengerCount: number,
+): GtfsItineraryFare | null {
+  if (!fare) return null;
+  if (!Number.isInteger(passengerCount) || passengerCount < 1 || passengerCount > 20) return null;
+  const priceMinor = fare.priceMinor * passengerCount;
+  const allocations = fare.allocations.map((allocation) => ({
+    ...allocation, priceMinor: allocation.priceMinor * passengerCount,
+  }));
+  if (!Number.isSafeInteger(priceMinor) || priceMinor < 0
+    || allocations.some((allocation) => !Number.isSafeInteger(allocation.priceMinor) || allocation.priceMinor < 0)) return null;
+  return { ...fare, priceMinor, allocations };
+}
+
 const V2_FILES = [
   'fare_media.txt', 'fare_products.txt', 'fare_leg_rules.txt', 'fare_leg_join_rules.txt',
   'fare_transfer_rules.txt', 'rider_categories.txt', 'timeframes.txt', 'networks.txt',

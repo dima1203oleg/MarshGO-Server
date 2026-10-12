@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareLeg } from '../server/journey/gtfsFares';
+import { calculateGtfsItineraryFare, parseGtfsFares, scaleGtfsFareForPassengers, type GtfsFareLeg } from '../server/journey/gtfsFares';
 import { findGtfsItineraries, mergeGtfsTimetables, parseGtfsTimetable, type GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 
 const encode = (value: string) => new TextEncoder().encode(value);
@@ -39,6 +39,20 @@ test('chooses two single-ride fares when a transfer ticket is more expensive', (
   ]);
   assert.equal(result?.priceMinor, 400);
   assert.deepEqual(result?.allocations.map((part) => part.priceMinor), [200, 200]);
+});
+
+test('scales a known itinerary fare and each segment allocation by passenger count', () => {
+  const fare = {
+    priceMinor: 4200, currency: 'UAH', source: 'gtfs-v1' as const,
+    allocations: [
+      { priceMinor: 4200, currency: 'UAH', fareProductId: 'through', includedByPreviousFare: false },
+      { priceMinor: 0, currency: 'UAH', fareProductId: 'through', includedByPreviousFare: true },
+    ],
+  };
+  const scaled = scaleGtfsFareForPassengers(fare, 3);
+  assert.equal(scaled?.priceMinor, 12_600);
+  assert.deepEqual(scaled?.allocations.map((part) => part.priceMinor), [12_600, 0]);
+  assert.equal(scaleGtfsFareForPassengers(fare, 0), null);
 });
 
 test('matches zone-based origin and destination rules and rejects expired transfer tickets', () => {

@@ -58,7 +58,7 @@
 - One transfer-engine expected-risk assertion initially expected LOW with only 12 minutes of post-requirement slack; corrected the fixture to provide 22 minutes. Final suite passed.
 
 **LIMITATIONS / BLOCKED_EXTERNAL**
-- Search currently returns direct Community legs only and no walking/multileg path. An unbooked Journey is a plan snapshot, not a reservation.
+- At this foundation phase, search returned direct Community legs only and no walking/multileg path. Later dated continuations below extend the planner; an unbooked Journey remains a plan snapshot, not a reservation.
 - No bus, rail, taxi, GTFS, municipal transit or commercial provider is connected. Provider contracts alone are not service availability.
 - No provider cache, Journey history/active-trip UI, booking-to-leg lifecycle binding, live journey monitor, predictive matching/replanning, persistent notifications or push yet.
 - Existing native iOS remains a Capacitor/WKWebView client; Journey acceptance on physical devices is not covered.
@@ -175,7 +175,7 @@
 - Isolated PostGIS/Redis integration passed: Journey schema 1/1; booking/search/Journey lifecycle 10/10; navigation 1/1; cross-instance realtime 1/1; restart 1/1; rate limit 1/1.
 
 **LIMITATIONS / BLOCKED_EXTERNAL**
-- Journey search still persists only a direct Community offer leg. No live predecessor schedule, GTFS feed or partner availability exists, so transfer alerts and predictive multi-leg replanning are not active.
+- At this lifecycle phase, Journey search persisted only a direct Community offer leg. The later composition continuation below adds bounded GTFS + Community plans; transfer alerts and predictive multi-leg replanning are still not active.
 - No physical device or background GPS test was performed for these server lifecycle transitions.
 
 **NEXT**
@@ -217,3 +217,31 @@
 - The integration assertion now follows provider health: it requires real Lviv routes when the healthy provider is configured and otherwise requires zero trips plus an explicit blocked-provider reason. GitHub CI does not depend on an external timetable feed.
 - This verifies one live city feed, not nationwide coverage or real-time location. Separate active marshrutka, taxi, transfer, carsharing and micromobility supplies are not established by this run.
 - Street-routed pedestrian access, verified public-transport fares/seats, rescue/rebooking during transit disruption, and measured load p95 are still outstanding. Do not treat the full 12-mode production acceptance criteria as complete.
+
+## 2026-10-12 — Published Community ride composed with GTFS transit
+
+**Status:** PARTIAL; bounded candidate implementation, not regional or production acceptance.
+
+**DONE**
+- Journey search now considers up to six published, road-routed Community offers found along the requested origin/destination corridor. A candidate can combine a GTFS transit prefix, the offer's exact driver-approved pickup-to-dropoff ride, and a GTFS transit suffix.
+- Prefix/suffix paths are searched against connected timezone-compatible GTFS feeds. Their walking access/egress and station transfers must be supported by the configured walking router or an explicit GTFS pathway; missing pedestrian evidence rejects the combination. The published Community pickup/dropoff is never shifted or invented.
+- Each returned candidate is checked for passenger capacity, the conservative 10-minute Community connection buffer, configured transfer/walking/duration limits, current published-offer state at search time, and fare completeness. Unknown or non-UAH components remain unknown; they are not zeroed, and an unknown fare prevents the global `CHEAPEST` label.
+- Transit fare products are scaled to the requested passenger count before ranking, max-price filtering, persistence, and per-leg display. The ride leg retains its offer ID, route geometry, price-per-seat and inventory snapshot so the existing details/booking flow can open that exact leg.
+- Composite Journey plans persist ordered WALK, GTFS and COMMUNITY legs, including source stops, timetable/prediction timestamps, route geometry, fare allocations and provider freshness. Booking the selected private-ride leg is allowed; the parent remains `PARTIALLY_RESERVED` because the public-transport legs are not booked through this server. The Site now explains that distinction in its Journey update message.
+- Direct Community results are kept truthful: an offer more than five metres from either requested endpoint is not presented as a direct door-to-door ride. Such an offer can appear only inside a validated scheduled combination.
+
+**CHANGED FILES**
+- `server/index.ts`, `server/journey/communityComposition.ts`, `server/journey/gtfsFares.ts`
+- `tests/community-composition.test.ts`, `tests/gtfs-fares.test.ts`
+- Site: `src/services/productionApi.ts`, `src/views/ProductionMarketplace.tsx`
+
+**TESTS**
+- Server: TypeScript and ESLint pass; full unit suite 154 passed, 0 failed, 1 opt-in database test skipped. Added tests cover valid prefix/ride/suffix composition, missed pickup buffer, insufficient seats, exact endpoints, unknown fares and passenger-count fare scaling.
+- Site: typecheck, ESLint, production build and all 59 tests pass.
+- The API/PostGIS booking integration suite was not run for this delta because no dedicated test database is configured. Database persistence and composite booking still need a fresh isolated integration run before release.
+
+**LIMITATIONS / BLOCKED_EXTERNAL**
+- Composition is bounded (six Community offers, at most two transit paths per side, 24 total combinations) and depends on a healthy GTFS feed plus a configured walking router or explicit GTFS transfer paths. Search reports truncation/partial coverage when these bounds or dependencies apply.
+- Only the driver's published route endpoints are eligible. Intermediate pickup/dropoff requires an explicit driver-approved stop and is intentionally unsupported.
+- The server does not issue or sell the transit tickets in a composite Journey. The saved plan and Community reservation are separate from any third-party transit purchase.
+- Taxi, commercial bus/rail purchasing, taxi/car-share/bike/scooter/transfer inventory, transit disruption Rescue, nationwide coverage, provider credentials, production load p95 and real-provider end-to-end acceptance remain open. Production stays NOT RELEASED.

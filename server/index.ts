@@ -17,6 +17,8 @@ import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { parseJourneySearchRequest, transitModeAllowed, transitProviderAllowed } from './journey/search';
+import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
+import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
@@ -2137,6 +2139,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     if (error instanceof TypeError) throw new ApiError(400, error.message, 'invalid_journey_search');
     throw error;
   }
+  const [originLon, originLat] = search.origin.coordinates;
+  const [destinationLon, destinationLat] = search.destination.coordinates;
+  const routeDistanceMeters = (() => {
+    const radians = (value: number) => value * Math.PI / 180;
+    const dLat = radians(destinationLat - originLat), dLon = radians(destinationLon - originLon);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(radians(originLat)) * Math.cos(radians(destinationLat)) * Math.sin(dLon / 2) ** 2;
+    return 6_371_000 * 2 * Math.asin(Math.sqrt(h));
+  })();
+  const corridorWidthMeters = Math.max(12_000, Math.min(60_000, routeDistanceMeters * 0.2));
   const { rows } = await pool.query<{
     offer_id: string; driver_id: string; driver_name: string; vehicle_id: string;
     origin_name: string; destination_name: string; origin_lon: number; origin_lat: number;
@@ -2144,11 +2155,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     duration_s: number; distance_m: number; route_source: string; price_per_seat_minor: number;
     currency: string; available_seats: number; average_rating: number | null; review_count: number;
     vehicle_make: string; vehicle_model: string; created_at: Date; snapshot_at: Date;
+    origin_offset_m: number; destination_offset_m: number; route_geojson: string | null;
   }>(
     `SELECT o.id AS offer_id,o.driver_id,u.display_name AS driver_name,o.vehicle_id,
             o.origin_name,o.destination_name,ST_X(o.origin::geometry) AS origin_lon,ST_Y(o.origin::geometry) AS origin_lat,
             ST_X(o.destination::geometry) AS destination_lon,ST_Y(o.destination::geometry) AS destination_lat,
+            ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography) AS origin_offset_m,
+            ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography) AS destination_offset_m,
             o.departure_at,o.arrival_at,o.duration_s,o.distance_m,o.route_source,o.price_per_seat_minor,o.currency,o.available_seats,
+            ST_AsGeoJSON(o.route) AS route_geojson,
             ratings.average_rating,ratings.review_count,v.make AS vehicle_make,v.model AS vehicle_model,o.created_at,now() AS snapshot_at
        FROM offers o JOIN users u ON u.id=o.driver_id JOIN vehicles v ON v.id=o.vehicle_id
        LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true
@@ -2156,18 +2171,21 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         AND o.available_seats >= $6 AND o.driver_id<>$7 AND o.route IS NOT NULL
         AND o.duration_s IS NOT NULL AND o.duration_s>0 AND o.distance_m IS NOT NULL AND o.distance_m>0
         AND o.route_source IS NOT NULL AND o.route_source<>'development_unrouted' AND $8::boolean
-        AND ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,25000)
-        AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,25000)
+        AND ((ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,25000)
+              AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,25000))
+          OR ST_DWithin(o.route::geography,
+              ST_MakeLine(ST_SetSRID(ST_MakePoint($1,$2),4326),ST_SetSRID(ST_MakePoint($3,$4),4326))::geography,$9))
         AND o.departure_at>now()
       ORDER BY o.departure_at ASC LIMIT 101`,
     [search.origin.coordinates[0], search.origin.coordinates[1], search.destination.coordinates[0], search.destination.coordinates[1], search.departureAt, search.passengers, req.userId,
-      search.preferences.allowCommunity !== false && journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes)],
+      search.preferences.allowCommunity !== false && journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes), corridorWidthMeters],
   );
 
   let candidateGenerationTruncated = rows.length > 100;
   const candidates = rows.slice(0, 100).flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number; waitingSeconds: number }> => {
     if (search.preferences.preferredVehicleClass || search.preferences.allowCommunity === false
       || !journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes)) return [];
+    if (offer.origin_offset_m > 5 || offer.destination_offset_m > 5) return [];
     const arrivalAt = offer.arrival_at ?? new Date(offer.departure_at.getTime() + offer.duration_s * 1000);
     const durationSeconds = Math.ceil((arrivalAt.getTime() - search.departureAt.getTime()) / 1000);
     const waitingSeconds = Math.max(0, Math.ceil((offer.departure_at.getTime() - search.departureAt.getTime()) / 1000));
@@ -2204,15 +2222,6 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   if (discoveredGtfsProviders.length > 100) candidateGenerationTruncated = true;
   const gtfsProviders = discoveredGtfsProviders.slice(0, 100);
   const transitAllowed = (mode: TransitJourneyMode) => transitModeAllowed(mode, search.preferences);
-  const [originLon, originLat] = search.origin.coordinates;
-  const [destinationLon, destinationLat] = search.destination.coordinates;
-  const routeDistanceMeters = (() => {
-    const radians = (value: number) => value * Math.PI / 180;
-    const dLat = radians(destinationLat - originLat), dLon = radians(destinationLon - originLon);
-    const h = Math.sin(dLat / 2) ** 2 + Math.cos(radians(originLat)) * Math.cos(radians(destinationLat)) * Math.sin(dLon / 2) ** 2;
-    return 6_371_000 * 2 * Math.asin(Math.sqrt(h));
-  })();
-  const corridorWidthMeters = Math.max(12_000, Math.min(60_000, routeDistanceMeters * 0.2));
   const spatiallyEligibleGtfsProviders = gtfsProviders.filter((provider) => {
     const box = provider.last_report?.bbox;
     return Boolean(box && (bboxContains(box, originLon, originLat) || bboxContains(box, destinationLon, destinationLat)
@@ -2266,13 +2275,60 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     sources.push(source); sourcesByTimezone.set(source.feed.timezone, sources);
   }
   type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary, 'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified'>>;
+  const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
+    if (!itinerary.fare || search.passengers === 1) return itinerary;
+    return { ...itinerary, fare: scaleGtfsFareForPassengers(itinerary.fare, search.passengers) };
+  };
+  const mergedFeedGroups = [...sourcesByTimezone.values()].flatMap((sources) => {
+    const feed = mergeGtfsTimetables(sources);
+    return feed ? [{ sources, feed }] : [];
+  });
   let scheduledCandidates: SearchItinerary[] = [];
   let pedestrianRoutesUnavailable = false;
   let pedestrianCandidatesRejected = false;
   let hasUnpricedTransitCandidates = false;
-  for (const sources of sourcesByTimezone.values()) {
-    const mergedFeed = mergeGtfsTimetables(sources);
-    if (!mergedFeed) continue;
+  const routeTransitItinerary = async (
+    itinerary: GtfsItinerary,
+    origin: [number, number],
+    destination: [number, number],
+    routeBudget: ReturnType<typeof createWalkingRouteBudget>,
+    requireMeasuredWalks: boolean,
+  ): Promise<SearchItinerary | null> => {
+    const first = itinerary.segments[0];
+    const last = itinerary.segments.at(-1);
+    if (!first || !last) return null;
+    if (!walkingRoutingUrl) {
+      if (requireMeasuredWalks && (first.distanceToOriginStopMeters > 0 || last.distanceFromDestinationStopMeters > 0
+        || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
+          && !itinerary.transferWalkingGeometries[index]))) return null;
+      return itinerary;
+    }
+    const transferRequests = itinerary.transferWalkingMeters.map(async (meters, index) => {
+      const previous = itinerary.segments[index];
+      const next = itinerary.segments[index + 1];
+      if (!previous || !next || itinerary.transferInSeat[index] || meters <= 0 || itinerary.transferWalkingGeometries[index]) return null;
+      return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates, walkingRoutingUrl, routeBudget);
+    });
+    const [access, egress, ...transfers] = await Promise.all([
+      first.distanceToOriginStopMeters > 0
+        ? routePedestrianPath(origin, first.originStop.coordinates, walkingRoutingUrl, routeBudget) : null,
+      last.distanceFromDestinationStopMeters > 0
+        ? routePedestrianPath(last.destinationStop.coordinates, destination, walkingRoutingUrl, routeBudget) : null,
+      ...transferRequests,
+    ]);
+    const missingRequiredPath = (first.distanceToOriginStopMeters > 0 && !access)
+      || (last.distanceFromDestinationStopMeters > 0 && !egress)
+      || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
+        && !itinerary.transferWalkingGeometries[index] && !transfers[index]);
+    if (missingRequiredPath) return null;
+    return applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
+      maximumAccessMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+      maximumEgressMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+      maximumTransferMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+    });
+  };
+
+  for (const { sources, feed: mergedFeed } of mergedFeedGroups) {
     const itinerarySearch = findGtfsItinerariesWithStats(mergedFeed, {
       providerId: sources[0].providerId, providerName: sources[0].providerName, origin: search.origin.coordinates,
       destination: search.destination.coordinates, earliestDeparture: search.departureAt,
@@ -2288,7 +2344,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       allowedTransportTypes: search.preferences.allowedTransportTypes,
     });
     candidateGenerationTruncated ||= itinerarySearch.searchTruncated || itinerarySearch.resultLimitReached;
-    const itineraries = itinerarySearch.itineraries;
+    const itineraries = itinerarySearch.itineraries.map(fareForPassengerCount);
     const feasibleItineraries = itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
       && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes))
       && candidate.segments.every((segment) => transitProviderAllowed(search.preferences, segment.transportType, segment.providerName))
@@ -2312,36 +2368,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
   }
   if (walkingRoutingUrl) {
-    const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary): Promise<SearchItinerary | null> => {
-      const first = itinerary.segments[0];
-      const last = itinerary.segments.at(-1);
-      if (!first || !last) return null;
-      const transferRequests = itinerary.transferWalkingMeters.map(async (meters, index) => {
-        const previous = itinerary.segments[index];
-        const next = itinerary.segments[index + 1];
-        if (!previous || !next || itinerary.transferInSeat[index] || meters <= 0 || itinerary.transferWalkingGeometries[index]) return null;
-        return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates, walkingRoutingUrl, walkingRouteBudget);
-      });
-      const [access, egress, ...transfers] = await Promise.all([
-        first.distanceToOriginStopMeters > 0
-          ? routePedestrianPath(search.origin.coordinates, first.originStop.coordinates, walkingRoutingUrl, walkingRouteBudget) : null,
-        last.distanceFromDestinationStopMeters > 0
-          ? routePedestrianPath(last.destinationStop.coordinates, search.destination.coordinates, walkingRoutingUrl, walkingRouteBudget) : null,
-        ...transferRequests,
-      ]);
-      const missingRequiredPath = (first.distanceToOriginStopMeters > 0 && !access)
-        || (last.distanceFromDestinationStopMeters > 0 && !egress)
-        || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
-          && !itinerary.transferWalkingGeometries[index] && !transfers[index]);
-      if (missingRequiredPath) {
-        pedestrianRoutesUnavailable = true;
-        return null;
-      }
-      const routed = applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
-        maximumAccessMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
-        maximumEgressMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
-        maximumTransferMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
-      });
+    const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary) => {
+      const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, search.destination.coordinates, walkingRouteBudget, false);
+      if (!routed && walkingRouteBudget.remaining > 0) pedestrianRoutesUnavailable = true;
       if (!routed) {
         pedestrianCandidatesRejected = true;
         return null;
@@ -2362,11 +2391,143 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerErrors.push(`Пішохідний маршрутизатор обмежив пошук ${walkingRouteBudget.limit} маршрутами; частину альтернатив не перевірено.`);
     }
   }
+
+  const MAX_COMMUNITY_COMPOSITION_OFFERS = 6;
+  const MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE = 2;
+  const MAX_COMMUNITY_TRANSIT_CANDIDATES = 24;
+  const communityTransferBufferSeconds = Math.max(configuredTransferBufferSeconds, 600);
+  const communityWalkingBudget = createWalkingRouteBudget(24);
+  const communityTransitCandidates: Array<ReturnType<typeof composeCommunityTransitJourneys>[number]> = [];
+  const parseOfferGeometry = (value: string | null): Array<[number, number]> | null => {
+    if (!value) return null;
+    try {
+      const parsed = JSON.parse(value) as { type?: unknown; coordinates?: unknown };
+      if (parsed.type !== 'LineString' || !Array.isArray(parsed.coordinates) || parsed.coordinates.length < 2) return null;
+      const coordinates = parsed.coordinates.flatMap((point): Array<[number, number]> =>
+        Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1])
+          && Math.abs(point[0] as number) <= 180 && Math.abs(point[1] as number) <= 90
+          ? [[point[0] as number, point[1] as number]] : []);
+      return coordinates.length >= 2 ? coordinates : null;
+    } catch {
+      return null;
+    }
+  };
+  const searchTransitBetween = async (
+    origin: { name: string; coordinates: [number, number] },
+    destination: { name: string; coordinates: [number, number] },
+    earliestDeparture: Date,
+    latestDeparture: Date,
+  ): Promise<SearchItinerary[]> => {
+    if (allowedTransitModes.length === 0 || latestDeparture < earliestDeparture) return [];
+    const paths: SearchItinerary[] = [];
+    for (const { sources, feed } of mergedFeedGroups) {
+      const searchResult = findGtfsItinerariesWithStats(feed, {
+        providerId: sources[0].providerId, providerName: sources[0].providerName, origin: origin.coordinates,
+        destination: destination.coordinates, earliestDeparture, latestDeparture,
+        limit: MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE,
+        maximumJourneySeconds: search.preferences.maxTotalDurationSeconds ?? 24 * 60 * 60,
+        maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
+        maximumWaitSeconds: 4 * 60 * 60,
+        minimumTransferBufferSeconds: configuredTransferBufferSeconds,
+        maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+        maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+        maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+        allowedModes: allowedTransitModes,
+        allowedTransportTypes: search.preferences.allowedTransportTypes,
+      });
+      candidateGenerationTruncated ||= searchResult.searchTruncated || searchResult.resultLimitReached;
+      const allowedPaths = searchResult.itineraries.map(fareForPassengerCount).filter((itinerary) => itinerary.segments.every((segment) =>
+        transitAllowed(segment.mode)
+        && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes)
+        && transitProviderAllowed(search.preferences, segment.transportType, segment.providerName)));
+      for (const itinerary of allowedPaths) {
+        const routed = await routeTransitItinerary(itinerary, origin.coordinates, destination.coordinates, communityWalkingBudget, true);
+        if (routed) paths.push(routed);
+        else if (communityWalkingBudget.remaining > 0) pedestrianRoutesUnavailable = true;
+        if (paths.length >= MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE) break;
+      }
+      if (paths.length >= MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE) break;
+    }
+    return [...new Map(paths.map((path) => [path.id, path])).values()]
+      .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.durationSeconds - b.durationSeconds)
+      .slice(0, MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE);
+  };
+
+  if (!search.preferences.preferredVehicleClass && search.preferences.allowCommunity !== false
+    && journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes) && mergedFeedGroups.length > 0) {
+    const composableOffers = rows.filter((offer) => {
+      const rating = offer.average_rating === null ? null : Number(offer.average_rating);
+      return (search.preferences.minDriverRating === undefined || search.preferences.minDriverRating <= 0
+        || (rating !== null && offer.review_count > 0 && rating >= search.preferences.minDriverRating))
+        && parseOfferGeometry(offer.route_geojson) !== null;
+    });
+    if (composableOffers.length > MAX_COMMUNITY_COMPOSITION_OFFERS) candidateGenerationTruncated = true;
+    for (const offer of composableOffers.slice(0, MAX_COMMUNITY_COMPOSITION_OFFERS)) {
+      const arrivalAt = offer.arrival_at ?? new Date(offer.departure_at.getTime() + offer.duration_s * 1000);
+      if (!Number.isFinite(arrivalAt.getTime()) || arrivalAt <= offer.departure_at) continue;
+      const ride: CommunityRideOption = {
+        id: offer.offer_id, driverId: offer.driver_id,
+        departureAt: offer.departure_at, arrivalAt,
+        origin: { name: offer.origin_name, coordinates: [offer.origin_lon, offer.origin_lat] },
+        destination: { name: offer.destination_name, coordinates: [offer.destination_lon, offer.destination_lat] },
+        distanceMeters: Number(offer.distance_m), pricePerSeatMinor: Number(offer.price_per_seat_minor),
+        currency: offer.currency.trim().toUpperCase(), availableSeats: Number(offer.available_seats),
+        routeGeometry: parseOfferGeometry(offer.route_geojson), snapshotAt: offer.snapshot_at,
+        metadata: { driverName: offer.driver_name, vehicleId: offer.vehicle_id,
+          vehicleMake: offer.vehicle_make, vehicleModel: offer.vehicle_model,
+          rating: offer.average_rating === null ? null : Number(offer.average_rating),
+          reviewCount: offer.review_count, offerCreatedAt: offer.created_at },
+      };
+      const pickupExact = offer.origin_offset_m <= 5;
+      const dropoffExact = offer.destination_offset_m <= 5;
+      const prefixLatest = new Date(Math.min(search.departureAt.getTime() + 120 * 60_000, offer.departure_at.getTime()));
+      const suffixEarliest = new Date(arrivalAt.getTime() + communityTransferBufferSeconds * 1000);
+      const [prefixes, suffixes] = await Promise.all([
+        pickupExact ? Promise.resolve([]) : searchTransitBetween(search.origin, ride.origin, search.departureAt, prefixLatest),
+        dropoffExact ? Promise.resolve([]) : searchTransitBetween(ride.destination, search.destination, suffixEarliest, new Date(suffixEarliest.getTime() + 4 * 60 * 60_000)),
+      ]);
+      const combinations = composeCommunityTransitJourneys({
+        offer: ride, prefixes, suffixes, requestedDepartureAt: search.departureAt,
+        origin: search.origin.coordinates, destination: search.destination.coordinates,
+        passengers: search.passengers, minimumTransferBufferSeconds: communityTransferBufferSeconds,
+        maximumDurationSeconds: search.preferences.maxTotalDurationSeconds ?? 24 * 60 * 60,
+        maximumWalkingMeters: search.preferences.maxWalkingMeters,
+        maximumResults: 6,
+      }).filter((journey) => search.preferences.maxTransfers === undefined || journey.transfers <= search.preferences.maxTransfers);
+      for (const combination of combinations) {
+        if (search.preferences.maxPriceMinor !== undefined) {
+          if (combination.priceMinor === null) {
+            hasUnpricedTransitCandidates = true;
+            continue;
+          }
+          if (combination.priceMinor > search.preferences.maxPriceMinor) continue;
+        }
+        communityTransitCandidates.push(combination);
+        if (communityTransitCandidates.length >= MAX_COMMUNITY_TRANSIT_CANDIDATES) {
+          candidateGenerationTruncated = true;
+          break;
+        }
+      }
+      if (communityTransitCandidates.length >= MAX_COMMUNITY_TRANSIT_CANDIDATES) break;
+      if (communityWalkingBudget.exhausted) {
+        candidateGenerationTruncated = true;
+        break;
+      }
+    }
+    if (pedestrianRoutesUnavailable) {
+      providerErrors.push('Пішохідний маршрутизатор не підтвердив шлях до точки посадки/висадки попутки; такі комбінації приховано.');
+    }
+    if (communityWalkingBudget.exhausted) {
+      candidateGenerationTruncated = true;
+      providerErrors.push(`Пішохідний маршрутизатор обмежив перевірку комбінацій ${communityWalkingBudget.limit} шляхами; частину варіантів не перевірено.`);
+    }
+  }
   scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
   if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
   scheduledCandidates.splice(100);
   const rankedCandidates = [
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
+    ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
     ...scheduledCandidates.map((itinerary) => ({
       id: itinerary.id,
       diversityKey: `transit:${itinerary.segments.map((segment) => segment.transportType).join('>')}`,
@@ -2411,9 +2572,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const blockedProviders = [
     ...canonicalRouteTypes.filter((type) => !routePlannerTypes.has(type))
       .map((type) => `transportType:${type}:no-routed-provider-in-corridor`),
-    'community-transit-combinations',
     ...(!walkingRoutingUrl ? ['door-to-door-walking:requires-WALKING_ROUTING_URL'] : []),
     'walking-transfers-between-unmatched-stops',
+    'community-intermediate-pickup:requires-explicit-driver-approved-stop',
   ];
   const client = await pool.connect();
   const journeys: Array<Record<string, unknown>> = [];
@@ -2421,6 +2582,168 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     await client.query('BEGIN');
     for (const representative of representatives) {
       const candidate = representative.journey;
+      if (candidate.kind === 'community-transit') {
+        const composition = candidate;
+        const offer = composition.offer;
+        const stored = await client.query<{ id: string }>(
+          `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
+           VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$11,$11,$11,$12,$13,$14,NULL,NULL)
+           RETURNING id`,
+          [req.userId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
+            search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
+            search.departureAt, representative.strategy, search.passengers, composition.priceMinor, composition.durationSeconds,
+            composition.walkingMeters, composition.transfers],
+        );
+        const journeyId = stored.rows[0].id;
+        await client.query(
+          `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
+          [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
+            preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
+            preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
+            preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
+            preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
+            configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
+            preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+            JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
+        );
+
+        const responseLegs: Array<Record<string, unknown>> = [];
+        let ordinal = 0;
+        let firstServiceLegId: string | null = null;
+        const insertWalk = async (
+          from: { name: string; coordinates: [number, number] },
+          to: { name: string; coordinates: [number, number] },
+          departureAt: Date,
+          distanceMeters: number,
+          durationSeconds: number,
+          source: string,
+          geometry?: Array<[number, number]> | null,
+        ) => {
+          if (distanceMeters <= 0) return;
+          const arrivalAt = new Date(departureAt.getTime() + durationSeconds * 1000);
+          const inserted = await client.query<{ id: string }>(
+            `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_status,availability_status,provider_type,state,data_source,last_updated_at,metadata)
+             VALUES($1,$2,'WALK',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$12,'UAH','UNKNOWN','AVAILABLE','walking','SUGGESTED',$13,now(),$14::jsonb) RETURNING id`,
+            [journeyId, ordinal++, from.coordinates[0], from.coordinates[1], from.name,
+              to.coordinates[0], to.coordinates[1], to.name, departureAt, arrivalAt, durationSeconds,
+              distanceMeters, source, JSON.stringify({ routeGeometry: geometry ?? null })],
+          );
+          responseLegs.push({ id: inserted.rows[0].id, mode: 'WALK', offerId: null, origin: from, destination: to,
+            departureAt, arrivalAt, durationSeconds, distanceMeters, priceMinor: null, currency: null,
+            priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source, routeGeometry: geometry ?? null,
+            lastUpdatedAt: new Date().toISOString(), dataFreshnessSeconds: 0, liveStatus: 'UNVERIFIED',
+            driver: null, vehicle: null });
+        };
+        const insertTransitPath = async (path: SearchItinerary, startFrom?: { name: string; coordinates: [number, number] },
+          endAt?: { name: string; coordinates: [number, number] }) => {
+          const first = path.segments[0];
+          const last = path.segments.at(-1);
+          if (!first || !last) return;
+          const accessWalk = path.accessWalk ?? null;
+          if (accessWalk && startFrom) {
+            await insertWalk(startFrom, { name: first.originStop.name, coordinates: first.originStop.coordinates },
+              path.departureAt, accessWalk.distanceMeters, accessWalk.durationSeconds, 'osrm-foot-route', accessWalk.geometry);
+          }
+          for (const [segmentIndex, segment] of path.segments.entries()) {
+            if (segmentIndex > 0) {
+              const previous = path.segments[segmentIndex - 1]!;
+              const meters = path.transferWalkingMeters[segmentIndex - 1] ?? 0;
+              const seconds = path.transferWalkingSeconds[segmentIndex - 1] ?? 0;
+              const geometry = path.transferWalks?.[segmentIndex - 1]?.geometry
+                ?? path.transferWalkingGeometries[segmentIndex - 1] ?? null;
+              if (meters > 0 && !path.transferInSeat[segmentIndex - 1]) {
+                await insertWalk({ name: previous.destinationStop.name, coordinates: previous.destinationStop.coordinates },
+                  { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
+                  previous.arrivalAt, meters, seconds, geometry ? 'gtfs-pathway' : 'walking-route', geometry);
+              }
+            }
+            const allocation = path.fare?.allocations[segmentIndex] ?? null;
+            const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
+            const provider = eligibleGtfsProviders.find((item) => item.id === segment.providerId);
+            const inserted = await client.query<{ id: string }>(
+              `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
+               VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb) RETURNING id`,
+              [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
+                segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
+                segment.scheduledDepartureAt, segment.scheduledArrivalAt,
+                segment.realtimeUpdatedAt ? segment.departureAt : null, segment.realtimeUpdatedAt ? segment.arrivalAt : null,
+                durationSeconds, allocation?.priceMinor ?? null, path.fare?.currency ?? 'UAH', allocation ? 'ESTIMATED' : 'UNKNOWN',
+                segment.providerId, segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+                segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
+                JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
+                  transportType: segment.transportType, headsign: segment.headsign, tripId: segment.tripId,
+                  serviceDate: segment.serviceDate, fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+                  ...(allocation ? { fareProductId: allocation.fareProductId,
+                    fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
+                  ...(segment.stops ? { stops: segment.stops } : {}),
+                  ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
+            );
+            firstServiceLegId ??= inserted.rows[0].id;
+            responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, offerId: null,
+              origin: { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
+              destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
+              departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
+              scheduledDepartureAt: segment.scheduledDepartureAt, scheduledArrivalAt: segment.scheduledArrivalAt,
+              ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
+              durationSeconds, distanceMeters: null, priceMinor: allocation?.priceMinor ?? null,
+              currency: allocation ? path.fare?.currency ?? null : null,
+              priceStatus: allocation ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+              ...(allocation ? { fareProductId: allocation.fareProductId,
+                fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
+              ...(segment.stops ? { stops: segment.stops } : {}),
+              liveStatus: segment.realtimeUpdatedAt ? 'PREDICTED' : 'SCHEDULED',
+              dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - (segment.realtimeUpdatedAt ?? segment.sourceFreshAt).getTime()) / 1000)),
+              source: segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+              lastUpdatedAt: segment.realtimeUpdatedAt ?? segment.sourceFreshAt, providerName: segment.providerName,
+              routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign,
+              ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}), driver: null, vehicle: null });
+          }
+          const egressWalk = path.egressWalk ?? null;
+          if (egressWalk && endAt) {
+            await insertWalk({ name: last.destinationStop.name, coordinates: last.destinationStop.coordinates }, endAt,
+              last.arrivalAt, egressWalk.distanceMeters, egressWalk.durationSeconds, 'osrm-foot-route', egressWalk.geometry);
+          }
+        };
+
+        const prefix = composition.prefix as SearchItinerary | null;
+        const suffix = composition.suffix as SearchItinerary | null;
+        if (prefix) await insertTransitPath(prefix, search.origin, offer.origin);
+        const communityPriceMinor = offer.pricePerSeatMinor * search.passengers;
+        const safeCommunityPriceMinor = Number.isSafeInteger(communityPriceMinor) && communityPriceMinor >= 0 ? communityPriceMinor : null;
+        const communityInserted = await client.query<{ id: string }>(
+          `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_type,offer_id,state,data_source,data_freshness_seconds,last_updated_at,metadata)
+           VALUES($1,$2,'COMMUNITY',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$13,$13,$13,$14,$15,'AVAILABLE','community',$16,'SELECTED','community-offer',0,$17,$18::jsonb) RETURNING id`,
+          [journeyId, ordinal++, offer.origin.coordinates[0], offer.origin.coordinates[1], offer.origin.name,
+            offer.destination.coordinates[0], offer.destination.coordinates[1], offer.destination.name,
+            offer.departureAt, offer.arrivalAt, Math.ceil((offer.arrivalAt.getTime() - offer.departureAt.getTime()) / 1000),
+            offer.distanceMeters, safeCommunityPriceMinor,
+            offer.currency, offer.currency === 'UAH' && safeCommunityPriceMinor !== null ? 'ESTIMATED' : 'UNKNOWN', offer.id, offer.snapshotAt,
+            JSON.stringify({ ...offer.metadata, driverId: offer.driverId, routeGeometry: offer.routeGeometry,
+              pricePerSeatMinor: offer.pricePerSeatMinor, availableSeatsAtSearch: offer.availableSeats })],
+        );
+        firstServiceLegId ??= communityInserted.rows[0].id;
+        responseLegs.push({ id: communityInserted.rows[0].id, mode: 'COMMUNITY', offerId: offer.id,
+          origin: offer.origin, destination: offer.destination, departureAt: offer.departureAt, arrivalAt: offer.arrivalAt,
+          durationSeconds: Math.ceil((offer.arrivalAt.getTime() - offer.departureAt.getTime()) / 1000),
+          distanceMeters: offer.distanceMeters, priceMinor: offer.currency === 'UAH' ? safeCommunityPriceMinor : null,
+          pricePerSeatMinor: offer.pricePerSeatMinor, currency: offer.currency,
+          priceStatus: offer.currency === 'UAH' && safeCommunityPriceMinor !== null ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'AVAILABLE',
+          source: 'community-offer', routeGeometry: offer.routeGeometry, lastUpdatedAt: offer.snapshotAt,
+          dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshotAt.getTime()) / 1000)),
+          liveStatus: 'SCHEDULED', availableSeats: offer.availableSeats, driver: offer.metadata });
+        if (suffix) await insertTransitPath(suffix, offer.destination, search.destination);
+        if (firstServiceLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstServiceLegId]);
+        journeys.push({ id: journeyId, offerId: offer.id, strategy: representative.strategy,
+          requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: composition.waitingSeconds,
+          recommendedStrategies: representative.recommendedStrategies, strategyRanks: representative.strategyRanks,
+          score: representative.score, state: 'PLANNED', source: 'community-transit',
+          totalDurationSeconds: composition.durationSeconds, totalPriceMinor: composition.priceMinor,
+          confirmedPriceMinor: null, estimatedPriceMinMinor: composition.priceMinor, estimatedPriceMaxMinor: composition.priceMinor,
+          currency: composition.currency, priceStatus: composition.priceMinor === null ? 'UNKNOWN' : 'ESTIMATED',
+          walkingMeters: composition.walkingMeters, transfers: composition.transfers, reliabilityScore: null, legs: responseLegs });
+        continue;
+      }
       if (candidate.kind !== 'community') continue;
       const offer = candidate.offer;
       const stored = await client.query<{ id: string }>(
@@ -2651,7 +2974,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     candidateGenerationTruncated,
     partial: journeys.length === 0 || candidateGenerationTruncated || providerErrors.length > 0 || unsupportedPreferences.length > 0
       || (scheduledCandidates.length > 0 && !walkingRoutingUrl)
-      || journeys.some((journey) => journey.source === 'gtfs-static'),
+      || journeys.some((journey) => journey.source === 'gtfs-static' || journey.source === 'community-transit'),
     blockedProviders,
     unsupportedPreferences,
     providerErrors,
@@ -3310,15 +3633,16 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     if (Number(currentOffer.available_seats) < seats) throw new ApiError(409, 'not enough available seats');
 
     if (hasJourneyReference) {
-      const selected = await client.query<{ passenger_count: number; journey_state: string; leg_state: string; offer_id: string; booking_id: string | null; leg_count: number }>(
-        `SELECT j.passenger_count,j.state AS journey_state,l.state AS leg_state,l.offer_id,l.booking_id,
-                (SELECT count(*)::int FROM journey_legs all_legs WHERE all_legs.journey_id=j.id) AS leg_count
+      const selected = await client.query<{ passenger_count: number; journey_state: string; leg_state: string; leg_mode: string; offer_id: string; booking_id: string | null; leg_count: number; community_leg_count: number }>(
+        `SELECT j.passenger_count,j.state AS journey_state,l.state AS leg_state,l.mode AS leg_mode,l.offer_id,l.booking_id,
+                (SELECT count(*)::int FROM journey_legs all_legs WHERE all_legs.journey_id=j.id) AS leg_count,
+                (SELECT count(*)::int FROM journey_legs community_legs WHERE community_legs.journey_id=j.id AND community_legs.mode='COMMUNITY') AS community_leg_count
            FROM journeys j JOIN journey_legs l ON l.journey_id=j.id
           WHERE j.id=$1 AND l.id=$2 AND j.user_id=$3 FOR UPDATE OF j,l`, [journeyId, journeyLegId, userId],
       );
       const journeySelection = selected.rows[0];
-      const normalJourneyBooking = journeySelection?.offer_id === offerId && journeySelection.leg_state === 'SELECTED'
-        && !journeySelection.booking_id && journeySelection.journey_state === 'PLANNED' && journeySelection.leg_count === 1
+      const normalJourneyBooking = journeySelection?.leg_mode === 'COMMUNITY' && journeySelection.offer_id === offerId && journeySelection.leg_state === 'SELECTED'
+        && !journeySelection.booking_id && journeySelection.journey_state === 'PLANNED' && journeySelection.community_leg_count === 1
         && Number(journeySelection.passenger_count) === seats;
       let rescueJourneyBooking = false;
       if (journeySelection?.journey_state === 'REPLANNING' && journeySelection.leg_state === 'CANCELLED'
@@ -3402,13 +3726,27 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
              price_min_minor=$3,price_max_minor=$3,updated_at=now() WHERE id=$1`, [journeyLegId, booking.rows[0].id, total],
         );
       }
-      await client.query(
-        `UPDATE journeys SET confirmed_price_minor=$2,total_price_minor=$2,estimated_price_min_minor=$2,
-           estimated_price_max_minor=$2,state='READY',updated_at=now() WHERE id=$1`, [journeyId, total],
+      const journeyLegCount = await client.query<{ leg_count: number }>(
+        'SELECT count(*)::int AS leg_count FROM journey_legs WHERE journey_id=$1', [journeyId],
       );
+      const compositeJourney = Number(journeyLegCount.rows[0]?.leg_count ?? 0) > 1;
+      if (compositeJourney) {
+        // The private-ride leg is now confirmed, while public-transit legs are
+        // still suggestions. Do not present this single payment as the price
+        // for the entire multimodal journey.
+        await client.query(
+          `UPDATE journeys SET confirmed_price_minor=NULL,state='PARTIALLY_RESERVED',updated_at=now() WHERE id=$1`, [journeyId],
+        );
+      } else {
+        await client.query(
+          `UPDATE journeys SET confirmed_price_minor=$2,total_price_minor=$2,estimated_price_min_minor=$2,
+             estimated_price_max_minor=$2,state='READY',updated_at=now() WHERE id=$1`, [journeyId, total],
+        );
+      }
       await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [userId, 'journey.leg.booked', 'journey', journeyId]);
       await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:booking:${booking.rows[0].id}`,
-        [userId], { journey_id: journeyId, journey_leg_id: journeyLegId, booking_id: booking.rows[0].id, state: 'READY' });
+        [userId], { journey_id: journeyId, journey_leg_id: journeyLegId, booking_id: booking.rows[0].id,
+          state: compositeJourney ? 'PARTIALLY_RESERVED' : 'READY' });
     }
     await client.query('COMMIT');
     res.status(201).json({ data: booking.rows[0], replayed: false });
