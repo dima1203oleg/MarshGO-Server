@@ -36,8 +36,8 @@ describe('Transit mode selection', () => {
     assert.deepEqual(JOURNEY_SEARCH_TRANSIT_MODES, ['BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO']);
     assert.equal(journeySearchTransitModeAllowed('FERRY', defaults), false);
     assert.equal(journeySearchTransitModeAllowed('FUNICULAR', defaults), false);
-    assert.equal(journeySearchTransitModeAllowed('FERRY', { ...defaults, allowedTransportTypes: ['ferry'] }), false);
-    assert.equal(journeySearchTransitModeAllowed('FUNICULAR', { ...defaults, allowedTransportTypes: ['funicular'] }), false);
+    assert.equal(journeySearchTransitModeAllowed('FERRY', { ...defaults, allowedTransportTypes: ['train'] }), false);
+    assert.equal(journeySearchTransitModeAllowed('FUNICULAR', { ...defaults, allowedTransportTypes: ['train'] }), false);
     assert.equal(journeySearchTransitModeAllowed('TRAM', { ...defaults, allowedTransportTypes: ['tram'] }), true);
   });
 });

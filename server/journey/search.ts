@@ -1,4 +1,4 @@
-import { JOURNEY_STRATEGIES, JOURNEY_TRANSPORT_TYPES, journeyTransportTypeSelected, type JourneyPreferences, type JourneyStrategy } from './types';
+import { canonicalJourneyTransportType, JOURNEY_STRATEGIES, JOURNEY_TRANSPORT_TYPES, journeyTransportTypeSelected, type JourneyPreferences, type JourneyStrategy } from './types';
 import type { TransitJourneyMode } from './gtfsTimetable';
 
 export interface JourneySearchRequest {
@@ -94,10 +94,13 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
   }
   if (rawPreferences.allowedTransportTypes !== undefined) {
     const types = rawPreferences.allowedTransportTypes;
-    if (!Array.isArray(types) || types.length > JOURNEY_TRANSPORT_TYPES.length
-      || types.some((type) => typeof type !== 'string' || !(JOURNEY_TRANSPORT_TYPES as readonly string[]).includes(type))
-      || new Set(types).size !== types.length) throw new TypeError('allowedTransportTypes is invalid');
-    preferences.allowedTransportTypes = types as JourneyPreferences['allowedTransportTypes'];
+    if (!Array.isArray(types) || types.length > JOURNEY_TRANSPORT_TYPES.length + 3
+      || types.some((type) => typeof type !== 'string')) throw new TypeError('allowedTransportTypes is invalid');
+    const normalized = (types as string[]).map(canonicalJourneyTransportType);
+    if (normalized.some((type) => type === null) || new Set(normalized).size !== normalized.length) {
+      throw new TypeError('allowedTransportTypes is invalid');
+    }
+    preferences.allowedTransportTypes = normalized as NonNullable<JourneyPreferences['allowedTransportTypes']>;
   }
   if (rawPreferences.allowedTransitProviders !== undefined) {
     const providers = rawPreferences.allowedTransitProviders;
@@ -108,15 +111,16 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
   }
   if (rawPreferences.allowedTransitProvidersByType !== undefined) {
     const providersByType = rawPreferences.allowedTransitProvidersByType;
-    if (!isRecord(providersByType) || Object.keys(providersByType).length > JOURNEY_TRANSPORT_TYPES.length) {
+    if (!isRecord(providersByType) || Object.keys(providersByType).length > JOURNEY_TRANSPORT_TYPES.length + 3) {
       throw new TypeError('allowedTransitProvidersByType is invalid');
     }
     const normalized: NonNullable<JourneyPreferences['allowedTransitProvidersByType']> = {};
     for (const [type, providers] of Object.entries(providersByType)) {
-      if (!(JOURNEY_TRANSPORT_TYPES as readonly string[]).includes(type) || !Array.isArray(providers) || providers.length > 100
+      const category = canonicalJourneyTransportType(type);
+      if (!category || !Array.isArray(providers) || providers.length > 100
         || providers.some((provider) => typeof provider !== 'string' || provider.trim().length < 2 || provider.trim().length > 120)
         || new Set(providers).size !== providers.length) throw new TypeError('allowedTransitProvidersByType is invalid');
-      normalized[type as keyof typeof normalized] = (providers as string[]).map((provider) => provider.trim());
+      normalized[category] = [...new Set([...(normalized[category] ?? []), ...(providers as string[]).map((provider) => provider.trim())])];
     }
     preferences.allowedTransitProvidersByType = normalized;
   }
@@ -136,14 +140,15 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
 /** Per-mode provider choices take precedence; the flat list remains for older clients. */
 export function transitProviderAllowed(preferences: JourneyPreferences, transportType: string, providerName: string): boolean {
   const operator = providerName.split(' — ')[0];
-  const selectedForType = preferences.allowedTransitProvidersByType?.[transportType as keyof NonNullable<JourneyPreferences['allowedTransitProvidersByType']>];
+  const category = canonicalJourneyTransportType(transportType);
+  const selectedForType = category ? preferences.allowedTransitProvidersByType?.[category] : undefined;
   if (selectedForType !== undefined) return selectedForType.includes(operator);
   return !preferences.allowedTransitProviders?.length || preferences.allowedTransitProviders.includes(operator);
 }
 
 const transportTypesByTransitMode: Record<TransitJourneyMode, readonly NonNullable<JourneyPreferences['allowedTransportTypes']>[number][]> = {
-  BUS: ['bus', 'intercity_bus'], MINIBUS: ['marshrutka'], RAIL: ['train', 'suburban_train', 'city_train'],
-  TRAM: ['tram'], TROLLEYBUS: ['trolleybus'], METRO: ['metro'], FERRY: ['ferry'], FUNICULAR: ['funicular'],
+  BUS: ['bus'], MINIBUS: ['marshrutka'], RAIL: ['train'],
+  TRAM: ['tram'], TROLLEYBUS: ['trolleybus'], METRO: ['metro'], FERRY: [], FUNICULAR: [],
 };
 
 /** Apply specific selected modes first; legacy booleans only gate their matching mode. */

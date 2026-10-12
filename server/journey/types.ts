@@ -5,20 +5,28 @@ export type JourneyLegMode =
   | 'WALK' | 'COMMUNITY' | 'COMMUNITY_DEMAND' | 'TAXI' | 'TRANSFER' | 'BUS' | 'MINIBUS'
   | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'URBAN_BUS' | 'CARSHARING' | 'FERRY' | 'FUNICULAR';
 
-export const JOURNEY_TRANSPORT_TYPES = ['carpool','taxi','carsharing','car_rental','transfer','bus','marshrutka','trolleybus','tram','metro','city_train','funicular','train','suburban_train','intercity_bus','bike','scooter','moped','plane','ferry','walk'] as const;
+/** Public selection categories. Feed-specific aliases belong to Journey segments, never to user preferences. */
+export const JOURNEY_TRANSPORT_TYPES = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'] as const;
 export type JourneyTransportType = typeof JOURNEY_TRANSPORT_TYPES[number];
 
-const journeyTransportAliases: Partial<Record<JourneyTransportType, readonly JourneyTransportType[]>> = {
-  bus: ['bus', 'intercity_bus'],
-  train: ['train', 'suburban_train', 'city_train'],
+const journeyTransportAliases: Partial<Record<JourneyTransportType, readonly string[]>> = {
+  bus: ['intercity_bus'],
+  train: ['suburban_train', 'city_train'],
 };
 
+/** Map a feed-specific segment type or accepted legacy preference to its public category. */
+export function canonicalJourneyTransportType(value: string): JourneyTransportType | null {
+  if ((JOURNEY_TRANSPORT_TYPES as readonly string[]).includes(value)) return value as JourneyTransportType;
+  return JOURNEY_TRANSPORT_TYPES.find((type) => journeyTransportAliases[type]?.includes(value)) ?? null;
+}
+
 export function journeyTransportTypeSelected(
-  actual: JourneyTransportType,
+  actual: string,
   selected?: readonly JourneyTransportType[],
 ): boolean {
   if (!selected) return true;
-  return selected.some((type) => type === actual || journeyTransportAliases[type]?.includes(actual) === true);
+  const category = canonicalJourneyTransportType(actual);
+  return category !== null && selected.includes(category);
 }
 
 export interface JourneyOption {
