@@ -1,6 +1,6 @@
 # MARSHGO Admin та Partner — уточнене технічне завдання
 
-Версія 1.1 · 14 жовтня 2026 · Статус: реалізація P0 розпочата
+Версія 1.2 · 14 жовтня 2026 · Статус: P0 реалізований; частина P1 реалізована; production acceptance не завершено
 
 ## 1. Мета та межі
 
@@ -11,7 +11,7 @@
 | Етап | Результат | Умова приймання |
 |---|---|---|
 | P0 Foundation | Організації, заявки, членства, server-side authorization, Admin review, адаптивні shells | Партнер подає заявку; Admin схвалює; член бачить лише свої організації; непартнер не бачить кабінет |
-| P1 Operations | Invitations, підключення провайдерів, provider health/sync UI, замовлення та state machine | Усі дії організації перевіряють membership, статус і право на модуль |
+| P1 Operations | Integration Control Center поверх чинного mobility registry; надалі invitations, партнерські connections, замовлення та state machine | Перевірки й перемикання connector виконуються сервером; tenant operations додаються лише разом із permission/state contract |
 | P2 Commercial | Agreements, commission ledger, settlements, advanced analytics | Юридична/платіжна модель погоджена; суми походять з підтверджених записів |
 
 Розділи, що потребують зовнішнього договору, ключа або налаштованої доставки повідомлень, лишаються `BLOCKED_EXTERNAL`; UI не імітує їхню роботу.
@@ -96,10 +96,14 @@ Application: `SUBMITTED → UNDER_REVIEW | NEEDS_INFORMATION | APPROVED | REJECT
 | `POST /admin/partners/:id/approve` | Admin | Атомарно схвалити заявку та активувати організацію |
 | `POST /admin/partners/:id/reject` | Admin | Відхилити заявку з аудійованою приміткою |
 | `POST /admin/partners/:id/suspend` | Admin | Призупинити активну організацію з причиною |
+| `GET /admin/integrations` | Admin | Безпечний огляд чинних feed sources та operators; URL і секрети не повертаються |
+| `POST /admin/integrations/providers/:id/test` | Admin | Сервером перевірити джерело, записати health та аудит, повернути очищений звіт |
+| `PATCH /admin/integrations/providers/:id` | Admin | Змінити status/priority з перевірками доступу, ліцензії та health |
+| `PATCH /admin/mobility/operators/:providerId` | Admin | Увімкнути лише підтверджений статичний або live operator |
 
 Не використовувати довільний `PATCH status`. Існуючий `/admin/mobility/providers` лишається канонічним реєстром джерел мобільності; партнерські організації не дублюють цей реєстр.
 
-P1 endpoint-и для invitations, connections, orders, fleet, sync/test і finance вводити лише разом із відповідними схемами, tenant permission checks, аудитом та contract tests. Не оголошувати їх реалізованими за самим записом у цьому документі.
+Партнерські invitations, connections, orders, fleet, webhooks і finance вводити лише разом із відповідними схемами, tenant permission checks, аудитом та contract tests. Наявний Control Center працює з глобальним provider source registry, а не створює удавані per-organization credentials чи замовлення.
 
 ## 7. Інтерфейси
 
@@ -110,6 +114,13 @@ P1 endpoint-и для invitations, connections, orders, fleet, sync/test і fina
 - Перегляд транспортних джерел через існуючий Admin mobility API.
 - Дії approve/reject/suspend мають підтвердження, пояснення і результат з API.
 - Не показувати замовлення, дохід, GPS або графіки, поки відповідний домен не доступний.
+
+### Admin P1 slice
+
+- Перевірка чинного provider feed виконується сервером; браузер не отримує feed URL, query credentials або raw source URL.
+- Status/priority зміни проходять існуючі перевірки доступу, health, комерційного дозволу й ліцензії; кожна зміна має audit event.
+- Оператор має окремий integration status, booking/pricing/live capability, configured boolean і фактичні лічильники точок; configured не розкриває значення ключа.
+- Партнерський API connection, invitation delivery, order state machine та Native Dispatch лишаються окремими P1 задачами, доки не готові vault/tenant contracts/passenger event integration.
 
 ### Partner P0
 
@@ -141,11 +152,12 @@ Frontend env: тільки публічний API origin. Backend secrets лиш
 
 ## 10. Тести та acceptance
 
-Обов’язкові для P0:
+Обов’язкові для P0/P1 slice:
 
 - unit: всі role/status комбінації та state transitions;
 - API/integration: заявка створює рівно одну org, membership owner, requested modules і audit event у транзакції;
 - security: інший користувач отримує 404 на tenant detail; suspended/rejected membership не отримує доступ; user без Admin ролі не може читати чи змінювати admin ресурси;
+- integration security: джерело без credentials/підтвердженого комерційного дозволу не вмикається; integration DTO не повертає feed URL/query key; connector test не виконується у тестах без явної команди;
 - concurrency: два рішення модерації не можуть одночасно перевести ту саму заявку у різні стани;
 - frontend: OTP/refresh, порожній стан, помилка API, admin approval, partner onboarding, mobile navigation/overflow;
 - CI: format/lint, typecheck, unit, build, Playwright smoke, dependency audit.

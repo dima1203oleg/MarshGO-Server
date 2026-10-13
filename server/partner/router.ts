@@ -2,6 +2,8 @@ import { Router, type Request, type RequestHandler, type Response } from 'expres
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
 import { canPerformOrganizationOperations, canReadOrganizationMembership, type OrganizationStatus, type PartnerRole } from './authz';
+import { testProviderConnection } from '../mobility/connection';
+import { intuiTravelStatus, kiwitaxiStatus } from '../mobility/transferAdapters';
 
 type AuthenticatedRequest = Request & { userId?: string };
 type ApiErrorConstructor = new (status: number, message: string, code?: string) => Error;
@@ -29,6 +31,10 @@ const reviewSchema = z.object({ note: z.string().trim().max(500).optional() }).s
 const pageSchema = z.coerce.number().int().min(1).max(100_000).default(1);
 const pageSizeSchema = z.coerce.number().int().min(1).max(100).default(25);
 const idSchema = z.string().uuid();
+const integrationUpdateSchema = z.object({
+  status: z.enum(['enabled','disabled','paused']).optional(),
+  priority: z.number().int().min(1).max(1000).optional(),
+}).strict().refine((value) => value.status !== undefined || value.priority !== undefined);
 
 function asyncRoute(handler: (req: AuthenticatedRequest, res: Response) => Promise<void>): RequestHandler {
   return (req, res, next) => { void handler(req as AuthenticatedRequest, res).catch(next); };
@@ -49,6 +55,57 @@ async function writeAudit(client: Pick<PoolClient, 'query'>, actorId: string, ac
   await client.query(
     'INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)',
     [actorId, action, 'organization', organizationId, JSON.stringify(details)],
+  );
+}
+
+function redactIntegrationText(value: string | null | undefined) {
+  if (!value) return value ?? null;
+  return value
+    .replace(/\b(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(/([?&][^=&#\s]*(?:token|key|secret|signature|auth)[^=&#\s]*=)[^&#\s]*/gi, '$1[redacted]');
+}
+
+function integrationProviderDto(row: Record<string, unknown>) {
+  const lastReport = row.last_report && typeof row.last_report === 'object' ? row.last_report as Record<string, unknown> : {};
+  const rawChecks = Array.isArray(lastReport.checks) ? lastReport.checks : [];
+  return {
+    id: row.id,
+    name: row.name,
+    city: row.city,
+    provider_type: row.provider_type,
+    source_type: row.source_type,
+    priority: row.priority,
+    status: row.status,
+    health: row.health,
+    country: row.country,
+    access: row.access,
+    license: row.license,
+    update_frequency: row.update_frequency,
+    coverage: row.coverage,
+    source_ref: row.source_ref,
+    commercial_use: row.commercial_use,
+    attribution_required: row.attribution_required,
+    discovery_status: row.discovery_status,
+    last_checked_at: row.last_checked_at,
+    last_sync_at: row.last_sync_at,
+    last_error: redactIntegrationText(typeof row.last_error === 'string' ? row.last_error : null),
+    last_report: {
+      counts: lastReport.counts && typeof lastReport.counts === 'object' ? lastReport.counts : {},
+      responseMs: typeof lastReport.responseMs === 'number' ? lastReport.responseMs : null,
+      bbox: Array.isArray(lastReport.bbox) ? lastReport.bbox : null,
+      checks: rawChecks.flatMap((check) => {
+        if (!check || typeof check !== 'object') return [];
+        const value = check as Record<string, unknown>;
+        return [{ name: value.name, ok: value.ok, detail: redactIntegrationText(typeof value.detail === 'string' ? value.detail : null) }];
+      }),
+    },
+  };
+}
+
+async function writeMobilityAudit(client: Pick<PoolClient, 'query'>, actorId: string, action: string, providerId: string, details: Record<string, unknown>) {
+  await client.query(
+    'INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)',
+    [actorId, action, 'mobility_provider', providerId, JSON.stringify(details)],
   );
 }
 
@@ -199,6 +256,97 @@ export function createPartnerPlatformRouter(options: Options) {
          now() AS generated_at`,
     );
     res.json({ data: summary });
+  }));
+
+  router.get('/admin/integrations', options.requireAuth, options.requireAdmin, asyncRoute(async (_req, res) => {
+    const [sourceResult, operatorResult] = await Promise.all([
+      pool.query(`SELECT id,name,city,provider_type,source_type,priority,status,health,country,access,license,update_frequency,
+                         coverage,source_ref,commercial_use,attribution_required,discovery_status,last_checked_at,last_sync_at,
+                         last_error,last_report
+                    FROM mobility_providers ORDER BY city,priority,name`),
+      pool.query(`SELECT mo.provider_id,mo.provider_name,mo.provider_group,mo.data_source,mo.integration_status,
+                         mo.data_freshness_seconds,mo.booking_method,mo.pricing_capability,mo.live_availability_capability,
+                         mo.commercial_permissions,mo.attribution_requirements,mo.enabled,mo.last_successful_sync,
+                         mo.last_sync_error,mo.api_key_configured,
+                         (SELECT count(*)::int FROM rental_locations rl WHERE rl.provider_id=mo.provider_id) AS location_count,
+                         (SELECT count(*)::int FROM rental_locations rl WHERE rl.provider_id=mo.provider_id AND rl.availability='AVAILABLE'
+                           AND rl.availability_checked_at > now()-interval '5 minutes') AS live_available_count
+                    FROM mobility_operators mo ORDER BY mo.provider_group,mo.provider_name`),
+    ]);
+    const kiwi = kiwitaxiStatus();
+    const intui = intuiTravelStatus();
+    const operators = operatorResult.rows.map((row) => {
+      const transferStatus = row.provider_id === 'kiwitaxi' ? kiwi : row.provider_id === 'intui_travel' ? intui : null;
+      if (!transferStatus) return { ...row, last_sync_error: redactIntegrationText(row.last_sync_error) };
+      return {
+        ...row,
+        integration_status: transferStatus.status,
+        api_key_configured: row.provider_id === 'kiwitaxi' ? Boolean(process.env.KIWITAXI_SECURITY_TOKEN?.trim()) : Boolean(process.env.INTUI_API_LIGHT_CREDENTIALS?.trim()),
+        status_message: transferStatus.message,
+        last_sync_error: redactIntegrationText(row.last_sync_error),
+      };
+    });
+    res.json({ data: { sources: sourceResult.rows.map((row) => integrationProviderDto(row)), operators } });
+  }));
+
+  router.post('/admin/integrations/providers/:id/test', options.requireAuth, options.requireAdmin, asyncRoute(async (req, res) => {
+    const actorId = requiredUserId(req, ApiError);
+    const id = parseOrThrow(idSchema, req.params.id, ApiError);
+    const { rows: [provider] } = await pool.query<{ id: string; name: string; source_type: string; feed_url: string; country: string }>(
+      'SELECT id,name,source_type,feed_url,country FROM mobility_providers WHERE id=$1', [id],
+    );
+    if (!provider) throw new ApiError(404, 'Provider not found', 'provider_not_found');
+    const report = await testProviderConnection(provider);
+    const result = await withTransaction(pool, async (client) => {
+      const { rows: [updated] } = await client.query(
+        `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_sync_at=CASE WHEN $2='healthy' THEN now() ELSE last_sync_at END,
+                last_error=$3,last_report=$4,status=CASE WHEN $2='offline' AND status='enabled' THEN 'paused' ELSE status END,updated_at=now()
+          WHERE id=$1 RETURNING id,name,city,provider_type,source_type,priority,status,health,country,access,license,update_frequency,
+                coverage,source_ref,commercial_use,attribution_required,discovery_status,last_checked_at,last_sync_at,last_error,last_report`,
+        [id, report.health, report.error ?? null, JSON.stringify(report)],
+      );
+      await writeMobilityAudit(client, actorId, 'mobility.provider.tested', id, { health: report.health, error: redactIntegrationText(report.error) });
+      return updated;
+    });
+    res.json({ data: { provider: integrationProviderDto(result), report: {
+      health: report.health,
+      checks: report.checks.map((check) => ({ ...check, detail: redactIntegrationText(check.detail) })),
+      counts: report.counts,
+      responseMs: report.responseMs,
+      ...(report.bbox ? { bbox: report.bbox } : {}),
+      ...(report.error ? { error: redactIntegrationText(report.error) } : {}),
+    } } });
+  }));
+
+  router.patch('/admin/integrations/providers/:id', options.requireAuth, options.requireAdmin, asyncRoute(async (req, res) => {
+    const actorId = requiredUserId(req, ApiError);
+    const id = parseOrThrow(idSchema, req.params.id, ApiError);
+    const input = parseOrThrow(integrationUpdateSchema, req.body, ApiError);
+    const result = await withTransaction(pool, async (client) => {
+      const { rows: [current] } = await client.query(
+        'SELECT status,priority,health,access,license,commercial_use,last_checked_at,discovery_status FROM mobility_providers WHERE id=$1 FOR UPDATE', [id],
+      );
+      if (!current) throw new ApiError(404, 'Provider not found', 'provider_not_found');
+      if (input.status === 'enabled' && current.access !== 'open') throw new ApiError(409, 'This source needs credentials or a secure endpoint before it can be enabled', 'provider_access_required');
+      if (input.status === 'enabled' && current.health === 'offline') throw new ApiError(409, 'Run a successful connection test before enabling an offline provider', 'provider_offline');
+      if (input.status === 'enabled' && (!current.license || current.commercial_use !== true || !current.last_checked_at || !['VALIDATED','ENABLED'].includes(current.discovery_status))) {
+        throw new ApiError(409, 'Record the source licence and validate commercial-use terms before enabling this provider', 'provider_license_unverified');
+      }
+      const { rows: [updated] } = await client.query(
+        `UPDATE mobility_providers SET status=COALESCE($2,status),
+                discovery_status=CASE WHEN $2='enabled' THEN 'ENABLED' ELSE discovery_status END,
+                priority=COALESCE($3,priority),updated_at=now()
+          WHERE id=$1 RETURNING id,name,city,provider_type,source_type,priority,status,health,country,access,license,update_frequency,
+                coverage,source_ref,commercial_use,attribution_required,discovery_status,last_checked_at,last_sync_at,last_error,last_report`,
+        [id, input.status ?? null, input.priority ?? null],
+      );
+      await writeMobilityAudit(client, actorId, 'mobility.provider.updated', id, {
+        old: { status: current.status, priority: current.priority },
+        new: { status: updated.status, priority: updated.priority },
+      });
+      return updated;
+    });
+    res.json({ data: integrationProviderDto(result) });
   }));
 
   router.get('/admin/partners', options.requireAuth, options.requireAdmin, asyncRoute(async (req, res) => {

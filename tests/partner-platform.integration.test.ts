@@ -16,6 +16,8 @@ describe('partner platform API and tenant isolation (opt-in local integration te
   const ownerA = crypto.randomUUID();
   const ownerB = crypto.randomUUID();
   const admin = crypto.randomUUID();
+  const providerId = crypto.randomUUID();
+  const apiKeySentinel = crypto.randomUUID();
   const organizationIds: string[] = [];
   const applicationIds: string[] = [];
   const auth = (userId: string) => ({ 'content-type': 'application/json', 'x-dev-user-id': userId });
@@ -32,6 +34,11 @@ describe('partner platform API and tenant isolation (opt-in local integration te
     await pool.query(`INSERT INTO users(id,display_name,roles) VALUES
       ($1,'Partner owner A',ARRAY['passenger']),($2,'Partner owner B',ARRAY['passenger']),($3,'Partner admin',ARRAY['admin'])`, [ownerA, ownerB, admin]);
     await pool.query(`INSERT INTO user_roles(user_id,role) VALUES ($1,'passenger'),($2,'passenger'),($3,'admin')`, [ownerA, ownerB, admin]);
+    await pool.query(
+      `INSERT INTO mobility_providers(id,name,city,provider_type,source_type,feed_url,created_by,access)
+       VALUES ($1,'Partner platform integration test','Київ','bike','gbfs',$2,$3,'requires_credentials')`,
+      [providerId, `https://feed.example.test/gbfs?api_key=${apiKeySentinel}`, admin],
+    );
   });
 
   after(async () => {
@@ -40,6 +47,7 @@ describe('partner platform API and tenant isolation (opt-in local integration te
       await pool.query('DELETE FROM organizations WHERE id=ANY($1::uuid[])', [organizationIds]);
     }
     if (applicationIds.length) await pool.query('DELETE FROM audit_events WHERE entity_id=ANY($1::uuid[])', [applicationIds]);
+    await pool.query('DELETE FROM mobility_providers WHERE id=$1', [providerId]);
     await pool.query('DELETE FROM users WHERE id=ANY($1::uuid[])', [[ownerA, ownerB, admin]]);
     await pool.end();
   });
@@ -75,6 +83,25 @@ describe('partner platform API and tenant isolation (opt-in local integration te
 
     const noAdmin = await fetch(`${apiUrl}/api/v1/admin/partners`, { headers: auth(ownerA) });
     assert.equal(noAdmin.status, 403);
+    const noIntegrationAdmin = await fetch(`${apiUrl}/api/v1/admin/integrations`, { headers: auth(ownerA) });
+    assert.equal(noIntegrationAdmin.status, 403);
+    const integrationsResponse = await fetch(`${apiUrl}/api/v1/admin/integrations`, { headers: auth(admin) });
+    assert.equal(integrationsResponse.status, 200);
+    const integrationPayload = await integrationsResponse.json() as { data: { sources: Array<Record<string, unknown>>; operators: Array<Record<string, unknown>> } };
+    const testSource = integrationPayload.data.sources.find((row) => row.id === providerId);
+    assert.ok(testSource);
+    assert.equal(Object.hasOwn(testSource, 'feed_url'), false);
+    assert.equal(Object.hasOwn(testSource, 'realtime_url'), false);
+    assert.equal(JSON.stringify(integrationPayload).includes(apiKeySentinel), false);
+    const deniedEnable = await fetch(`${apiUrl}/api/v1/admin/integrations/providers/${providerId}`, {
+      method: 'PATCH', headers: auth(admin), body: JSON.stringify({ status: 'enabled' }),
+    });
+    assert.equal(deniedEnable.status, 409);
+    const paused = await fetch(`${apiUrl}/api/v1/admin/integrations/providers/${providerId}`, {
+      method: 'PATCH', headers: auth(admin), body: JSON.stringify({ status: 'paused' }),
+    });
+    assert.equal(paused.status, 200);
+    assert.equal((await paused.json() as { data: { status: string } }).data.status, 'paused');
     const rejectWithoutReason = await fetch(`${apiUrl}/api/v1/admin/partners/${resultA.data.organization.id}/reject`, {
       method: 'POST', headers: auth(admin), body: JSON.stringify({}),
     });
