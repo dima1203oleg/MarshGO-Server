@@ -13,6 +13,7 @@ describe('editing and cancelling a published trip (opt-in local integration test
   const pool = new Pool({ connectionString: databaseUrl });
   const driver = crypto.randomUUID(), passengerA = crypto.randomUUID(), passengerB = crypto.randomUUID(), stranger = crypto.randomUUID();
   const vehicle = crypto.randomUUID(), vehicleTwo = crypto.randomUUID(), smallVehicle = crypto.randomUUID(), offer = crypto.randomUUID();
+  const testPlates = Array.from({ length: 3 }, () => `EDIT${crypto.randomBytes(3).toString('hex').slice(0, 3).toUpperCase()}`);
   const headers = (userId: string, extra: Record<string, string> = {}) => ({ 'content-type': 'application/json', 'x-dev-user-id': userId, ...extra });
   const call = (path: string, userId: string, method = 'GET', body?: unknown) => fetch(`${apiUrl}/api/v1${path}`, { method, headers: headers(userId), body: body === undefined ? undefined : JSON.stringify(body) });
   const departure = new Date(Date.now() + 3 * 86_400_000);
@@ -22,7 +23,7 @@ describe('editing and cancelling a published trip (opt-in local integration test
     await pool.query(`INSERT INTO users(id,display_name,roles) VALUES($1,'Edit driver',ARRAY['driver']),($2,'Edit passenger A',ARRAY['passenger']),($3,'Edit passenger B',ARRAY['passenger']),($4,'Stranger',ARRAY['driver'])`, [driver, passengerA, passengerB, stranger]);
     await pool.query(`INSERT INTO user_roles(user_id,role) VALUES($1,'driver'),($2,'passenger'),($3,'passenger'),($4,'driver')`, [driver, passengerA, passengerB, stranger]);
     await pool.query(`INSERT INTO vehicles(id,owner_id,make,model,model_year,seat_count,is_active,trust_level,plate) VALUES
-      ($1,$4,'Avatr','11',2024,4,true,1,'EDIT001'),($2,$4,'Tesla','Model Y',2023,4,false,1,'EDIT002'),($3,$4,'Smart','ForTwo',2020,1,false,1,'EDIT003')`, [vehicle, vehicleTwo, smallVehicle, driver]);
+      ($1,$4,'Avatr','11',2024,4,true,1,$5),($2,$4,'Tesla','Model Y',2023,4,false,1,$6),($3,$4,'Smart','ForTwo',2020,1,false,1,$7)`, [vehicle, vehicleTwo, smallVehicle, driver, ...testPlates]);
     await pool.query(`INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
       VALUES ($1,$2,$3,'Львів','Стрий',ST_SetSRID(ST_MakePoint(24.03,49.84),4326)::geography,ST_SetSRID(ST_MakePoint(23.85,49.26),4326)::geography,
         ST_MakeLine(ST_SetSRID(ST_MakePoint(24.03,49.84),4326),ST_SetSRID(ST_MakePoint(23.85,49.26),4326)),$4,$5,70000,3600,'osrm',15000,3,3)`,

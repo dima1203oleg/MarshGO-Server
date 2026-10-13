@@ -10,6 +10,32 @@ export interface JourneySearchRequest {
   preferences: JourneyPreferences;
 }
 
+export type JourneySearchPartialReason =
+  | 'candidate_generation_truncated'
+  | 'provider_error'
+  | 'unsupported_preference'
+  | 'walking_routing_unavailable';
+
+/**
+ * Report whether the search is incomplete because of a known limitation.
+ * A scheduled-only or Community result is not partial by itself: freshness,
+ * fare certainty, and provider coverage are represented by their own fields.
+ * An empty result can also be complete when every requested source was checked.
+ */
+export function getJourneySearchPartialReasons(input: {
+  candidateGenerationTruncated: boolean;
+  providerErrorCount: number;
+  unsupportedPreferenceCount: number;
+  scheduledCandidatesNeedWalkingRouting: boolean;
+}): JourneySearchPartialReason[] {
+  return [
+    ...(input.candidateGenerationTruncated ? ['candidate_generation_truncated' as const] : []),
+    ...(input.providerErrorCount > 0 ? ['provider_error' as const] : []),
+    ...(input.unsupportedPreferenceCount > 0 ? ['unsupported_preference' as const] : []),
+    ...(input.scheduledCandidatesNeedWalkingRouting ? ['walking_routing_unavailable' as const] : []),
+  ];
+}
+
 /**
  * GTFS modes that may participate in a MARSHGO Journey. This is deliberately
  * narrower than the feed parser's enum: feed ingestion may understand other
@@ -44,6 +70,8 @@ const preferenceBounds: Record<string, [number, number]> = {
   minimumTransferBufferSeconds: [0, 7200],
   maxCommunityDetourSeconds: [0, 7200],
   maxCommunityDetourMeters: [0, 100_000],
+  maxWalkToRentalMeters: [0, 10_000],
+  maxRentalDurationSeconds: [60, 24 * 60 * 60],
 };
 
 export function parseJourneySearchRequest(value: unknown, now = new Date()): JourneySearchRequest {
@@ -68,7 +96,7 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
   if (!isRecord(rawPreferences)) throw new TypeError('preferences must be an object');
   const allowedPreferences = new Set([
     ...Object.keys(preferenceBounds), 'minDriverRating','preferredVehicleClass',
-    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowedTransportTypes','allowedTransitProviders','allowedTransitProvidersByType',
+    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowBicycle','allowScooter','requireVerifiedReturn','allowStaticRentalDiscovery','allowedProviderIds','blockedProviderIds','allowedTransportTypes','allowedTransitProviders','allowedTransitProvidersByType',
   ]);
   const unknownPreference = Object.keys(rawPreferences).find((key) => !allowedPreferences.has(key));
   if (unknownPreference) throw new TypeError(`unsupported preference: ${unknownPreference}`);
@@ -86,11 +114,21 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
     else if (key === 'minimumTransferBufferSeconds') preferences.minimumTransferBufferSeconds = raw;
     else if (key === 'maxCommunityDetourSeconds') preferences.maxCommunityDetourSeconds = raw;
     else if (key === 'maxCommunityDetourMeters') preferences.maxCommunityDetourMeters = raw;
+    else if (key === 'maxWalkToRentalMeters') preferences.maxWalkToRentalMeters = raw;
+    else if (key === 'maxRentalDurationSeconds') preferences.maxRentalDurationSeconds = raw;
   }
-  for (const key of ['allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer'] as const) {
+  for (const key of ['allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowBicycle','allowScooter','requireVerifiedReturn','allowStaticRentalDiscovery'] as const) {
     const raw = rawPreferences[key];
     if (raw !== undefined && typeof raw !== 'boolean') throw new TypeError(`${key} must be a boolean`);
     if (typeof raw === 'boolean') preferences[key] = raw;
+  }
+  for (const key of ['allowedProviderIds','blockedProviderIds'] as const) {
+    const raw = rawPreferences[key];
+    if (raw === undefined) continue;
+    if (!Array.isArray(raw) || raw.length > 100
+      || raw.some((provider) => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9_-]{1,79}$/.test(provider))
+      || new Set(raw).size !== raw.length) throw new TypeError(`${key} is invalid`);
+    preferences[key] = raw as string[];
   }
   if (rawPreferences.allowedTransportTypes !== undefined) {
     const types = rawPreferences.allowedTransportTypes;

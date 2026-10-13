@@ -23,7 +23,7 @@ async function main() {
         console.log(`registered (${entry.access}): ${entry.name}`);
         continue;
       }
-      const report = await testProviderConnection({ id: provider.id, name: entry.name, source_type: entry.sourceType, feed_url: entry.feedUrl });
+      const report = await testProviderConnection({ id: provider.id, name: entry.name, source_type: entry.sourceType, feed_url: entry.feedUrl, country: 'UA' });
       await pool.query(
         `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_sync_at=CASE WHEN $2='healthy' THEN now() ELSE last_sync_at END,last_error=$3,last_report=$4,
            status=CASE WHEN $2='offline' THEN 'disabled' ELSE 'enabled' END,discovery_status=CASE WHEN $2='healthy' THEN 'ENABLED' ELSE 'TEMPORARILY_UNAVAILABLE' END,

@@ -19,6 +19,10 @@ export function selectNearby(
 ): { assets: NearbyAsset[]; stations: NearbyStation[]; totalAssets: number } {
   const assets: NearbyAsset[] = []; const stations: NearbyStation[] = [];
   for (const { providerName, snapshot } of snapshots) {
+    // A production GBFS payload with no source timestamp or an expired timestamp
+    // cannot be advertised as current inventory. Legacy unit fixtures omit both.
+    if (snapshot.lastUpdated === null || (snapshot.lastUpdated !== undefined
+      && Date.now() - snapshot.lastUpdated > (snapshot.staleAfterSeconds ?? 60) * 1000)) continue;
     for (const asset of snapshot.assets) {
       if (!asset.available || !types.includes(asset.type)) continue;
       const distanceM = distanceMeters(origin, asset.location);
@@ -33,14 +37,18 @@ export function selectNearby(
   return { assets: assets.slice(0, limit), stations: stations.slice(0, limit), totalAssets: assets.length };
 }
 
-const cache = new Map<string, { at: number; promise: Promise<GbfsSnapshot> }>();
-const TTL_MS = 60_000;
-/** Snapshots are shared across requests for a minute so many users do not hammer operator feeds. */
+const cache = new Map<string, { at: number; expiresAt: number; promise: Promise<GbfsSnapshot> }>();
+/** Singleflight and GBFS TTL-aware server cache; ttl=0 uses a short shared poll window instead of per-user requests. */
 export function cachedSnapshot(providerId: string, url: string): Promise<GbfsSnapshot> {
   const hit = cache.get(providerId);
-  if (hit && Date.now() - hit.at < TTL_MS) return hit.promise;
+  if (hit && Date.now() < hit.expiresAt) return hit.promise;
   const promise = loadGbfsSnapshot(providerId, url);
-  cache.set(providerId, { at: Date.now(), promise });
-  promise.catch(() => cache.delete(providerId));
+  const entry = { at: Date.now(), expiresAt: Date.now() + 1000, promise };
+  cache.set(providerId, entry);
+  promise.then((snapshot) => {
+    const sourceTtlMs = snapshot.ttlSeconds === null || snapshot.ttlSeconds === undefined ? 30_000 : snapshot.ttlSeconds === 0 ? 3_000 : snapshot.ttlSeconds * 1000;
+    const freshnessMs = (snapshot.staleAfterSeconds ?? 60) * 1000;
+    entry.expiresAt = Date.now() + Math.max(1000, Math.min(sourceTtlMs, freshnessMs, 60_000));
+  }).catch(() => cache.delete(providerId));
   return promise;
 }

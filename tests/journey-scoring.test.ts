@@ -30,6 +30,25 @@ describe('Journey strategy scoring', () => {
     assert.deepEqual(frontier.map((journey) => journey.id).sort(), ['cheap', 'fast', 'unknown']);
   });
 
+  it('keeps a slower, more comfortable option for PREMIUM ranking', () => {
+    const standard = {
+      ...candidates[1], id: 'standard', durationSeconds: 3000, priceMinor: 15000,
+      transfers: 0, walkingMeters: 0, reliability: 0.95, transferRisk: 0, comfort: 0.2,
+    };
+    const premium = {
+      ...standard, id: 'premium', durationSeconds: 3300, priceMinor: 18000, comfort: 0.99,
+    };
+
+    assert.deepEqual(paretoFrontier([standard, premium]).map((journey) => journey.id).sort(), ['premium', 'standard']);
+    assert.equal(scoreJourneys(paretoFrontier([standard, premium]), 'PREMIUM')[0].journey.id, 'premium');
+  });
+
+  it('keeps measured and unknown comfort incomparable in the Pareto frontier', () => {
+    const unknown = { ...candidates[0], id: 'unknown-comfort', comfort: null };
+    const measured = { ...candidates[0], id: 'measured-comfort', comfort: 0.1 };
+    assert.deepEqual(paretoFrontier([unknown, measured]).map((journey) => journey.id).sort(), ['measured-comfort', 'unknown-comfort']);
+  });
+
   it('exposes one winner per strategy and groups an identical winner across tabs', () => {
     const recommendations = selectStrategyRecommendations([candidates[0]], ['BALANCED', 'FASTEST', 'CHEAPEST']);
     assert.equal(recommendations.length, 1);

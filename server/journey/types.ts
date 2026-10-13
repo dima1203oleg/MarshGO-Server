@@ -3,7 +3,7 @@ export type JourneyStrategy = typeof JOURNEY_STRATEGIES[number];
 
 export type JourneyLegMode =
   | 'WALK' | 'COMMUNITY' | 'COMMUNITY_DEMAND' | 'TAXI' | 'TRANSFER' | 'BUS' | 'MINIBUS'
-  | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'URBAN_BUS' | 'CARSHARING' | 'FERRY' | 'FUNICULAR';
+  | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'URBAN_BUS' | 'CARSHARING' | 'FERRY' | 'FUNICULAR' | 'BICYCLE' | 'SCOOTER';
 
 /** Public selection categories. Feed-specific aliases belong to Journey segments, never to user preferences. */
 export const JOURNEY_TRANSPORT_TYPES = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'] as const;
@@ -60,6 +60,16 @@ export interface JourneyPreferences {
   allowPublicTransport?: boolean;
   allowCarsharing?: boolean;
   allowTransfer?: boolean;
+  allowBicycle?: boolean;
+  allowScooter?: boolean;
+  /** Stable mobility operator IDs; empty/undefined means no provider filter. */
+  allowedProviderIds?: string[];
+  blockedProviderIds?: string[];
+  maxWalkToRentalMeters?: number;
+  maxRentalDurationSeconds?: number;
+  requireVerifiedReturn?: boolean;
+  /** Static rental locations may be discovered, but this does not claim a vehicle is available. */
+  allowStaticRentalDiscovery?: boolean;
   preferredVehicleClass?: string;
   allowedTransportTypes?: JourneyTransportType[];
   allowedTransitProviders?: string[];

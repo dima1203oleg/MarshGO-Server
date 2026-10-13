@@ -7,8 +7,8 @@ import { testProviderConnection } from './connection';
  * "offline" sources are skipped by the map layers and availability until a later check finds them again.
  */
 export async function refreshProviderHealth(pool: Pool, log: (entry: Record<string, unknown>) => void = () => undefined) {
-  const { rows } = await pool.query<{ id: string; name: string; source_type: string; feed_url: string }>(
-    `SELECT id,name,source_type,feed_url FROM mobility_providers WHERE status='enabled' AND access='open' ORDER BY last_checked_at NULLS FIRST LIMIT 100`);
+  const { rows } = await pool.query<{ id: string; name: string; source_type: string; feed_url: string; country: string }>(
+    `SELECT id,name,source_type,feed_url,country FROM mobility_providers WHERE status='enabled' AND access='open' ORDER BY last_checked_at NULLS FIRST LIMIT 100`);
   let healthy = 0, degraded = 0, offline = 0;
   for (const provider of rows) {
     try {

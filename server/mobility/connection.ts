@@ -7,8 +7,8 @@ import { buildGeoJsonNetwork, geoJsonMode } from './transportLayers';
 import { testKyivScheduleConnection } from './kyivSchedule';
 import type { ConnectionReport } from './types';
 
-export async function testProviderConnection(provider: { id: string; name?: string; source_type: string; feed_url: string }): Promise<ConnectionReport> {
-  if (provider.source_type === 'gbfs') return testGbfsConnection(provider.id, provider.feed_url);
+export async function testProviderConnection(provider: { id: string; name?: string; source_type: string; feed_url: string; country?: string }): Promise<ConnectionReport> {
+  if (provider.source_type === 'gbfs') return testGbfsConnection(provider.id, provider.feed_url, provider.country);
   if (provider.source_type === 'gtfs') return testGtfsConnection(provider.feed_url);
   if (provider.source_type === 'gtfs_rt') return testGtfsRealtimeConnection(provider.feed_url);
   if (provider.source_type === 'json') return testJsonVehiclesConnection(provider.feed_url);

@@ -61,6 +61,13 @@ export function createConnectionMap(
 }
 
 function validateOption(option: ProviderOption): boolean {
+  const rentalValid = option.mode !== 'BICYCLE' && option.mode !== 'SCOOTER' || Boolean(option.rental
+    && option.rental.sessionId && option.rental.mode === option.mode
+    && option.rental.pickupLocationId && option.rental.dropoffLocationId
+    && option.rental.pickupLocationId !== option.rental.dropoffLocationId
+    && option.rental.networkId && option.rental.availabilityStatus === 'AVAILABLE'
+    && option.rental.confirmationLevel === 'VERIFIED'
+    && option.rental.returnRule !== undefined);
   return Boolean(option.id && option.providerId
     && option.originNodeId && option.destinationNodeId && option.originNodeId !== option.destinationNodeId
     && option.departureAt && Number.isFinite(option.departureAt.getTime())
@@ -70,7 +77,7 @@ function validateOption(option: ProviderOption): boolean {
     && (option.priceMinor === null || (Number.isSafeInteger(option.priceMinor) && option.priceMinor >= 0))
     && (option.distanceMeters === null || (Number.isInteger(option.distanceMeters) && option.distanceMeters >= 0))
     && option.availability !== 'UNAVAILABLE' && option.availability !== 'BLOCKED_EXTERNAL'
-    && option.availability !== 'UNKNOWN');
+    && option.availability !== 'UNKNOWN' && rentalValid);
 }
 
 function pathSignature(legs: readonly JourneyPlanLeg[]): string {
@@ -103,7 +110,7 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
   const routes: PlannedJourney[] = [];
   const maxDeparture = input.departureAt.getTime() + maximumWaitSeconds * 1000;
 
-  const walk = (legs: JourneyPlanLeg[]): void => {
+  const walk = (legs: JourneyPlanLeg[], visitedNodeIds: ReadonlySet<string>): void => {
     const previous = legs.at(-1);
     if (previous && legs.length > 0) {
       const arrivalAt = previous.arrivalAt!;
@@ -113,7 +120,10 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
       }
       if (legs.length >= maximumLegs) return;
       for (const next of options) {
-        if (legs.some((leg) => leg.id === next.id) || next.departureAt!.getTime() < arrivalAt.getTime()
+        if (legs.some((leg) => leg.providerId === next.providerId && leg.id === next.id)
+          || (visitedNodeIds.has(next.originNodeId!) && next.originNodeId !== previous.destinationNodeId)
+          || visitedNodeIds.has(next.destinationNodeId!)
+          || next.departureAt!.getTime() < arrivalAt.getTime()
           || !previous.destinationNodeId || !next.originNodeId) continue;
         // Provider node IDs deliberately remain provider-scoped. Two nearby
         // platforms can have different IDs and still be connected by a real
@@ -131,7 +141,10 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
           boardingGraceSeconds: input.boardingGraceSeconds,
         });
         if (!transferBefore.feasible) continue;
-        walk([...legs, { ...next, connectionFromPrevious: connection, transferBefore }]);
+        const nextVisitedNodeIds = new Set(visitedNodeIds);
+        nextVisitedNodeIds.add(next.originNodeId!);
+        nextVisitedNodeIds.add(next.destinationNodeId!);
+        walk([...legs, { ...next, connectionFromPrevious: connection, transferBefore }], nextVisitedNodeIds);
       }
     }
   };
@@ -139,7 +152,10 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
   for (const option of options) {
     if (option.originNodeId !== input.originNodeId || option.departureAt!.getTime() < input.departureAt.getTime()
       || option.departureAt!.getTime() > maxDeparture) continue;
-    walk([{ ...option, connectionFromPrevious: null, transferBefore: null }]);
+    walk(
+      [{ ...option, connectionFromPrevious: null, transferBefore: null }],
+      new Set([input.originNodeId, option.destinationNodeId!]),
+    );
   }
 
   const unique = [...new Map(routes.map((route) => [pathSignature(route.legs), route])).values()];

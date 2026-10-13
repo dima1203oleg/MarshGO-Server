@@ -48,7 +48,7 @@ export interface GtfsItineraryFare {
   priceMinor: number;
   currency: string;
   allocations: GtfsFareAllocation[];
-  source: 'gtfs-v1';
+  source: 'gtfs-v1' | 'city-tariff-registry';
 }
 
 /** GTFS fares are per rider; scale them for the passenger count in a search. */

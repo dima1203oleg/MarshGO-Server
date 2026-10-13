@@ -41,10 +41,14 @@ function riskMetric(journey: JourneyOption): number {
 
 function dominates(a: JourneyOption, b: JourneyOption): boolean {
   if ((a.priceMinor === null) !== (b.priceMinor === null)) return false;
+  // Comfort is a real optimization dimension (especially for PREMIUM).
+  // Unknown comfort must stay incomparable with measured comfort, just as an
+  // unknown fare stays incomparable with a known fare.
+  if ((a.comfort === null) !== (b.comfort === null)) return false;
   const aPrice = a.priceMinor ?? 0;
   const bPrice = b.priceMinor ?? 0;
-  const metricsA = [a.durationSeconds, aPrice, a.transfers, a.walkingMeters, riskMetric(a)];
-  const metricsB = [b.durationSeconds, bPrice, b.transfers, b.walkingMeters, riskMetric(b)];
+  const metricsA = [a.durationSeconds, aPrice, a.transfers, a.walkingMeters, riskMetric(a), a.comfort === null ? 0.5 : 1 - a.comfort];
+  const metricsB = [b.durationSeconds, bPrice, b.transfers, b.walkingMeters, riskMetric(b), b.comfort === null ? 0.5 : 1 - b.comfort];
   return metricsA.every((value, index) => value <= metricsB[index])
     && metricsA.some((value, index) => value < metricsB[index]);
 }

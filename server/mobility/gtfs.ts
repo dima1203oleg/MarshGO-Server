@@ -6,7 +6,8 @@ import { bboxOf, type ConnectionReport } from './types';
 export function routeTypeLabel(routeType: number, routeName = ''): string {
   const name = routeName.normalize('NFKC').toLocaleLowerCase('uk-UA');
   if (name.includes('фунікулер') || name.includes('funicular')) return 'funicular';
-  if (name.includes('міська електричка') || name.includes('city train') || name.includes('city express') || name.includes('кільцева')) return 'city_train';
+  const isRailRoute = routeType === 2 || (routeType >= 100 && routeType < 200);
+  if (isRailRoute && (name.includes('міська електричка') || name.includes('city train') || name.includes('city express') || name.includes('кільцева'))) return 'city_train';
   if (name.includes('маршрутка') || name.includes('маршрутн') || name.includes('minibus')) return 'marshrutka';
   if (routeType === 0 || (routeType >= 900 && routeType < 1000)) return 'tram';
   if (routeType === 1 || (routeType >= 400 && routeType < 500)) return 'metro';

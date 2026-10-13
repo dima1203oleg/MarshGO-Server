@@ -10,6 +10,9 @@ export interface MobilityAsset {
   rangeMeters?: number;
   stationId?: string;
   lastUpdated?: string;
+  vehicleTypeId?: string;
+  pricingPlanId?: string;
+  rentalUris?: { android?: string; ios?: string; web?: string };
 }
 export interface MobilityStation {
   id: string;
@@ -19,6 +22,7 @@ export interface MobilityStation {
   capacity?: number;
   availableAssets?: number;
   returnAllowed?: boolean;
+  sourceUpdatedAt?: string;
 }
 export type ProviderHealth = 'healthy' | 'degraded' | 'offline';
 export interface ConnectionReport {

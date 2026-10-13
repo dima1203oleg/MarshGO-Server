@@ -12,6 +12,24 @@ if (enabled && database && !['127.0.0.1', 'localhost', '::1'].includes(database.
   throw new Error('API integration tests are restricted to a loopback database');
 }
 
+function nextKyivMorningDeparture(now = new Date()): string {
+  const localDate = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now);
+  const part = (type: Intl.DateTimeFormatPartTypes) => localDate.find((value) => value.type === type)?.value ?? '';
+  const nextDay = new Date(Date.UTC(Number(part('year')), Number(part('month')) - 1, Number(part('day')) + 1));
+  const year = nextDay.getUTCFullYear();
+  const month = String(nextDay.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(nextDay.getUTCDate()).padStart(2, '0');
+  const date = `${year}-${month}-${day}`;
+  const offsetLabel = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Kyiv', timeZoneName: 'shortOffset', hour: '2-digit',
+  }).formatToParts(new Date(`${date}T08:00:00Z`)).find((value) => value.type === 'timeZoneName')?.value ?? 'GMT';
+  const offset = offsetLabel.match(/^GMT([+-])(\d{1,2})(?::(\d{2}))?$/);
+  const zone = offset ? `${offset[1]}${offset[2]!.padStart(2, '0')}:${offset[3] ?? '00'}` : '+00:00';
+  return new Date(`${date}T08:00:00${zone}`).toISOString();
+}
+
 describe('API booking transaction (opt-in local integration test)', { skip: !enabled }, () => {
   const pool = new Pool({ connectionString: databaseUrl });
   let healthyLvivGtfsEnabled = false;
@@ -219,7 +237,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         ...body,
         origin: { name: 'Малоголосківська, Львів', coordinates: [24.0029933, 49.8681678] },
         destination: { name: 'Сихів, Львів', coordinates: [24.057585, 49.794117] },
-        departureAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+        departureAt: nextKyivMorningDeparture(),
       } : body;
       const modeResponse = await fetch(`${apiUrl}/api/v1/journeys/search`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
@@ -228,8 +246,22 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.equal(modeResponse.status, 200, `${transportType} search responds successfully`);
       const modeData = (await modeResponse.json() as { data: {
         blockedProviders: string[];
-        journeys: Array<{ offerId: string | null; legs: Array<{ mode: string; transportType?: string }> }>;
+        journeys: Array<{ offerId: string | null; legs: Array<{
+          mode: string; transportType?: string; source?: string;
+          origin?: { name: string; coordinates: [number, number] };
+          destination?: { name: string; coordinates: [number, number] };
+          stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string }>;
+        }> }>;
       } }).data;
+      const assertScheduledStopCalls = (leg: typeof modeData.journeys[number]['legs'][number]) => {
+        if (!['gtfs-static', 'gtfs-realtime-trip-updates'].includes(leg.source ?? '')) return;
+        const stops = leg.stops ?? [];
+        assert.ok(stops.length >= 2, `${leg.transportType ?? leg.mode} response carries boarding/alighting calls and every published intermediate call`);
+        assert.deepEqual(stops[0]?.coordinates, leg.origin?.coordinates, 'the first stop call matches the selected boarding stop');
+        assert.deepEqual(stops.at(-1)?.coordinates, leg.destination?.coordinates, 'the final stop call matches the selected alighting stop');
+        assert.ok(stops.every((stop, index) => index === 0
+          || Date.parse(stops[index - 1]!.arrivalAt) <= Date.parse(stop.arrivalAt)), 'stop calls retain GTFS sequence order');
+      };
       const acceptedTypes = transportType === 'bus' ? ['bus','intercity_bus']
         : transportType === 'train' ? ['train','suburban_train','city_train'] : [transportType];
       for (const journey of modeData.journeys) {
@@ -241,14 +273,12 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
             continue;
           }
           assert.ok(acceptedTypes.includes(leg.transportType ?? ''), `${transportType} selection leaked ${leg.transportType ?? leg.mode}`);
+          assertScheduledStopCalls(leg);
         }
       }
       assert.equal(modeData.journeys.some((journey) => journey.offerId === ids.journeyOffer), transportType === 'carpool',
         `${transportType} selection controls the direct carpool offer`);
-      if (transportType === 'tram' && healthyLvivGtfsEnabled) {
-        assert.ok(modeData.journeys.some((journey) => journey.legs.some((leg) => leg.transportType === 'tram')),
-          'the enabled real Lviv GTFS feed builds the selected tram route');
-      } else if (['bus','tram'].includes(transportType) && !healthyLvivGtfsEnabled) {
+      if (['bus','tram'].includes(transportType) && !healthyLvivGtfsEnabled) {
         assert.equal(modeData.journeys.length, 0, `${transportType} does not invent trips without an enabled Lviv GTFS provider`);
         assert.ok(modeData.blockedProviders.some((value) => value.startsWith(`transportType:${transportType}:`)),
           `${transportType} search reports the missing routed provider`);
@@ -266,18 +296,35 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         ...body,
         origin: { name: 'Малоголосківська, Львів', coordinates: [24.0029933, 49.8681678] },
         destination: { name: 'Сихів, Львів', coordinates: [24.057585, 49.794117] },
-        departureAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+        departureAt: nextKyivMorningDeparture(),
         strategy: 'BALANCED',
         preferences: { allowCommunity: true, allowedTransportTypes: ['bus','tram'] },
       }),
     });
     assert.equal(multiResponse.status, 200);
-    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; legs: Array<{ mode: string; transportType?: string }> }> } }).data;
+    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; legs: Array<{
+      mode: string; transportType?: string; routeGeometry?: [number, number][];
+      origin?: { coordinates: [number, number] }; destination?: { coordinates: [number, number] };
+      stops?: Array<{ coordinates: [number, number]; arrivalAt: string }>;
+    }> }> } }).data;
     assert.equal(multiData.returnedCount, multiData.journeys.length, 'response metadata matches persisted alternatives');
     if (healthyLvivGtfsEnabled) {
       assert.ok(multiData.availableStrategies.includes('BALANCED'));
       assert.ok(multiData.journeys.some((journey) => typeof journey.strategyRanks?.BALANCED === 'number'),
         'each returned result exposes its place in the selected strategy ranking');
+      const realBusTramChain = multiData.journeys.find((journey) => {
+        const modes = new Set(journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.transportType));
+        return modes.has('bus') && modes.has('tram');
+      });
+      assert.ok(realBusTramChain, 'the real Lviv timetable composes a bus + tram itinerary when both modes are selected');
+      for (const leg of realBusTramChain.legs.filter((item) => item.mode !== 'WALK')) {
+        assert.ok((leg.routeGeometry?.length ?? 0) >= 2, `${leg.transportType} includes renderable route geometry`);
+        assert.ok((leg.stops?.length ?? 0) >= 2, `${leg.transportType} includes boarding and alighting stop calls`);
+        assert.deepEqual(leg.routeGeometry?.[0], leg.origin?.coordinates, 'GTFS geometry starts at its selected boarding stop');
+        assert.deepEqual(leg.routeGeometry?.at(-1), leg.destination?.coordinates, 'GTFS geometry ends at its selected alighting stop');
+        assert.ok(leg.stops!.every((stop, index) => index === 0
+          || Date.parse(leg.stops![index - 1]!.arrivalAt) <= Date.parse(stop.arrivalAt)), 'GTFS stop calls remain in time order');
+      }
     } else {
       assert.equal(multiData.journeys.length, 0, 'an empty provider registry must not produce fabricated transit alternatives');
       assert.ok(multiData.blockedProviders.some((value) => value.startsWith('transportType:bus:')));
@@ -300,8 +347,9 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA }, body: JSON.stringify(body),
     });
     assert.equal(response.status, 200);
-    const result = await response.json() as { data: { partial: boolean; blockedProviders: string[]; unsupportedPreferences: string[]; journeys: Array<{ id: string; offerId: string | null; strategy: string; confirmedPriceMinor: number | null; totalPriceMinor: number | null; source?: string; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
+    const result = await response.json() as { data: { partial: boolean; partialReasons: string[]; blockedProviders: string[]; unsupportedPreferences: string[]; journeys: Array<{ id: string; offerId: string | null; strategy: string; confirmedPriceMinor: number | null; totalPriceMinor: number | null; source?: string; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
     assert.equal(result.data.partial, true);
+    assert.ok(result.data.partialReasons.length > 0);
     assert.ok(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:taxi:')));
     assert.equal(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:bus:')), !healthyLvivGtfsEnabled,
       healthyLvivGtfsEnabled ? 'the enabled local GTFS bus feed is recognized' : 'a missing GTFS source is reported instead of being implied available');
@@ -1338,13 +1386,19 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     await pool.query(`INSERT INTO user_roles(user_id,role) VALUES($1,'passenger')`, [devUser]);
     try {
       const headers = { 'x-dev-user-id': devUser };
-      for (const path of ['layers', 'routes?bbox=24,49,24.1,49.1&types=bus', 'stops?bbox=24,49,24.1,49.1&types=bus', 'vehicles?bbox=24,49,24.1,49.1&types=bus', 'micromobility?bbox=24,49,24.1,49.1&types=scooter', 'micromobility?bbox=24,49,24.1,49.1&types=carsharing']) {
+      for (const path of ['layers', 'fares?city=Київ', 'routes?bbox=24,49,24.1,49.1&types=bus', 'stops?bbox=24,49,24.1,49.1&types=bus', 'vehicles?bbox=24,49,24.1,49.1&types=bus', 'micromobility?bbox=24,49,24.1,49.1&types=scooter', 'micromobility?bbox=24,49,24.1,49.1&types=carsharing']) {
         assert.equal((await fetch(`${apiUrl}/api/v1/transport/${path}`)).status, 401, `${path} requires sign-in`);
       }
       const layers = await fetch(`${apiUrl}/api/v1/transport/layers`, { headers });
       assert.equal(layers.status, 200);
       const ids = (await layers.json() as { data: Array<{ id: string; available: boolean }> }).data.map((item) => item.id);
       assert.deepEqual(ids, ['PUBLIC_TRANSPORT', 'METRO', 'BUS', 'TRAM', 'TROLLEYBUS', 'STOPS', 'MINIBUS', 'CITY_TRAIN', 'FUNICULAR', 'BICYCLE', 'SCOOTER', 'CARSHARING', 'RENTAL_POINTS']);
+      const faresResponse = await fetch(`${apiUrl}/api/v1/transport/fares?city=${encodeURIComponent('Київ')}`, { headers });
+      assert.equal(faresResponse.status, 200);
+      const fares = (await faresResponse.json() as { data: Array<{ id: string; priceMinor: number | null }> }).data;
+      assert.equal(fares.find((fare) => fare.id === 'kyiv-communal-single-ride')?.priceMinor, 3_000);
+      assert.equal(fares.find((fare) => fare.id === 'kyiv-90-minute-transfer-ticket')?.priceMinor, 6_000);
+      assert.ok(fares.every((fare) => !fare.id.includes('taxi')), 'city-filtered public fares do not include taxi quotes');
       for (const path of ['routes?types=bus', 'routes?bbox=24,49,24.1,49.1', 'routes?bbox=20,45,30,55&types=bus', 'stops?bbox=24,49,25,50&types=bus', 'vehicles?bbox=x&types=bus', 'micromobility?bbox=24,49,25,50&types=scooter', 'micromobility?bbox=24,49,24.1,49.1&types=cars']) {
         assert.equal((await fetch(`${apiUrl}/api/v1/transport/${path}`, { headers })).status, 400, `${path} must be rejected`);
       }

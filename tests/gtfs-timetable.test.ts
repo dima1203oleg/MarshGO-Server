@@ -100,8 +100,10 @@ function fourModeTransferFeed() {
     ].join('\n')),
     'stops.txt': new TextEncoder().encode([
       'stop_id,stop_name,stop_lat,stop_lon',
-      'start,Start,49.8400,24.0200', 'hub1,Hub 1,49.8420,24.0220', 'hub2,Hub 2,49.8440,24.0240',
-      'hub3,Hub 3,49.8460,24.0260', 'finish,Finish,49.8500,24.0300',
+      'start,Start,49.8400,24.0200', 'bus-mid,Bus intermediate,49.8425,24.0225', 'hub1,Hub 1,49.8450,24.0250',
+      'tram-mid,Tram intermediate,49.8475,24.0275', 'hub2,Hub 2,49.8500,24.0300',
+      'metro-mid,Metro intermediate,49.8525,24.0325', 'hub3,Hub 3,49.8550,24.0350',
+      'rail-mid,Rail intermediate,49.8575,24.0375', 'finish,Finish,49.8600,24.0400',
     ].join('\n')),
     'trips.txt': new TextEncoder().encode([
       'route_id,service_id,trip_id,trip_headsign', 'bus,weekday,b1,Hub 1', 'tram,weekday,t1,Hub 2',
@@ -109,10 +111,10 @@ function fourModeTransferFeed() {
     ].join('\n')),
     'stop_times.txt': new TextEncoder().encode([
       'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
-      'b1,08:00:00,08:00:00,start,1,0,0', 'b1,08:10:00,08:10:00,hub1,2,0,0',
-      't1,08:20:00,08:20:00,hub1,1,0,0', 't1,08:30:00,08:30:00,hub2,2,0,0',
-      'm1,08:40:00,08:40:00,hub2,1,0,0', 'm1,08:50:00,08:50:00,hub3,2,0,0',
-      'r1,09:00:00,09:00:00,hub3,1,0,0', 'r1,09:15:00,09:15:00,finish,2,0,0',
+      'b1,08:00:00,08:00:00,start,1,0,0', 'b1,08:05:00,08:05:00,bus-mid,2,0,0', 'b1,08:10:00,08:10:00,hub1,3,0,0',
+      't1,08:20:00,08:20:00,hub1,1,0,0', 't1,08:25:00,08:25:00,tram-mid,2,0,0', 't1,08:30:00,08:30:00,hub2,3,0,0',
+      'm1,08:40:00,08:40:00,hub2,1,0,0', 'm1,08:45:00,08:45:00,metro-mid,2,0,0', 'm1,08:50:00,08:50:00,hub3,3,0,0',
+      'r1,09:00:00,09:00:00,hub3,1,0,0', 'r1,09:07:00,09:07:00,rail-mid,2,0,0', 'r1,09:15:00,09:15:00,finish,3,0,0',
     ].join('\n')),
     'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,0,0,0,0,0,0,20261001,20261031'),
   };
@@ -256,6 +258,39 @@ test('reports when the itinerary result limit hides additional route chains', ()
   assert.equal(result.searchTruncated, false);
 });
 
+test('keeps fastest and cheapest GTFS candidates when the response limit is tight', () => {
+  const timetable = feed({ departure: '08:00:00', arrival: '08:30:00' });
+  timetable.routes.set('r2', { name: 'Slow cheap bus', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.set('t2', { routeId: 'r2', serviceId: 'weekday', headsign: 'Destination' });
+  const slowStops = (timetable.stopTimes.get('t1') ?? []).map((stop, index) => ({
+    ...stop,
+    arrivalSeconds: index === 0 ? 8 * 3600 + 5 * 60 : 8 * 3600 + 45 * 60,
+    departureSeconds: index === 0 ? 8 * 3600 + 5 * 60 : 8 * 3600 + 45 * 60,
+  }));
+  timetable.stopTimes.set('t2', slowStops);
+  slowStops.forEach((stop, index) => {
+    timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: 't2', index },
+    ]);
+  });
+  timetable.fareProducts = new Map([
+    ['fast-fare', { id: 'fast-fare', priceMinor: 1000, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+    ['cheap-fare', { id: 'cheap-fare', priceMinor: 100, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+  ]);
+  timetable.fareRules = new Map([
+    ['fast-fare', [{ fareId: 'fast-fare', routeId: 'r' }]],
+    ['cheap-fare', [{ fareId: 'cheap-fare', routeId: 'r2' }]],
+  ]);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    limit: 2, maximumTransfers: 0, maximumStopDistanceMeters: 1000,
+  });
+
+  assert.deepEqual(new Set(result.itineraries.map((journey) => journey.segments[0]?.routeId)), new Set(['r', 'r2']));
+  assert.equal(result.itineraries.find((journey) => journey.segments[0]?.routeId === 'r2')?.fare?.priceMinor, 100);
+});
+
 test('uses calendar date exceptions before weekly service and excludes removed service', () => {
   const added = findDirectGtfsJourneys(feed({ monday: '0', exceptionDate: '20261012' }), request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'));
   const removed = findDirectGtfsJourneys(feed({ exceptionDate: '20261012', exceptionType: '2' }), request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'));
@@ -308,6 +343,32 @@ test('normalizes GTFS rail and ferry journeys into supported journey modes', () 
   assert.equal(findDirectGtfsJourneys(feed({ routeType: '4' }), interval)[0]?.mode, 'FERRY');
 });
 
+test('keeps boarding, intermediate, and alighting calls for every selectable GTFS mode', () => {
+  const interval = request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z');
+  const cases = [
+    { name: 'City bus', routeType: '3', mode: 'BUS', transportType: 'bus' },
+    { name: 'Маршрутка № 5', routeType: '3', mode: 'MINIBUS', transportType: 'marshrutka' },
+    { name: 'City trolleybus', routeType: '11', mode: 'TROLLEYBUS', transportType: 'trolleybus' },
+    { name: 'City tram', routeType: '0', mode: 'TRAM', transportType: 'tram' },
+    { name: 'City metro', routeType: '1', mode: 'METRO', transportType: 'metro' },
+    { name: 'Regional train', routeType: '2', mode: 'RAIL', transportType: 'train' },
+  ] as const;
+
+  for (const item of cases) {
+    const journeys = findGtfsItineraries(feed({ routeType: item.routeType, routeName: item.name, withIntermediate: true }), {
+      ...interval,
+      allowedModes: [item.mode],
+      allowedTransportTypes: [item.transportType],
+      maximumStopDistanceMeters: 100,
+    });
+    const segment = journeys[0]?.segments[0];
+    assert.ok(segment, `${item.name} produces a selectable scheduled segment`);
+    assert.equal(segment.mode, item.mode);
+    assert.equal(segment.transportType, item.transportType);
+    assert.deepEqual(segment.stops?.map((stop) => stop.name), ['Origin stop', 'Middle stop', 'Destination stop']);
+  }
+});
+
 test('maps city and suburban rail into the canonical train category and excludes funicular', () => {
   const interval = request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z');
   const cityTrain = findGtfsItineraries(feed({ routeType: '2', routeName: 'Київська міська електричка' }), {
@@ -332,6 +393,16 @@ test('maps city and suburban rail into the canonical train category and excludes
   assert.equal(intercityBus[0]?.segments[0]?.transportType, 'intercity_bus');
 });
 
+test('does not classify bus or trolleybus routes containing “Кільцева” as city rail', () => {
+  const bus = feed({ routeType: '3', routeName: 'А21 Кільцева дорога Три слони' });
+  const trolleybus = feed({ routeType: '11', routeName: 'Тролейбус Кільцева' });
+  const cityRail = feed({ routeType: '2', routeName: 'Міська електричка Кільцева' });
+
+  assert.equal(bus.routes.get('r')?.transportType, 'bus');
+  assert.equal(trolleybus.routes.get('r')?.transportType, 'trolleybus');
+  assert.equal(cityRail.routes.get('r')?.transportType, 'city_train');
+});
+
 test('composes a time-feasible bus-to-rail itinerary at the same canonical stop', () => {
   const results = findGtfsItineraries(connectingFeed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
@@ -354,6 +425,65 @@ test('composes a time-feasible bus-to-rail itinerary at the same canonical stop'
     - results[0].segments[0].arrivalAt.getTime()) / 1000);
   assert.equal(results[0].waitingSeconds, initialWaitSeconds + transferWaitSeconds);
   assert.ok(results[0].arrivalAt.getTime() > results[0].segments.at(-1)!.arrivalAt.getTime());
+});
+
+test('finds a legal nearby-platform transfer when GTFS omits an explicit transfer row', () => {
+  const timetable = connectingFeed({ secondRouteType: '3', secondDeparture: '08:40:00' });
+  timetable.stops.delete('hub');
+  timetable.stops.set('bus-platform', { id: 'bus-platform', name: 'Bus platform', lon: 24.025, lat: 49.845 });
+  timetable.stops.set('tram-platform', { id: 'tram-platform', name: 'Tram platform', lon: 24.02505, lat: 49.845 });
+  timetable.stopTimes.get('b1')![1].stopId = 'bus-platform';
+  timetable.stopTimes.get('b1')![1].sourceStopId = 'bus-platform';
+  timetable.stopTimes.get('b1')![1].sourceStopCoordinates = [24.025, 49.845];
+  timetable.stopTimes.get('r1')![0].stopId = 'tram-platform';
+  timetable.stopTimes.get('r1')![0].sourceStopId = 'tram-platform';
+  timetable.stopTimes.get('r1')![0].sourceStopCoordinates = [24.02505, 49.845];
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, entries] of timetable.stopTimes) entries.forEach((entry, index) => {
+    const calls = timetable.stopTimesByStop.get(entry.stopId) ?? [];
+    calls.push({ tripId, index });
+    timetable.stopTimesByStop.set(entry.stopId, calls);
+  });
+
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransferWalkingMeters: 100,
+    maximumTransfers: 1,
+  };
+  const connected = findGtfsItineraries(timetable, query).find((journey) => journey.segments.length === 2);
+  assert.ok(connected, 'distinct route platforms within the transfer walk shed can be joined');
+  assert.notEqual(connected.segments[0].destinationStop.id, connected.segments[1].originStop.id);
+  assert.ok(connected.transferWalkingMeters[0] > 0);
+
+  const outsideWalkShed = findGtfsItineraries(timetable, { ...query, maximumTransferWalkingMeters: 2 });
+  assert.equal(outsideWalkShed.some((journey) => journey.segments.length === 2), false,
+    'nearby candidates are still rejected when their walking transfer exceeds the configured limit');
+});
+
+test('keeps valid shorter and longer chain lengths in one multi-transfer search', () => {
+  const timetable = connectingFeed();
+  timetable.routes.set('direct', { name: 'Direct bus', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.set('direct-trip', { routeId: 'direct', serviceId: 'weekday', headsign: 'Finish' });
+  const directStops = [
+    { stopId: 'start', sequence: 1, arrivalSeconds: 8 * 3600 + 10 * 60, departureSeconds: 8 * 3600 + 10 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: 'finish', sequence: 2, arrivalSeconds: 8 * 3600 + 50 * 60, departureSeconds: 8 * 3600 + 50 * 60, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.stopTimes.set('direct-trip', directStops);
+  for (const [index, stop] of directStops.entries()) {
+    timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: 'direct-trip', index },
+    ]);
+  }
+
+  const results = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+  });
+
+  assert.ok(results.itineraries.some((itinerary) => itinerary.segments.length === 1), 'direct route remains available');
+  assert.ok(results.itineraries.some((itinerary) => itinerary.segments.length === 2), 'one-transfer route remains available');
 });
 
 test('counts initial schedule wait in door-to-door time so fastest ranking favors earliest arrival', () => {
@@ -466,12 +596,24 @@ test('uses GTFS pathways for platform transfer time and geometry, and fails clos
 test('composes four scheduled transport segments with three feasible transfers', () => {
   const results = findGtfsItineraries(fourModeTransferFeed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    destination: [24.0401, 49.8601],
     maximumStopDistanceMeters: 300,
     maximumTransfers: 3,
     minimumTransferBufferSeconds: 600,
   });
-  assert.ok(results.some((journey) => journey.transfers === 3
-    && journey.segments.map((segment) => segment.mode).join(',') === 'BUS,TRAM,METRO,RAIL'));
+  const journey = results.find((candidate) => candidate.transfers === 3
+    && candidate.segments.map((segment) => segment.mode).join(',') === 'BUS,TRAM,METRO,RAIL');
+  assert.ok(journey);
+  assert.deepEqual(journey.segments.map((segment) => segment.stops?.map((stop) => stop.name)), [
+    ['Start', 'Bus intermediate', 'Hub 1'],
+    ['Hub 1', 'Tram intermediate', 'Hub 2'],
+    ['Hub 2', 'Metro intermediate', 'Hub 3'],
+    ['Hub 3', 'Rail intermediate', 'Finish'],
+  ]);
+  assert.deepEqual(journey.segments.map((segment) => segment.stops?.[1]?.arrivalAt), [
+    '2026-10-12T05:05:00.000Z', '2026-10-12T05:25:00.000Z',
+    '2026-10-12T05:45:00.000Z', '2026-10-12T06:07:00.000Z',
+  ]);
 });
 
 test('keeps the nearest stop for each transport type and reports the bounded stop search', () => {

@@ -95,6 +95,27 @@ test('does not continue past the requested destination to append extra legs', ()
   assert.deepEqual(routes[0].legs.map((leg) => leg.id), ['direct']);
 });
 
+test('never returns a route that revisits an earlier network node', () => {
+  const direct = option('direct', 'A', 'B', 0, 1200, 1000);
+  const out = option('loop-out', 'A', 'C', 0, 300, 0);
+  const back = option('loop-back', 'C', 'A', 600, 900, 0);
+  const cheaperAfterLoop = option('cheap-after-loop', 'A', 'B', 1200, 1800, 0);
+  const routes = planJourneys({
+    options: [direct, out, back, cheaperAfterLoop], originNodeId: 'A', destinationNodeId: 'B', departureAt: at(0),
+    strategy: 'CHEAPEST', minimumTransferBufferSeconds: 0,
+    connections: createConnectionMap([
+      { fromNodeId: 'A', toNodeId: 'A', connection: connection(0, 0) },
+      { fromNodeId: 'C', toNodeId: 'C', connection: connection(0, 0) },
+    ]),
+  });
+
+  assert.ok(routes.length > 0);
+  assert.ok(routes.every((route) => {
+    const nodes = [route.legs[0].originNodeId, ...route.legs.map((leg) => leg.destinationNodeId)];
+    return new Set(nodes).size === nodes.length;
+  }));
+});
+
 test('counts initial wait and access walking door-to-door without counting walking as a transfer', () => {
   const access = option('access-walk', 'A', 'H', 0, 600, 0);
   access.mode = 'WALK';
@@ -115,4 +136,32 @@ test('counts initial wait and access walking door-to-door without counting walki
   assert.equal(routes[0].departureAt.getTime(), at(0).getTime());
   assert.equal(routes[0].walkingMeters, 400);
   assert.equal(routes[0].transfers, 1);
+});
+
+test('rental modes require a verified, provider-scoped pickup and return session', () => {
+  const scooterStart = option('scooter-1', 'A', 'B', 0, 600, 100);
+  scooterStart.mode = 'SCOOTER'; scooterStart.providerId = 'zelectra';
+  scooterStart.rental = { sessionId: 's1', mode: 'SCOOTER', pickupLocationId: 'z1', dropoffLocationId: 'z2', networkId: 'zelectra-66', returnRule: 'FREE_FLOATING_ZONE', confirmationLevel: 'VERIFIED', availabilityStatus: 'AVAILABLE' };
+  const bicycle = option('bike', 'B2', 'C', 900, 1800, 200);
+  bicycle.mode = 'BICYCLE'; bicycle.providerId = 'bikenow';
+  bicycle.rental = { sessionId: 'b1', mode: 'BICYCLE', pickupLocationId: 'b1', dropoffLocationId: 'b2', networkId: 'bikenow-network', returnRule: 'ANY_NETWORK_LOCATION', confirmationLevel: 'VERIFIED', availabilityStatus: 'AVAILABLE' };
+  const scooterEnd = option('scooter-2', 'C2', 'D', 2100, 2700, 100);
+  scooterEnd.mode = 'SCOOTER'; scooterEnd.providerId = 'zelectra';
+  scooterEnd.rental = { sessionId: 's2', mode: 'SCOOTER', pickupLocationId: 'z3', dropoffLocationId: 'z4', networkId: 'zelectra-66', returnRule: 'FREE_FLOATING_ZONE', confirmationLevel: 'VERIFIED', availabilityStatus: 'AVAILABLE' };
+  const input = {
+    options: [scooterStart, bicycle, scooterEnd], originNodeId: 'A', destinationNodeId: 'D', departureAt: at(0),
+    strategy: 'BALANCED' as const, minimumTransferBufferSeconds: 0,
+    connections: createConnectionMap([
+      { fromNodeId: 'B', toNodeId: 'B2', connection: connection(120, 80) },
+      { fromNodeId: 'C', toNodeId: 'C2', connection: connection(120, 80) },
+    ]),
+  };
+  const result = planJourneys(input);
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0]?.legs.map((leg) => leg.providerId), ['zelectra','bikenow','zelectra']);
+
+  const conditional = { ...bicycle, rental: { ...bicycle.rental!, confirmationLevel: 'CONDITIONAL' as const } };
+  assert.equal(planJourneys({ ...input, options: [scooterStart, conditional, scooterEnd] }).length, 0);
+  const looseBike = { ...bicycle, rental: undefined };
+  assert.equal(planJourneys({ ...input, options: [scooterStart, looseBike, scooterEnd] }).length, 0);
 });

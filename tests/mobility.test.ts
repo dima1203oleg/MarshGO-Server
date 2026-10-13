@@ -32,7 +32,7 @@ describe('GBFS normalisation', () => {
     const { assets, rejected } = normalizeVehicles('p1', types, status);
     assert.equal(assets.length, 2);
     assert.equal(rejected, 2);
-    assert.deepEqual(assets[0], { id: 'a', providerId: 'p1', type: 'SCOOTER', location: [24.03, 49.84], available: true, rangeMeters: 12000 });
+    assert.deepEqual(assets[0], { id: 'a', providerId: 'p1', type: 'SCOOTER', location: [24.03, 49.84], available: true, rangeMeters: 12000, vehicleTypeId: 's1' });
     assert.equal(assets[1].available, false);
   });
 

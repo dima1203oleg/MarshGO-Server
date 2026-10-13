@@ -5,7 +5,7 @@ export interface KyivScheduleSource { id: string; name: string; feed_url: string
 interface ArcGisFeatureCollection { features?: Array<{ attributes?: Record<string, unknown> }> }
 interface CachedRows { expiresAt: number; rows: Array<Record<string, unknown>> }
 type KyivScheduleRow = Record<string, unknown> & {
-  dataKind: 'stop_times' | 'headways' | 'station_hours';
+  dataKind: 'stop_times' | 'headways' | 'station_hours' | 'interchanges';
   source: string;
   sourceRef: string | null;
 };
@@ -18,7 +18,8 @@ const sourceConfig: Record<KyivScheduleKind, { phrase: string }> = {
   metro: { phrase: 'метро' },
   funicular: { phrase: 'фунікулер' },
 };
-const dataKindFor = (name: string): 'stop_times' | 'headways' | 'station_hours' => name.includes('інтервали') ? 'headways' : name.includes('години роботи') ? 'station_hours' : 'stop_times';
+const dataKindFor = (name: string): KyivScheduleRow['dataKind'] => name.includes('інтервали') ? 'headways'
+  : name.includes('години роботи') ? 'station_hours' : name.includes('пересад') ? 'interchanges' : 'stop_times';
 
 async function fetchRows(source: KyivScheduleSource): Promise<Array<Record<string, unknown>>> {
   const cached = cache.get(source.id);
@@ -49,7 +50,11 @@ export async function loadKyivSchedules(sources: KyivScheduleSource[], kind: Kyi
   return { data: filtered, meta: { city: 'Київ', kind, timezone: 'Europe/Kyiv', sourceCount: eligible.length,
     failedSources: settled.filter((item) => item.error).map(({ source, error }) => ({ name: source.name, error })),
     updatedAt: new Date().toISOString(), cacheTtlSeconds: CACHE_MS / 1000,
-    scheduleSemantics: kind === 'city_train' ? 'published_station_passage_times' : 'published_first_last_service_and_headway_intervals' } };
+    scheduleSemantics: kind === 'city_train' ? 'published_station_passage_times'
+      : 'published_first_last_service_and_headway_intervals',
+    ...(kind === 'metro' ? { estimatedTripTimes: true, realtimeAvailable: false,
+      notes: ['Поїзні відправлення моделюються за оприлюдненими годинними діапазонами інтервалів.',
+        'Відкриті дані не містять realtime-прогнозу чи фактичного розкладу кожного рейсу.'] } : {}) } };
 }
 
 /** Validate the city's public schedule REST response during provider discovery/refresh. */

@@ -16,7 +16,7 @@ import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, Routi
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
-import { JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
+import { getJourneySearchPartialReasons, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, findGtfsStopArrivals, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
@@ -33,8 +33,13 @@ import { cachedSnapshot, selectNearby } from './mobility/nearby';
 import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
 import { buildTransportCities } from './mobility/cities';
 import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
+import { cachedKyivMetroTimetable } from './mobility/kyivMetroTimetable';
+import { getTransportFareCatalog } from './mobility/transportTariffs';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
+import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
+import { buildMicromobilityGeofenceFeatures, buildMicromobilityPointFeatures, buildStaticRentalPointFeature } from './mobility/micromobilityFeatures';
+import { buildKiwitaxiAffiliateUrl, intuiTravelStatus, kiwitaxiStatus } from './mobility/transferAdapters';
 import { normalizePlate } from './vehiclePlate';
 import { isExactVehiclePhotoOrder } from './vehiclePhotos';
 import { shouldGrantAdmin } from './adminPhones';
@@ -447,10 +452,180 @@ app.get('/api/v1/mobility/nearby', requireAuth, placeSearchLimiter, asyncHandler
   res.json({ data: { mode, radiusM, providers: providers.length, failedProviders: settled.length - snapshots.length, ...result } });
 }));
 
+/** Canonical service-operator registry; legacy feed registry remains available at /mobility/providers. */
+app.get('/api/v1/mobility/operators', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT provider_id,provider_name,provider_group,data_source,source_url,integration_status,data_freshness_seconds,
+            booking_method,pricing_capability,live_availability_capability,commercial_permissions,attribution_requirements,
+            enabled,last_successful_sync,last_sync_error,api_key_configured,
+            COALESCE((SELECT count(*) FROM rental_locations rl WHERE rl.provider_id=mo.provider_id),0)::int AS location_count,
+            COALESCE((SELECT count(*) FROM rental_locations rl WHERE rl.provider_id=mo.provider_id AND rl.availability='AVAILABLE'
+              AND rl.availability_checked_at > now()-interval '5 minutes'),0)::int AS live_available_count
+     FROM mobility_operators mo ORDER BY provider_group,provider_name`,
+  );
+  const kiwi = kiwitaxiStatus(), intui = intuiTravelStatus();
+  const data = rows.map((row) => {
+    const transferStatus = row.provider_id === 'kiwitaxi' ? kiwi : row.provider_id === 'intui_travel' ? intui : null;
+    return transferStatus ? { ...row, integration_status: transferStatus.status, api_key_configured: transferStatus.providerId === 'kiwitaxi' ? Boolean(process.env.KIWITAXI_SECURITY_TOKEN?.trim()) : Boolean(process.env.INTUI_API_LIGHT_CREDENTIALS?.trim()), status_message: transferStatus.message } : { ...row, status_message: null };
+  });
+  res.json({ data });
+}));
+
+app.patch('/api/v1/admin/mobility/operators/:providerId', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const providerId = req.params.providerId;
+  const enabled = req.body?.enabled;
+  if (!/^[a-z0-9][a-z0-9_-]{1,79}$/.test(providerId) || typeof enabled !== 'boolean') throw new ApiError(400, 'providerId and enabled boolean are required', 'invalid_operator_update');
+  const current = await pool.query<{ integration_status: string; enabled: boolean }>('SELECT integration_status,enabled FROM mobility_operators WHERE provider_id=$1', [providerId]);
+  if (!current.rows[0]) throw new ApiError(404, 'Mobility operator not found', 'operator_not_found');
+  if (enabled && !['ACTIVE_LIVE','ACTIVE_STATIC'].includes(current.rows[0].integration_status)) throw new ApiError(409, 'Only verified live or static operators can be enabled', 'operator_not_ready');
+  const { rows } = await pool.query('UPDATE mobility_operators SET enabled=$2,updated_at=now() WHERE provider_id=$1 RETURNING provider_id,provider_name,integration_status,enabled', [providerId, enabled]);
+  await auditMobility(req.userId, 'mobility.operator.updated', providerId, { old: { enabled: current.rows[0].enabled }, new: { enabled } });
+  res.json({ data: rows[0] });
+}));
+
+/** Static points are discoverable here, but only fresh, verified availability is exposed as live. */
+app.get('/api/v1/mobility/rental-locations', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
+  const box = parseBbox(req.query.bbox, 0.6);
+  const modeRaw = typeof req.query.mode === 'string' ? req.query.mode.toUpperCase() : null;
+  const mode = modeRaw === 'BIKE' ? 'BICYCLE' : modeRaw;
+  const providerId = typeof req.query.provider_id === 'string' ? req.query.provider_id : null;
+  const networkId = typeof req.query.network_id === 'string' ? req.query.network_id : null;
+  const sourceStatus = typeof req.query.source_status === 'string' ? req.query.source_status : null;
+  const limit = req.query.limit === undefined ? 500 : Number(req.query.limit);
+  const offset = req.query.offset === undefined ? 0 : Number(req.query.offset);
+  if (!box || (mode !== null && mode !== 'BICYCLE' && mode !== 'SCOOTER')
+    || (providerId !== null && !/^[a-z0-9][a-z0-9_-]{1,79}$/.test(providerId))
+    || (networkId !== null && !/^[a-z0-9][a-z0-9_-]{1,99}$/.test(networkId))
+    || (sourceStatus !== null && !['LIVE','STATIC','UNKNOWN'].includes(sourceStatus))
+    || !Number.isInteger(limit) || limit < 1 || limit > 1000 || !Number.isInteger(offset) || offset < 0 || offset > 100_000) {
+    throw new ApiError(400, 'bbox, valid mode/provider/network filters and bounded pagination are required', 'invalid_rental_location_query');
+  }
+  const { rows } = await pool.query(
+    `SELECT r.id,r.provider_id AS "providerId",o.provider_name AS "providerName",r.network_id AS "networkId",r.mode,
+            r.rental_model AS "rentalModel",r.source,r.external_id AS "externalId",r.object_type AS "objectType",r.name,
+            r.operator_name AS "operatorName",r.network_name AS "networkName",r.brand,r.reference,r.city,r.region,r.address,
+            r.opening_hours AS "openingHours",r.access,r.website,r.phone,r.capacity,r.vehicle_types AS "vehicleTypes",
+            r.pickup_allowed AS "pickupAllowed",r.dropoff_allowed AS "dropoffAllowed",r.geofence_allows_pickup AS "geofenceAllowsPickup",
+            r.geofence_allows_dropoff AS "geofenceAllowsDropoff",r.one_way_return AS "oneWayReturn",
+            CASE WHEN r.availability='AVAILABLE' AND r.availability_checked_at > now()-make_interval(secs => greatest(coalesce(n.maximum_snapshot_age_seconds,300),1)) THEN 'AVAILABLE'
+                 WHEN r.availability='UNAVAILABLE' AND r.availability_checked_at > now()-make_interval(secs => greatest(coalesce(n.maximum_snapshot_age_seconds,300),1)) THEN 'UNAVAILABLE'
+                 ELSE 'UNKNOWN' END AS availability,
+            CASE WHEN r.availability_checked_at > now()-make_interval(secs => greatest(coalesce(n.maximum_snapshot_age_seconds,300),1)) THEN r.available_vehicles ELSE NULL END AS "availableVehicles",
+            CASE WHEN r.availability_checked_at > now()-make_interval(secs => greatest(coalesce(n.maximum_snapshot_age_seconds,300),1)) THEN r.available_docks ELSE NULL END AS "availableDocks",
+            r.availability_checked_at AS "availabilityCheckedAt",r.source_updated_at AS "sourceUpdatedAt",r.source_imported_at AS "sourceImportedAt",
+            r.source_quality AS "sourceQuality",ST_X(ST_PointOnSurface(r.geom)::geometry) AS lon,ST_Y(ST_PointOnSurface(r.geom)::geometry) AS lat,
+            CASE WHEN r.availability_checked_at IS NOT NULL AND r.availability_checked_at > now()-interval '5 minutes' THEN 'LIVE' WHEN r.source='OSM' OR r.source='MANUAL' THEN 'STATIC' ELSE 'UNKNOWN' END AS "sourceStatus"
+     FROM rental_locations r JOIN mobility_operators o ON o.provider_id=r.provider_id
+     LEFT JOIN mobility_networks n ON n.network_id=r.network_id
+     WHERE ST_Intersects(r.geom,ST_MakeEnvelope($1,$2,$3,$4,4326))
+       AND ($5::text IS NULL OR r.mode=$5) AND ($6::text IS NULL OR r.provider_id=$6)
+       AND ($7::text IS NULL OR r.network_id=$7)
+       AND ($8::text IS NULL OR CASE WHEN r.availability_checked_at IS NOT NULL AND r.availability_checked_at > now()-interval '5 minutes' THEN 'LIVE' WHEN r.source IN ('OSM','MANUAL') THEN 'STATIC' ELSE 'UNKNOWN' END=$8)
+     ORDER BY r.provider_id,r.name NULLS LAST LIMIT $9 OFFSET $10`,
+    [box[0], box[1], box[2], box[3], mode, providerId, networkId, sourceStatus, limit, offset],
+  );
+  res.json({ data: rows, meta: { count: rows.length, limit, offset, truncated: rows.length === limit, attribution: '© OpenStreetMap contributors, ODbL 1.0 where source=osm' } });
+}));
+
+/** Refuses a rental if operator/network, live stock, return capacity or applicable rules are unknown. */
+app.post('/api/v1/mobility/rental-compatibility', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
+  const body: unknown = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ApiError(400, 'request must be an object', 'invalid_rental_request');
+  const value = body as Record<string, unknown>;
+  const pickupId = value.pickupLocationId, dropoffId = value.dropoffLocationId, vehicleType = value.vehicleType;
+  const parseDate = (raw: unknown) => typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(raw) ? new Date(raw) : null;
+  const departureAt = parseDate(value.departureAt), arrivalAt = parseDate(value.arrivalAt);
+  if (typeof pickupId !== 'string' || !/^[0-9a-f-]{36}$/i.test(pickupId) || typeof dropoffId !== 'string' || !/^[0-9a-f-]{36}$/i.test(dropoffId)
+    || typeof vehicleType !== 'string' || vehicleType.length < 1 || vehicleType.length > 80 || !departureAt || !arrivalAt || !Number.isFinite(departureAt.getTime()) || !Number.isFinite(arrivalAt.getTime())
+    || typeof value.requireVerifiedReturn !== 'undefined' && typeof value.requireVerifiedReturn !== 'boolean') {
+    throw new ApiError(400, 'pickup/dropoff IDs, vehicleType and timezone-qualified rental times are required', 'invalid_rental_request');
+  }
+  const { rows } = await pool.query<Record<string, unknown>>(
+    `SELECT r.id,r.provider_id AS "providerId",r.network_id AS "networkId",r.mode,r.rental_model AS "rentalModel",r.name,
+            r.pickup_allowed AS "pickupAllowed",r.dropoff_allowed AS "dropoffAllowed",r.geofence_allows_pickup AS "geofenceAllowsPickup",
+            r.geofence_allows_dropoff AS "geofenceAllowsDropoff",r.availability,r.available_vehicles AS "availableVehicles",r.available_docks AS "availableDocks",
+            r.vehicle_types AS "vehicleTypes",r.availability_checked_at AS "availabilityCheckedAt",r.opening_hours AS "openingHours",
+            n.return_rule AS "returnRule",n.compatibility_status AS "compatibilityStatus",n.cross_provider_return_confirmed AS "crossProviderReturnConfirmed",
+            n.provider_ids AS "providerIds",n.maximum_snapshot_age_seconds AS "maximumSnapshotAgeSeconds"
+     FROM rental_locations r LEFT JOIN mobility_networks n ON n.network_id=r.network_id WHERE r.id=ANY($1::uuid[])`,
+    [[pickupId, dropoffId]],
+  );
+  const pickupRow = rows.find((row) => row.id === pickupId), dropoffRow = rows.find((row) => row.id === dropoffId);
+  if (!pickupRow || !dropoffRow) throw new ApiError(404, 'Rental location not found');
+  const dateValue = (raw: unknown) => raw instanceof Date ? raw : typeof raw === 'string' ? new Date(raw) : null;
+  const boolValue = (raw: unknown) => typeof raw === 'boolean' ? raw : null;
+  const rentalLocation = (row: Record<string, unknown>): RentalLocation => ({
+    id: String(row.id), providerId: String(row.providerId), networkId: typeof row.networkId === 'string' ? row.networkId : null,
+    mode: row.mode === 'BICYCLE' || row.mode === 'SCOOTER' ? row.mode : 'BICYCLE',
+    rentalModel: ['STATION_BASED','FREE_FLOATING','STAFFED','CONFIRMED_ONE_WAY'].includes(String(row.rentalModel)) ? row.rentalModel as RentalLocation['rentalModel'] : 'UNKNOWN',
+    name: typeof row.name === 'string' ? row.name : String(row.id), pickupAllowed: boolValue(row.pickupAllowed), dropoffAllowed: boolValue(row.dropoffAllowed),
+    availability: row.availability === 'AVAILABLE' || row.availability === 'UNAVAILABLE' ? row.availability : 'UNKNOWN',
+    availableVehicles: typeof row.availableVehicles === 'number' ? row.availableVehicles : null,
+    availableDocks: typeof row.availableDocks === 'number' ? row.availableDocks : null,
+    vehicleTypes: Array.isArray(row.vehicleTypes) ? row.vehicleTypes.filter((item): item is string => typeof item === 'string') : [],
+    availabilityCheckedAt: dateValue(row.availabilityCheckedAt),
+    // Staffed opening-hours parsing is intentionally fail-closed until a verified hours evaluator is available.
+    openingAtPickup: row.rentalModel === 'STAFFED' ? null : true,
+    openingAtDropoff: row.rentalModel === 'STAFFED' ? null : true,
+    geofenceAllowsPickup: boolValue(row.geofenceAllowsPickup), geofenceAllowsDropoff: boolValue(row.geofenceAllowsDropoff),
+  });
+  const pickup = rentalLocation(pickupRow), dropoff = rentalLocation(dropoffRow);
+  const firstCheckedAt = pickup.availabilityCheckedAt;
+  const networkRule: RentalNetworkRule | null = typeof pickupRow.networkId === 'string' && pickupRow.networkId === dropoffRow.networkId ? {
+    networkId: pickupRow.networkId, providerIds: Array.isArray(pickupRow.providerIds) ? pickupRow.providerIds.filter((item): item is string => typeof item === 'string') : [],
+    status: pickupRow.compatibilityStatus === 'CONFIRMED' ? 'CONFIRMED' : pickupRow.compatibilityStatus === 'DISABLED' ? 'DISABLED' : 'UNKNOWN',
+    returnRule: ['SAME_LOCATION','ANY_NETWORK_LOCATION','FREE_FLOATING_ZONE','ONE_WAY_CONFIRMED'].includes(String(pickupRow.returnRule)) ? pickupRow.returnRule as RentalNetworkRule['returnRule'] : 'UNKNOWN',
+    crossProviderReturnConfirmed: pickupRow.crossProviderReturnConfirmed === true,
+    maximumSnapshotAgeSeconds: typeof pickupRow.maximumSnapshotAgeSeconds === 'number' ? pickupRow.maximumSnapshotAgeSeconds : null,
+  } : null;
+  const compatibility = canRent({ pickup, dropoff, vehicleType, departureAt, arrivalAt, networkRule, requireVerifiedReturn: value.requireVerifiedReturn !== false, now: new Date() });
+  // The top-level timestamp follows the limiting snapshot so clients can explain the freshness of the decision.
+  res.json({ data: { ...compatibility, availabilityCheckedAt: firstCheckedAt?.toISOString() ?? null } });
+}));
+
+/** Search only imported provider catalog rows. This does not call partners or imply a live quote/booking. */
+app.post('/api/v1/mobility/transfers/search', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
+  const value: unknown = req.body;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ApiError(400, 'request must be an object', 'invalid_transfer_search');
+  const body = value as Record<string, unknown>;
+  const placeId = (raw: unknown) => typeof raw === 'string' && /^[0-9a-f-]{36}$/i.test(raw);
+  const passengerCount = body.passengerCount === undefined ? 1 : Number(body.passengerCount);
+  const providerIds = body.providerIds === undefined ? null : Array.isArray(body.providerIds)
+    && body.providerIds.length <= 10 && body.providerIds.every((id) => typeof id === 'string' && /^[a-z0-9][a-z0-9_-]{1,79}$/.test(id)) ? body.providerIds as string[] : undefined;
+  if (!placeId(body.originPlaceId) || !placeId(body.destinationPlaceId) || body.originPlaceId === body.destinationPlaceId
+    || !Number.isInteger(passengerCount) || passengerCount < 1 || passengerCount > 16 || providerIds === undefined) {
+    throw new ApiError(400, 'originPlaceId, destinationPlaceId, passengerCount and providerIds are invalid', 'invalid_transfer_search');
+  }
+  const { rows } = await pool.query<Record<string, unknown>>(
+    `SELECT tr.id AS "offerId",tr.provider_id AS "providerId",o.provider_name AS "providerName",
+            a.external_id AS "originExternalId",a.city AS "originCity",b.external_id AS "destinationExternalId",b.city AS "destinationCity",
+            tr.vehicle_class AS "vehicleClass",tr.seats,tr.luggage,tr.price_minor AS "priceMinor",tr.currency,tr.price_status AS "priceStatus",
+            tr.source_updated_at AS "sourceUpdatedAt",tr.attributes->>'booking_url' AS "bookingUrl"
+       FROM transfer_routes tr JOIN mobility_operators o ON o.provider_id=tr.provider_id
+       JOIN transfer_places a ON a.id=tr.origin_place_id JOIN transfer_places b ON b.id=tr.destination_place_id
+      WHERE tr.origin_place_id=$1 AND tr.destination_place_id=$2 AND ($3::text[] IS NULL OR tr.provider_id=ANY($3::text[]))
+        AND (tr.seats IS NULL OR tr.seats >= $4)
+      ORDER BY CASE WHEN tr.price_status='DYNAMIC' THEN 0 WHEN tr.price_status='CATALOG' THEN 1 ELSE 2 END,
+               tr.price_minor NULLS LAST LIMIT 100`,
+    [body.originPlaceId, body.destinationPlaceId, providerIds, passengerCount],
+  );
+  const offers = rows.map((row) => {
+    let bookingUrl: string | null = null;
+    if (row.providerId === 'kiwitaxi' && typeof row.bookingUrl === 'string') {
+      try { bookingUrl = buildKiwitaxiAffiliateUrl(row.bookingUrl); } catch { bookingUrl = null; }
+    }
+    const sourceUpdatedAt = row.sourceUpdatedAt instanceof Date ? row.sourceUpdatedAt.toISOString() : typeof row.sourceUpdatedAt === 'string' ? row.sourceUpdatedAt : null;
+    return { ...row, sourceUpdatedAt, quoteStatus: row.priceStatus === 'DYNAMIC' ? 'DYNAMIC' : row.priceStatus === 'CATALOG' ? 'CATALOG_ONLY' : 'UNKNOWN', availabilityStatus: 'UNKNOWN', bookingUrl, bookingAvailable: false };
+  });
+  res.json({ data: offers, providers: [kiwitaxiStatus(), intuiTravelStatus()], meta: { catalogOnly: true, liveQuotes: false, bookingAvailable: false, count: offers.length } });
+}));
+
 // ---- Map layers (2D). Everything is loaded per viewport and per layer; the client asks only for layers the user switched on. ----
-type LayerProviderRow = { id: string; name: string; city: string; provider_type: string; source_type: string; feed_url: string; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } };
+type LayerProviderRow = { id: string; name: string; city: string; provider_type: string; source_type: string; feed_url: string; operator_id: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } };
 const layerProviders = async (sourceTypes: string[], providerTypes: string[]) => (await pool.query<LayerProviderRow>(
-  `SELECT id,name,city,provider_type,source_type,feed_url,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') AND source_type = ANY($1) AND provider_type = ANY($2) ORDER BY priority,name`, [sourceTypes, providerTypes],
+  `SELECT mp.id,COALESCE(mo.provider_name,mp.name) AS name,mp.city,mp.provider_type,mp.source_type,mp.feed_url,mp.operator_id,mp.last_report
+     FROM mobility_providers mp LEFT JOIN mobility_operators mo ON mo.provider_id=mp.operator_id
+    WHERE mp.status='enabled' AND mp.health IN ('healthy','degraded') AND mp.source_type = ANY($1) AND mp.provider_type = ANY($2) ORDER BY mp.priority,mp.name`, [sourceTypes, providerTypes],
 )).rows;
 const providerTouches = (row: LayerProviderRow, box: [number, number, number, number]) => row.city === 'Україна' || !row.last_report?.bbox || intersects(box, [row.last_report.bbox[0] - .15, row.last_report.bbox[1] - .1, row.last_report.bbox[2] + .15, row.last_report.bbox[3] + .1]);
 /** Map layers can be hundreds of KB of GeoJSON; compress when the client accepts it. Coordinates are rounded to ~1 m. */
@@ -508,6 +683,13 @@ app.get('/api/v1/transport/health', requireAuth, asyncHandler(async (_req, res) 
        last_checked_at AS "lastCheckedAt",last_sync_at AS "lastSyncAt",last_report->'counts' AS counts
      FROM mobility_providers ORDER BY city,priority,name`);
   res.json({ data: rows, checkedAt: new Date().toISOString() });
+}));
+
+/** Verified published fares plus explicit dynamic-price requirements; no vendor secret is returned. */
+app.get('/api/v1/transport/fares', requireAuth, asyncHandler(async (req, res) => {
+  const city = typeof req.query.city === 'string' ? req.query.city.trim().slice(0, 80) : undefined;
+  const mode = typeof req.query.mode === 'string' ? req.query.mode.trim().toLocaleLowerCase('uk-UA').slice(0, 40) : undefined;
+  res.json({ data: getTransportFareCatalog({ city, mode }), currency: 'UAH', lastVerifiedAt: '2026-10-13' });
 }));
 
 /** Official Kyiv metro, city-rail and funicular timetable data; these are static schedules, not realtime predictions. */
@@ -660,14 +842,44 @@ app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req,
   const providers = (await layerProviders(['gbfs'], ['bike', 'ebike', 'scooter', 'carsharing'])).filter((row) => providerTouches(row, box));
   const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url).then((snapshot) => ({ row, snapshot })))));
   const features: unknown[] = [];
+  let staleAssets = 0;
   for (const item of settled) {
     if (!item.ok) continue;
-    for (const asset of item.value.snapshot.assets) if (asset.available && assetTypes.has(asset.type) && inBbox(box, asset.location[0], asset.location[1]))
-      features.push({ type: 'Feature', properties: { kind: asset.type === 'SCOOTER' ? 'scooter' : asset.type === 'CARSHARING' ? 'carsharing' : 'bike', provider: item.value.row.name.split(' — ')[0], battery: asset.batteryPercent ?? null }, geometry: { type: 'Point', coordinates: asset.location } });
-    if (wantStations) for (const station of item.value.snapshot.stations) if (inBbox(box, station.location[0], station.location[1]))
-      features.push({ type: 'Feature', properties: { kind: 'station', name: station.name, available: station.availableAssets ?? null, provider: item.value.row.name.split(' — ')[0] }, geometry: { type: 'Point', coordinates: station.location } });
+    const provider = { id: item.value.row.id, name: item.value.row.name, operatorId: item.value.row.operator_id };
+    const mapped = buildMicromobilityPointFeatures(provider, item.value.snapshot, { west: box[0], south: box[1], east: box[2], north: box[3] }, assetTypes, { includeStations: wantStations });
+    features.push(...mapped);
+    const timestamp = item.value.snapshot.lastUpdated;
+    const staleAfter = item.value.snapshot.staleAfterSeconds ?? 60;
+    if (timestamp === null || timestamp === undefined || Date.now() - timestamp > staleAfter * 1000) staleAssets += item.value.snapshot.assets.length;
   }
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 3000) }, meta: { failedProviders: settled.filter((item) => !item.ok).length, truncated: features.length > 3000 } });
+  if (assetTypes.has('BIKE') || assetTypes.has('EBIKE')) {
+    const { rows: rentals } = await pool.query<Record<string, unknown>>(
+      `SELECT r.id,r.provider_id AS "providerId",o.provider_name AS "providerName",r.network_id AS "networkId",r.mode,
+              r.rental_model AS "rentalModel",r.source,r.name,r.operator_name AS "operatorName",r.city,r.address,
+              r.pickup_allowed AS "pickupAllowed",r.dropoff_allowed AS "dropoffAllowed",r.availability,
+              r.availability_checked_at AS "availabilityCheckedAt",r.source_updated_at AS "sourceUpdatedAt",r.source_imported_at AS "sourceImportedAt",
+              CASE WHEN r.availability_checked_at IS NOT NULL AND r.availability_checked_at > now()-interval '5 minutes' THEN 'LIVE'
+                   WHEN r.source IN ('OSM','MANUAL') THEN 'STATIC' ELSE 'UNKNOWN' END AS "sourceStatus",
+              ST_X(ST_PointOnSurface(r.geom)::geometry) AS lon,ST_Y(ST_PointOnSurface(r.geom)::geometry) AS lat
+         FROM rental_locations r JOIN mobility_operators o ON o.provider_id=r.provider_id
+        WHERE r.mode='BICYCLE' AND (o.enabled=true OR r.source='OSM') AND ST_Intersects(r.geom,ST_MakeEnvelope($1,$2,$3,$4,4326))
+        ORDER BY r.provider_id,r.name NULLS LAST LIMIT 3000`, [box[0], box[1], box[2], box[3]],
+    );
+    for (const row of rentals) { const feature = buildStaticRentalPointFeature(row); if (feature) features.push(feature); }
+  }
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 3000) }, meta: { failedProviders: settled.filter((item) => !item.ok).length, filteredStaleAssets: staleAssets, truncated: features.length > 3000, attribution: 'Zelectra GBFS; © OpenStreetMap contributors, ODbL 1.0 where source=OSM' } });
+}));
+
+app.get('/api/v1/transport/micromobility/geofences', requireAuth, asyncHandler(async (req, res) => {
+  const box = parseBbox(req.query.bbox, 0.6);
+  if (!box) throw new ApiError(400, 'bbox (at most 0.6 degree) is required', 'invalid_transport_query');
+  const providers = (await layerProviders(['gbfs'], ['scooter'])).filter((row) => providerTouches(row, box));
+  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url).then((snapshot) => ({ row, snapshot })))));
+  const features = settled.flatMap((item) => item.ok ? buildMicromobilityGeofenceFeatures(
+    { id: item.value.row.id, name: item.value.row.name, operatorId: item.value.row.operator_id }, item.value.snapshot,
+    { west: box[0], south: box[1], east: box[2], north: box[3] },
+  ) : []);
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 1000) }, meta: { failedProviders: settled.filter((item) => !item.ok).length, truncated: features.length > 1000, attribution: 'Zelectra GBFS; Mobility Database catalog reports CC BY 4.0' } });
 }));
 
 app.get('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
@@ -731,7 +943,7 @@ app.delete('/api/v1/admin/mobility/providers/:id', requireAuth, requireAdmin, as
 
 app.post('/api/v1/admin/mobility/providers/:id/test', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
   if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid provider id', 'invalid_provider_id');
-  const found = await pool.query<{ id: string; name: string; source_type: string; feed_url: string }>('SELECT id,name,source_type,feed_url FROM mobility_providers WHERE id=$1', [req.params.id]);
+  const found = await pool.query<{ id: string; name: string; source_type: string; feed_url: string; country: string }>('SELECT id,name,source_type,feed_url,country FROM mobility_providers WHERE id=$1', [req.params.id]);
   if (!found.rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
   const report = await testProviderConnection(found.rows[0]);
   const { rows } = await pool.query(
@@ -2150,6 +2362,9 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
          'distanceMeters',l.distance_m,'priceMinor',l.price_minor,'priceMinMinor',l.price_min_minor,
          'priceMaxMinor',l.price_max_minor,'currency',l.currency,'priceStatus',l.price_status,
          'availabilityStatus',l.availability_status,'providerType',l.provider_type,'offerId',l.offer_id,
+         'fareProductId',l.metadata->>'fareProductId','fareSource',l.metadata->>'fareSource',
+         'fareIncludedByPreviousSegment',COALESCE((l.metadata->>'fareIncludedByPreviousSegment')::boolean,false),
+         'scheduleSemantics',l.metadata->>'scheduleSemantics',
          'bookingId',l.booking_id,'demandId',l.demand_id,'state',l.state,'dataSource',l.data_source,
          'lastUpdatedAt',l.last_updated_at,'source',l.data_source,'dataSource',l.data_source,
          'metadata',l.metadata,'routeGeometry',l.metadata->'routeGeometry','stops',l.metadata->'stops'
@@ -2247,6 +2462,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const h = Math.sin(dLat / 2) ** 2 + Math.cos(radians(originLat)) * Math.cos(radians(destinationLat)) * Math.sin(dLon / 2) ** 2;
     return 6_371_000 * 2 * Math.asin(Math.sqrt(h));
   })();
+  // City transit should be bounded to a useful passenger search horizon by
+  // default. Intercity journeys keep the full-day horizon; an explicit user
+  // preference always overrides this default.
+  const maximumSearchDurationSeconds = search.preferences.maxTotalDurationSeconds
+    ?? (routeDistanceMeters <= 30_000 ? 6 * 60 * 60 : 24 * 60 * 60);
   const corridorWidthMeters = Math.max(12_000, Math.min(60_000, routeDistanceMeters * 0.2));
   const { rows } = await pool.query<{
     offer_id: string; driver_id: string; driver_name: string; vehicle_id: string;
@@ -2338,6 +2558,24 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     if (!counts) return true;
     return allowedTransitModes.some((mode) => typeKeysByMode[mode].some((type) => Number(counts[`routes_${type}`] ?? 0) > 0));
   });
+  const providerMetadata = new Map(eligibleGtfsProviders.map((provider) => [provider.id, { name: provider.name, last_sync_at: provider.last_sync_at }]));
+  const kyivMetroBounds: [number, number, number, number] = [30.1, 50.1, 31.0, 50.8];
+  const shouldLoadKyivMetro = allowedTransitModes.includes('METRO')
+    && bboxIntersectsRouteCorridor(kyivMetroBounds, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters);
+  // Start Kyiv's multi-source open-data build alongside regular GTFS fetches.
+  const kyivMetroFeedTask = shouldLoadKyivMetro ? (async () => {
+    const { rows } = await pool.query<{ id: string; name: string; city: string; feed_url: string; source_ref: string | null; source_type: string; last_sync_at: Date | null }>(
+      `SELECT id,name,city,feed_url,source_ref,source_type,last_sync_at FROM mobility_providers
+        WHERE city='Київ' AND provider_type='public_transit' AND source_type IN ('rest','geojson')
+          AND status='enabled' AND health IN ('healthy','degraded') AND name ILIKE '%метро%'
+        ORDER BY priority,name`);
+    const stations = rows.find((row) => row.source_type === 'geojson' && row.name.toLocaleLowerCase('uk-UA').includes('метро (станції)'));
+    const route = rows.find((row) => row.source_type === 'geojson' && row.name.toLocaleLowerCase('uk-UA').includes('метро (геометрія ліній)'));
+    const scheduleSources = rows.filter((row) => row.source_type === 'rest' && row.name.toLocaleLowerCase('uk-UA').includes('метро'));
+    if (!stations || !route || scheduleSources.length < 3) throw new Error('Київські джерела станцій, геометрії, розкладу або пересадок не зареєстровані чи вимкнені');
+    const feed = await cachedKyivMetroTimetable({ stationSource: stations, routeSource: route, scheduleSources });
+    return { routeSource: route, feed };
+  })() : null;
   const feedLoads = await Promise.allSettled(eligibleGtfsProviders.map(async (provider) => ({
     provider,
     feed: await cachedGtfsTimetable(provider.id, provider.feed_url),
@@ -2369,6 +2607,17 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerCity: result.value.provider.city, feed: result.value.feed,
       ...(realtimeByProvider.get(result.value.provider.id) ? { realtime: realtimeByProvider.get(result.value.provider.id)! } : {}) });
   });
+  if (kyivMetroFeedTask) {
+    const [metroResult] = await Promise.allSettled([kyivMetroFeedTask]);
+    if (metroResult?.status === 'fulfilled') {
+      const { routeSource, feed } = metroResult.value;
+      const providerName = 'Київ — метро (офіційний інтервальний розклад)';
+      feedSources.push({ providerId: routeSource.id, providerName, providerCity: routeSource.city, feed });
+      providerMetadata.set(routeSource.id, { name: providerName, last_sync_at: routeSource.last_sync_at });
+    } else {
+      providerErrors.push(`Київське метро: ${metroResult?.reason instanceof Error ? metroResult.reason.message : 'відкриті дані тимчасово недоступні'}`);
+    }
+  }
   const sourcesByTimezone = new Map<string, GtfsTimetableSource[]>();
   for (const source of feedSources) {
     const sources = sourcesByTimezone.get(source.feed.timezone) ?? [];
@@ -2433,7 +2682,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerId: sources[0].providerId, providerName: sources[0].providerName, origin: search.origin.coordinates,
       destination: search.destination.coordinates, earliestDeparture: search.departureAt,
       latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 100,
-      maximumJourneySeconds: search.preferences.maxTotalDurationSeconds ?? 24 * 60 * 60,
+      maximumJourneySeconds: maximumSearchDurationSeconds,
       maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
       maximumWaitSeconds: 4 * 60 * 60,
       minimumTransferBufferSeconds: configuredTransferBufferSeconds,
@@ -2525,7 +2774,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         providerId: sources[0].providerId, providerName: sources[0].providerName, origin: origin.coordinates,
         destination: destination.coordinates, earliestDeparture, latestDeparture,
         limit: MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE,
-        maximumJourneySeconds: search.preferences.maxTotalDurationSeconds ?? 24 * 60 * 60,
+        maximumJourneySeconds: maximumSearchDurationSeconds,
         maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
         maximumWaitSeconds: 4 * 60 * 60,
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
@@ -2590,7 +2839,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         offer: ride, prefixes, suffixes, requestedDepartureAt: search.departureAt,
         origin: search.origin.coordinates, destination: search.destination.coordinates,
         passengers: search.passengers, minimumTransferBufferSeconds: communityTransferBufferSeconds,
-        maximumDurationSeconds: search.preferences.maxTotalDurationSeconds ?? 24 * 60 * 60,
+        maximumDurationSeconds: maximumSearchDurationSeconds,
         maximumWalkingMeters: search.preferences.maxWalkingMeters,
         maximumResults: 6,
       }).filter((journey) => search.preferences.maxTransfers === undefined || journey.transfers <= search.preferences.maxTransfers);
@@ -2625,12 +2874,20 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
   if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
   scheduledCandidates.splice(100);
+  const transitRouteChainKey = (itinerary: GtfsItinerary) => {
+    const routes: string[] = [];
+    for (const segment of itinerary.segments) {
+      const key = `${segment.providerId}:${segment.routeId}`;
+      if (routes.at(-1) !== key) routes.push(key);
+    }
+    return routes.join('>');
+  };
   const rankedCandidates = [
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
     ...scheduledCandidates.map((itinerary) => ({
       id: itinerary.id,
-      diversityKey: `transit:${itinerary.segments.map((segment) => segment.transportType).join('>')}`,
+      diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
       durationSeconds: itinerary.durationSeconds,
       priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
       transfers: itinerary.transfers,
@@ -2764,7 +3021,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             }
             const allocation = path.fare?.allocations[segmentIndex] ?? null;
             const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
-            const provider = eligibleGtfsProviders.find((item) => item.id === segment.providerId);
+            const provider = providerMetadata.get(segment.providerId);
             const inserted = await client.query<{ id: string }>(
               `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
                VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb) RETURNING id`,
@@ -2777,7 +3034,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                 segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
                 JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
                   transportType: segment.transportType, headsign: segment.headsign, tripId: segment.tripId,
-                  serviceDate: segment.serviceDate, fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+                  serviceDate: segment.serviceDate, scheduleSemantics: segment.scheduleSemantics,
+                  fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
                   ...(allocation ? { fareProductId: allocation.fareProductId,
                     fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
                   ...(segment.stops ? { stops: segment.stops } : {}),
@@ -2801,6 +3059,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               source: segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
               lastUpdatedAt: segment.realtimeUpdatedAt ?? segment.sourceFreshAt, providerName: segment.providerName,
               routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign,
+              scheduleSemantics: segment.scheduleSemantics,
               ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}), driver: null, vehicle: null });
           }
           const egressWalk = path.egressWalk ?? null;
@@ -2987,7 +3246,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           );
         }
         const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
-        const provider = eligibleGtfsProviders.find((item) => item.id === segment.providerId);
+        const provider = providerMetadata.get(segment.providerId);
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
            VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb) RETURNING id`,
@@ -3003,6 +3262,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
           JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
               headsign: segment.headsign, tripId: segment.tripId, serviceDate: segment.serviceDate,
+              scheduleSemantics: segment.scheduleSemantics,
               fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
               ...(itinerary.fare?.allocations[segmentIndex] ? { fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
                 fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
@@ -3031,6 +3291,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           source: segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
           lastUpdatedAt: segment.realtimeUpdatedAt ?? segment.sourceFreshAt, providerName: segment.providerName,
           routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign,
+          scheduleSemantics: segment.scheduleSemantics,
           ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}), driver: null, vehicle: null });
       }
       await saveWalkLeg(
@@ -3066,6 +3327,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...(search.strategy === 'CHEAPEST' && (scheduledCandidates.length > 0 || hasUnpricedTransitCandidates) ? ['CHEAPEST:public-transit-fares-unavailable'] : []),
     ...(search.preferences.maxTransfers !== undefined && search.preferences.maxTransfers > MAX_GTFS_TRANSFERS ? [`maxTransfers:limited-to-${MAX_GTFS_TRANSFERS}`] : []),
   ];
+  const partialReasons = getJourneySearchPartialReasons({
+    candidateGenerationTruncated,
+    providerErrorCount: providerErrors.length,
+    unsupportedPreferenceCount: unsupportedPreferences.length,
+    scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0 && !walkingRoutingUrl,
+  });
   res.json({ data: {
     journeys,
     requestedStrategy: search.strategy,
@@ -3076,9 +3343,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     alternativeLimitPerStrategy,
     resultsTruncated: candidateGenerationTruncated || paretoCandidates.some((candidate) => !selectedCandidateIds.has(candidate.id)),
     candidateGenerationTruncated,
-    partial: journeys.length === 0 || candidateGenerationTruncated || providerErrors.length > 0 || unsupportedPreferences.length > 0
-      || (scheduledCandidates.length > 0 && !walkingRoutingUrl)
-      || journeys.some((journey) => journey.source === 'gtfs-static' || journey.source === 'community-transit'),
+    partial: partialReasons.length > 0,
+    partialReasons,
     blockedProviders,
     unsupportedPreferences,
     providerErrors,
