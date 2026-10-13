@@ -62,7 +62,10 @@ function redactIntegrationText(value: string | null | undefined) {
   if (!value) return value ?? null;
   return value
     .replace(/\b(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
-    .replace(/([?&][^=&#\s]*(?:token|key|secret|signature|auth)[^=&#\s]*=)[^&#\s]*/gi, '$1[redacted]');
+    .replace(/([?&][^=&#\s]*(?:token|key|secret|signature|auth)[^=&#\s]*=)[^&#\s]*/gi, '$1[redacted]')
+    .replace(/https?:\/\/[^\s"'<>]+/gi, (rawUrl) => {
+      try { return `${new URL(rawUrl).origin}/[redacted]`; } catch { return '[redacted-url]'; }
+    });
 }
 
 function integrationProviderDto(row: Record<string, unknown>) {
@@ -297,25 +300,26 @@ export function createPartnerPlatformRouter(options: Options) {
     );
     if (!provider) throw new ApiError(404, 'Provider not found', 'provider_not_found');
     const report = await testProviderConnection(provider);
-    const result = await withTransaction(pool, async (client) => {
-      const { rows: [updated] } = await client.query(
-        `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_sync_at=CASE WHEN $2='healthy' THEN now() ELSE last_sync_at END,
-                last_error=$3,last_report=$4,status=CASE WHEN $2='offline' AND status='enabled' THEN 'paused' ELSE status END,updated_at=now()
-          WHERE id=$1 RETURNING id,name,city,provider_type,source_type,priority,status,health,country,access,license,update_frequency,
-                coverage,source_ref,commercial_use,attribution_required,discovery_status,last_checked_at,last_sync_at,last_error,last_report`,
-        [id, report.health, report.error ?? null, JSON.stringify(report)],
-      );
-      await writeMobilityAudit(client, actorId, 'mobility.provider.tested', id, { health: report.health, error: redactIntegrationText(report.error) });
-      return updated;
-    });
-    res.json({ data: { provider: integrationProviderDto(result), report: {
+    const safeReport = {
       health: report.health,
       checks: report.checks.map((check) => ({ ...check, detail: redactIntegrationText(check.detail) })),
       counts: report.counts,
       responseMs: report.responseMs,
       ...(report.bbox ? { bbox: report.bbox } : {}),
       ...(report.error ? { error: redactIntegrationText(report.error) } : {}),
-    } } });
+    };
+    const result = await withTransaction(pool, async (client) => {
+      const { rows: [updated] } = await client.query(
+        `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_sync_at=CASE WHEN $2='healthy' THEN now() ELSE last_sync_at END,
+                last_error=$3,last_report=$4,status=CASE WHEN $2='offline' AND status='enabled' THEN 'paused' ELSE status END,updated_at=now()
+          WHERE id=$1 RETURNING id,name,city,provider_type,source_type,priority,status,health,country,access,license,update_frequency,
+                coverage,source_ref,commercial_use,attribution_required,discovery_status,last_checked_at,last_sync_at,last_error,last_report`,
+        [id, report.health, safeReport.error ?? null, JSON.stringify(safeReport)],
+      );
+      await writeMobilityAudit(client, actorId, 'mobility.provider.tested', id, { health: report.health, error: safeReport.error ?? null });
+      return updated;
+    });
+    res.json({ data: { provider: integrationProviderDto(result), report: safeReport } });
   }));
 
   router.patch('/admin/integrations/providers/:id', options.requireAuth, options.requireAdmin, asyncRoute(async (req, res) => {

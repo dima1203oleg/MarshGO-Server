@@ -373,6 +373,40 @@ app.use('/api/v1', createPartnerPlatformRouter({
 const providerTypes = ['public_transit', 'bike', 'ebike', 'scooter', 'moped', 'carsharing', 'taxi', 'carpool', 'on_demand', 'other'];
 const sourceTypes = ['gtfs', 'gtfs_rt', 'gbfs', 'gofs', 'rest', 'graphql', 'websocket', 'json', 'csv', 'geojson', 'marshgo'];
 const providerColumns = 'id,name,city,country,provider_type,source_type,feed_url,realtime_url,priority,status,health,access,license,update_frequency,coverage,source_ref,commercial_use,attribution_required,last_verified_at,discovery_status,last_checked_at,last_sync_at,last_error,last_report,created_at,updated_at';
+function redactMobilitySecretText(value: string | null | undefined) {
+  if (!value) return value ?? null;
+  return value
+    .replace(/\b(Bearer\s+)[^\s,;]+/gi, '$1[redacted]')
+    .replace(/([?&][^=&#\s]*(?:token|key|secret|signature|auth)[^=&#\s]*=)[^&#\s]*/gi, '$1[redacted]')
+    .replace(/https?:\/\/[^\s"'<>]+/gi, (rawUrl) => {
+      try { return `${new URL(rawUrl).origin}/[redacted]`; } catch { return '[redacted-url]'; }
+    });
+}
+function mobilityHost(value: unknown) {
+  if (typeof value !== 'string') return null;
+  try { return new URL(value).host; } catch { return null; }
+}
+function publicMobilityProvider(row: Record<string, unknown>) {
+  const { feed_url, realtime_url, last_error, last_report, ...safe } = row;
+  const report = last_report && typeof last_report === 'object' ? last_report as Record<string, unknown> : {};
+  const checks = Array.isArray(report.checks) ? report.checks.flatMap((check) => {
+    if (!check || typeof check !== 'object') return [];
+    const item = check as Record<string, unknown>;
+    return [{ name: item.name, ok: item.ok, detail: redactMobilitySecretText(typeof item.detail === 'string' ? item.detail : null) }];
+  }) : [];
+  return {
+    ...safe,
+    feed_host: mobilityHost(feed_url),
+    realtime_host: mobilityHost(realtime_url),
+    last_error: redactMobilitySecretText(typeof last_error === 'string' ? last_error : null),
+    last_report: {
+      counts: report.counts && typeof report.counts === 'object' ? report.counts : {},
+      responseMs: typeof report.responseMs === 'number' ? report.responseMs : null,
+      bbox: Array.isArray(report.bbox) ? report.bbox : null,
+      checks,
+    },
+  };
+}
 async function auditMobility(actorId: string | undefined, action: string, providerId: string, details: Record<string, unknown>) {
   await pool.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)', [actorId, action, 'mobility_provider', providerId, JSON.stringify(details)]);
 }
@@ -892,7 +926,7 @@ app.get('/api/v1/transport/micromobility/geofences', requireAuth, asyncHandler(a
 
 app.get('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
   const { rows } = await pool.query(`SELECT ${providerColumns} FROM mobility_providers ORDER BY city, priority, name`);
-  res.json({ data: rows });
+  res.json({ data: rows.map((row) => publicMobilityProvider(row)) });
 }));
 
 app.post('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
@@ -912,7 +946,7 @@ app.post('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHan
       [name.trim(), city.trim(), providerType, sourceType, feedUrl, realtimeUrl || null, priority ?? 100, req.userId],
     );
     await auditMobility(req.userId, 'mobility.provider.created', rows[0].id, { name: rows[0].name, city: rows[0].city, sourceType });
-    res.status(201).json({ data: rows[0] });
+    res.status(201).json({ data: publicMobilityProvider(rows[0]) });
   } catch (error) {
     if ((error as { code?: string }).code === '23505') throw new ApiError(409, 'A provider with this name already exists in the city', 'provider_exists');
     throw error;
@@ -937,7 +971,7 @@ app.patch('/api/v1/admin/mobility/providers/:id', requireAuth, requireAdmin, asy
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)',
       [req.userId, 'mobility.provider.updated', 'mobility_provider', req.params.id, JSON.stringify({ old: { status: current.rows[0].status, priority: current.rows[0].priority }, new: { status: rows[0].status, priority: rows[0].priority } })]);
     await client.query('COMMIT');
-    res.json({ data: rows[0] });
+    res.json({ data: publicMobilityProvider(rows[0]) });
   } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
 }));
 
@@ -954,13 +988,21 @@ app.post('/api/v1/admin/mobility/providers/:id/test', requireAuth, requireAdmin,
   const found = await pool.query<{ id: string; name: string; source_type: string; feed_url: string; country: string }>('SELECT id,name,source_type,feed_url,country FROM mobility_providers WHERE id=$1', [req.params.id]);
   if (!found.rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
   const report = await testProviderConnection(found.rows[0]);
+  const safeReport = {
+    health: report.health,
+    checks: report.checks.map((check) => ({ ...check, detail: redactMobilitySecretText(check.detail) })),
+    counts: report.counts,
+    responseMs: report.responseMs,
+    ...(report.bbox ? { bbox: report.bbox } : {}),
+    ...(report.error ? { error: redactMobilitySecretText(report.error) } : {}),
+  };
   const { rows } = await pool.query(
     `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_sync_at=CASE WHEN $2='healthy' THEN now() ELSE last_sync_at END,last_error=$3,last_report=$4,
        status=CASE WHEN $2='offline' AND status='enabled' THEN 'paused' ELSE status END,updated_at=now() WHERE id=$1 RETURNING ${providerColumns}`,
-    [req.params.id, report.health, report.error ?? null, JSON.stringify(report)],
+    [req.params.id, report.health, safeReport.error ?? null, JSON.stringify(safeReport)],
   );
-  await auditMobility(req.userId, 'mobility.provider.tested', req.params.id, { health: report.health, error: report.error ?? null });
-  res.json({ data: { provider: rows[0], report } });
+  await auditMobility(req.userId, 'mobility.provider.tested', req.params.id, { health: report.health, error: safeReport.error ?? null });
+  res.json({ data: { provider: publicMobilityProvider(rows[0]), report: safeReport } });
 }));
 
 app.get('/api/v1/admin/mobility/audit', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
