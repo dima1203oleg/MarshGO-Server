@@ -3,7 +3,7 @@ import { gzipSync } from 'node:zlib';
 import crypto from 'node:crypto';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import express, { NextFunction, Request, Response } from 'express';
+import express, { NextFunction, Request, Response, type RequestHandler } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { Pool, PoolClient } from 'pg';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -54,6 +54,7 @@ import {
   getVerificationEvidenceUrl, isAllowedPhotoType, isAllowedVerificationEvidenceType, ObjectStorageUnavailableError, StoredEvidenceUnavailableError,
   verifyVehiclePhotoObject, verifyVerificationEvidenceObject,
 } from './objectStorage';
+import { createPartnerPlatformRouter } from './partner/router';
 
 const app = express();
 validateRuntimeConfig(process.env);
@@ -361,6 +362,13 @@ function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFuncti
       next();
     }).catch(next);
 }
+
+app.use('/api/v1', createPartnerPlatformRouter({
+  pool,
+  requireAuth: requireAuth as RequestHandler,
+  requireAdmin: requireAdmin as RequestHandler,
+  ApiError,
+}));
 
 const providerTypes = ['public_transit', 'bike', 'ebike', 'scooter', 'moped', 'carsharing', 'taxi', 'carpool', 'on_demand', 'other'];
 const sourceTypes = ['gtfs', 'gtfs_rt', 'gbfs', 'gofs', 'rest', 'graphql', 'websocket', 'json', 'csv', 'geojson', 'marshgo'];

@@ -6,6 +6,7 @@ The PostgreSQL schema is managed by ordered SQL migrations in `server/migrations
 
 | Domain | Tables | Current invariants |
 | --- | --- | --- |
+| Partner foundation | `organizations`, `organization_memberships`, `partner_applications`, `organization_service_modules` | Organizations are distinct from transport providers. Memberships are user-scoped and can span organizations. P0 applications create one owner membership and requested modules in the same transaction; Admin decisions are state-checked and audited. `ACTIVE` means the organization was approved; it does not imply an integration or live service is enabled. |
 | Identity | `users`, `user_roles`, `sessions`, `otp_challenges`, `driver_profiles`, `verification_records`, `account_deletion_requests` | Unique E.164 phone; roles are normalized; access and refresh credentials are hashed; OTP challenge expiry and attempt state are stored. |
 | Garage | `vehicles`, `vehicle_photos` | Owner FK; seat bounds; one active non-archived car per owner; archive preserves historic references. Photo metadata exists, upload/storage does not. |
 | Marketplace | `offers`, `bookings`, `booking_events`, `booking_completion_confirmations`, `reviews` | Offer points and optional road LineString use SRID 4326; prices are integer minor units; capacity is checked; booking idempotency is unique per passenger; state transitions and two-party completion confirmations are persisted; reviews require completed bookings. |
@@ -38,6 +39,7 @@ The PostgreSQL schema is managed by ordered SQL migrations in `server/migrations
 * `025_passenger_demand_spatial_indexes.sql` — spatial indexes for demand pickup/dropoff candidate queries.
 * `026_booking_fee_snapshot_immutability.sql` — protects the Community fee snapshot from later mutation.
 * `027_account_deletion_cooling_off.sql` — reversible deletion-request cooling-off/status state; this records requests but does not itself purge account data.
+* `051_partner_organizations.sql` — additive P0 partner applications, organizations, membership roles and requested service modules, with status checks and tenant lookup indexes.
 
 ## Not yet modeled or incomplete
 
