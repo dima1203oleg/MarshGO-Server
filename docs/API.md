@@ -7,6 +7,26 @@ Base URL: the API server, default `http://localhost:3002`.
 * `GET /healthz` — process liveness; does not imply database readiness.
 * `GET /readyz` — checks PostgreSQL connectivity.
 
+## Partner platform P0
+
+Partner workspaces reuse the existing OTP access token and refresh session. No separate credentials or client-selected role are accepted. `GET /api/v1/partner/organizations` returns only active memberships of the authenticated user. `GET /api/v1/partner/organizations/:id` and `/permissions` bind both the authenticated user ID and requested organization ID in the database query; an organization the caller cannot access returns the same `404` as a missing organization.
+
+`POST /api/v1/partner/applications` validates the organization name, city, optional HTTPS website, contact fields, unique service modules, and dispatch mode. In one transaction it creates a `PENDING_REVIEW` organization, `SUBMITTED` application, `organization_owner` membership for the authenticated user, requested service modules, and an audit event. The server does not enable any provider or operational capability as a side effect.
+
+Admin endpoints require the existing `user_roles.role='admin'` server check:
+
+- `GET /api/v1/admin/dashboard` reports current organization and provider counts from PostgreSQL.
+- `GET /api/v1/admin/partners?page=1&pageSize=25&status=PENDING_REVIEW&search=...` returns `{ data: { items, page, pageSize, total } }`.
+- `POST /api/v1/admin/partners/:id/approve`, `/reject`, and `/suspend` are explicit status transitions. Rejection and suspension require a non-empty review reason. Review actions lock organization/application rows and commit the status change plus `audit_events` in one transaction. Invalid/repeated transitions return `409`.
+
+Partner membership and organization status are checked server-side. The permissions response is only a presentation aid; it does not authorize future operational endpoints. Until P1 adds organization-scoped connection, order, fleet, and finance APIs, these product areas must remain unavailable in the UI.
+
+## Admin mobility integrations
+
+`GET /api/v1/admin/integrations` is the preferred Integration Control Center feed. It returns provider and operator metadata, capabilities, freshness, health, configured booleans, and sanitized validation results. It never returns feed URLs, realtime URLs, full source-reference URLs, or secret values. `POST /api/v1/admin/integrations/providers/:id/test` performs a server-side connection check and records the result and audit event. `PATCH /api/v1/admin/integrations/providers/:id` changes only supported status/priority fields and applies access, health, licence, commercial-use, and discovery checks before enabling a source.
+
+The legacy `GET`, `POST`, `PATCH /api/v1/admin/mobility/providers`, `PATCH /api/v1/admin/mobility/providers/:id`, and `POST /api/v1/admin/mobility/providers/:id/test` endpoints remain for existing admin clients. Their DTO now exposes `feed_host` and `realtime_host` only; it omits `feed_url` and `realtime_url`. Connection-test messages redact URL paths and queries, bearer tokens, and credential-like query values before both storage and response. The create form may submit a feed URL to the authenticated server over HTTPS, but the saved URL is not returned to the browser. Keep provider credentials in server-side configuration and never put them in logs or client state.
+
 ## Offers
 
 `GET /api/v1/offers?origin=Стрий&destination=Львів`

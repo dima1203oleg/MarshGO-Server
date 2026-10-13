@@ -79,6 +79,8 @@ start_secondary_api() {
 start_api
 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:bookings
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:partners
 stop_api
 
 OSRM_STUB_PORT=3304 node tests/fixtures/osrm-stub.mjs &
