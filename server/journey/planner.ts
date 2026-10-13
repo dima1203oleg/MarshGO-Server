@@ -1,6 +1,6 @@
 import type { ProviderOption } from '../providers/types';
 import type { JourneyOption, JourneyStrategy } from './types';
-import { scoreJourneys } from './scoring';
+import { paretoFrontier, scoreJourneys } from './scoring';
 import { evaluateTransfer, type TransferEvaluation } from './transferEngine';
 
 export interface RouteConnection {
@@ -61,6 +61,13 @@ export function createConnectionMap(
 }
 
 function validateOption(option: ProviderOption): boolean {
+  const rentalValid = option.mode !== 'BICYCLE' && option.mode !== 'SCOOTER' || Boolean(option.rental
+    && option.rental.sessionId && option.rental.mode === option.mode
+    && option.rental.pickupLocationId && option.rental.dropoffLocationId
+    && option.rental.pickupLocationId !== option.rental.dropoffLocationId
+    && option.rental.networkId && option.rental.availabilityStatus === 'AVAILABLE'
+    && option.rental.confirmationLevel === 'VERIFIED'
+    && option.rental.returnRule !== undefined);
   return Boolean(option.id && option.providerId
     && option.originNodeId && option.destinationNodeId && option.originNodeId !== option.destinationNodeId
     && option.departureAt && Number.isFinite(option.departureAt.getTime())
@@ -70,7 +77,7 @@ function validateOption(option: ProviderOption): boolean {
     && (option.priceMinor === null || (Number.isSafeInteger(option.priceMinor) && option.priceMinor >= 0))
     && (option.distanceMeters === null || (Number.isInteger(option.distanceMeters) && option.distanceMeters >= 0))
     && option.availability !== 'UNAVAILABLE' && option.availability !== 'BLOCKED_EXTERNAL'
-    && option.availability !== 'UNKNOWN');
+    && option.availability !== 'UNKNOWN' && rentalValid);
 }
 
 function pathSignature(legs: readonly JourneyPlanLeg[]): string {
@@ -103,18 +110,24 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
   const routes: PlannedJourney[] = [];
   const maxDeparture = input.departureAt.getTime() + maximumWaitSeconds * 1000;
 
-  const walk = (legs: JourneyPlanLeg[]): void => {
+  const walk = (legs: JourneyPlanLeg[], visitedNodeIds: ReadonlySet<string>): void => {
     const previous = legs.at(-1);
     if (previous && legs.length > 0) {
       const arrivalAt = previous.arrivalAt!;
       if (previous.destinationNodeId === input.destinationNodeId) {
-        routes.push(summarize(legs));
+        routes.push(summarize(legs, input.departureAt));
         return;
       }
       if (legs.length >= maximumLegs) return;
       for (const next of options) {
-        if (legs.some((leg) => leg.id === next.id) || next.departureAt!.getTime() < arrivalAt.getTime()
-          || !previous.destinationNodeId || next.originNodeId !== previous.destinationNodeId) continue;
+        if (legs.some((leg) => leg.providerId === next.providerId && leg.id === next.id)
+          || (visitedNodeIds.has(next.originNodeId!) && next.originNodeId !== previous.destinationNodeId)
+          || visitedNodeIds.has(next.destinationNodeId!)
+          || next.departureAt!.getTime() < arrivalAt.getTime()
+          || !previous.destinationNodeId || !next.originNodeId) continue;
+        // Provider node IDs deliberately remain provider-scoped. Two nearby
+        // platforms can have different IDs and still be connected by a real
+        // pedestrian path; only the measured connection map may join them.
         const connection = input.connections.get(connectionKey(previous.destinationNodeId, next.originNodeId));
         if (!connection) continue;
         const wait = Math.floor((next.departureAt!.getTime() - arrivalAt.getTime()) / 1000);
@@ -128,7 +141,10 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
           boardingGraceSeconds: input.boardingGraceSeconds,
         });
         if (!transferBefore.feasible) continue;
-        walk([...legs, { ...next, connectionFromPrevious: connection, transferBefore }]);
+        const nextVisitedNodeIds = new Set(visitedNodeIds);
+        nextVisitedNodeIds.add(next.originNodeId!);
+        nextVisitedNodeIds.add(next.destinationNodeId!);
+        walk([...legs, { ...next, connectionFromPrevious: connection, transferBefore }], nextVisitedNodeIds);
       }
     }
   };
@@ -136,20 +152,23 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
   for (const option of options) {
     if (option.originNodeId !== input.originNodeId || option.departureAt!.getTime() < input.departureAt.getTime()
       || option.departureAt!.getTime() > maxDeparture) continue;
-    walk([{ ...option, connectionFromPrevious: null, transferBefore: null }]);
+    walk(
+      [{ ...option, connectionFromPrevious: null, transferBefore: null }],
+      new Set([input.originNodeId, option.destinationNodeId!]),
+    );
   }
 
   const unique = [...new Map(routes.map((route) => [pathSignature(route.legs), route])).values()];
-  return scoreJourneys(unique, input.strategy).slice(0, maximumResults).map(({ journey }) => journey);
+  return scoreJourneys(paretoFrontier(unique), input.strategy).slice(0, maximumResults).map(({ journey }) => journey);
 }
 
-function summarize(legs: JourneyPlanLeg[]): PlannedJourney {
-  const first = legs[0];
+function summarize(legs: JourneyPlanLeg[], requestedDepartureAt: Date): PlannedJourney {
   const last = legs.at(-1)!;
-  const departureAt = first.departureAt!;
   const arrivalAt = last.arrivalAt!;
   const etaUncertaintySeconds = legs.reduce((sum, leg) => sum + leg.etaUncertaintySeconds, 0);
-  const walkingMeters = legs.reduce((sum, leg) => sum + (leg.connectionFromPrevious?.walkingMeters ?? 0), 0);
+  const walkingMeters = legs.reduce((sum, leg) => sum
+    + (leg.connectionFromPrevious?.walkingMeters ?? 0)
+    + (leg.mode === 'WALK' ? leg.distanceMeters ?? 0 : 0), 0);
   const knownPrices = legs.flatMap((leg) => leg.priceMinor === null ? [] : [leg.priceMinor]);
   const hasUnknownPrice = legs.some((leg) => leg.priceMinor === null);
   const priceMinMinor = legs.every((leg) => leg.priceMinMinor !== null)
@@ -157,16 +176,20 @@ function summarize(legs: JourneyPlanLeg[]): PlannedJourney {
   const priceMaxMinor = legs.every((leg) => leg.priceMaxMinor !== null)
     ? legs.reduce((sum, leg) => sum + (leg.priceMaxMinor ?? 0), 0) : null;
   const priceMinor = hasUnknownPrice ? null : knownPrices.reduce((sum, price) => sum + price, 0);
-  const elapsedSeconds = Math.max(0, Math.floor((arrivalAt.getTime() - departureAt.getTime()) / 1000));
+  // Count from the requested start time so a scheduled first departure does
+  // not hide the initial wait from the door-to-door duration.
+  const elapsedSeconds = Math.max(0, Math.floor((arrivalAt.getTime() - requestedDepartureAt.getTime()) / 1000));
+  const boardedLegs = legs.filter((leg) => leg.mode !== 'WALK');
   const transferRisk = legs.slice(1).reduce((risk, leg) => Math.max(risk, riskFor(leg.transferBefore)), 0);
   const reliabilityValues = legs.map((leg) => leg.reliability).filter((value): value is number => value !== null);
   const comfortValues = legs.map((leg) => leg.comfort).filter((value): value is number => value !== null);
 
   return {
-    id: pathSignature(legs), departureAt, arrivalAt, etaUncertaintySeconds,
+    id: pathSignature(legs), departureAt: requestedDepartureAt, arrivalAt, etaUncertaintySeconds,
     durationSeconds: elapsedSeconds,
     priceMinor, priceMinMinor, priceMaxMinor,
-    transfers: Math.max(0, legs.length - 1), walkingMeters,
+    // Access, egress, and transfer walks are not separate vehicle changes.
+    transfers: Math.max(0, boardedLegs.length - 1), walkingMeters,
     reliability: reliabilityValues.length === legs.length ? Math.min(...reliabilityValues) : null,
     transferRisk, comfort: comfortValues.length === legs.length ? Math.min(...comfortValues) : null,
     legs,

@@ -88,6 +88,8 @@ describe('booking durability across API process restart (opt-in local integratio
         API_PORT: String(port),
         REDIS_URL: process.env.REDIS_URL ?? 'redis://127.0.0.1:6380',
         SESSION_SECRET: 'integration-test-session-secret-32chars',
+        // Shares the suite's Redis rate-limit window with the other integration suites.
+        API_RATE_LIMIT_LIMIT: process.env.API_RATE_LIMIT_LIMIT ?? '1000',
       },
       stdio: 'ignore',
     });
