@@ -387,7 +387,7 @@ function mobilityHost(value: unknown) {
   try { return new URL(value).host; } catch { return null; }
 }
 function publicMobilityProvider(row: Record<string, unknown>) {
-  const { feed_url, realtime_url, last_error, last_report, ...safe } = row;
+  const { feed_url, realtime_url, source_ref, last_error, last_report, ...safe } = row;
   const report = last_report && typeof last_report === 'object' ? last_report as Record<string, unknown> : {};
   const checks = Array.isArray(report.checks) ? report.checks.flatMap((check) => {
     if (!check || typeof check !== 'object') return [];
@@ -396,6 +396,7 @@ function publicMobilityProvider(row: Record<string, unknown>) {
   }) : [];
   return {
     ...safe,
+    source_ref: redactMobilitySecretText(typeof source_ref === 'string' ? source_ref : null),
     feed_host: mobilityHost(feed_url),
     realtime_host: mobilityHost(realtime_url),
     last_error: redactMobilitySecretText(typeof last_error === 'string' ? last_error : null),

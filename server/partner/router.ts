@@ -85,7 +85,7 @@ function integrationProviderDto(row: Record<string, unknown>) {
     license: row.license,
     update_frequency: row.update_frequency,
     coverage: row.coverage,
-    source_ref: row.source_ref,
+    source_ref: redactIntegrationText(typeof row.source_ref === 'string' ? row.source_ref : null),
     commercial_use: row.commercial_use,
     attribution_required: row.attribution_required,
     discovery_status: row.discovery_status,

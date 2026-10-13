@@ -40,8 +40,8 @@ describe('partner platform API and tenant isolation (opt-in local integration te
       [providerId, `https://feed.example.test/private/${apiKeySentinel}?api_key=${apiKeySentinel}`, admin],
     );
     await pool.query(
-      `UPDATE mobility_providers SET last_error=$2,last_report=$3::jsonb WHERE id=$1`,
-      [providerId, `Feed failed at https://feed.example.test/private/${apiKeySentinel}?api_key=${apiKeySentinel}`, JSON.stringify({
+      `UPDATE mobility_providers SET source_ref=$2,last_error=$3,last_report=$4::jsonb WHERE id=$1`,
+      [providerId, `https://feed.example.test/catalog/${apiKeySentinel}`, `Feed failed at https://feed.example.test/private/${apiKeySentinel}?api_key=${apiKeySentinel}`, JSON.stringify({
         checks: [{ name: 'Feed accessible', ok: false, detail: `Request failed: https://feed.example.test/private/${apiKeySentinel}?api_key=${apiKeySentinel}` }],
         counts: {}, responseMs: 12,
       })],
@@ -101,6 +101,7 @@ describe('partner platform API and tenant isolation (opt-in local integration te
     assert.equal(Object.hasOwn(testSource, 'realtime_url'), false);
     assert.equal(JSON.stringify(integrationPayload).includes(apiKeySentinel), false);
     assert.equal(JSON.stringify(integrationPayload).includes('/private/'), false);
+    assert.equal(JSON.stringify(integrationPayload).includes('/catalog/'), false);
     const legacyProvidersResponse = await fetch(`${apiUrl}/api/v1/admin/mobility/providers`, { headers: auth(admin) });
     assert.equal(legacyProvidersResponse.status, 200);
     const legacyProvidersPayload = await legacyProvidersResponse.json() as { data: Array<Record<string, unknown>> };
@@ -111,6 +112,7 @@ describe('partner platform API and tenant isolation (opt-in local integration te
     assert.equal(legacyProvider.feed_host, 'feed.example.test');
     assert.equal(JSON.stringify(legacyProvidersPayload).includes(apiKeySentinel), false);
     assert.equal(JSON.stringify(legacyProvidersPayload).includes('/private/'), false);
+    assert.equal(JSON.stringify(legacyProvidersPayload).includes('/catalog/'), false);
     const deniedEnable = await fetch(`${apiUrl}/api/v1/admin/integrations/providers/${providerId}`, {
       method: 'PATCH', headers: auth(admin), body: JSON.stringify({ status: 'enabled' }),
     });

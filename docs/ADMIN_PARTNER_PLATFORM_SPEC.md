@@ -117,7 +117,7 @@ Application: `SUBMITTED → UNDER_REVIEW | NEEDS_INFORMATION | APPROVED | REJECT
 
 ### Admin P1 slice
 
-- Перевірка чинного provider feed виконується сервером; браузер не отримує feed URL, query credentials або raw source URL.
+- Перевірка чинного provider feed виконується сервером; браузер не отримує feed URL, query credentials або повні source-reference URL.
 - Старий `/admin/mobility/providers` contract лишається сумісним для форми керування, але віддає тільки `feed_host` / `realtime_host`; `last_error` і `last_report` редагуються до запису, відповіді та audit event, щоб URL-шляхи й query secrets не потрапляли у клієнт або журнал.
 - Status/priority зміни проходять існуючі перевірки доступу, health, комерційного дозволу й ліцензії; кожна зміна має audit event.
 - Оператор має окремий integration status, booking/pricing/live capability, configured boolean і фактичні лічильники точок; configured не розкриває значення ключа.
