@@ -1,5 +1,7 @@
 import bindings from 'gtfs-realtime-bindings';
+import { z } from 'zod';
 import { fetchBinary } from '../mobility/safeFetch';
+import { smartCache } from '../cache/cacheService';
 
 const { transit_realtime } = bindings;
 type FeedMessage = InstanceType<typeof bindings.transit_realtime.FeedMessage>;
@@ -119,19 +121,63 @@ export function parseGtfsRealtimeTripUpdates(data: Uint8Array, now = new Date())
   return { feedTimestamp: timestamp, fresh: true, updates };
 }
 
-const cache = new Map<string, { cachedAt: number; promise: Promise<GtfsRealtimeTripUpdates> }>();
+const serializedRealtimeSchema = z.object({
+  feedTimestamp: z.iso.datetime({ offset: true }), fresh: z.boolean(),
+  reason: z.enum(['MISSING_TIMESTAMP','STALE','FUTURE_TIMESTAMP','DIFFERENTIAL_UNSUPPORTED']).optional(),
+  updates: z.array(z.tuple([z.string(), z.object({ tripId: z.string(), routeId: z.string().optional(), startDate: z.string(),
+    relationship: z.enum(['SCHEDULED','CANCELED','DELETED','OTHER']),
+    stops: z.array(z.object({ stopSequence: z.number().int(), stopId: z.string().optional(),
+      arrival: z.object({ time: z.iso.datetime({ offset: true }).optional(), delaySeconds: z.number().int().optional() }).optional(),
+      departure: z.object({ time: z.iso.datetime({ offset: true }).optional(), delaySeconds: z.number().int().optional() }).optional(),
+      relationship: z.enum(['SCHEDULED','SKIPPED','NO_DATA','UNSCHEDULED']) })),
+    updatedAt: z.iso.datetime({ offset: true }), feedTimestamp: z.iso.datetime({ offset: true }),
+  })])),
+});
+
+function serializeRealtime(result: GtfsRealtimeTripUpdates) {
+  return {
+    feedTimestamp: result.feedTimestamp.toISOString(), fresh: result.fresh,
+    ...(result.reason ? { reason: result.reason } : {}),
+    updates: [...result.updates.entries()].map(([key, update]) => [key, {
+      ...update, updatedAt: update.updatedAt.toISOString(), feedTimestamp: update.feedTimestamp.toISOString(),
+      stops: update.stops.map((stop) => ({ ...stop,
+        ...(stop.arrival?.time ? { arrival: { ...stop.arrival, time: stop.arrival.time.toISOString() } } : {}),
+        ...(stop.departure?.time ? { departure: { ...stop.departure, time: stop.departure.time.toISOString() } } : {}),
+      })),
+    }]),
+  };
+}
+
+function deserializeRealtime(value: z.infer<typeof serializedRealtimeSchema>): GtfsRealtimeTripUpdates {
+  return {
+    feedTimestamp: new Date(value.feedTimestamp), fresh: value.fresh,
+    ...(value.reason ? { reason: value.reason } : {}),
+    updates: new Map(value.updates.map(([key, update]) => [key, {
+      ...update, updatedAt: new Date(update.updatedAt), feedTimestamp: new Date(update.feedTimestamp),
+      stops: update.stops.map((stop) => ({ ...stop,
+        ...(stop.arrival ? { arrival: { ...stop.arrival, ...(stop.arrival.time ? { time: new Date(stop.arrival.time) } : {}) } } : {}),
+        ...(stop.departure ? { departure: { ...stop.departure, ...(stop.departure.time ? { time: new Date(stop.departure.time) } : {}) } } : {}),
+      })),
+    }])) as GtfsRealtimeTripUpdates['updates'],
+  };
+}
 
 /** Short-lived in-memory cache prevents a route search from refetching the same live snapshot. */
 export function cachedGtfsRealtimeTripUpdates(providerId: string, url: string, now = Date.now()): Promise<GtfsRealtimeTripUpdates> {
-  const cached = cache.get(providerId);
-  if (cached && now - cached.cachedAt < CACHE_TTL_MS) return cached.promise;
-  const promise = (async () => {
+  return smartCache.getOrLoad('gtfs_realtime', { providerId, sourceUrl: url }, serializedRealtimeSchema, {
+    ttlMs: CACHE_TTL_MS, l1TtlMs: CACHE_TTL_MS,
+    ttlForValue: (value) => value.fresh ? CACHE_TTL_MS : 0,
+    lockTtlMs: 10_000,
+  }, async () => {
     const { data } = await fetchBinary(url, MAX_FEED_BYTES, 8_000);
-    return parseGtfsRealtimeTripUpdates(data, new Date(now));
-  })();
-  cache.set(providerId, { cachedAt: now, promise });
-  promise.catch(() => { if (cache.get(providerId)?.promise === promise) cache.delete(providerId); });
-  return promise;
+    return serializedRealtimeSchema.parse(serializeRealtime(parseGtfsRealtimeTripUpdates(data, new Date(now))));
+  }).then((serialized) => {
+    const result = deserializeRealtime(serialized);
+    if (result.fresh && now - result.feedTimestamp.getTime() > MAX_FEED_AGE_MS) {
+      return { feedTimestamp: result.feedTimestamp, fresh: false, reason: 'STALE', updates: new Map() };
+    }
+    return result;
+  });
 }
 
 export function gtfsRealtimeTripUpdateKey(tripId: string, serviceDate: string): string {

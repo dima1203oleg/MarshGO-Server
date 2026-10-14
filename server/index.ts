@@ -9,8 +9,11 @@ import { Pool, PoolClient } from 'pg';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createClient } from 'redis';
 import { RedisRateLimitStore } from './redisRateLimitStore';
+import { smartCache } from './cache/cacheService';
+import { routingMetricsPrometheus } from './routing/osrmGateway';
 import { parseBearerToken } from './auth/bearer';
 import type { Duplex } from 'node:stream';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
 import { routeRequestSchema } from '../shared/navigation/contracts';
@@ -56,6 +59,8 @@ import {
 } from './objectStorage';
 
 const app = express();
+const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+eventLoopDelay.enable();
 validateRuntimeConfig(process.env);
 app.set('trust proxy', getTrustedProxyHops(process.env));
 const rendezvousSettings = getRendezvousSettings(process.env);
@@ -621,9 +626,9 @@ app.post('/api/v1/mobility/transfers/search', requireAuth, placeSearchLimiter, a
 }));
 
 // ---- Map layers (2D). Everything is loaded per viewport and per layer; the client asks only for layers the user switched on. ----
-type LayerProviderRow = { id: string; name: string; city: string; provider_type: string; source_type: string; feed_url: string; operator_id: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } };
+type LayerProviderRow = { id: string; name: string; city: string; provider_type: string; source_type: string; feed_url: string; operator_id: string | null; source_version: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } };
 const layerProviders = async (sourceTypes: string[], providerTypes: string[]) => (await pool.query<LayerProviderRow>(
-  `SELECT mp.id,COALESCE(mo.provider_name,mp.name) AS name,mp.city,mp.provider_type,mp.source_type,mp.feed_url,mp.operator_id,mp.last_report
+  `SELECT mp.id,COALESCE(mo.provider_name,mp.name) AS name,mp.city,mp.provider_type,mp.source_type,mp.feed_url,mp.operator_id,mp.last_report->>'sourceVersion' AS source_version,mp.last_report
      FROM mobility_providers mp LEFT JOIN mobility_operators mo ON mo.provider_id=mp.operator_id
     WHERE mp.status='enabled' AND mp.health IN ('healthy','degraded') AND mp.source_type = ANY($1) AND mp.provider_type = ANY($2) ORDER BY mp.priority,mp.name`, [sourceTypes, providerTypes],
 )).rows;
@@ -710,8 +715,8 @@ const loadRoutes = async (box: [number, number, number, number], types: LineType
   const hasTypes = (row: LayerProviderRow) => types.length === 0 || types.some((type) => (row.last_report?.counts?.[`routes_${type}`] ?? 0) > 0);
   const providers = (await layerProviders(['gtfs', 'geojson'], ['public_transit'])).filter((row) => providerTouches(row, box) && hasTypes(row));
   const settled = await Promise.all(providers.map((row) => layerFetch((row.source_type === 'gtfs'
-    ? cachedNetwork(row.id, row.feed_url)
-    : (() => { const mode = geoJsonMode(row.name); return mode ? cachedGeoJsonNetwork(row.id, row.feed_url, mode) : Promise.reject(new Error('Unknown GeoJSON transport mode')); })())
+    ? cachedNetwork(row.id, row.feed_url, row.source_version)
+    : (() => { const mode = geoJsonMode(row.name); return mode ? cachedGeoJsonNetwork(row.id, row.feed_url, mode, row.source_version) : Promise.reject(new Error('Unknown GeoJSON transport mode')); })())
     .then((network) => ({ row, network })))));
   return { settled, loaded: settled.flatMap((item) => item.ok ? [item.value] : []) };
 };
@@ -964,6 +969,30 @@ app.get('/api/v1/admin/mobility/audit', requireAuth, requireAdmin, asyncHandler(
 }));
 
 app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
+app.get('/metrics', (req, res) => {
+  const configuredToken = process.env.METRICS_BEARER_TOKEN;
+  const suppliedToken = req.get('authorization')?.replace(/^Bearer\s+/i, '');
+  if (!configuredToken || !suppliedToken) return res.sendStatus(404);
+  const expected = Buffer.from(configuredToken);
+  const supplied = Buffer.from(suppliedToken);
+  if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) return res.sendStatus(404);
+  const memory = process.memoryUsage();
+  const cpu = process.cpuUsage();
+  const eventLoopP95Ms = eventLoopDelay.percentile(95) / 1_000_000;
+  const runtimeMetrics = [
+    `marshgo_process_uptime_seconds ${process.uptime()}`,
+    `marshgo_process_resident_memory_bytes ${memory.rss}`,
+    `marshgo_process_heap_used_bytes ${memory.heapUsed}`,
+    `marshgo_process_heap_total_bytes ${memory.heapTotal}`,
+    `marshgo_process_cpu_user_seconds_total ${cpu.user / 1_000_000}`,
+    `marshgo_process_cpu_system_seconds_total ${cpu.system / 1_000_000}`,
+    `marshgo_event_loop_delay_p95_ms ${Number.isFinite(eventLoopP95Ms) ? eventLoopP95Ms : 0}`,
+    `marshgo_postgres_pool_total ${pool.totalCount}`,
+    `marshgo_postgres_pool_idle ${pool.idleCount}`,
+    `marshgo_postgres_pool_waiting ${pool.waitingCount}`,
+  ].join('\n') + '\n';
+  res.type('text/plain; version=0.0.4; charset=utf-8').send(smartCache.toPrometheus() + routingMetricsPrometheus() + runtimeMetrics);
+});
 app.get('/readyz', asyncHandler(async (_req, res) => {
   await pool.query('SELECT 1');
   const redisReady = !process.env.REDIS_URL || realtimeRedis?.isReady === true;
@@ -5655,6 +5684,12 @@ const proposalExpiryTimer = setInterval(() => {
 }, 30_000);
 proposalExpiryTimer.unref();
 async function startServer() {
+  const cacheRedisConfigured = Boolean(process.env.REDIS_CACHE_URL);
+  if (cacheRedisConfigured) {
+    void smartCache.connect().then((connected) => {
+      if (connected) console.log(JSON.stringify({ level: 'info', event: 'cache.redis_connected' }));
+    });
+  }
   const redisUrl = process.env.REDIS_URL;
   if (!redisUrl && process.env.NODE_ENV === 'production') throw new Error('REDIS_URL is required in production');
   if (redisUrl) {
@@ -5679,7 +5714,8 @@ async function startServer() {
       }
     });
   }
-  server = app.listen(port, host, () => console.log(JSON.stringify({ level: 'info', event: 'api.started', host, port, realtime: realtimeRedis ? 'redis' : 'single_process_dev' })));
+  server = app.listen(port, host, () => console.log(JSON.stringify({ level: 'info', event: 'api.started', host, port,
+    realtime: realtimeRedis ? 'redis' : 'single_process_dev', cache: cacheRedisConfigured ? 'redis_l2_optional' : 'local_l1' })));
   attachRealtimeUpgradeHandler();
   const dispatch = () => {
     if (realtimeOutboxDispatch) return;
@@ -5698,6 +5734,7 @@ void startServer().catch((error: unknown) => {
 });
 async function closeResources() {
   const tasks: Promise<unknown>[] = [pool.end()];
+  tasks.push(smartCache.close());
   if (realtimeSubscriber) tasks.push(realtimeSubscriber.quit());
   if (realtimeRedis) tasks.push(realtimeRedis.quit());
   await Promise.allSettled(tasks);
@@ -5706,6 +5743,7 @@ async function shutdown() {
   clearInterval(navigationExpiryTimer);
   clearInterval(proposalExpiryTimer);
   clearInterval(realtimeHeartbeat);
+  eventLoopDelay.disable();
   if (realtimeOutboxTimer) clearInterval(realtimeOutboxTimer);
   if (realtimeOutboxDispatch) await realtimeOutboxDispatch;
   realtimeServer.close();
