@@ -32,6 +32,7 @@ import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction,
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
 import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
 import { buildTransportCities } from './mobility/cities';
+import { buildTransportLayerAvailability } from './mobility/transportLayerAvailability';
 import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
 import { cachedKyivMetroTimetable } from './mobility/kyivMetroTimetable';
 import { getTransportFareCatalog } from './mobility/transportTariffs';
@@ -647,14 +648,7 @@ app.get('/api/v1/transport/layers', requireAuth, asyncHandler(async (_req, res) 
     if (row.provider_type === 'public_transit') for (const [key, count] of Object.entries(row.last_report?.counts ?? {})) { const match = /^(routes|vehicles)_(\w+)$/.exec(key); if (match && count > 0) lines.add(match[2]); }
     else { micro.add(row.provider_type); if ((row.last_report?.counts?.stations ?? 0) > 0) stationsAvailable = true; }
   }
-  const publicTransport = ['bus', 'marshrutka', 'trolleybus', 'tram'].some((type) => lines.has(type));
-  res.json({ data: [
-    { id: 'PUBLIC_TRANSPORT', available: publicTransport }, { id: 'METRO', available: lines.has('metro') }, { id: 'BUS', available: lines.has('bus') || lines.has('marshrutka') },
-    { id: 'TRAM', available: lines.has('tram') }, { id: 'TROLLEYBUS', available: lines.has('trolleybus') }, { id: 'STOPS', available: publicTransport || lines.has('train') || lines.has('metro') },
-    { id: 'MINIBUS', available: lines.has('marshrutka') }, { id: 'CITY_TRAIN', available: lines.has('city_train') }, { id: 'FUNICULAR', available: lines.has('funicular') },
-    { id: 'BICYCLE', available: micro.has('bike') || micro.has('ebike') }, { id: 'SCOOTER', available: micro.has('scooter') },
-    { id: 'CARSHARING', available: micro.has('carsharing') }, { id: 'RENTAL_POINTS', available: stationsAvailable },
-  ] });
+  res.json({ data: buildTransportLayerAvailability({ lines, micro, stationsAvailable }) });
 }));
 
 /** Cities are discovered from healthy enabled GTFS providers and their validated coverage, not hardcoded in the client. */
