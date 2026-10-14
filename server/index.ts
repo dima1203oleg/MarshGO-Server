@@ -765,6 +765,11 @@ app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) 
   if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) {
     throw new ApiError(400, 'limit must be between 1 and 50', 'invalid_limit');
   }
+  const routeId = typeof req.query.routeId === 'string' ? req.query.routeId.trim() : '';
+  const headsign = typeof req.query.headsign === 'string' ? req.query.headsign.trim() : '';
+  if (routeId.length > 255 || headsign.length > 255) {
+    throw new ApiError(400, 'routeId and headsign must contain at most 255 characters', 'invalid_arrival_filter');
+  }
 
   const { rows } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; source_type: string }>(
     `SELECT id,name,city,feed_url,realtime_url,source_type FROM mobility_providers
@@ -803,12 +808,15 @@ app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) 
       console.error(JSON.stringify({ level: 'warn', event: 'transit.stop_arrivals.realtime_unavailable', providerId }));
     }
   }
-  const arrivals = findGtfsStopArrivals(feed, stopId, { now: new Date(), limit: requestedLimit }).map((arrival) => {
+  const arrivals = findGtfsStopArrivals(feed, stopId, {
+    now: new Date(), limit: requestedLimit,
+    ...(routeId ? { routeId } : {}), ...(headsign ? { headsign } : {}),
+  }).map((arrival) => {
     const etaMinutes = Math.ceil(arrival.etaSeconds / 60);
     const routeName = arrival.routeName || arrival.routeId;
     const live = arrival.source === 'TRIP_UPDATE';
     return {
-      stopId: scopedStopId, routeId: arrival.routeId, mode: arrival.transportType,
+      stopId: scopedStopId, routeId: arrival.routeId, routeName, headsign: arrival.headsign, mode: arrival.transportType,
       tripId: arrival.tripId, scheduledArrival: arrival.scheduledArrivalAt.toISOString(),
       predictedArrival: arrival.predictedArrivalAt.toISOString(), arrivalSource: arrival.source,
       confidence: arrival.confidence, ...(arrival.realtimeUpdatedAt ? { realtimeUpdatedAt: arrival.realtimeUpdatedAt.toISOString() } : {}),
@@ -2390,7 +2398,8 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
          'durationSeconds',l.duration_s,
          'distanceMeters',l.distance_m,'priceMinor',l.price_minor,'priceMinMinor',l.price_min_minor,
          'priceMaxMinor',l.price_max_minor,'currency',l.currency,'priceStatus',l.price_status,
-         'availabilityStatus',l.availability_status,'providerType',l.provider_type,'offerId',l.offer_id,
+         'availabilityStatus',l.availability_status,'providerType',l.provider_type,'providerId',l.provider_id,'offerId',l.offer_id,
+         'routeId',l.metadata->>'routeId','headsign',l.metadata->>'headsign',
          'fareProductId',l.metadata->>'fareProductId','fareSource',l.metadata->>'fareSource',
          'fareIncludedByPreviousSegment',COALESCE((l.metadata->>'fareIncludedByPreviousSegment')::boolean,false),
          'scheduleSemantics',l.metadata->>'scheduleSemantics',
@@ -3072,6 +3081,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             );
             firstServiceLegId ??= inserted.rows[0].id;
             responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, offerId: null,
+              providerId: segment.providerId, routeId: segment.routeId,
               origin: { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
               destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
               departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
@@ -3301,6 +3311,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         );
         firstTransitLegId ??= inserted.rows[0].id;
         responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, offerId: null,
+          providerId: segment.providerId, routeId: segment.routeId,
           origin: { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
           destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
           departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,

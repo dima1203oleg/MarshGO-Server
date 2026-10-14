@@ -247,7 +247,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const modeData = (await modeResponse.json() as { data: {
         blockedProviders: string[];
         journeys: Array<{ offerId: string | null; legs: Array<{
-          mode: string; transportType?: string; source?: string;
+          mode: string; transportType?: string; source?: string; providerId?: string; routeId?: string; headsign?: string;
           origin?: { name: string; coordinates: [number, number] };
           destination?: { name: string; coordinates: [number, number] };
           stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string }>;
@@ -256,6 +256,9 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const assertScheduledStopCalls = (leg: typeof modeData.journeys[number]['legs'][number]) => {
         if (!['gtfs-static', 'gtfs-realtime-trip-updates'].includes(leg.source ?? '')) return;
         const stops = leg.stops ?? [];
+        assert.ok(leg.providerId, `${leg.transportType ?? leg.mode} response carries its provider scope for stop queries`);
+        assert.ok(leg.routeId, `${leg.transportType ?? leg.mode} response carries its feed route ID`);
+        assert.ok(leg.headsign, `${leg.transportType ?? leg.mode} response carries its direction for stop queries`);
         assert.ok(stops.length >= 2, `${leg.transportType ?? leg.mode} response carries boarding/alighting calls and every published intermediate call`);
         assert.deepEqual(stops[0]?.coordinates, leg.origin?.coordinates, 'the first stop call matches the selected boarding stop');
         assert.deepEqual(stops.at(-1)?.coordinates, leg.destination?.coordinates, 'the final stop call matches the selected alighting stop');
