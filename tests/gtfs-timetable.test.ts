@@ -3,22 +3,32 @@ import assert from 'node:assert/strict';
 import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
-function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean } = {}) {
+function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
+  const routeRows = [
+    'route_id,agency_id,route_short_name,route_long_name,route_type',
+    `r,a,7,${overrides.routeName ?? 'Test bus'},${overrides.routeType ?? '3'}`,
+    ...(overrides.withArrivalAlternatives ? ['r2,a,8,Other route,3'] : []),
+  ];
+  const tripRows = [
+    `r,weekday,t1,Central station${overrides.withShape ? ',shape-1' : ''}`,
+    ...(overrides.withArrivalAlternatives ? ['r2,weekday,t2,Central station', 'r,weekday,t3,Opposite direction'] : []),
+  ];
   const files: Record<string, Uint8Array> = {
     'agency.txt': new TextEncoder().encode(['agency_id,agency_name,agency_url,agency_timezone', 'a,Test,https://example.test,Europe/Kyiv'].join('\n')),
-    'routes.txt': new TextEncoder().encode(['route_id,agency_id,route_short_name,route_long_name,route_type', `r,a,7,${overrides.routeName ?? 'Test bus'},${overrides.routeType ?? '3'}`].join('\n')),
+    'routes.txt': new TextEncoder().encode(routeRows.join('\n')),
     'stops.txt': new TextEncoder().encode([
       'stop_id,stop_name,stop_lat,stop_lon',
       'origin,Origin stop,49.8400,24.0200',
       ...(overrides.withIntermediate ? ['middle,Middle stop,49.8450,24.0250'] : []),
       'destination,Destination stop,49.8500,24.0300',
     ].join('\n')),
-    'trips.txt': new TextEncoder().encode(`route_id,service_id,trip_id,trip_headsign${overrides.withShape ? ',shape_id' : ''}\nr,weekday,t1,Central station${overrides.withShape ? ',shape-1' : ''}`),
+    'trips.txt': new TextEncoder().encode(`route_id,service_id,trip_id,trip_headsign${overrides.withShape ? ',shape_id' : ''}\n${tripRows.join('\n')}`),
     'stop_times.txt': new TextEncoder().encode([
       'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
       `t1,${overrides.departure ?? '08:00:00'},${overrides.departure ?? '08:00:00'},origin,1,${overrides.pickup ?? '0'},0`,
       ...(overrides.withIntermediate ? ['t1,08:20:00,08:20:00,middle,2,0,0'] : []),
       `t1,${overrides.arrival ?? '08:40:00'},${overrides.arrival ?? '08:40:00'},destination,${overrides.withIntermediate ? '3' : '2'},0,${overrides.dropoff ?? '0'}`,
+      ...(overrides.withArrivalAlternatives ? ['t2,08:00:00,08:00:00,origin,1,0,0', 't2,08:21:00,08:21:00,destination,2,0,0', 't3,08:00:00,08:00:00,origin,1,0,0', 't3,08:22:00,08:22:00,destination,2,0,0'] : []),
     ].join('\n')),
     'calendar.txt': new TextEncoder().encode(`service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,${overrides.monday ?? '1'},0,0,0,0,0,0,20261001,20261031`),
   };
@@ -201,6 +211,22 @@ test('lists upcoming stop arrivals from the provider-scoped schedule without cla
   assert.equal(arrivals[0].etaSeconds, 1200);
   assert.equal(arrivals[0].source, 'SCHEDULE');
   assert.equal(arrivals[0].confidence, 'LOW');
+});
+
+test('filters stop arrivals by the selected route and direction before limiting results', () => {
+  const schedule = feed({ withArrivalAlternatives: true });
+  const matching = findGtfsStopArrivals(schedule, 'destination', {
+    now: new Date('2026-10-12T05:20:00Z'), routeId: 'r', headsign: '  CENTRAL   STATION ', limit: 1,
+  });
+  assert.equal(matching.length, 1);
+  assert.equal(matching[0].routeId, 'r');
+  assert.equal(matching[0].tripId, 't1');
+  assert.equal(findGtfsStopArrivals(schedule, 'destination', {
+    now: new Date('2026-10-12T05:20:00Z'), routeId: 'r', limit: 1,
+  })[0].tripId, 't3', 'an earlier opposite-direction departure exists and is excluded by the headsign filter');
+  assert.equal(findGtfsStopArrivals(schedule, 'destination', {
+    now: new Date('2026-10-12T05:20:00Z'), routeId: 'r2', headsign: 'Central station', limit: 1,
+  })[0].tripId, 't2', 'an earlier matching headsign exists on another route and is excluded by the route filter');
 });
 
 test('filters skipped, past, and non-service-day stop arrivals', () => {

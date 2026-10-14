@@ -582,7 +582,7 @@ function dateStringAfter(date: string, days: number): string {
 export function findGtfsStopArrivals(
   feed: GtfsTimetableFeed,
   stopId: string,
-  options: { now?: Date; horizonSeconds?: number; limit?: number } = {},
+  options: { now?: Date; horizonSeconds?: number; limit?: number; routeId?: string; headsign?: string } = {},
 ): GtfsStopArrival[] {
   const now = options.now ?? new Date();
   const horizonSeconds = options.horizonSeconds ?? 6 * 60 * 60;
@@ -593,6 +593,10 @@ export function findGtfsStopArrivals(
     throw new TypeError('arrival horizon must be between 60 and 172800 seconds');
   }
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new TypeError('arrival limit must be between 1 and 50');
+  const routeId = options.routeId?.trim();
+  const headsign = options.headsign?.normalize('NFKC').replace(/\s+/g, ' ').trim().toLocaleLowerCase('uk-UA');
+  if (routeId !== undefined && (!routeId || routeId.length > 255)) throw new TypeError('route ID must contain 1 to 255 characters');
+  if (headsign !== undefined && (!headsign || headsign.length > 255)) throw new TypeError('headsign must contain 1 to 255 characters');
 
   const stop = feed.stops.get(stopId);
   if (!stop) return [];
@@ -612,7 +616,9 @@ export function findGtfsStopArrivals(
     const trip = feed.trips.get(entry.tripId);
     const route = trip && feed.routes.get(trip.routeId);
     const stopTime = feed.stopTimes.get(entry.tripId)?.[entry.index];
-    if (!trip || !route || !stopTime || stopTime.pickupType !== 0) continue;
+    if (!trip || !route || !stopTime || stopTime.pickupType !== 0
+      || (routeId && trip.routeId !== routeId)
+      || (headsign && trip.headsign.normalize('NFKC').replace(/\s+/g, ' ').trim().toLocaleLowerCase('uk-UA') !== headsign)) continue;
 
     for (const serviceDate of serviceDates) {
       if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
