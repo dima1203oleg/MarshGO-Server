@@ -792,10 +792,12 @@ app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) 
   }
   let realtimeStatus: 'AVAILABLE' | 'STALE' | 'UNAVAILABLE' | 'NOT_CONFIGURED' | 'TEMPORARILY_UNAVAILABLE' = provider.realtime_url ? 'UNAVAILABLE' : 'NOT_CONFIGURED';
   let realtimeUpdatedAt: Date | undefined;
+  let realtimeFeedTimestamp: Date | undefined;
   let feed = baseFeed;
   if (provider.realtime_url) {
     try {
       const realtime = await cachedGtfsRealtimeTripUpdates(provider.id, provider.realtime_url);
+      if (realtime.feedTimestamp.getTime() > 0) realtimeFeedTimestamp = realtime.feedTimestamp;
       if (realtime.fresh) {
         feed = { ...baseFeed, realtimeTripUpdates: realtime.updates };
         realtimeStatus = 'AVAILABLE';
@@ -827,7 +829,9 @@ app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) 
   const stopKnown = baseFeed.stops.has(stopId);
   res.json({ data: { stopId: scopedStopId, lat, lon, arrivals },
     meta: { availability: stopKnown ? 'AVAILABLE' : 'STOP_NOT_IN_FEED', scheduleUpdatedAt: baseFeed.fetchedAt.toISOString(),
-      realtimeStatus, ...(realtimeUpdatedAt ? { realtimeUpdatedAt: realtimeUpdatedAt.toISOString() } : {}) } });
+      realtimeStatus,
+      ...(realtimeUpdatedAt ? { realtimeUpdatedAt: realtimeUpdatedAt.toISOString() } : {}),
+      ...(realtimeFeedTimestamp ? { realtimeFeedTimestamp: realtimeFeedTimestamp.toISOString() } : {}) } });
 }));
 
 app.get('/api/v1/transport/vehicles', requireAuth, asyncHandler(async (req, res) => {
