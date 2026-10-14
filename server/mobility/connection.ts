@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { canonicalCacheJson } from '../cache/cacheService';
 import { testGbfsConnection } from './gbfs';
 import { testGtfsConnection } from './gtfs';
 import { testGtfsRealtimeConnection } from './gtfsRealtime';
@@ -26,7 +28,7 @@ export async function testProviderConnection(provider: { id: string; name?: stri
       const mode = geoJsonMode(provider.name ?? '');
       const network = mode ? buildGeoJsonNetwork(data, mode) : null;
       const ok = valid > 0;
-      return { health: ok ? 'healthy' : 'degraded', checks: [
+      return { health: ok ? 'healthy' : 'degraded', sourceVersion: createHash('sha256').update(canonicalCacheJson(data)).digest('hex'), checks: [
         { name: 'GeoJSON FeatureCollection', ok: true, detail: `${features.length} features` },
         { name: 'Supported route/station geometries', ok, detail: `${valid} usable features` },
       ], counts: { features: features.length, ...(mode && network?.routes.length ? { [`routes_${mode}`]: network.routes.length } : {}), ...(mode && network?.stops.length ? { [`stops_${mode}`]: network.stops.length } : {}) }, responseMs: ms, ...(network?.bbox ? { bbox: network.bbox } : {}), ...(ok ? {} : { error: 'No supported GeoJSON features' }) };

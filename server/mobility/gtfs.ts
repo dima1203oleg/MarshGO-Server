@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from './safeFetch';
 import { bboxOf, type ConnectionReport } from './types';
@@ -132,5 +133,5 @@ export async function testGtfsConnection(url: string): Promise<ConnectionReport>
   const counts: Record<string, number> = { stops: summary.stops, routes: summary.routes, trips: summary.trips, stopTimes: summary.stopTimeRows, ...Object.fromEntries(Object.entries(summary.routeTypes).map(([type, count]) => [`routes_${type}`, count])) };
   const critical = summary.missingFiles.length === 0 && summary.stops > 0 && summary.routes > 0 && summary.trips > 0;
   const healthy = critical && summary.badStops <= stopTolerance && summary.hasCalendar && summary.hasUpcomingService;
-  return { health: healthy ? 'healthy' : !summary.hasUpcomingService ? 'offline' : critical ? 'degraded' : 'offline', checks, counts, responseMs: Date.now() - started, ...(bboxOf(summary.stopPoints) ? { bbox: bboxOf(summary.stopPoints) } : {}), ...(critical && summary.hasUpcomingService ? {} : { error: !summary.hasUpcomingService ? 'GTFS feed has no service scheduled in the next 7 days' : 'GTFS feed is incomplete' }) };
+  return { health: healthy ? 'healthy' : !summary.hasUpcomingService ? 'offline' : critical ? 'degraded' : 'offline', checks, counts, responseMs: Date.now() - started, sourceVersion: createHash('sha256').update(data).digest('hex'), ...(bboxOf(summary.stopPoints) ? { bbox: bboxOf(summary.stopPoints) } : {}), ...(critical && summary.hasUpcomingService ? {} : { error: !summary.hasUpcomingService ? 'GTFS feed has no service scheduled in the next 7 days' : 'GTFS feed is incomplete' }) };
 }
