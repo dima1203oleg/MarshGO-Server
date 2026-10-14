@@ -1392,7 +1392,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const layers = await fetch(`${apiUrl}/api/v1/transport/layers`, { headers });
       assert.equal(layers.status, 200);
       const ids = (await layers.json() as { data: Array<{ id: string; available: boolean }> }).data.map((item) => item.id);
-      assert.deepEqual(ids, ['PUBLIC_TRANSPORT', 'METRO', 'BUS', 'TRAM', 'TROLLEYBUS', 'STOPS', 'MINIBUS', 'CITY_TRAIN', 'FUNICULAR', 'BICYCLE', 'SCOOTER', 'CARSHARING', 'RENTAL_POINTS']);
+      assert.deepEqual(ids, ['PUBLIC_TRANSPORT', 'BUS', 'MINIBUS', 'TROLLEYBUS', 'TRAM', 'METRO', 'TRAIN', 'CITY_TRAIN', 'FUNICULAR', 'CARPOOL', 'TAXI', 'TRANSFER', 'BICYCLE', 'SCOOTER', 'CARSHARING', 'STOPS', 'RENTAL_POINTS']);
       const faresResponse = await fetch(`${apiUrl}/api/v1/transport/fares?city=${encodeURIComponent('Київ')}`, { headers });
       assert.equal(faresResponse.status, 200);
       const fares = (await faresResponse.json() as { data: Array<{ id: string; priceMinor: number | null }> }).data;
