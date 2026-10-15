@@ -63,6 +63,9 @@ app.set('trust proxy', getTrustedProxyHops(process.env));
 const rendezvousSettings = getRendezvousSettings(process.env);
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 12, idleTimeoutMillis: 30_000 });
+pool.on('error', (error: Error) => {
+  console.error(JSON.stringify({ level: 'error', event: 'database.pool_idle_client_error', message: error.message }));
+});
 type RealtimeTicket = { userId: string; sessionId: string; expiresAt: number };
 type RealtimeMessage = { id: string; conversation_id: string; sender_id: string; sender_name: string; body: string; created_at: Date };
 const realtimeTickets = new Map<string, RealtimeTicket>();
