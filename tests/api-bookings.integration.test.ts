@@ -251,7 +251,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.equal(modeResponse.status, 200, `${transportType} search responds successfully`);
       const modeData = (await modeResponse.json() as { data: {
         blockedProviders: string[];
-        journeys: Array<{ offerId: string | null; legs: Array<{
+        journeys: Array<{ offerId: string | null; origin: { name: string; coordinates: [number, number] }; destination: { name: string; coordinates: [number, number] }; legs: Array<{
           mode: string; transportType?: string; source?: string;
           origin?: { name: string; coordinates: [number, number] };
           destination?: { name: string; coordinates: [number, number] };
@@ -270,6 +270,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const acceptedTypes = transportType === 'bus' ? ['bus','intercity_bus']
         : transportType === 'train' ? ['train','suburban_train','city_train'] : [transportType];
       for (const journey of modeData.journeys) {
+        assert.deepEqual(journey.origin, modeSearch.origin, 'the journey keeps the requested origin instead of the first nearby transport stop');
+        assert.deepEqual(journey.destination, modeSearch.destination, 'the journey keeps the requested destination instead of the last nearby transport stop');
         if (journey.offerId) assert.equal(transportType, 'carpool', `${transportType} must not leak a carpool offer`);
         for (const leg of journey.legs) {
           if (leg.mode === 'WALK') continue;

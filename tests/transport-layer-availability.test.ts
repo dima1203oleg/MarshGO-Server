@@ -7,6 +7,7 @@ test('map layer availability separates buses and trains and fails closed for uns
     lines: new Set(['bus', 'train']),
     micro: new Set(['scooter']),
     stationsAvailable: false,
+    staticBikeLocationsAvailable: false,
   });
   const byId = Object.fromEntries(data.map((item) => [item.id, item.available]));
   assert.equal(byId.BUS, true);
@@ -18,4 +19,17 @@ test('map layer availability separates buses and trains and fails closed for uns
   assert.equal(byId.TAXI, false);
   assert.equal(byId.TRANSFER, false);
   assert.equal(byId.RENTAL_POINTS, false);
+});
+
+test('static bike rental locations enable map discovery without claiming live rental points', () => {
+  const data = buildTransportLayerAvailability({
+    lines: new Set(),
+    micro: new Set(),
+    stationsAvailable: false,
+    staticBikeLocationsAvailable: true,
+  });
+  const byId = Object.fromEntries(data.map((item) => [item.id, item.available]));
+  assert.equal(byId.BICYCLE, true);
+  assert.equal(byId.RENTAL_POINTS, false);
+  assert.equal(byId.SCOOTER, false);
 });

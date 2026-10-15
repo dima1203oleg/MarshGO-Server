@@ -35,7 +35,7 @@ export async function testProviderConnection(provider: { id: string; name?: stri
       return { health: 'offline', checks: [{ name: 'GeoJSON feed', ok: false, detail: message }], counts: {}, responseMs: Date.now() - started, error: message };
     }
   }
-  if (provider.source_type === 'rest' && provider.name?.startsWith('Київ — ') && /розклад|перший\/останній|інтервали|години роботи/.test(provider.name)) {
+  if (provider.source_type === 'rest' && provider.name?.startsWith('Київ — ') && /розклад|перший\/останній|інтервали|години роботи|пересадкові/.test(provider.name)) {
     const started = Date.now();
     try { return await testKyivScheduleConnection(provider.feed_url); }
     catch (error) {

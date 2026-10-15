@@ -16,7 +16,7 @@ const location = (id: string, providerId = 'operator-a'): RentalLocation => ({
   vehicleTypes: ['city-bike'], availabilityCheckedAt: now, openingAtPickup: true, openingAtDropoff: true,
   geofenceAllowsPickup: true, geofenceAllowsDropoff: true,
 });
-const network: RentalNetworkRule = { networkId: 'network-a', providerIds: ['operator-a'], status: 'CONFIRMED', returnRule: 'ANY_NETWORK_LOCATION', crossProviderReturnConfirmed: false, maximumSnapshotAgeSeconds: 300 };
+const network: RentalNetworkRule = { networkId: 'network-a', providerIds: ['operator-a'], status: 'CONFIRMED', returnRule: 'ANY_NETWORK_LOCATION', returnRuleSource: 'OWNER_ATTESTED', crossProviderReturnConfirmed: false, maximumSnapshotAgeSeconds: 300 };
 const attempt = (pickup = location('A'), dropoff = location('B'), networkRule: RentalNetworkRule | null = network) => canRent({
   pickup, dropoff, vehicleType: 'city-bike', departureAt: now, arrivalAt: new Date(now.getTime() + 20 * 60_000), networkRule, now,
 });
@@ -25,6 +25,8 @@ test('rental compatibility requires one confirmed provider network and current p
   const allowed = attempt();
   assert.equal(allowed.allowed, true);
   assert.equal(allowed.confirmationLevel, 'VERIFIED');
+  assert.equal(allowed.returnRule, 'ANY_NETWORK_LOCATION');
+  assert.equal(allowed.returnRuleSource, 'OWNER_ATTESTED');
   assert.equal(attempt(location('A', 'bikenow'), location('B', 'veliki_ua'), network).allowed, false);
   assert.equal(attempt(location('A'), location('B'), null).allowed, false);
 });
@@ -84,10 +86,16 @@ test('OSM parser includes rental services but excludes ordinary bicycle parking 
   assert.equal(normalizeOsmBikeRental({ type: 'Feature', id: 'node/45', properties: { bicycle_rental: 'dropoff_point', 'ref:gbfs': 'feed:station:1' }, geometry: { type: 'Point', coordinates: [1,1] } })?.refGbfs, 'feed:station:1');
   const seq = '\u001e' + JSON.stringify({ type: 'Feature', id: 'node/44', properties: { shop: 'rental', rental: 'bicycle' }, geometry: { type: 'Point', coordinates: [1,1] } });
   assert.equal(parseOsmGeoJsonSequence(seq).length, 1);
-  assert.equal(normalizeOsmBikeRental({ type:'Feature', id:'node/46', properties:{ amenity:'bicycle_rental', operator:'BikeNow' }, geometry:{ type:'Point', coordinates:[1,1] } })?.providerId, 'bikenow');
-  assert.equal(normalizeOsmBikeRental({ type:'Feature', id:'node/47', properties:{ amenity:'bicycle_rental', website:'https://rent.veliki.ua/locations' }, geometry:{ type:'Point', coordinates:[1,1] } })?.providerId, 'veliki_ua');
+  const bikeNow = normalizeOsmBikeRental({ type:'Feature', id:'node/46', properties:{ amenity:'bicycle_rental', operator:'BikeNow' }, geometry:{ type:'Point', coordinates:[1,1] } });
+  assert.equal(bikeNow?.providerId, 'bikenow');
+  assert.equal(bikeNow?.networkId, 'bikenow-ua');
+  const veliki = normalizeOsmBikeRental({ type:'Feature', id:'node/47', properties:{ amenity:'bicycle_rental', website:'https://rent.veliki.ua/locations' }, geometry:{ type:'Point', coordinates:[1,1] } });
+  assert.equal(veliki?.providerId, 'veliki_ua');
+  assert.equal(veliki?.networkId, 'veliki-ua');
   assert.equal(normalizeOsmBikeRental({ type:'Feature', id:'node/48', properties:{ amenity:'bicycle_rental', name:'BikeNow City Bikes' }, geometry:{ type:'Point', coordinates:[1,1] } })?.providerId, 'bicycle_operator_unknown');
-  assert.equal(normalizeOsmBikeRental({ type:'Feature', id:'node/50', properties:{ amenity:'bicycle_rental', operator:'ТОВ "Некстбайк Україна"', network:'nextbike' }, geometry:{ type:'Point', coordinates:[1,1] } })?.providerId, 'nextbike_ua');
+  const nextbike = normalizeOsmBikeRental({ type:'Feature', id:'node/50', properties:{ amenity:'bicycle_rental', operator:'ТОВ "Некстбайк Україна"', network:'nextbike' }, geometry:{ type:'Point', coordinates:[1,1] } });
+  assert.equal(nextbike?.providerId, 'nextbike_ua');
+  assert.equal(nextbike?.networkId, 'nextbike-ua');
   const osmiumId = normalizeOsmBikeRental({ type:'Feature', id:'n49', properties:{ amenity:'bicycle_rental' }, geometry:{ type:'Point', coordinates:[1,1] } });
   assert.equal(osmiumId?.externalId, 'node/49');
   assert.equal(osmiumId?.objectType, 'node');

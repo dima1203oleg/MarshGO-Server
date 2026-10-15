@@ -2,10 +2,11 @@ export type TransportLayerAvailabilityInput = {
   lines: ReadonlySet<string>;
   micro: ReadonlySet<string>;
   stationsAvailable: boolean;
+  staticBikeLocationsAvailable: boolean;
 };
 
-/** Reports whether a map layer has validated data behind it; unsupported modes stay unavailable. */
-export function buildTransportLayerAvailability({ lines, micro, stationsAvailable }: TransportLayerAvailabilityInput) {
+/** Reports whether a map or routing layer has validated data behind it; unsupported modes stay unavailable. */
+export function buildTransportLayerAvailability({ lines, micro, stationsAvailable, staticBikeLocationsAvailable }: TransportLayerAvailabilityInput) {
   const publicTransport = ['bus', 'marshrutka', 'trolleybus', 'tram'].some((type) => lines.has(type));
   return [
     { id: 'PUBLIC_TRANSPORT', available: publicTransport },
@@ -20,7 +21,8 @@ export function buildTransportLayerAvailability({ lines, micro, stationsAvailabl
     { id: 'CARPOOL', available: false },
     { id: 'TAXI', available: false },
     { id: 'TRANSFER', available: false },
-    { id: 'BICYCLE', available: micro.has('bike') || micro.has('ebike') },
+    // Availability means route-estimate coverage only; a static point does not imply stock or bookability.
+    { id: 'BICYCLE', available: staticBikeLocationsAvailable || micro.has('bike') || micro.has('ebike') },
     { id: 'SCOOTER', available: micro.has('scooter') },
     { id: 'CARSHARING', available: micro.has('carsharing') },
     { id: 'STOPS', available: publicTransport || lines.has('train') || lines.has('suburban') || lines.has('metro') },
