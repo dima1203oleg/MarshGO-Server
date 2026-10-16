@@ -7,7 +7,13 @@ import { kyivOpenDataCatalog, ukraineCatalog, ukraineCatalogWave2 } from './ukra
 async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {
-    for (const entry of [...ukraineCatalog, ...ukraineCatalogWave2, ...kyivOpenDataCatalog]) {
+    const scope = process.argv[2] ?? 'all';
+    const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...kyivOpenDataCatalog];
+    const entries = scope === '--kyiv-metro'
+      ? catalog.filter((entry) => entry.city === 'Київ' && entry.name.toLocaleLowerCase('uk-UA').includes('метро'))
+      : scope === 'all' ? catalog : null;
+    if (!entries) throw new Error('Supported seed scopes: all, --kyiv-metro');
+    for (const entry of entries) {
       const { rows } = await pool.query<{ id: string; status: string }>(
         `INSERT INTO mobility_providers(name,city,provider_type,source_type,feed_url,realtime_url,vehicle_position_url,priority,access,license,update_frequency,coverage,source_ref,country,commercial_use,attribution_required,discovery_status)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'UA',$14,$15,$16)
@@ -17,6 +23,12 @@ async function main() {
           entry.access === 'open' && Boolean(entry.license), entry.access === 'open' && Boolean(entry.license), entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP' : entry.access === 'open' && Boolean(entry.license) ? 'VALIDATED' : 'DISCOVERED'],
       );
       const provider = rows[0];
+      // Canonicalize the operator link for the public Zelectra GBFS system so
+      // its live inventory and geofences join the confirmed rental network.
+      if (entry.providerType === 'scooter' && entry.sourceType === 'gbfs'
+        && entry.feedUrl.replace(/\/$/, '') === 'https://zelectra.rideatom.com/gbfs/66/v3.0/gbfs') {
+        await pool.query("UPDATE mobility_providers SET operator_id='zelectra' WHERE id=$1 AND operator_id IS DISTINCT FROM 'zelectra'", [provider.id]);
+      }
       if (entry.access !== 'open' || !entry.license) {
         await pool.query(`UPDATE mobility_providers SET health='offline',last_error=$2,last_checked_at=now(),status='disabled',discovery_status=$3 WHERE id=$1`,
           [provider.id, entry.access === 'requires_credentials' ? 'REQUIRES_CREDENTIALS: потрібен ключ API від оператора' : entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP: умови комерційного використання не підтверджені' : entry.access === 'insecure_endpoint' ? 'INSECURE_ENDPOINT: джерело доступне лише по http, не підключено' : 'LICENSE_UNVERIFIED: licence terms are required before enabling', entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP' : 'DISCOVERED']);

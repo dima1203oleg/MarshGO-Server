@@ -236,6 +236,18 @@ test('preserves shape identifiers and geometry when compatible GTFS providers ar
   assert.equal(result.itineraries[0]?.segments[0]?.routeGeometry?.length, 3);
 });
 
+test('reuses a merged timetable briefly and invalidates it when a source snapshot changes', () => {
+  const source = { providerId: 'merge-cache-reuse', providerName: 'Test Transit', providerCity: 'Львів', feed: feed({ withShape: true }) };
+  const first = mergeGtfsTimetables([source]);
+  const reused = mergeGtfsTimetables([source]);
+  assert.ok(first);
+  assert.strictEqual(reused, first);
+
+  const updated = mergeGtfsTimetables([{ ...source, feed: feed({ withShape: true }) }]);
+  assert.ok(updated);
+  assert.notStrictEqual(updated, first);
+});
+
 test('reports when the itinerary result limit hides additional route chains', () => {
   const timetable = feed();
   timetable.routes.set('r2', { name: 'Tram 2', mode: 'TRAM', transportType: 'tram' });

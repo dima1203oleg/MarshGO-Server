@@ -55,13 +55,13 @@ export function resolveBicycleProvider(tags: Record<string, unknown>): { provide
   const host = typeof website === 'string' ? (() => { try { const raw = website.trim(); return new URL(raw.includes('://') ? raw : `https://${raw}`).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; } })() : '';
   const matchesDomain = (domain: string) => host === domain || host.endsWith(`.${domain}`);
   if (aliases.some((alias) => ['bikenow', 'bike now', 'bikenow ukraine', 'байкноу', 'байк нау'].includes(alias)) || matchesDomain('bikenow.com.ua')) {
-    return { providerId: 'bikenow', networkId: null };
+    return { providerId: 'bikenow', networkId: 'bikenow-ua' };
   }
   if (aliases.some((alias) => ['veliki', 'veliki ua', 'велики ua'].includes(alias)) || matchesDomain('veliki.ua')) {
-    return { providerId: 'veliki_ua', networkId: null };
+    return { providerId: 'veliki_ua', networkId: 'veliki-ua' };
   }
   if (aliases.some((alias) => ['nextbike', 'next bike', 'nextbike ua', 'nextbike ukraine', 'тов некстбайк україна', 'тов nextbike україна'].includes(alias))) {
-    return { providerId: 'nextbike_ua', networkId: null };
+    return { providerId: 'nextbike_ua', networkId: 'nextbike-ua' };
   }
   // Provider identity alone does not prove station-to-station return compatibility.
   return { providerId: 'bicycle_operator_unknown', networkId: null };

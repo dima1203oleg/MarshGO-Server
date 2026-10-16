@@ -69,10 +69,45 @@ function capacityAllows(stops: readonly NavigationStop[], onboardSeats: number, 
   return occupied === 0;
 }
 
-function routeHasLegs(route: RoadRoute, pointCount: number): boolean {
-  return route.legs?.length === pointCount - 1
-    && route.legs.every((leg) => Number.isFinite(leg.durationSeconds) && leg.durationSeconds > 0
-      && Number.isFinite(leg.distanceMeters) && leg.distanceMeters > 0);
+function samePoint(a: [number, number], b: [number, number]): boolean {
+  return a[0] === b[0] && a[1] === b[1];
+}
+
+async function routeWithRepeatedWaypointsCollapsed(
+  points: [number, number][],
+  route: (points: [number, number][]) => Promise<RoadRoute>,
+): Promise<RoadRoute> {
+  const uniqueConsecutivePoints: [number, number][] = [];
+  const pointIndexes: number[] = [];
+  for (const point of points) {
+    const lastIndex = uniqueConsecutivePoints.length - 1;
+    if (lastIndex >= 0 && samePoint(uniqueConsecutivePoints[lastIndex], point)) {
+      pointIndexes.push(lastIndex);
+      continue;
+    }
+    uniqueConsecutivePoints.push(point);
+    pointIndexes.push(uniqueConsecutivePoints.length - 1);
+  }
+
+  const routed = await route(uniqueConsecutivePoints);
+  if (uniqueConsecutivePoints.length === points.length || routed.legs?.length !== uniqueConsecutivePoints.length - 1) return routed;
+
+  const legs = pointIndexes.slice(1).map((pointIndex, index) => {
+    const previousPointIndex = pointIndexes[index];
+    return pointIndex === previousPointIndex
+      ? { distanceMeters: 0, durationSeconds: 0 }
+      : routed.legs![pointIndex - 1];
+  });
+  return { ...routed, legs };
+}
+
+function routeHasLegs(route: RoadRoute, points: [number, number][]): boolean {
+  return route.legs?.length === points.length - 1
+    && route.legs.every((leg, index) => {
+      const zeroLengthLeg = samePoint(points[index], points[index + 1]);
+      return Number.isFinite(leg.durationSeconds) && (zeroLengthLeg ? leg.durationSeconds === 0 : leg.durationSeconds > 0)
+        && Number.isFinite(leg.distanceMeters) && (zeroLengthLeg ? leg.distanceMeters === 0 : leg.distanceMeters > 0);
+    });
 }
 
 function straightLineMeters(a: [number, number], b: [number, number]): number {
@@ -106,8 +141,8 @@ export async function optimizeStopInsertion(
     throw new TypeError('existing navigation stop is invalid');
   }
   const baselinePoints = [input.currentLocation, ...input.existingStops.map((stop) => stop.coordinates), input.destination];
-  const baseline = await route(baselinePoints);
-  if (!routeHasLegs(baseline, baselinePoints.length)) return null;
+  const baseline = await routeWithRepeatedWaypointsCollapsed(baselinePoints, route);
+  if (!routeHasLegs(baseline, baselinePoints)) return null;
 
   const candidatePlans: Array<{ stops: NavigationStop[]; points: [number, number][]; approximateDistanceM: number }> = [];
   const n = input.existingStops.length;
@@ -129,9 +164,9 @@ export async function optimizeStopInsertion(
   const shortlist = candidatePlans.sort((a, b) => a.approximateDistanceM - b.approximateDistanceM).slice(0, 8);
   const evaluated = await Promise.all(shortlist.map(async ({ stops, points }) => {
       let proposed: RoadRoute;
-      try { proposed = await route(points); }
+      try { proposed = await routeWithRepeatedWaypointsCollapsed(points, route); }
       catch { return null; }
-      if (!routeHasLegs(proposed, points.length)) return null;
+      if (!routeHasLegs(proposed, points)) return null;
       const pickupOrdinal = stops.findIndex((stop) => stop.bookingId === candidate.bookingId && stop.kind === 'pickup') + 1;
       const dropoffOrdinal = stops.findIndex((stop) => stop.bookingId === candidate.bookingId && stop.kind === 'dropoff') + 1;
       const pickupDuration = proposed.legs!.slice(0, pickupOrdinal).reduce((sum, leg) => sum + leg.durationSeconds, 0);

@@ -41,13 +41,33 @@ async function fetchPublic(raw: string, init: RequestInit, timeoutMs: number): P
 
 export async function fetchJson(raw: string, timeoutMs = 8000): Promise<{ data: unknown; ms: number }> {
   const started = Date.now();
-  const response = await fetchPublic(raw, { headers: { accept: 'application/json', 'user-agent': 'MARSHGO-Mobility/1.0' } }, timeoutMs);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const declared = Number(response.headers.get('content-length') ?? 0);
-  if (declared > MAX_BYTES) throw new Error('Feed is too large');
-  const text = await response.text();
-  if (text.length > MAX_BYTES) throw new Error('Feed is too large');
-  try { return { data: JSON.parse(text), ms: Date.now() - started }; } catch { throw new Error('Response is not valid JSON'); }
+  const init = { headers: { accept: 'application/json', 'user-agent': 'MARSHGO-Mobility/1.0' } };
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetchPublic(raw, init, timeoutMs);
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        if ((response.status === 429 || response.status >= 500) && attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          continue;
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const declared = Number(response.headers.get('content-length') ?? 0);
+      if (declared > MAX_BYTES) throw new Error('Feed is too large');
+      const text = await response.text();
+      if (text.length > MAX_BYTES) throw new Error('Feed is too large');
+      try { return { data: JSON.parse(text), ms: Date.now() - started }; } catch { throw new Error('Response is not valid JSON'); }
+    } catch (error) {
+      lastError = error;
+      const retryable = !(error instanceof UnsafeUrlError) && error instanceof Error
+        && (error.name === 'TimeoutError' || error.name === 'AbortError' || /fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH/.test(error.message));
+      if (!retryable || attempt > 0) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Feed is unreachable');
 }
 
 /** Reachability probe for non-JSON feeds (GTFS zip, CSV, ...): checks status and content type without downloading the body. */
