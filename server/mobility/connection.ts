@@ -61,3 +61,28 @@ export async function testProviderConnection(provider: { id: string; name?: stri
     return { health: 'offline', checks: [{ name: 'Feed accessible', ok: false, detail: message }], counts: {}, responseMs: Date.now() - started, error: message };
   }
 }
+
+/** Lightweight scheduled health check; full feed downloads and schema parsing remain an explicit admin action. */
+export async function probeProviderReachability(provider: { source_type: string; feed_url: string }): Promise<ConnectionReport> {
+  const started = Date.now();
+  try {
+    const probe = await probeUrl(provider.feed_url, 8000);
+    const ok = probe.status >= 200 && probe.status < 300;
+    return {
+      health: ok ? 'degraded' : 'offline',
+      checks: [
+        { name: 'Feed accessible', ok, detail: `HTTP ${probe.status}${probe.contentType ? `, ${probe.contentType}` : ''}` },
+        { name: `${provider.source_type.toUpperCase()} schema validation`, ok: false, detail: 'Deferred to explicit provider validation' },
+      ],
+      counts: {}, responseMs: probe.ms,
+      ...(ok ? {} : { error: `Feed returned HTTP ${probe.status}` }),
+    };
+  } catch (error) {
+    const message = error instanceof UnsafeUrlError ? error.message : error instanceof Error ? error.message : 'Feed is unreachable';
+    return {
+      health: 'offline',
+      checks: [{ name: 'Feed accessible', ok: false, detail: message }],
+      counts: {}, responseMs: Date.now() - started, error: message,
+    };
+  }
+}
