@@ -1599,12 +1599,11 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         const overflow = overflowSegmentsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
         for (const candidate of tripCandidates) {
-          const startsAtOrigin = originStopIds.has(candidate.segment.originStop.id);
-          const canCatchOrigin = startsAtOrigin && candidate.segment.departureAt.getTime()
-            >= input.earliestDeparture.getTime()
-              + Math.ceil(candidate.segment.distanceToOriginStopMeters / 1.25) * 1000;
-          const endsAtDestination = destinationStopIds.has(candidate.segment.destinationStop.id);
-          if (canCatchOrigin || endsAtDestination) overflow.consider(candidate);
+          // Keep transfer-only segments in the bounded overflow reservoir too.
+          // Endpoint segments still rank ahead of these through compareTripSegments,
+          // but filtering here could leave route budget unused and remove the only
+          // usable middle leg from a multi-transfer itinerary.
+          overflow.consider(candidate);
         }
         overflowSegmentsByRoute.set(trip.routeId, overflow);
         for (const { segment, fromIndex, toIndex } of tripCandidates) {
