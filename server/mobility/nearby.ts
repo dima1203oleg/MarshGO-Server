@@ -59,8 +59,8 @@ const gbfsSnapshotSchema: z.ZodType<GbfsSnapshot> = z.object({
 });
 
 /** Versioned provider snapshot cache. TTL is capped by the source TTL and the normalized stale-after boundary. */
-export function cachedSnapshot(providerId: string, url: string): Promise<GbfsSnapshot> {
-  return smartCache.getOrLoad('gbfs_snapshot', { providerId, sourceUrl: url }, gbfsSnapshotSchema, {
+export function cachedSnapshot(providerId: string, url: string, expectedCountry?: string): Promise<GbfsSnapshot> {
+  return smartCache.getOrLoad('gbfs_snapshot', { providerId, sourceUrl: url, expectedCountry: expectedCountry ?? null }, gbfsSnapshotSchema, {
     ttlMs: 15_000,
     l1TtlMs: 15_000,
     ttlForValue: (snapshot) => {
@@ -69,5 +69,5 @@ export function cachedSnapshot(providerId: string, url: string): Promise<GbfsSna
       return Math.max(1_000, Math.min(sourceTtlMs, freshnessMs, 15_000));
     },
     lockTtlMs: 12_000,
-  }, () => loadGbfsSnapshot(providerId, url));
+  }, () => loadGbfsSnapshot(providerId, url, expectedCountry));
 }

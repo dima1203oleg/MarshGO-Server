@@ -5,6 +5,9 @@ import { journeyTransportTypeSelected, type JourneyTransportType } from './types
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
 import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
+import { retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
+import { compareStableId } from './stableOrdering';
+import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
@@ -14,9 +17,15 @@ const MAX_MERGED_FEED_CACHE_ENTRIES = 2;
 const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
 const MAX_STOPS_PER_SIDE = 48;
-const MAX_STOPS_PER_ROUTE = 2;
+const MAX_STOPS_PER_ROUTE_PATTERN = 2;
 const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
+// Bound the per-request materialized GTFS graph. A dense city feed can create
+// millions of stop-pair objects before the later itinerary sampling limits
+// apply; that used to exhaust the Node heap. The route-proportional ceiling
+// preserves a fair slice for each line and makes truncation explicit.
+const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
+const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 export const MAX_GTFS_TRANSFERS = 4;
 export const DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS = 180;
 export const DEFAULT_MAX_ACCESS_WALKING_METERS = 900;
@@ -170,6 +179,123 @@ export interface GtfsItinerarySearchResult {
   itineraries: GtfsItinerary[];
   searchTruncated: boolean;
   resultLimitReached: boolean;
+  candidateGraphTruncated: boolean;
+}
+
+type RetainedGtfsSegment = { segment: GtfsDirectJourney };
+type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
+
+// Keep the same deterministic, order-independent sample for a feed snapshot.
+// GTFS feeds are often written in departure-time order, so a simple prefix cap
+// silently drops the later part of the requested search window.
+function gtfsSegmentRetentionPriority(key: string): number {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < key.length; index++) {
+    hash = Math.imul(hash ^ key.charCodeAt(index), 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/**
+ * Keep a balanced sample of GTFS candidates for the cross-provider scorer.
+ * When comparable fares exist, an unknown fare must not receive the same
+ * zero-cost score as the cheapest known fare. It remains eligible for the
+ * other sampling objectives (time, transfers, and walking).
+ */
+export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly GtfsItinerary[]): GtfsItinerary[] {
+  if (!itineraries.length) return [];
+  const comparableFares = itineraries.filter((itinerary) => itinerary.fare?.currency === 'UAH');
+  const minDuration = Math.min(...itineraries.map((itinerary) => itinerary.durationSeconds));
+  const maxDuration = Math.max(...itineraries.map((itinerary) => itinerary.durationSeconds));
+  const minFare = comparableFares.length ? Math.min(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
+  const maxFare = comparableFares.length ? Math.max(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
+  const minTransfers = Math.min(...itineraries.map((itinerary) => itinerary.transfers));
+  const maxTransfers = Math.max(...itineraries.map((itinerary) => itinerary.transfers));
+  const minWalking = Math.min(...itineraries.map((itinerary) => itinerary.walkingMeters));
+  const maxWalking = Math.max(...itineraries.map((itinerary) => itinerary.walkingMeters));
+  const normalize = (value: number, min: number, max: number) => max === min ? 0 : (value - min) / (max - min);
+  const score = (itinerary: GtfsItinerary) => {
+    const hasComparableFare = itinerary.fare?.currency === 'UAH';
+    const fareCost = comparableFares.length
+      ? hasComparableFare ? normalize(itinerary.fare!.priceMinor, minFare, maxFare) : 1
+      : 0;
+    return 0.35 * normalize(itinerary.durationSeconds, minDuration, maxDuration)
+      + 0.25 * fareCost
+      + 0.10 * normalize(itinerary.transfers, minTransfers, maxTransfers)
+      + 0.10 * normalize(itinerary.walkingMeters, minWalking, maxWalking)
+      + 0.20 * (itinerary.transfers > 0 ? 0.3 : 0);
+  };
+  return [...itineraries].sort((a, b) => score(a) - score(b)
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+}
+
+/** Keep useful boarding/alighting choices for the same scheduled vehicle chain. */
+export function sampleGtfsTripChainCandidates(
+  itineraries: readonly GtfsItinerary[], maximum = 2,
+): GtfsItinerary[] {
+  if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('trip-chain sample maximum must be positive');
+  if (itineraries.length <= maximum) return [...itineraries];
+
+  const selected = new Map<string, GtfsItinerary>();
+  const take = (ranked: readonly GtfsItinerary[], count: number) => {
+    for (const item of ranked) {
+      if (selected.size >= maximum || count <= 0) break;
+      if (selected.has(item.id)) continue;
+      selected.set(item.id, item);
+      count--;
+    }
+  };
+  const byDuration = [...itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds
+    || compareStableId(a.id, b.id));
+  const byFare = itineraries.filter((item) => item.fare?.currency === 'UAH')
+    .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const byWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+
+  const fastest = byDuration[0];
+  if (fastest) selected.set(fastest.id, fastest);
+  const cheapest = byFare[0];
+  if (cheapest && selected.size < maximum
+    && (fastest?.fare?.currency !== 'UAH' || cheapest.fare!.priceMinor < fastest.fare.priceMinor)) {
+    selected.set(cheapest.id, cheapest);
+  }
+  take(byWalking, maximum - selected.size);
+  take(rankGtfsItinerariesForCandidateSampling(itineraries), maximum - selected.size);
+  take(byDuration, maximum - selected.size);
+  return [...selected.values()];
+}
+
+/** Keep route-chain samples useful to the FASTEST, CHEAPEST, and balanced views. */
+export function sampleGtfsRouteChainCandidates(
+  itineraries: readonly GtfsItinerary[], maximum = 8,
+): GtfsItinerary[] {
+  if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('route-chain sample maximum must be positive');
+  if (itineraries.length <= maximum) return [...itineraries];
+
+  const selected = new Map<string, GtfsItinerary>();
+  const take = (ranked: readonly GtfsItinerary[], count: number) => {
+    for (const item of ranked) {
+      if (selected.size >= maximum || count <= 0) break;
+      if (selected.has(item.id)) continue;
+      selected.set(item.id, item);
+      count--;
+    }
+  };
+  const byDuration = [...itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const byFare = itineraries.filter((item) => item.fare?.currency === 'UAH')
+    .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const byTransfers = [...itineraries].sort((a, b) => a.transfers - b.transfers || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const byWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const balanced = rankGtfsItinerariesForCandidateSampling(itineraries);
+
+  take(byDuration, 2);
+  take(byFare, 2);
+  take(balanced, 2);
+  take(byTransfers, 1);
+  take(byWalking, 1);
+  take(balanced, maximum - selected.size);
+  return [...selected.values()];
 }
 
 export interface GtfsStopArrival {
@@ -371,7 +497,7 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
  */
 function buildMergedGtfsTimetables(sources: readonly GtfsTimetableSource[]): GtfsTimetableFeed | null {
   if (sources.length === 0) return null;
-  const ordered = [...sources].sort((a, b) => a.providerId.localeCompare(b.providerId));
+  const ordered = [...sources].sort((a, b) => compareStableId(a.providerId, b.providerId));
   const timezone = ordered[0].feed.timezone;
   if (ordered.some((source) => source.feed.timezone !== timezone)) throw new TypeError('GTFS feeds with different timezones cannot be combined');
 
@@ -685,7 +811,7 @@ export function findGtfsStopArrivals(
     }
   }
   return arrivals.sort((a, b) => a.predictedArrivalAt.getTime() - b.predictedArrivalAt.getTime()
-    || a.routeId.localeCompare(b.routeId) || a.tripId.localeCompare(b.tripId)).slice(0, limit);
+    || compareStableId(a.routeId, b.routeId) || compareStableId(a.tripId, b.tripId)).slice(0, limit);
 }
 
 function distanceMeters(a: [number, number], b: [number, number]): number {
@@ -917,7 +1043,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const debugStartedAt = Date.now();
   const debugStage = (stage: string, details: Record<string, number> = {}) => {
     if (process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1') {
-      console.info(JSON.stringify({ event: 'gtfs.search.debug', stage, elapsedMs: Date.now() - debugStartedAt, ...details }));
+      const memory = process.memoryUsage();
+      console.info(JSON.stringify({ event: 'gtfs.search.debug', stage, elapsedMs: Date.now() - debugStartedAt,
+        heapUsedBytes: memory.heapUsed, rssBytes: memory.rss, ...details }));
     }
   };
   const now = input.now ?? new Date();
@@ -952,23 +1080,28 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       .filter(({ distance }) => distance <= radius)
       .sort((a, b) => a.distance - b.distance);
     const selected = new Map<string, typeof ranked[number]>();
-    const selectedByRoute = new Map<string, number>();
-    const routeIdsByStop = new Map<string, Set<string>>();
-    const routesAtStop = (stopId: string) => {
-      const cached = routeIdsByStop.get(stopId);
+    const selectedByRoutePattern = new Map<string, number>();
+    const routePatternsByStop = new Map<string, Set<string>>();
+    const routePatternsAtStop = (stopId: string) => {
+      const cached = routePatternsByStop.get(stopId);
       if (cached) return cached;
-      const routeIds = new Set<string>();
+      const routePatterns = new Set<string>();
       for (const entry of feed.stopTimesByStop.get(stopId) ?? []) {
         const trip = feed.trips.get(entry.tripId);
-        if (trip && feed.routes.has(trip.routeId)) routeIds.add(trip.routeId);
+        if (trip && feed.routes.has(trip.routeId)) {
+          // GTFS route_id can contain both directions and branched headsigns.
+          // Counting only route_id lets the nearest stops crowd out every
+          // stop on the reverse direction before candidate generation starts.
+          routePatterns.add(`${trip.routeId}:${trip.directionId ?? ''}:${trip.headsign.trim()}`);
+        }
       }
-      routeIdsByStop.set(stopId, routeIds);
-      return routeIds;
+      routePatternsByStop.set(stopId, routePatterns);
+      return routePatterns;
     };
     const addSelected = (item: typeof ranked[number]) => {
       selected.set(item.stop.id, item);
-      for (const routeId of routesAtStop(item.stop.id)) {
-        selectedByRoute.set(routeId, (selectedByRoute.get(routeId) ?? 0) + 1);
+      for (const routePattern of routePatternsAtStop(item.stop.id)) {
+        selectedByRoutePattern.set(routePattern, (selectedByRoutePattern.get(routePattern) ?? 0) + 1);
       }
     };
 
@@ -979,9 +1112,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     for (const item of ranked.slice(0, MAX_NEAREST_STOPS_PER_SIDE)) addSelected(item);
     for (const item of ranked) {
       if (selected.has(item.stop.id)) continue;
-      const addsRouteCoverage = [...routesAtStop(item.stop.id)]
-        .some((routeId) => (selectedByRoute.get(routeId) ?? 0) < MAX_STOPS_PER_ROUTE);
-      if (!addsRouteCoverage) continue;
+      const addsRoutePatternCoverage = [...routePatternsAtStop(item.stop.id)]
+        .some((pattern) => (selectedByRoutePattern.get(pattern) ?? 0) < MAX_STOPS_PER_ROUTE_PATTERN);
+      if (!addsRoutePatternCoverage) continue;
       if (selected.size >= MAX_STOPS_PER_SIDE) { stopSelectionTruncated = true; break; }
       addSelected(item);
     }
@@ -992,7 +1125,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const destinationStops = closestStops(input.destination, egressRadius);
   debugStage('stops-selected', { originStops: originStops.length, destinationStops: destinationStops.length });
   if (!originStops.length || !destinationStops.length) {
-    return { itineraries: [], searchTruncated: false, resultLimitReached: false };
+    return { itineraries: [], searchTruncated: false, resultLimitReached: false, candidateGraphTruncated: false };
   }
 
   const routeDistance = distanceMeters(input.origin, input.destination);
@@ -1115,6 +1248,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       routesByParentStation.set(stop.parentStation, routes);
     }
   }
+  // A trip endpoint alone is not a transfer node. Add a stop only when a
+  // second route, explicit GTFS transfer/pathway, shared station, or measured
+  // nearby cross-route platform can connect there; isolated termini otherwise
+  // inflate a bounded graph with edges the passenger cannot use to change lines.
   // A valid transfer can be between two distinct nearby stop IDs when a feed
   // does not publish a transfers.txt rule. Add those stops to the candidate
   // graph using the configured walk shed, but keep the exact GTFS/pathway and
@@ -1160,17 +1297,82 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       interchangeStopIds.add(stopId);
     }
   }
-  // Include trip termini so same-route short-turn services remain transferable.
-  for (const stops of feed.stopTimes.values()) {
-    if (stops.length > 1) {
-      interchangeStopIds.add(stops[0].stopId);
-      interchangeStopIds.add(stops.at(-1)!.stopId);
-    }
-  }
   debugStage('corridor-selected', { corridorStops: corridorStops.size, interchangeStops: interchangeStopIds.size,
     corridorWidthMeters: Math.round(corridorWidth) });
 
-  const segments: GtfsDirectJourney[] = [];
+  const segmentsByRoute = new Map<string, RetainedGtfsTrip[]>();
+  const retainedSegmentCountByRoute = new Map<string, number>();
+  const candidateStopCountByRoute = new Map<string, number>();
+  for (const [stopId, routeIds] of routesByStop) {
+    if (!interchangeStopIds.has(stopId)) continue;
+    for (const routeId of routeIds) {
+      const route = feed.routes.get(routeId);
+      if (!route || (input.allowedModes && !input.allowedModes.includes(route.mode))) continue;
+      const providerCity = feed.providersByRoute?.get(routeId)?.city ?? input.providerCity;
+      const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
+      if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
+      const eligibleStops = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
+        ? localCityCatchmentStops : corridorStops;
+      if (!eligibleStops.has(stopId)) continue;
+      candidateStopCountByRoute.set(routeId, (candidateStopCountByRoute.get(routeId) ?? 0) + 1);
+    }
+  }
+  // Weight route budgets by eligible service volume and stop-pair opportunity.
+  // Equal shares waste most of the global graph limit on low-frequency lines,
+  // while a single busy corridor can hit its share and truncate useful trips.
+  const candidateDemandByRoute = new Map<string, number>();
+  for (const [tripId, trip] of feed.trips) {
+    const candidateStops = candidateStopCountByRoute.get(trip.routeId) ?? 0;
+    if (candidateStops < 2) continue;
+    const stops = feed.stopTimes.get(tripId);
+    if (!stops || stops.length < 2) continue;
+    const providerCity = feed.providersByRoute?.get(trip.routeId)?.city ?? input.providerCity;
+    const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
+      ? localCityCatchmentStops : corridorStops;
+    const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
+      && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
+    const eligibleStopTimes = eligibleIndexes.map((index) => stops[index]);
+    if (eligibleStopTimes.length < 2) continue;
+    let pairOpportunities = 0;
+    for (const serviceDate of serviceDates) {
+      if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
+      const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
+      if (update?.relationship === 'CANCELED' || update?.relationship === 'DELETED') continue;
+      const dated = update?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
+      if (dated && dated.stops.length !== stops.length) continue;
+      const scheduledTimes = eligibleIndexes.map((index) => dated?.stops[index] ?? {
+        departureAt: serviceTimeToUtc(serviceDate, stops[index].departureSeconds),
+        arrivalAt: serviceTimeToUtc(serviceDate, stops[index].arrivalSeconds),
+        skipped: false,
+      });
+      for (let fromCursor = 0; fromCursor < eligibleStopTimes.length - 1; fromCursor++) {
+        const from = eligibleStopTimes[fromCursor];
+        if (from.pickupType !== 0 || scheduledTimes[fromCursor].skipped) continue;
+        const departureAt = scheduledTimes[fromCursor].departureAt;
+        if (!departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
+        // Mirror the graph's bounded forward stop-pair and schedule window
+        // without materializing candidate segment objects in this demand pass.
+        const toEnd = Math.min(eligibleStopTimes.length, fromCursor + 21);
+        for (let toCursor = fromCursor + 1; toCursor < toEnd; toCursor++) {
+          const to = eligibleStopTimes[toCursor];
+          if (to.dropOffType !== 0 || scheduledTimes[toCursor].skipped || to.arrivalSeconds < from.departureSeconds) continue;
+          const arrivalAt = scheduledTimes[toCursor].arrivalAt;
+          if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
+            || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
+          pairOpportunities++;
+        }
+      }
+    }
+    if (pairOpportunities === 0) continue;
+    const boundedPairOpportunities = Math.min(MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE, pairOpportunities);
+    candidateDemandByRoute.set(trip.routeId,
+      (candidateDemandByRoute.get(trip.routeId) ?? 0) + boundedPairOpportunities);
+  }
+  const graphSegmentBudgetByRoute = allocateBoundedGraphBudgets(
+    candidateDemandByRoute, MAX_GTFS_GRAPH_SEGMENTS, MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE,
+  );
+  const candidateRouteCount = graphSegmentBudgetByRoute.size;
+  let segmentGraphTruncated = false;
   // A national feed can produce a very large number of stop-pair candidates.
   // Keep only the stop-time indexes during graph construction and materialize
   // route shapes for the small set of itineraries that will actually be shown.
@@ -1199,7 +1401,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const key = `${primary}\u0000${parent ?? ''}`;
     const cached = transferNodeCache.get(key);
     if (cached) return cached;
-    const value = [primary, ...(parent ? [parent] : [])];
+    const value = parent && parent !== primary ? [primary, parent] : [primary];
     transferNodeCache.set(key, value);
     return value;
   };
@@ -1233,6 +1435,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const providerCity = provider?.city ?? input.providerCity;
     const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
     if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
+    const graphSegmentLimitPerRoute = graphSegmentBudgetByRoute.get(trip.routeId) ?? 0;
+    if (graphSegmentLimitPerRoute === 0) continue;
     const localFeedInIntercitySearch = intercitySearch && providerCity !== undefined && providerCity !== 'Україна';
     const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : corridorStops;
     const eligibleIndexes = stops.flatMap((stop, index) => eligibleStopIds.has(stop.stopId)
@@ -1246,6 +1450,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const eligibleContexts = eligibleIndexes.map((index) => stopContext(stops[index]));
     for (const serviceDate of serviceDates) {
       if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
+      const tripCandidates: RetainedGtfsSegment[] = [];
+      let tripCandidatesExceededLimit = false;
       // Duplicate stop IDs can occur in loop routes; deduplicate only within
       // this trip instance so a citywide set of every candidate key is not
       // retained alongside the graph.
@@ -1254,14 +1460,21 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       if (realtimeUpdate?.relationship === 'CANCELED' || realtimeUpdate?.relationship === 'DELETED') continue;
       const dated = realtimeUpdate?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
       if (dated && dated.stops.length !== stops.length) continue;
-      for (let fromCursor = 0; fromCursor < eligibleIndexes.length - 1; fromCursor++) {
+      // The same arrival stop-time participates in many upstream stop-pair
+      // segments. Resolve its service-date timestamps once instead of creating
+      // duplicate Date objects inside every boarding/alighting pair.
+      const scheduledTimes = eligibleIndexes.map((index) => ({
+        departureAt: serviceTimeToUtc(serviceDate, stops[index].departureSeconds),
+        arrivalAt: serviceTimeToUtc(serviceDate, stops[index].arrivalSeconds),
+      }));
+      candidatePairLoop: for (let fromCursor = 0; fromCursor < eligibleIndexes.length - 1; fromCursor++) {
         const fromIndex = eligibleIndexes[fromCursor];
         const from = stops[fromIndex];
         const fromContext = eligibleContexts[fromCursor];
         if (!fromContext) continue;
         const datedFrom = dated?.stops[fromIndex];
         if (from.pickupType !== 0 || datedFrom?.skipped) continue;
-        const scheduledDepartureAt = serviceTimeToUtc(serviceDate, from.departureSeconds);
+        const scheduledDepartureAt = scheduledTimes[fromCursor].departureAt;
         const departureAt = datedFrom?.departureAt ?? scheduledDepartureAt;
         if (!scheduledDepartureAt || !departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
         for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length && toCursor <= fromCursor + 20; toCursor++) {
@@ -1271,7 +1484,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
           if (!toContext) continue;
           const datedTo = dated?.stops[toIndex];
           if (to.dropOffType !== 0 || datedTo?.skipped || to.arrivalSeconds < from.departureSeconds) continue;
-          const scheduledArrivalAt = serviceTimeToUtc(serviceDate, to.arrivalSeconds);
+          const scheduledArrivalAt = scheduledTimes[toCursor].arrivalAt;
           const arrivalAt = datedTo?.arrivalAt ?? scheduledArrivalAt;
           if (!scheduledArrivalAt || !arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
             || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
@@ -1282,6 +1495,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
           const key = `${from.stopId}:${to.stopId}:${departureAt.getTime()}`;
           if (seenTripSegments.has(key)) continue;
           seenTripSegments.add(key);
+          if (tripCandidates.length >= graphSegmentLimitPerRoute) {
+            tripCandidatesExceededLimit = true;
+            break candidatePairLoop;
+          }
           const segment: GtfsDirectJourney = {
             providerId: provider?.id ?? input.providerId, providerName: provider?.name ?? input.providerName,
             providerCity: providerCity ?? input.providerCity, mode: route.mode,
@@ -1304,13 +1521,47 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
           };
           shapeIndexesBySegment.set(segment, { fromIndex, toIndex, serviceDate });
           if (dated?.update?.stops.length) segment.stops = stopCallsForTrip(feed, tripId, fromIndex, toIndex, serviceDate, dated.stops);
-          segments.push(segment);
+          tripCandidates.push({ segment });
+        }
+      }
+      if (tripCandidatesExceededLimit) {
+        segmentGraphTruncated = true;
+        continue;
+      }
+      if (tripCandidates.length) {
+        segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
+        const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
+        const canBoardFromOrigin = tripCandidates.some(({ segment }) => originStopIds.has(segment.originStop.id)
+          && segment.departureAt.getTime() >= input.earliestDeparture.getTime()
+            + Math.ceil(segment.distanceToOriginStopMeters / 1.25) * 1000);
+        const canAlightAtDestination = tripCandidates.some(({ segment }) => destinationStopIds.has(segment.destinationStop.id));
+        // Reserve graph capacity for endpoint-serving trips before sampling
+        // transfer-only lines. A uniformly hashed reservoir can otherwise
+        // discard a useful first or last leg even when those exact stops are
+        // already selected for the query.
+        const retentionTier = canBoardFromOrigin && canAlightAtDestination ? 0
+          : canBoardFromOrigin ? 1 : canAlightAtDestination ? 2 : 3;
+        const routeCandidates = segmentsByRoute.get(trip.routeId) ?? [];
+        const retained = retainBoundedTripGroup(routeCandidates, {
+          key: tripKey,
+          priority: retentionTier * 0x1_0000_0000 + gtfsSegmentRetentionPriority(tripKey),
+          segments: tripCandidates,
+        }, retainedSegmentCountByRoute.get(trip.routeId) ?? 0, graphSegmentLimitPerRoute);
+        if (retained.retained) {
+          segmentsByRoute.set(trip.routeId, routeCandidates);
+          retainedSegmentCountByRoute.set(trip.routeId, retained.segments);
         }
       }
     }
   }
+  const segments = [...segmentsByRoute.values()].flatMap((trips) => trips.flatMap((trip) => trip.segments.map(({ segment }) => segment)));
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
-    serviceDates: serviceDates.size, corridorStops: corridorStops.size });
+    serviceDates: serviceDates.size, corridorStops: corridorStops.size,
+    candidateRouteCount, graphRoutesWithCandidates: segmentsByRoute.size,
+    graphRoutesAtLimit: [...retainedSegmentCountByRoute].filter(([routeId, count]) => count === graphSegmentBudgetByRoute.get(routeId)).length,
+    graphSegmentBudgetTotal: [...graphSegmentBudgetByRoute.values()].reduce((sum, value) => sum + value, 0),
+    graphSegmentBudgetMax: Math.max(0, ...graphSegmentBudgetByRoute.values()),
+    segmentGraphTruncated: Number(segmentGraphTruncated) });
   const outgoing = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
     const choices = outgoing.get(segment.originStop.id) ?? [];
@@ -1323,11 +1574,14 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   // geographic grid contains each stop once; it never stores a copy of every
   // scheduled segment in the cell, which made the old dense-city lookup
   // quadratic on real Lviv data.
-  const outgoingByTransferNodeId = new Map<string, Set<GtfsDirectJourney>>();
+  // Each segment is indexed once per distinct canonical boarding node. Store
+  // these references in arrays: transferNodeList is already de-duplicated, so
+  // a Set per node adds hashing/table overhead without changing membership.
+  const outgoingByTransferNodeId = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
     for (const nodeId of segment.originTransferNodeIds) {
-      const choices = outgoingByTransferNodeId.get(nodeId) ?? new Set<GtfsDirectJourney>();
-      choices.add(segment);
+      const choices = outgoingByTransferNodeId.get(nodeId) ?? [];
+      choices.push(segment);
       outgoingByTransferNodeId.set(nodeId, choices);
     }
   }
@@ -1356,6 +1610,11 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       + `\u0001${previous.destinationTransferNodeIds.join('\u0000')}`;
   const transferCandidateViewKey = (previous: GtfsDirectJourney) => `${transferCandidateKey(previous)}\u0001${previous.routeId}`;
   const transferCandidateViewCache = new Map<string, GtfsDirectJourney[]>();
+  // At each transfer depth, many scheduled segments lead to stops that cannot
+  // reach the destination with the remaining leg budget. Cache a reachability-
+  // filtered view once per equivalent transfer state so queue expansion does
+  // not spend one search step per known-dead segment on every path.
+  const transferCandidateReachableCache = new Map<string, GtfsDirectJourney[]>();
 
   const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
   type TransferMeasure = { walkingMeters: number; walkingSeconds: number; geometry: Array<[number, number]> | null; inSeat: boolean };
@@ -1438,7 +1697,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const queue: Array<{ node: string; seconds: number }> = [{ node: fromStopId, seconds: 0 }];
     const visited = new Set<string>();
     while (queue.length) {
-      queue.sort((a, b) => a.seconds - b.seconds || a.node.localeCompare(b.node));
+      queue.sort((a, b) => a.seconds - b.seconds || compareStableId(a.node, b.node));
       const current = queue.shift()!;
       if (visited.has(current.node)) continue;
       visited.add(current.node);
@@ -1608,14 +1867,49 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   }
 
   const results = new Map<string, GtfsItinerary>();
+  const MAX_SEARCH_RESULTS = limit * 25;
+  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 10_000;
+  let candidatePoolReachedAtStep: number | null = null;
+  const objectiveCandidateSamples = new Map<string, GtfsItinerary[]>();
+  const objectiveSampleLimit = Math.max(1, Math.floor(limit / 5));
+  const retainObjectiveCandidate = (key: string, candidate: GtfsItinerary,
+    compare: (left: GtfsItinerary, right: GtfsItinerary) => number) => {
+    const sample = objectiveCandidateSamples.get(key) ?? [];
+    if (sample.some((item) => item.id === candidate.id)) return;
+    let low = 0, high = sample.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (compare(sample[middle], candidate) <= 0) low = middle + 1;
+      else high = middle;
+    }
+    if (low >= objectiveSampleLimit) return;
+    sample.splice(low, 0, candidate);
+    if (sample.length > objectiveSampleLimit) sample.pop();
+    objectiveCandidateSamples.set(key, sample);
+  };
+  const retainCandidateObjectives = (candidate: GtfsItinerary) => {
+    retainObjectiveCandidate('duration', candidate, (a, b) => a.durationSeconds - b.durationSeconds
+      || a.transfers - b.transfers || compareStableId(a.id, b.id));
+    if (candidate.fare?.currency === 'UAH') retainObjectiveCandidate('fare', candidate, (a, b) => a.fare!.priceMinor - b.fare!.priceMinor
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+    retainObjectiveCandidate('transfers', candidate, (a, b) => a.transfers - b.transfers
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+    retainObjectiveCandidate('walking', candidate, (a, b) => a.walkingMeters - b.walkingMeters
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  };
   const resultCountByRouteChain = new Map<string, number>();
+  const resultIdsByRouteChain = new Map<string, Set<string>>();
+  const resultIdsByTripChain = new Map<string, Set<string>>();
   const resultCountByLegCount = new Map<number, number>();
   const MAX_RESULTS_PER_ROUTE_CHAIN = 8;
+  // Keep a few useful boarding/alighting variants for the same scheduled
+  // vehicles, selected across time, fare, transfer, and walking objectives.
+  const MAX_RESULTS_PER_TRIP_CHAIN = 2;
   const maxTransitLegs = maximumTransfers + 1;
-  // Keep twice the visible limit per chain length so the later multi-objective
-  // ranking can compare a broader, balanced pool instead of ranking only the
-  // first page of depth-first discoveries.
-  const MAX_CANDIDATES_PER_LEG_COUNT = Math.min(limit * 2, 500);
+  // Keep the per-leg sampling cap independent of the caller's response-page
+  // size so later cross-provider ranking receives a consistent diverse pool.
+  // The separate global result cap below still bounds retained path objects.
+  const MAX_CANDIDATES_PER_LEG_COUNT = 500;
   // Most city-feed stops cannot lead to this destination. Exclude those dead
   // ends before enumerating timed transfer combinations.
   const reachableWithin = [destinationStopIds];
@@ -1645,6 +1939,15 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     }
     reachableWithin.push(reachable);
   }
+  const transferCandidatesWithin = (previous: GtfsDirectJourney, remainingLegs: number) => {
+    const cacheKey = `${transferCandidateViewKey(previous)}\u0001${remainingLegs}`;
+    const cached = transferCandidateReachableCache.get(cacheKey);
+    if (cached) return cached;
+    const canReach = reachableWithin[remainingLegs - 1];
+    const candidates = transferCandidates(previous).filter((candidate) => canReach.has(candidate.destinationStop.id));
+    transferCandidateReachableCache.set(cacheKey, candidates);
+    return candidates;
+  };
   debugStage('reachability-built', { transferStates: transferCandidateCache.size,
     routeStates: transferCandidateViewCache.size, reachableStops: reachableWithin.at(-1)?.size ?? 0 });
   const maxFirstDeparture = input.latestDeparture.getTime();
@@ -1680,14 +1983,13 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const routeChain = path.map((segment, index) => index === 0 || path[index - 1].providerId !== segment.providerId
       || path[index - 1].routeId !== segment.routeId ? `${segment.providerId}:${segment.routeId}` : '')
       .filter(Boolean).join('>');
-    const routeChainCount = resultCountByRouteChain.get(routeChain) ?? 0;
+    const routeChainIds = resultIdsByRouteChain.get(routeChain) ?? new Set<string>();
+    const tripChain = path.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+    const tripChainIds = resultIdsByTripChain.get(tripChain) ?? new Set<string>();
+    const isKnownTripChain = tripChainIds.size > 0;
     const legCount = resultCountByLegCount.get(path.length) ?? 0;
-    if (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || routeChainCount >= MAX_RESULTS_PER_ROUTE_CHAIN) {
-      candidateSamplingTruncated = true;
-      return;
-    }
-    if (results.size < MAX_SEARCH_RESULTS) {
-      results.set(id, {
+    const canReplaceRouteChainCandidate = routeChainIds.size >= MAX_RESULTS_PER_ROUTE_CHAIN;
+    const candidate: GtfsItinerary = {
       id, providerId: first.providerId,
       providerName: [...new Set(path.map((segment) => segment.providerName))].join(' + '),
       segments: path, departureAt, arrivalAt, durationSeconds,
@@ -1718,10 +2020,72 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         departureAt: segment.departureAt,
         arrivalAt: segment.arrivalAt,
       }))),
-      });
-      resultCountByRouteChain.set(routeChain, routeChainCount + 1);
-      resultCountByLegCount.set(path.length, legCount + 1);
+    };
+    if ((!isKnownTripChain && !canReplaceRouteChainCandidate
+      && (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || results.size >= MAX_SEARCH_RESULTS))) {
+      // Keep a small per-objective reservoir after the bounded general pool
+      // fills. A late known-cheapest option must remain available to the
+      // CHEAPEST response even though the complete search is still flagged as
+      // sampled/truncated.
+      retainCandidateObjectives(candidate);
+      candidateSamplingTruncated = true;
+      return;
     }
+    const existingVariants = [...tripChainIds].flatMap((existingId) => {
+      const existing = results.get(existingId);
+      return existing ? [existing] : [];
+    });
+    const selectedVariants = sampleGtfsTripChainCandidates([...existingVariants, candidate], MAX_RESULTS_PER_TRIP_CHAIN);
+    const selectedIds = new Set(selectedVariants.map((itinerary) => itinerary.id));
+    if (!selectedIds.has(id)) {
+      candidateSamplingTruncated = true;
+      return;
+    }
+
+    const replacedTripVariants = existingVariants.filter((variant) => !selectedIds.has(variant.id));
+    const tripVariantsForRouteSample = [...routeChainIds]
+      .filter((existingId) => !replacedTripVariants.some((variant) => variant.id === existingId))
+      .flatMap((existingId) => {
+        const existing = results.get(existingId);
+        return existing ? [existing] : [];
+      });
+    const selectedRouteVariants = sampleGtfsRouteChainCandidates([...tripVariantsForRouteSample, candidate], MAX_RESULTS_PER_ROUTE_CHAIN);
+    const selectedRouteIds = new Set(selectedRouteVariants.map((itinerary) => itinerary.id));
+    if (!selectedRouteIds.has(id)) {
+      candidateSamplingTruncated = true;
+      return;
+    }
+
+    const removedIds = new Set([...replacedTripVariants.map((variant) => variant.id),
+      ...tripVariantsForRouteSample.filter((variant) => !selectedRouteIds.has(variant.id)).map((variant) => variant.id)]);
+    if (results.size - removedIds.size + 1 > MAX_SEARCH_RESULTS) {
+      retainCandidateObjectives(candidate);
+      candidateSamplingTruncated = true;
+      return;
+    }
+
+    for (const removedId of removedIds) {
+      const removed = results.get(removedId);
+      if (!removed) continue;
+      results.delete(removedId);
+      routeChainIds.delete(removedId);
+      const removedTripChain = removed.segments.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+      const removedTripChainIds = resultIdsByTripChain.get(removedTripChain);
+      removedTripChainIds?.delete(removedId);
+      if (removedTripChainIds?.size === 0) resultIdsByTripChain.delete(removedTripChain);
+      resultCountByRouteChain.set(routeChain, Math.max(0, (resultCountByRouteChain.get(routeChain) ?? 1) - 1));
+      resultCountByLegCount.set(removed.segments.length,
+        Math.max(0, (resultCountByLegCount.get(removed.segments.length) ?? 1) - 1));
+    }
+    results.set(id, candidate);
+    tripChainIds.add(id);
+    resultIdsByTripChain.set(tripChain, tripChainIds);
+    routeChainIds.add(id);
+    resultIdsByRouteChain.set(routeChain, routeChainIds);
+    resultCountByRouteChain.set(routeChain, (resultCountByRouteChain.get(routeChain) ?? 0) + 1);
+    resultCountByLegCount.set(path.length, (resultCountByLegCount.get(path.length) ?? 0) + 1);
+    if (results.size >= MAX_SEARCH_RESULTS && candidatePoolReachedAtStep === null) candidatePoolReachedAtStep = searchSteps;
+    if (removedIds.size > 0) candidateSamplingTruncated = true;
   };
 
   // Bound both graph expansion and queued alternatives. Search is round-robin
@@ -1732,10 +2096,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
   // but do not cut off ordinary city results at the first-route frontier.
   const MAX_SEARCH_STEPS = 1_000_000;
-  const MAX_SEARCH_RESULTS = limit * 25;
   let searchBudgetTruncated = false;
   let maximumQueuedSearchWork = 0;
-  let activeDepthLimitReached = false;
 
   // Feed/trip insertion order is not a routing priority. In a dense city feed,
   // the bounded DFS could spend its entire budget on late or poorly connected
@@ -1753,8 +2115,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         || a.departureAt.getTime() - b.departureAt.getTime()
         || a.distanceToOriginStopMeters - b.distanceToOriginStopMeters
         || a.arrivalAt.getTime() - b.arrivalAt.getTime()
-        || a.tripId.localeCompare(b.tripId)
-        || a.destinationStop.id.localeCompare(b.destinationStop.id);
+        || compareStableId(a.tripId, b.tripId)
+        || compareStableId(a.destinationStop.id, b.destinationStop.id);
     });
 
   type PathWork = { kind: 'path'; path: GtfsDirectJourney[] };
@@ -1784,6 +2146,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     queuesPendingWork++;
   };
   let queuesPendingWork = 0;
+  const canContinueCandidateSearch = () => results.size < MAX_SEARCH_RESULTS
+    || candidatePoolReachedAtStep === null
+    || searchSteps - candidatePoolReachedAtStep < MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
   const takeNextWork = (queue: RouteSearchQueue): SearchWork | undefined => {
     if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length) {
       queue.preferFirstLeg = false;
@@ -1812,17 +2177,13 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const last = path.at(-1)!;
     if (destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
       addPath(path, maximumLegsForPass);
-      if ((resultCountByLegCount.get(maximumLegsForPass) ?? 0) >= MAX_CANDIDATES_PER_LEG_COUNT) {
-        activeDepthLimitReached = true;
-        candidateSamplingTruncated = true;
-      }
     }
     const remainingLegs = maximumLegsForPass - path.length;
-    if (activeDepthLimitReached || remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return;
+    if (remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return;
     const previousIds = new Set(path.map((segment) => segment.tripId));
     const visitedStops = new Set(path.map((segment) => segment.originStop.id));
     visitedStops.add(last.destinationStop.id);
-    const choices = transferCandidates(last);
+    const choices = transferCandidatesWithin(last, remainingLegs);
     const latestNext = Math.min(last.arrivalAt.getTime() + maximumWaitSeconds * 1000, journeyEnd.getTime());
     let low = 0, high = choices.length;
     while (low < high) {
@@ -1861,7 +2222,6 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       ? MAX_SEARCH_STEPS
       : Math.min(MAX_SEARCH_STEPS, searchSteps + Math.max(1,
         Math.floor((MAX_SEARCH_STEPS - searchSteps) * depthWeights[depthIndex] / remainingWeight)));
-    activeDepthLimitReached = false;
     const firstLegGroups = new Map<string, GtfsDirectJourney[]>();
     for (const segment of firstLegs) {
       const key = `${segment.providerId}:${segment.routeId}`;
@@ -1873,12 +2233,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true,
     }));
-    while (!activeDepthLimitReached && searchSteps < stepLimit
-      && searchSteps < MAX_SEARCH_STEPS && results.size < MAX_SEARCH_RESULTS) {
+    while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS && canContinueCandidateSearch()) {
       let processed = false;
       for (const queue of queues) {
-        if (activeDepthLimitReached || searchSteps >= stepLimit
-          || searchSteps >= MAX_SEARCH_STEPS || results.size >= MAX_SEARCH_RESULTS) break;
+        if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS || !canContinueCandidateSearch()) break;
         const work = takeNextWork(queue);
         if (!work) continue;
         processed = true;
@@ -1888,39 +2246,29 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       if (!processed) break;
     }
     if (searchSteps >= stepLimit && hasQueuedWork(queues)) searchBudgetTruncated = true;
+    if (!canContinueCandidateSearch() && hasQueuedWork(queues)) searchBudgetTruncated = true;
   }
 
-  const rankedResults = [...results.values()]
-    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || a.id.localeCompare(b.id));
+  const allCandidateIds = new Set(results.keys());
+  const rankedResults = [...results.values()];
+  for (const sample of objectiveCandidateSamples.values()) {
+    for (const candidate of sample) {
+      if (allCandidateIds.has(candidate.id)) continue;
+      allCandidateIds.add(candidate.id);
+      rankedResults.push(candidate);
+    }
+  }
+  rankedResults.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byDuration = [...rankedResults].sort((a, b) => a.durationSeconds - b.durationSeconds
-    || a.transfers - b.transfers || a.id.localeCompare(b.id));
+    || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byComparableFare = rankedResults.filter((itinerary) => itinerary.fare?.currency === 'UAH')
     .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor
-      || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const byTransfers = [...rankedResults].sort((a, b) => a.transfers - b.transfers
-    || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const byWalking = [...rankedResults].sort((a, b) => a.walkingMeters - b.walkingMeters
-    || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
-  const minDuration = Math.min(...rankedResults.map((itinerary) => itinerary.durationSeconds));
-  const maxDuration = Math.max(...rankedResults.map((itinerary) => itinerary.durationSeconds));
-  const minFare = byComparableFare.length
-    ? Math.min(...byComparableFare.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
-  const maxFare = byComparableFare.length
-    ? Math.max(...byComparableFare.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
-  const minTransfers = Math.min(...rankedResults.map((itinerary) => itinerary.transfers));
-  const maxTransfers = Math.max(...rankedResults.map((itinerary) => itinerary.transfers));
-  const minWalking = Math.min(...rankedResults.map((itinerary) => itinerary.walkingMeters));
-  const maxWalking = Math.max(...rankedResults.map((itinerary) => itinerary.walkingMeters));
-  const normalize = (value: number, min: number, max: number) => max === min ? 0 : (value - min) / (max - min);
-  const balanced = [...rankedResults].sort((a, b) => {
-    const score = (itinerary: GtfsItinerary) => 0.35 * normalize(itinerary.durationSeconds, minDuration, maxDuration)
-      + 0.25 * (itinerary.fare?.currency === 'UAH' && maxFare > minFare
-        ? normalize(itinerary.fare.priceMinor, minFare, maxFare) : 0)
-      + 0.10 * normalize(itinerary.transfers, minTransfers, maxTransfers)
-      + 0.10 * normalize(itinerary.walkingMeters, minWalking, maxWalking)
-      + 0.20 * (itinerary.transfers > 0 ? 0.3 : 0);
-    return score(a) - score(b) || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id);
-  });
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const balanced = rankGtfsItinerariesForCandidateSampling(rankedResults);
 
   // Preserve objective extremes before filling the remaining response with
   // the fastest alternatives. The API scores these candidates again together
@@ -1939,7 +2287,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     selected.set(itinerary.id, itinerary);
   }
   const itineraries = [...selected.values()]
-    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || a.id.localeCompare(b.id));
+    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
   for (const itinerary of itineraries) {
     for (const segment of itinerary.segments) {
       const indexes = shapeIndexesBySegment.get(segment);
@@ -1957,15 +2305,17 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     returned: itineraries.length,
     stopSelectionTruncated: Number(stopSelectionTruncated), searchBudgetTruncated: Number(searchBudgetTruncated),
     searchStepLimitReached: Number(searchSteps >= MAX_SEARCH_STEPS), candidateResultLimitReached: Number(results.size >= MAX_SEARCH_RESULTS),
-    candidateSamplingTruncated: Number(candidateSamplingTruncated), maxQueuedSearchWork: maximumQueuedSearchWork,
-    searchTruncated: Number(stopSelectionTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
+    candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
+    maxQueuedSearchWork: maximumQueuedSearchWork,
+    searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
   return {
     itineraries,
-    searchTruncated: stopSelectionTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
+    searchTruncated: stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS,
     resultLimitReached: rankedResults.length > itineraries.length || candidateSamplingTruncated,
+    candidateGraphTruncated: segmentGraphTruncated,
   };
 }
 

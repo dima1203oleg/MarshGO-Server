@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
@@ -296,6 +296,80 @@ test('reports when the itinerary result limit hides additional route chains', ()
   assert.equal(result.searchTruncated, false);
 });
 
+test('limits duplicate stop-pair alternatives for the same scheduled trip chain', () => {
+  const timetable = feed({ withIntermediate: true });
+  const stops = [
+    { id: 'origin', name: 'Origin stop', lon: 24.02, lat: 49.84, seconds: 8 * 3600 },
+    { id: 'extra-1', name: 'Extra 1', lon: 24.022, lat: 49.842, seconds: 8 * 3600 + 5 * 60 },
+    { id: 'extra-2', name: 'Extra 2', lon: 24.024, lat: 49.844, seconds: 8 * 3600 + 10 * 60 },
+    { id: 'middle', name: 'Middle stop', lon: 24.025, lat: 49.845, seconds: 8 * 3600 + 20 * 60 },
+    { id: 'extra-3', name: 'Extra 3', lon: 24.028, lat: 49.848, seconds: 8 * 3600 + 30 * 60 },
+    { id: 'destination', name: 'Destination stop', lon: 24.03, lat: 49.85, seconds: 8 * 3600 + 40 * 60 },
+  ];
+  for (const stop of stops.filter((item) => item.id.startsWith('extra'))) {
+    timetable.stops.set(stop.id, { id: stop.id, name: stop.name, lon: stop.lon, lat: stop.lat });
+  }
+  for (const [stopId, entries] of timetable.stopTimesByStop) {
+    timetable.stopTimesByStop.set(stopId, entries.filter((entry) => entry.tripId !== 't1'));
+  }
+  const stopTimes = stops.map((stop, index) => ({
+    stopId: stop.id, sequence: index + 1, arrivalSeconds: stop.seconds, departureSeconds: stop.seconds,
+    pickupType: 0, dropOffType: 0,
+  }));
+  timetable.stopTimes.set('t1', stopTimes);
+  stopTimes.forEach((stop, index) => timetable.stopTimesByStop.set(stop.stopId,
+    [...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: 't1', index }]));
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumTransfers: 0,
+    maximumStopDistanceMeters: 2000,
+  });
+  const countsByTripChain = new Map<string, number>();
+  for (const itinerary of result.itineraries) {
+    const key = itinerary.segments.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+    countsByTripChain.set(key, (countsByTripChain.get(key) ?? 0) + 1);
+  }
+
+  assert.ok(result.itineraries.length > 0);
+  assert.ok([...countsByTripChain.values()].every((count) => count <= 2),
+    'a bounded number of stop-pair choices should share the same scheduled vehicle chain');
+  assert.equal(result.resultLimitReached, true,
+    'suppressing additional stop-pair variants must be visible as candidate sampling');
+});
+
+test('same-trip sampling preserves a genuinely cheaper stop-pair option under the two-variant cap', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const fastest = { ...base, id: 'fastest-stops', durationSeconds: 3_900, walkingMeters: 900,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const cheaper = { ...base, id: 'cheaper-stops', durationSeconds: 4_200, walkingMeters: 700,
+    fare: { priceMinor: 2_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const shortestWalk = { ...base, id: 'shortest-walk-stops', durationSeconds: 4_300, walkingMeters: 300,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+
+  const selected = sampleGtfsTripChainCandidates([shortestWalk, cheaper, fastest]);
+  assert.deepEqual(new Set(selected.map((journey) => journey.id)), new Set([fastest.id, cheaper.id]));
+});
+
+test('same-trip sampling uses the lower-walking boarding choice when fares are equal', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const fastest = { ...base, id: 'fastest-stops', durationSeconds: 3_900, walkingMeters: 900,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const shortestWalk = { ...base, id: 'shortest-walk-stops', durationSeconds: 4_300, walkingMeters: 300,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const ordinary = { ...base, id: 'ordinary-stops', durationSeconds: 4_200, walkingMeters: 700,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+
+  const selected = sampleGtfsTripChainCandidates([ordinary, shortestWalk, fastest]);
+  assert.deepEqual(new Set(selected.map((journey) => journey.id)), new Set([fastest.id, shortestWalk.id]));
+});
+
 test('keeps fastest and cheapest GTFS candidates when the response limit is tight', () => {
   const timetable = feed({ departure: '08:00:00', arrival: '08:30:00' });
   timetable.routes.set('r2', { name: 'Slow cheap bus', mode: 'BUS', transportType: 'bus' });
@@ -329,13 +403,243 @@ test('keeps fastest and cheapest GTFS candidates when the response limit is tigh
   assert.equal(result.itineraries.find((journey) => journey.segments[0]?.routeId === 'r2')?.fare?.priceMinor, 100);
 });
 
-test('round-robins transfer search so a late cheapest line survives a dense candidate list', () => {
+test('keeps a later faster trip within the same route chain after the route-chain sample fills', () => {
+  const timetable = feed();
+  const origin = timetable.stops.get('origin');
+  const destination = timetable.stops.get('destination');
+  assert.ok(origin && destination);
+  const dailyTrips = Array.from({ length: 10 }, (_, index) => ({
+    id: index === 9 ? 'express-trip' : `regular-${index}`,
+    departure: 8 * 3600 + index * 60,
+    arrival: index === 9 ? 8 * 3600 + 15 * 60 : 8 * 3600 + 25 * 60 + index * 60,
+  }));
+  timetable.trips.delete('t1');
+  timetable.stopTimes.delete('t1');
+  for (const entries of timetable.stopTimesByStop.values()) {
+    for (let index = entries.length - 1; index >= 0; index--) {
+      if (entries[index]?.tripId === 't1') entries.splice(index, 1);
+    }
+  }
+  dailyTrips.forEach((trip) => {
+    timetable.trips.set(trip.id, { routeId: 'r', serviceId: 'weekday', headsign: 'Central station' });
+    const stops = [
+      { stopId: 'origin', sequence: 1, arrivalSeconds: trip.departure, departureSeconds: trip.departure, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: trip.arrival, departureSeconds: trip.arrival, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(trip.id, stops);
+    stops.forEach((stop, index) => timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: trip.id, index },
+    ]));
+  });
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    limit: 10, maximumTransfers: 0, maximumStopDistanceMeters: 1000,
+  });
+
+  assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === 'express-trip'),
+    'candidate sampling must not let earlier regular departures hide a later express arrival on the same route chain');
+  assert.equal(result.resultLimitReached, true, 'discarding additional route-chain candidates remains visible');
+});
+
+test('preserves stops for the reverse direction when nearby stops crowd the same route id', () => {
+  const timetable = feed();
+  const originalTrip = timetable.trips.get('t1');
+  assert.ok(originalTrip);
+  timetable.trips.set('t1', { ...originalTrip, directionId: '0' });
+  const terminal = { id: 'far-terminal', name: 'Far terminal', lon: 24.07, lat: 49.87 };
+  timetable.stops.set(terminal.id, terminal);
+
+  // Twenty closer stops all belong to the same route direction. A valid
+  // reverse-direction boarding stop ranks 21st but remains inside the access shed.
+  for (let index = 1; index <= 19; index++) {
+    const stopId = `near-${index}`;
+    const tripId = `near-trip-${index}`;
+    timetable.stops.set(stopId, { id: stopId, name: `Near ${index}`, lon: 24.02 + index * 0.00014, lat: 49.84 });
+    timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Central station', directionId: '0' });
+    timetable.stopTimes.set(tripId, [
+      { stopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: terminal.id, sequence: 2, arrivalSeconds: 9 * 3600, departureSeconds: 9 * 3600, pickupType: 0, dropOffType: 0 },
+    ]);
+    timetable.stopTimesByStop.set(stopId, [{ tripId, index: 0 }]);
+    timetable.stopTimesByStop.set(terminal.id, [
+      ...(timetable.stopTimesByStop.get(terminal.id) ?? []), { tripId, index: 1 },
+    ]);
+  }
+
+  const reverseOriginId = 'reverse-origin';
+  timetable.stops.set(reverseOriginId, { id: reverseOriginId, name: 'Reverse direction stop', lon: 24.0235, lat: 49.84 });
+  timetable.trips.set('reverse-trip', { routeId: 'r', serviceId: 'weekday', headsign: 'South terminal', directionId: '1' });
+  timetable.stopTimes.set('reverse-trip', [
+    { stopId: reverseOriginId, sequence: 1, arrivalSeconds: 8 * 3600 + 5 * 60, departureSeconds: 8 * 3600 + 5 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: 'destination', sequence: 2, arrivalSeconds: 8 * 3600 + 25 * 60, departureSeconds: 8 * 3600 + 25 * 60, pickupType: 0, dropOffType: 0 },
+  ]);
+  timetable.stopTimesByStop.set(reverseOriginId, [{ tripId: 'reverse-trip', index: 0 }]);
+  timetable.stopTimesByStop.set('destination', [
+    ...(timetable.stopTimesByStop.get('destination') ?? []), { tripId: 'reverse-trip', index: 1 },
+  ]);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+
+  assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === 'reverse-trip'));
+  assert.equal(result.searchTruncated, false, 'all in-radius route patterns fit within the bounded stop set');
+});
+
+test('bounds a dense route graph and reports omitted GTFS segment candidates', () => {
+  const timetable = feed();
+  // Routes elsewhere in a national feed must not dilute this corridor's
+  // retention quota when they have no stops in the query's interchange set.
+  for (let index = 0; index < 1_000; index++) {
+    const routeId = `unrelated-${String(index).padStart(4, '0')}`;
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+  }
+  const originEntries = [...(timetable.stopTimesByStop.get('origin') ?? [])];
+  const destinationEntries = [...(timetable.stopTimesByStop.get('destination') ?? [])];
+  for (let index = 0; index < 5_001; index++) {
+    const tripId = `dense-${String(index).padStart(4, '0')}`;
+    timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Destination' });
+    timetable.stopTimes.set(tripId, [
+      { stopId: 'origin', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: 8 * 3600 + 40 * 60, departureSeconds: 8 * 3600 + 40 * 60, pickupType: 0, dropOffType: 0 },
+    ]);
+    originEntries.push({ tripId, index: 0 });
+    destinationEntries.push({ tripId, index: 1 });
+  }
+  // This useful departure is deliberately last in feed insertion order. A
+  // prefix cap drops it even though it is the fastest feasible direct option.
+  timetable.trips.set('fast-late-trip', { routeId: 'r', serviceId: 'weekday', headsign: 'Destination' });
+  timetable.stopTimes.set('fast-late-trip', [
+    { stopId: 'origin', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+    { stopId: 'destination', sequence: 2, arrivalSeconds: 8 * 3600 + 5 * 60, departureSeconds: 8 * 3600 + 5 * 60, pickupType: 0, dropOffType: 0 },
+  ]);
+  timetable.stopTimesByStop.set('origin', originEntries);
+  timetable.stopTimesByStop.set('destination', destinationEntries);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+
+  assert.ok(result.itineraries.length > 0, 'the bounded graph still returns feasible scheduled options');
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === 'fast-late-trip')),
+    'bounded retention must not favor early rows in a chronologically ordered feed');
+  assert.equal(result.searchTruncated, true, 'omitting graph candidates must be visible as a partial search');
+  assert.equal(result.candidateGraphTruncated, true, 'the internal result identifies graph-level truncation');
+  assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
+});
+
+test('excludes isolated remote trip endpoints from the transfer graph and retains a feasible chain', () => {
+  const timetable = connectingFeed();
+  const noiseOrigin = 'noise-origin';
+  const noiseDestination = 'noise-destination';
+  timetable.stops.set(noiseOrigin, { id: noiseOrigin, name: 'Remote line start', lon: 24.0201, lat: 49.86 });
+  timetable.stops.set(noiseDestination, { id: noiseDestination, name: 'Remote line end', lon: 24.0201, lat: 49.862 });
+
+  const originEntries = [...(timetable.stopTimesByStop.get(noiseOrigin) ?? [])];
+  const destinationEntries = [...(timetable.stopTimesByStop.get(noiseDestination) ?? [])];
+  for (let index = 0; index < 11_000; index++) {
+    const tripId = `noise-${String(index).padStart(5, '0')}`;
+    timetable.trips.set(tripId, { routeId: 'rail', serviceId: 'weekday', headsign: 'Remote line end' });
+    timetable.stopTimes.set(tripId, [
+      { stopId: noiseOrigin, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: noiseDestination, sequence: 2, arrivalSeconds: 8 * 3600 + 10 * 60, departureSeconds: 8 * 3600 + 10 * 60, pickupType: 0, dropOffType: 0 },
+    ]);
+    originEntries.push({ tripId, index: 0 });
+    destinationEntries.push({ tripId, index: 1 });
+  }
+  timetable.stopTimesByStop.set(noiseOrigin, originEntries);
+  timetable.stopTimesByStop.set(noiseDestination, destinationEntries);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+  });
+
+  assert.ok(result.itineraries.some((journey) => journey.segments.map((segment) => segment.tripId).join(',') === 'b1,r1'),
+    'the valid bus-to-rail connection remains in the candidate graph');
+  assert.equal(result.candidateGraphTruncated, false, 'isolated one-way endpoints do not create an artificial graph overflow');
+  assert.equal(result.searchTruncated, false, 'the complete small corridor query is not reported as partial');
+});
+
+test('does not treat an unknown fare as free in balanced GTFS candidate sampling', () => {
+  const base = findGtfsItineraries(connectingFeed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+  })[0];
+  assert.ok(base);
+  const known = {
+    ...base,
+    id: 'known-zero-fare',
+    durationSeconds: base.durationSeconds + 60,
+    fare: { priceMinor: 0, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  };
+  const unknown = {
+    ...base,
+    id: 'unknown-fare',
+    fare: null,
+  };
+  const slowerKnown = {
+    ...known,
+    id: 'slower-known-fare',
+    durationSeconds: base.durationSeconds + 3600,
+  };
+
+  const ranked = rankGtfsItinerariesForCandidateSampling([unknown, known, slowerKnown]);
+  assert.deepEqual(ranked.map((itinerary) => itinerary.id), ['known-zero-fare', 'unknown-fare', 'slower-known-fare']);
+  assert.equal(unknown.fare, null, 'unknown fare remains unknown in the candidate data');
+});
+
+test('route-chain sample preserves both FASTEST and CHEAPEST extremes', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const ordinary = Array.from({ length: 10 }, (_, index) => ({
+    ...base, id: `ordinary-${index}`, durationSeconds: 4_000 + index * 30,
+    fare: { priceMinor: 600 + index * 20, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  }));
+  const fastest = { ...base, id: 'fastest-extreme', durationSeconds: 1_800,
+    fare: { priceMinor: 1_500, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const cheapest = { ...base, id: 'cheapest-extreme', durationSeconds: 7_200,
+    fare: { priceMinor: 100, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const selected = sampleGtfsRouteChainCandidates([...ordinary, fastest, cheapest], 8);
+
+  assert.equal(selected.length, 8);
+  assert.ok(selected.some((journey) => journey.id === fastest.id), 'the fastest option survives route-chain sampling');
+  assert.ok(selected.some((journey) => journey.id === cheapest.id), 'the cheapest known-fare option survives route-chain sampling');
+});
+
+test('route-chain sample tie-break is locale-independent and stable across input order', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const ids = ['Z', 'a', 'Б', 'А', '10', '2', 'z', 'A', 'а', 'б'];
+  const equalCandidates = ids.map((id) => ({
+    ...base,
+    id,
+    durationSeconds: 3_600,
+    transfers: 0,
+    walkingMeters: 100,
+    fare: { priceMinor: 500, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  }));
+
+  const forward = sampleGtfsRouteChainCandidates(equalCandidates, 4).map((journey) => journey.id);
+  const reversed = sampleGtfsRouteChainCandidates([...equalCandidates].reverse(), 4).map((journey) => journey.id);
+  assert.deepEqual(forward, ['10', '2', 'A', 'Z']);
+  assert.deepEqual(reversed, forward, 'equal-score sample does not depend on feed/input insertion order');
+});
+
+test('retains the late cheapest transfer after the bounded candidate pool fills', () => {
   const timetable = connectingFeed();
   const products = new Map<string, { id: string; priceMinor: number; currency: string; transfers: number; transferDurationSeconds: null }>();
   const rules = new Map<string, Array<{ fareId: string; routeId: string }>>();
   products.set('bus-fare', { id: 'bus-fare', priceMinor: 1000, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
   rules.set('bus-fare', [{ fareId: 'bus-fare', routeId: 'bus' }]);
-  for (let index = 1; index <= 130; index++) {
+  for (let index = 1; index <= 520; index++) {
     const suffix = String(index).padStart(3, '0');
     const routeId = `alt-${suffix}`;
     const tripId = `alt-trip-${suffix}`;
@@ -348,7 +652,7 @@ test('round-robins transfer search so a late cheapest line survives a dense cand
     ]);
     timetable.stopTimesByStop.set('hub', [...(timetable.stopTimesByStop.get('hub') ?? []), { tripId, index: 0 }]);
     timetable.stopTimesByStop.set('finish', [...(timetable.stopTimesByStop.get('finish') ?? []), { tripId, index: 1 }]);
-    products.set(fareId, { id: fareId, priceMinor: index === 130 ? 100 : 1000, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
+    products.set(fareId, { id: fareId, priceMinor: index === 520 ? 100 : 1000, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
     rules.set(fareId, [{ fareId, routeId }]);
   }
   timetable.fareProducts = products;
@@ -360,9 +664,61 @@ test('round-robins transfer search so a late cheapest line survives a dense cand
     maximumTransferWalkingMeters: 200, maximumTransfers: 1, limit: 100,
   });
 
-  const cheapestLateLine = result.itineraries.find((journey) => journey.segments.at(-1)?.routeId === 'alt-130');
-  assert.ok(cheapestLateLine, 'the 130th feasible transfer candidate is the lowest-fare route and must be considered');
+  const cheapestLateLine = result.itineraries.find((journey) => journey.segments.at(-1)?.routeId === 'alt-520');
+  assert.ok(cheapestLateLine, 'the 520th feasible transfer candidate is the lowest-fare route and must survive the 500-item candidate cap');
   assert.equal(cheapestLateLine.fare?.priceMinor, 1100);
+});
+
+test('keeps a globally cheapest direct route discovered after the bounded candidate pool fills', () => {
+  const timetable = connectingFeed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  const products = new Map<string, { id: string; priceMinor: number; currency: string; transfers: number; transferDurationSeconds: null }>();
+  const rules = new Map<string, Array<{ fareId: string; routeId: string }>>();
+  const directRoutes = Array.from({ length: 500 }, (_, index) => `line-${String(index).padStart(3, '0')}`);
+  directRoutes.push('zz-cheapest-line');
+  for (const routeId of directRoutes) {
+    const tripId = `trip-${routeId}`;
+    const fareId = `fare-${routeId}`;
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Finish' });
+    const entries = [
+      { stopId: 'start', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: 'finish', sequence: 2, arrivalSeconds: 8 * 3600 + 20 * 60, departureSeconds: 8 * 3600 + 20 * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => {
+      const atStop = timetable.stopTimesByStop.get(entry.stopId) ?? [];
+      atStop.push({ tripId, index });
+      timetable.stopTimesByStop.set(entry.stopId, atStop);
+    });
+    products.set(fareId, { id: fareId, priceMinor: routeId === 'zz-cheapest-line' ? 100 : 1000, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
+    rules.set(fareId, [{ fareId, routeId }]);
+  }
+  timetable.fareProducts = products;
+  timetable.fareRules = rules;
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumTransfers: 0, maximumStopDistanceMeters: 300, limit: 100,
+  });
+
+  const cheapest = result.itineraries.find((journey) => journey.segments[0]?.routeId === 'zz-cheapest-line');
+  assert.ok(cheapest, 'the CHEAPEST strategy candidate must survive the internal 500-itinerary sample cap');
+  assert.equal(cheapest.fare?.priceMinor, 100);
+  assert.equal(result.resultLimitReached, true, 'the response must still report that candidate sampling omitted alternatives');
+  assert.equal(result.candidateGraphTruncated, false, 'the test exhausts a complete route graph but exceeds the retained candidate sample');
+
+  const globalLimitResult = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumTransfers: 0, maximumStopDistanceMeters: 300, limit: 5,
+  });
+  const globallyRetainedCheapest = globalLimitResult.itineraries.find((journey) => journey.segments[0]?.routeId === 'zz-cheapest-line');
+  assert.ok(globallyRetainedCheapest, 'the objective reservoir must also protect the cheapest route after the global pool cap when space remains for multiple objectives');
+  assert.equal(globallyRetainedCheapest.fare?.priceMinor, 100);
+  assert.equal(globalLimitResult.resultLimitReached, true);
 });
 
 test('uses calendar date exceptions before weekly service and excludes removed service', () => {

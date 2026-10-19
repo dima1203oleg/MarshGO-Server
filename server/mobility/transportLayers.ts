@@ -19,11 +19,16 @@ export const isLineType = (value: string): value is LineType => LINE_TYPES.has(v
 export interface NetworkStop { id: string; name: string; lon: number; lat: number; types: LineType[]; routes: string[] }
 export interface NetworkRoute { id: string; name: string; type: LineType; direction: string; directionId?: string; geometrySource?: 'gtfs_shape' | 'stop_sequence' | 'provider_geojson'; stopCount: number; coordinates: Array<[number, number]> }
 export interface TransportNetwork { stops: NetworkStop[]; routes: NetworkRoute[]; bbox: Bbox | null }
-const networkSchema = z.object({
+export const networkSchema = z.object({
   stops: z.array(z.object({ id: z.string(), name: z.string(), lon: z.number().finite().min(-180).max(180), lat: z.number().finite().min(-90).max(90), types: z.array(z.enum(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular'])), routes: z.array(z.string()) })),
-  routes: z.array(z.object({ id: z.string(), name: z.string(), type: z.enum(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular']), direction: z.string(), stopCount: z.number().int().nonnegative(), coordinates: z.array(z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)])).min(2).max(250_000) })),
+  routes: z.array(z.object({
+    id: z.string(), name: z.string(), type: z.enum(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular']),
+    direction: z.string(), directionId: z.string().optional(), geometrySource: z.enum(['gtfs_shape', 'stop_sequence', 'provider_geojson']).optional(),
+    stopCount: z.number().int().nonnegative(), coordinates: z.array(z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)])).min(2).max(250_000),
+  })),
   bbox: z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90), z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)]).nullable(),
 });
+export const NETWORK_CACHE_SCHEMA_VERSION = 2;
 
 function rows(text: string | undefined): Array<Record<string, string>> {
   if (!text) return [];
@@ -188,7 +193,7 @@ export function buildGeoJsonNetwork(body: unknown, mode: LineType): TransportNet
 /** Static networks use shared L2 only when a source sync version is known; unknown versions get a short process-local cache. */
 export function cachedNetwork(providerId: string, url: string, sourceVersion?: string | null): Promise<TransportNetwork> {
   const version = sourceVersion?.trim() || null;
-  return smartCache.getOrLoad('gtfs_network', { providerId, url, sourceVersion: version }, networkSchema, {
+  return smartCache.getOrLoad('gtfs_network', { providerId, url, sourceVersion: version, schemaVersion: NETWORK_CACHE_SCHEMA_VERSION }, networkSchema, {
     ttlMs: NETWORK_TTL_MS,
     l1TtlMs: version ? 10 * 60_000 : 60_000,
     maxL2Bytes: 8 * 1024 * 1024,
@@ -204,7 +209,7 @@ export function cachedNetwork(providerId: string, url: string, sourceVersion?: s
 
 export function cachedGeoJsonNetwork(providerId: string, url: string, mode: LineType, sourceVersion?: string | null): Promise<TransportNetwork> {
   const version = sourceVersion?.trim() || null;
-  return smartCache.getOrLoad('gtfs_network', { providerId, url, mode, sourceVersion: version }, networkSchema, {
+  return smartCache.getOrLoad('gtfs_network', { providerId, url, mode, sourceVersion: version, schemaVersion: NETWORK_CACHE_SCHEMA_VERSION }, networkSchema, {
     ttlMs: NETWORK_TTL_MS,
     l1TtlMs: version ? 10 * 60_000 : 60_000,
     maxL2Bytes: 8 * 1024 * 1024,

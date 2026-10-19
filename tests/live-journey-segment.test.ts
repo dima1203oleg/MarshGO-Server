@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 import { buildLiveJourneySegment } from '../server/journey/liveJourneySegments';
-import type { LiveVehicle, TransportNetwork } from '../server/mobility/transportLayers';
+import { networkSchema, type LiveVehicle, type TransportNetwork } from '../server/mobility/transportLayers';
 
 const providerId = 'provider-1';
 const now = Date.parse('2026-10-18T10:00:00.000Z');
@@ -84,6 +84,17 @@ describe('live journey segment assembly', () => {
     assert.equal(result.vehicles.find(({ id }) => id.endsWith(':unknown-trip'))?.approachingBoarding, false);
     assert.equal(result.vehicles.find(({ id }) => id.endsWith(':far'))?.approachingBoarding, true);
     assert.equal(result.vehicle?.coordinates[0], 24.02);
+  });
+
+  it('preserves GTFS direction and geometry provenance across the cached network schema', () => {
+    const cachedNetwork = networkSchema.parse(network());
+    const result = buildLiveJourneySegment(leg, { vehicles: [], network: cachedNetwork, timetable: feed() }, now);
+
+    assert.deepEqual(cachedNetwork.routes.slice(0, 2).map(({ directionId, geometrySource }) => ({ directionId, geometrySource })), [
+      { directionId: '0', geometrySource: 'gtfs_shape' },
+      { directionId: '1', geometrySource: 'gtfs_shape' },
+    ]);
+    assert.deepEqual(result.lineRoutes.map(({ directionId }) => directionId), ['0', '1']);
   });
 
   it('keeps a verified scheduled line when live positions are absent and refuses stop-sequence estimates as full line geometry', () => {

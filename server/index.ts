@@ -726,9 +726,9 @@ app.post('/api/v1/mobility/transfers/search', requireAuth, placeSearchLimiter, a
 }));
 
 // ---- Map layers (2D). Everything is loaded per viewport and per layer; the client asks only for layers the user switched on. ----
-type LayerProviderRow = { id: string; name: string; city: string; provider_type: string; source_type: string; feed_url: string; operator_id: string | null; source_version: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } };
+type LayerProviderRow = { id: string; name: string; city: string; country: string; provider_type: string; source_type: string; feed_url: string; operator_id: string | null; source_version: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } };
 const layerProviders = async (sourceTypes: string[], providerTypes: string[]) => (await pool.query<LayerProviderRow>(
-  `SELECT mp.id,COALESCE(mo.provider_name,mp.name) AS name,mp.city,mp.provider_type,mp.source_type,mp.feed_url,mp.operator_id,mp.last_report->>'sourceVersion' AS source_version,mp.last_report
+  `SELECT mp.id,COALESCE(mo.provider_name,mp.name) AS name,mp.city,mp.country,mp.provider_type,mp.source_type,mp.feed_url,mp.operator_id,mp.last_report->>'sourceVersion' AS source_version,mp.last_report
      FROM mobility_providers mp LEFT JOIN mobility_operators mo ON mo.provider_id=mp.operator_id
     WHERE mp.status='enabled' AND mp.health IN ('healthy','degraded') AND mp.source_type = ANY($1) AND mp.provider_type = ANY($2) ORDER BY mp.priority,mp.name`, [sourceTypes, providerTypes],
 )).rows;
@@ -962,7 +962,7 @@ app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req,
   const wantStations = wanted.includes('stations');
   if (!box || (assetTypes.size === 0 && !wantStations)) throw new ApiError(400, 'bbox (at most 0.6 degree) and types (bike, scooter, carsharing, stations) are required', 'invalid_transport_query');
   const providers = (await layerProviders(['gbfs'], ['bike', 'ebike', 'scooter', 'carsharing'])).filter((row) => providerTouches(row, box));
-  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url).then((snapshot) => ({ row, snapshot })))));
+  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })))));
   const features: unknown[] = [];
   let staleAssets = 0;
   for (const item of settled) {
@@ -996,7 +996,7 @@ app.get('/api/v1/transport/micromobility/geofences', requireAuth, asyncHandler(a
   const box = parseBbox(req.query.bbox, 0.6);
   if (!box) throw new ApiError(400, 'bbox (at most 0.6 degree) is required', 'invalid_transport_query');
   const providers = (await layerProviders(['gbfs'], ['scooter'])).filter((row) => providerTouches(row, box));
-  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url).then((snapshot) => ({ row, snapshot })))));
+  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })))));
   const features = settled.flatMap((item) => item.ok ? buildMicromobilityGeofenceFeatures(
     { id: item.value.row.id, name: item.value.row.name, operatorId: item.value.row.operator_id }, item.value.snapshot,
     { west: box[0], south: box[1], east: box[2], north: box[3] },
@@ -2856,7 +2856,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       allowedTransportTypes: search.preferences.allowedTransportTypes,
     });
     // Reaching the requested top-N result count is normal ranking behavior;
-    // only a hard search budget/step cap means candidate generation was cut short.
+    // a stop, graph, or search-budget cap means candidate generation was cut short.
     candidateGenerationTruncated ||= itinerarySearch.searchTruncated;
     resultSamplingTruncated ||= itinerarySearch.resultLimitReached;
     const itineraries = itinerarySearch.itineraries.map(fareForPassengerCount);

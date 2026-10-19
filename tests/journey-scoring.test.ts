@@ -15,6 +15,14 @@ describe('Journey strategy scoring', () => {
     assert.equal(scoreJourneys(candidates, 'CHEAPEST')[0].journey.id, 'bus');
   });
 
+  it('uses locale-independent IDs to break equal-score ties regardless of input order', () => {
+    const tied = ['Z', 'a', 'Б', 'А', '10', '2'].map((id) => ({ ...candidates[0]!, id }));
+    const forward = scoreJourneys(tied, 'BALANCED').map(({ journey }) => journey.id);
+    const reversed = scoreJourneys([...tied].reverse(), 'BALANCED').map(({ journey }) => journey.id);
+    assert.deepEqual(forward, ['10', '2', 'Z', 'a', 'А', 'Б']);
+    assert.deepEqual(reversed, forward);
+  });
+
   it('uses the documented normalized weights for the default balanced mode', () => {
     assert.deepEqual(JOURNEY_SCORE_WEIGHTS.BALANCED, {
       time: 0.35, price: 0.25, transfers: 0.10, walking: 0.10, risk: 0.20, comfort: 0,
