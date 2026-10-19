@@ -296,6 +296,48 @@ test('reports when the itinerary result limit hides additional route chains', ()
   assert.equal(result.searchTruncated, false);
 });
 
+test('limits duplicate stop-pair alternatives for the same scheduled trip chain', () => {
+  const timetable = feed({ withIntermediate: true });
+  const stops = [
+    { id: 'origin', name: 'Origin stop', lon: 24.02, lat: 49.84, seconds: 8 * 3600 },
+    { id: 'extra-1', name: 'Extra 1', lon: 24.022, lat: 49.842, seconds: 8 * 3600 + 5 * 60 },
+    { id: 'extra-2', name: 'Extra 2', lon: 24.024, lat: 49.844, seconds: 8 * 3600 + 10 * 60 },
+    { id: 'middle', name: 'Middle stop', lon: 24.025, lat: 49.845, seconds: 8 * 3600 + 20 * 60 },
+    { id: 'extra-3', name: 'Extra 3', lon: 24.028, lat: 49.848, seconds: 8 * 3600 + 30 * 60 },
+    { id: 'destination', name: 'Destination stop', lon: 24.03, lat: 49.85, seconds: 8 * 3600 + 40 * 60 },
+  ];
+  for (const stop of stops.filter((item) => item.id.startsWith('extra'))) {
+    timetable.stops.set(stop.id, { id: stop.id, name: stop.name, lon: stop.lon, lat: stop.lat });
+  }
+  for (const [stopId, entries] of timetable.stopTimesByStop) {
+    timetable.stopTimesByStop.set(stopId, entries.filter((entry) => entry.tripId !== 't1'));
+  }
+  const stopTimes = stops.map((stop, index) => ({
+    stopId: stop.id, sequence: index + 1, arrivalSeconds: stop.seconds, departureSeconds: stop.seconds,
+    pickupType: 0, dropOffType: 0,
+  }));
+  timetable.stopTimes.set('t1', stopTimes);
+  stopTimes.forEach((stop, index) => timetable.stopTimesByStop.set(stop.stopId,
+    [...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: 't1', index }]));
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumTransfers: 0,
+    maximumStopDistanceMeters: 2000,
+  });
+  const countsByTripChain = new Map<string, number>();
+  for (const itinerary of result.itineraries) {
+    const key = itinerary.segments.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+    countsByTripChain.set(key, (countsByTripChain.get(key) ?? 0) + 1);
+  }
+
+  assert.ok(result.itineraries.length > 0);
+  assert.ok([...countsByTripChain.values()].every((count) => count <= 2),
+    'a bounded number of stop-pair choices should share the same scheduled vehicle chain');
+  assert.equal(result.resultLimitReached, true,
+    'suppressing additional stop-pair variants must be visible as candidate sampling');
+});
+
 test('keeps fastest and cheapest GTFS candidates when the response limit is tight', () => {
   const timetable = feed({ departure: '08:00:00', arrival: '08:30:00' });
   timetable.routes.set('r2', { name: 'Slow cheap bus', mode: 'BUS', transportType: 'bus' });

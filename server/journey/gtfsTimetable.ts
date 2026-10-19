@@ -1745,8 +1745,12 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
 
   const results = new Map<string, GtfsItinerary>();
   const resultCountByRouteChain = new Map<string, number>();
+  const resultIdsByTripChain = new Map<string, Set<string>>();
   const resultCountByLegCount = new Map<number, number>();
   const MAX_RESULTS_PER_ROUTE_CHAIN = 8;
+  // Keep a few useful boarding/alighting variants for the same scheduled
+  // vehicles, selected across time, fare, transfer, and walking objectives.
+  const MAX_RESULTS_PER_TRIP_CHAIN = 2;
   const maxTransitLegs = maximumTransfers + 1;
   // Keep the per-leg sampling cap independent of the caller's response-page
   // size so later cross-provider ranking receives a consistent diverse pool.
@@ -1826,13 +1830,17 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       || path[index - 1].routeId !== segment.routeId ? `${segment.providerId}:${segment.routeId}` : '')
       .filter(Boolean).join('>');
     const routeChainCount = resultCountByRouteChain.get(routeChain) ?? 0;
+    const tripChain = path.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+    const tripChainIds = resultIdsByTripChain.get(tripChain) ?? new Set<string>();
+    const isKnownTripChain = tripChainIds.size > 0;
     const legCount = resultCountByLegCount.get(path.length) ?? 0;
-    if (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || routeChainCount >= MAX_RESULTS_PER_ROUTE_CHAIN) {
+    if ((!isKnownTripChain && (legCount >= MAX_CANDIDATES_PER_LEG_COUNT
+      || routeChainCount >= MAX_RESULTS_PER_ROUTE_CHAIN || results.size >= MAX_SEARCH_RESULTS))) {
       candidateSamplingTruncated = true;
       return;
     }
-    if (results.size < MAX_SEARCH_RESULTS) {
-      results.set(id, {
+
+    const candidate: GtfsItinerary = {
       id, providerId: first.providerId,
       providerName: [...new Set(path.map((segment) => segment.providerName))].join(' + '),
       segments: path, departureAt, arrivalAt, durationSeconds,
@@ -1863,9 +1871,42 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         departureAt: segment.departureAt,
         arrivalAt: segment.arrivalAt,
       }))),
-      });
-      resultCountByRouteChain.set(routeChain, routeChainCount + 1);
-      resultCountByLegCount.set(path.length, legCount + 1);
+    };
+    const existingVariants = [...tripChainIds].flatMap((existingId) => {
+      const existing = results.get(existingId);
+      return existing ? [existing] : [];
+    });
+    const selectedVariants = rankGtfsItinerariesForCandidateSampling([...existingVariants, candidate])
+      .slice(0, MAX_RESULTS_PER_TRIP_CHAIN);
+    const selectedIds = new Set(selectedVariants.map((itinerary) => itinerary.id));
+    if (!selectedIds.has(id)) {
+      candidateSamplingTruncated = true;
+      return;
+    }
+
+    const removedVariantCount = existingVariants.filter((variant) => !selectedIds.has(variant.id)).length;
+    if (results.size - removedVariantCount + 1 > MAX_SEARCH_RESULTS) {
+      candidateSamplingTruncated = true;
+      return;
+    }
+
+    if (isKnownTripChain) {
+      for (const existingId of tripChainIds) {
+        if (selectedIds.has(existingId)) continue;
+        results.delete(existingId);
+        tripChainIds.delete(existingId);
+        resultCountByRouteChain.set(routeChain, Math.max(0, (resultCountByRouteChain.get(routeChain) ?? 1) - 1));
+        resultCountByLegCount.set(path.length, Math.max(0, (resultCountByLegCount.get(path.length) ?? 1) - 1));
+      }
+    }
+    if (results.size < MAX_SEARCH_RESULTS || isKnownTripChain) {
+      results.set(id, candidate);
+      tripChainIds.add(id);
+      resultIdsByTripChain.set(tripChain, tripChainIds);
+      resultCountByRouteChain.set(routeChain, (resultCountByRouteChain.get(routeChain) ?? 0) + 1);
+      resultCountByLegCount.set(path.length, (resultCountByLegCount.get(path.length) ?? 0) + 1);
+    } else {
+      candidateSamplingTruncated = true;
     }
   };
 
