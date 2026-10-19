@@ -676,6 +676,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const initial = await sessionResponse.json() as { data: { id: string; state: string; locationSharingEnabled: boolean } };
     assert.equal(initial.data.state, 'SCHEDULED');
     assert.equal(initial.data.locationSharingEnabled, false);
+    const approachesBeforeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: passengerHeaders });
+    assert.equal(approachesBeforeConsent.status, 409);
     const prematureLocation = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
       method: 'POST', headers: passengerHeaders,
       body: JSON.stringify({ longitude: 24, latitude: 49, accuracyMeters: 5, capturedAt: new Date().toISOString() }),
@@ -736,6 +738,19 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const passengerState = await passengerView.json() as { data: { locations: { driver: { freshness: string; coordinates: number[] } | null } } };
     assert.deepEqual(passengerState.data.locations.driver?.coordinates, [24.0001, 49]);
     assert.equal(passengerState.data.locations.driver?.freshness, 'LIVE');
+    const approaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: passengerHeaders });
+    assert.equal(approaches.status, 200);
+    const approachData = await approaches.json() as { data: {
+      driver: { approach: { status: string; geometry: unknown; distanceMeters: number | null } };
+      passenger: { approach: { status: string; geometry: unknown; distanceMeters: number | null } };
+    } };
+    assert.equal(approachData.data.driver.approach.status, 'ROUTING_UNAVAILABLE');
+    assert.equal(approachData.data.driver.approach.geometry, null);
+    assert.equal(approachData.data.driver.approach.distanceMeters, null);
+    assert.equal(approachData.data.passenger.approach.status, 'ROUTING_UNAVAILABLE');
+    assert.equal(approachData.data.passenger.approach.geometry, null);
+    const outsiderApproaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: { 'x-dev-user-id': passengerB } });
+    assert.equal(outsiderApproaches.status, 404);
 
     const revokeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
       method: 'POST', headers: passengerHeaders, body: JSON.stringify({ enabled: false }),

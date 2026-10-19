@@ -37,7 +37,7 @@ start_api() {
     REDIS_URL="$REDIS_URL" API_RATE_LIMIT_PREFIX="${API_TEST_RATE_LIMIT_PREFIX_OVERRIDE:-$RATE_LIMIT_TEST_PREFIX}" \
     API_RATE_LIMIT_LIMIT="${API_TEST_RATE_LIMIT_LIMIT:-5000}" \
     API_RATE_LIMIT_WINDOW_MS="${API_TEST_RATE_LIMIT_WINDOW_MS:-900000}" SESSION_SECRET="integration-test-session-secret-32chars" \
-    ROUTING_ENGINE_URL="$routing_url" ./node_modules/.bin/tsx server/index.ts &
+    OSRM_URL="" WALKING_ROUTING_URL="" ROUTING_ENGINE_URL="$routing_url" ./node_modules/.bin/tsx server/index.ts &
   API_PID=$!
   for _ in $(seq 1 60); do
     if curl --fail --silent "$API_URL/healthz" >/dev/null; then return 0; fi
