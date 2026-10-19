@@ -185,6 +185,12 @@ export interface GtfsItinerarySearchResult {
   candidateGraphTruncated: boolean;
 }
 
+/** Optional lower graph limits let tests exercise bounded retention deterministically. */
+export interface GtfsGraphBudgetLimits {
+  totalSegments?: number;
+  segmentsPerRoute?: number;
+}
+
 type RetainedGtfsSegment = {
   segment: GtfsDirectJourney;
   fromIndex: number;
@@ -1050,7 +1056,11 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
  * feeds. Walking to and from the first/last stop uses a conservative straight-
  * line estimate and is surfaced separately in the result.
  */
-export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerarySearchResult {
+export function findGtfsItinerariesWithStats(
+  feed: GtfsTimetableFeed,
+  input: GtfsItinerarySearchInput,
+  graphLimits: GtfsGraphBudgetLimits = {},
+): GtfsItinerarySearchResult {
   const debugStartedAt = Date.now();
   const debugStage = (stage: string, details: Record<string, number | string> = {}) => {
     if (process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1') {
@@ -1064,6 +1074,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
   const minimumTransferBufferSeconds = input.minimumTransferBufferSeconds ?? DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS;
   const maximumWaitSeconds = input.maximumWaitSeconds ?? 4 * 60 * 60;
+  const maximumGraphSegments = graphLimits.totalSegments ?? MAX_GTFS_GRAPH_SEGMENTS;
+  const maximumGraphSegmentsPerRoute = graphLimits.segmentsPerRoute ?? MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
@@ -1079,7 +1091,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > 10_000
     || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > 10_000
     || !Number.isFinite(transferRadius) || transferRadius < 0 || transferRadius > 10_000
-    || !Number.isInteger(limit) || limit < 1 || limit > 100) {
+    || !Number.isInteger(limit) || limit < 1 || limit > 100
+    || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > MAX_GTFS_GRAPH_SEGMENTS
+    || !Number.isSafeInteger(maximumGraphSegmentsPerRoute) || maximumGraphSegmentsPerRoute < 1
+    || maximumGraphSegmentsPerRoute > MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
 
@@ -1333,6 +1348,24 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   // Equal shares waste most of the global graph limit on low-frequency lines,
   // while a single busy corridor can hit its share and truncate useful trips.
   const candidateDemandByRoute = new Map<string, number>();
+  // Query-specific scheduled access/egress events let graph retention prefer
+  // transfer trips that can actually join a first/last leg. These are only a
+  // retention signal: the normal transferDecision remains the final authority
+  // for GTFS rules, pathway topology, walking distance and buffers.
+  const originReachableArrivalsByNode = new Map<string, Set<number>>();
+  const destinationReachableDeparturesByNode = new Map<string, Set<number>>();
+  const retentionTransferNodes = (entry: NonNullable<GtfsTimetableFeed['stopTimes'] extends Map<string, (infer T)[]> ? T : never>) => {
+    const primary = entry.sourceStopId ?? entry.stopId;
+    return entry.sourceParentStationId && entry.sourceParentStationId !== primary
+      ? [primary, entry.sourceParentStationId] : [primary];
+  };
+  const addRetentionEvent = (events: Map<string, Set<number>>, entry: NonNullable<GtfsTimetableFeed['stopTimes'] extends Map<string, (infer T)[]> ? T : never>, at: Date) => {
+    for (const nodeId of retentionTransferNodes(entry)) {
+      const values = events.get(nodeId) ?? new Set<number>();
+      values.add(at.getTime());
+      events.set(nodeId, values);
+    }
+  };
   for (const [tripId, trip] of feed.trips) {
     const candidateStops = candidateStopCountByRoute.get(trip.routeId) ?? 0;
     if (candidateStops < 2) continue;
@@ -1371,30 +1404,75 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
           const arrivalAt = scheduledTimes[toCursor].arrivalAt;
           if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
             || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
+          if (originStopIds.has(from.stopId) && interchangeStopIds.has(to.stopId)) {
+            const fromStop = feed.stops.get(from.stopId);
+            const coordinates = from.sourceStopCoordinates ?? (fromStop ? [fromStop.lon, fromStop.lat] as [number, number] : null);
+            const accessSeconds = coordinates ? Math.ceil(distanceMeters(input.origin, coordinates) / 1.25) : Infinity;
+            if (departureAt.getTime() >= input.earliestDeparture.getTime() + accessSeconds * 1000) {
+              addRetentionEvent(originReachableArrivalsByNode, to, arrivalAt);
+            }
+          }
+          if (interchangeStopIds.has(from.stopId) && destinationStopIds.has(to.stopId)) {
+            addRetentionEvent(destinationReachableDeparturesByNode, from, departureAt);
+          }
           pairOpportunities++;
         }
       }
     }
     if (pairOpportunities === 0) continue;
-    const boundedPairOpportunities = Math.min(MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE, pairOpportunities);
+    const boundedPairOpportunities = Math.min(maximumGraphSegmentsPerRoute, pairOpportunities);
     candidateDemandByRoute.set(trip.routeId,
       (candidateDemandByRoute.get(trip.routeId) ?? 0) + boundedPairOpportunities);
   }
   const graphSegmentBudgetByRoute = allocateBoundedGraphBudgets(
-    candidateDemandByRoute, MAX_GTFS_GRAPH_SEGMENTS, MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE,
+    candidateDemandByRoute, maximumGraphSegments, maximumGraphSegmentsPerRoute,
   );
   const candidateRouteCount = graphSegmentBudgetByRoute.size;
   const estimatedGraphDemand = [...candidateDemandByRoute.values()].reduce((sum, value) => sum + value, 0);
   const graphRoutesBudgetLimited = [...candidateDemandByRoute].filter(([routeId, demand]) =>
     demand > (graphSegmentBudgetByRoute.get(routeId) ?? 0)).length;
   const graphRoutesAtPerRouteCap = [...graphSegmentBudgetByRoute.values()]
-    .filter((budget) => budget === MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE).length;
-  const globalGraphBudgetBinding = estimatedGraphDemand > MAX_GTFS_GRAPH_SEGMENTS;
+    .filter((budget) => budget === maximumGraphSegmentsPerRoute).length;
+  const globalGraphBudgetBinding = estimatedGraphDemand > maximumGraphSegments;
   let segmentGraphTruncated = false;
   // A national feed can produce a very large number of stop-pair candidates.
   // Keep only the stop-time indexes during graph construction and materialize
   // route shapes for the small set of itineraries that will actually be shown.
   const shapeIndexesBySegment = new WeakMap<GtfsDirectJourney, { fromIndex: number; toIndex: number; serviceDate: string }>();
+  const sortedRetentionEvents = (events: Map<string, Set<number>>) => new Map([...events]
+    .map(([nodeId, values]) => [nodeId, [...values].sort((a, b) => a - b)] as const));
+  const originRetentionEvents = sortedRetentionEvents(originReachableArrivalsByNode);
+  const destinationRetentionEvents = sortedRetentionEvents(destinationReachableDeparturesByNode);
+  const hasPriorEvent = (nodeIds: readonly string[], eventAt: number, minimumGapSeconds: number) => {
+    const latestAllowed = eventAt - minimumGapSeconds * 1000;
+    for (const nodeId of nodeIds) {
+      const events = originRetentionEvents.get(nodeId);
+      if (!events?.length) continue;
+      let low = 0, high = events.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (events[middle] <= latestAllowed) low = middle + 1;
+        else high = middle;
+      }
+      if (low > 0 && eventAt - events[low - 1] <= maximumWaitSeconds * 1000) return true;
+    }
+    return false;
+  };
+  const hasNextEvent = (nodeIds: readonly string[], eventAt: number, minimumGapSeconds: number) => {
+    const earliestAllowed = eventAt + minimumGapSeconds * 1000;
+    for (const nodeId of nodeIds) {
+      const events = destinationRetentionEvents.get(nodeId);
+      if (!events?.length) continue;
+      let low = 0, high = events.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (events[middle] < earliestAllowed) low = middle + 1;
+        else high = middle;
+      }
+      if (low < events.length && events[low] - eventAt <= maximumWaitSeconds * 1000) return true;
+    }
+    return false;
+  };
   let tripsConsidered = 0;
   let tripsWithEligibleStops = 0;
   const stopDetailsCache = new Map<string, { id: string; name: string; coordinates: [number, number] }>();
@@ -1625,10 +1703,18 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         // already selected for the query.
         const retentionTier = canBoardFromOrigin && canAlightAtDestination ? 0
           : canBoardFromOrigin ? 1 : canAlightAtDestination ? 2 : 3;
+        const temporallyConnectsQueryEnds = tripCandidates.some(({ segment }) =>
+          hasPriorEvent(segment.originTransferNodeIds, segment.departureAt.getTime(), DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS)
+          && hasNextEvent(segment.destinationTransferNodeIds, segment.arrivalAt.getTime(), DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS));
         const routeCandidates = segmentsByRoute.get(trip.routeId) ?? [];
         const retained = retainBoundedTripGroup(routeCandidates, {
           key: tripKey,
-          priority: retentionTier * 0x1_0000_0000 + gtfsSegmentRetentionPriority(tripKey),
+          // Preserve endpoint tiers; within the transfer-only tier prioritize
+          // a scheduled segment bracketed by query-reachable first/last legs
+          // before using the hash as the stable tie-breaker.
+          priority: retentionTier * 0x2_0000_0000
+            + (retentionTier === 3 && !temporallyConnectsQueryEnds ? 0x1_0000_0000 : 0)
+            + gtfsSegmentRetentionPriority(tripKey),
           segments: tripCandidates,
         }, retainedSegmentCountByRoute.get(trip.routeId) ?? 0, graphSegmentLimitPerRoute);
         if (retained.retained) {

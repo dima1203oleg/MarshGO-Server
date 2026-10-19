@@ -72,6 +72,57 @@ function connectingFeed(options: { secondRouteType?: string; secondDeparture?: s
   return parseGtfsTimetable(files);
 }
 
+function timeFeasibleChainWithHashCompetingTrips() {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  for (const [id, name, lon, lat] of [
+    ['origin', 'Origin', 24.0200, 49.8400],
+    ['hub-a', 'Hub A', 24.0250, 49.8450],
+    ['hub-b', 'Hub B', 24.0270, 49.8470],
+    ['destination', 'Destination', 24.0300, 49.8500],
+  ] as const) timetable.stops.set(id, { id, name, lon, lat });
+  for (const [id, name] of [['access', 'Access'], ['middle', 'Middle'], ['egress', 'Egress']] as const) {
+    timetable.routes.set(id, { name, mode: 'BUS', transportType: 'bus' });
+  }
+  const addTrip = (tripId: string, routeId: string, stopIds: string[], times: number[]) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    const entries = stopIds.map((stopId, index) => ({
+      stopId, sequence: index + 1, arrivalSeconds: times[index], departureSeconds: times[index], pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId, [
+      ...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index },
+    ]));
+  };
+  addTrip('access-trip', 'access', ['origin', 'hub-a'], [8 * 3600, 8 * 3600 + 10 * 60]);
+  addTrip('egress-trip', 'egress', ['hub-b', 'destination'], [8 * 3600 + 35 * 60, 8 * 3600 + 50 * 60]);
+
+  const targetTripId = 'feasible-middle';
+  const retentionHash = (key: string) => {
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < key.length; index++) hash = Math.imul(hash ^ key.charCodeAt(index), 0x01000193);
+    return hash >>> 0;
+  };
+  const targetKey = `middle\u0000${targetTripId}\u000020261012`;
+  let decoyTripId = 'hash-decoy-0';
+  for (let index = 1; retentionHash(`middle\u0000${decoyTripId}\u000020261012`) > retentionHash(targetKey); index++) {
+    decoyTripId = `hash-decoy-${index}`;
+  }
+  // The baseline hash policy prefers this trip even though it cannot connect
+  // the access and egress schedules. The desired trip can connect both.
+  addTrip(decoyTripId, 'middle', ['hub-a', 'hub-b'], [8 * 3600 + 5 * 60, 8 * 3600 + 38 * 60]);
+  addTrip(targetTripId, 'middle', ['hub-a', 'hub-b'], [8 * 3600 + 18 * 60, 8 * 3600 + 25 * 60]);
+  return {
+    timetable, targetTripId, decoyTripId,
+    targetHash: retentionHash(targetKey),
+    decoyHash: retentionHash(`middle\u0000${decoyTripId}\u000020261012`),
+  };
+}
+
 function platformTransferFeed(secondDeparture: string, connectPathways = true) {
   const transit = connectingFeed({ secondRouteType: '3', secondDeparture });
   transit.stops.delete('hub');
@@ -585,6 +636,73 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
   assert.deepEqual(reorderedResult.itineraries.map(({ id }) => id), result.itineraries.map(({ id }) => id),
     'bounded retention and leftover-budget fill must ignore GTFS Map insertion order');
   assert.equal(reorderedResult.searchTruncated, result.searchTruncated);
+});
+
+test('query-time retention keeps a feasible multi-leg chain under an injected graph budget', () => {
+  const { timetable, targetTripId, decoyTripId, targetHash, decoyHash } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.fareProducts = new Map([
+    ['access-fare', { id: 'access-fare', priceMinor: 300, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+    ['middle-fare', { id: 'middle-fare', priceMinor: 200, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+    ['egress-fare', { id: 'egress-fare', priceMinor: 400, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+  ]);
+  timetable.fareRules = new Map([
+    ['access-fare', [{ fareId: 'access-fare', routeId: 'access' }]],
+    ['middle-fare', [{ fareId: 'middle-fare', routeId: 'middle' }]],
+    ['egress-fare', [{ fareId: 'egress-fare', routeId: 'egress' }]],
+  ]);
+  const searchInput = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+  };
+  const graphLimits = { totalSegments: 3, segmentsPerRoute: 1 };
+  const result = findGtfsItinerariesWithStats(timetable, searchInput, graphLimits);
+
+  assert.equal(result.candidateGraphTruncated, true);
+  assert.equal(result.searchTruncated, true);
+  assert.ok(decoyHash < targetHash, 'the baseline hash ordering gives the infeasible decoy better retention priority');
+  const feasibleChain = result.itineraries.find((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `access-trip,${targetTripId},egress-trip`);
+  assert.ok(feasibleChain,
+  'query-time retention preserves the exact middle trip that fits both scheduled transfers');
+  assert.equal(feasibleChain.fare?.priceMinor, 900, 'query-time retention does not lose known fare totals');
+  assert.ok(!result.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === decoyTripId)),
+    'the infeasible lower-hash group is not allowed to crowd out the scheduled chain');
+
+  const reordered = structuredClone(timetable);
+  reordered.trips = new Map([...reordered.trips].reverse());
+  const reorderedResult = findGtfsItinerariesWithStats(reordered, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400], destination: [24.0300, 49.8500],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+  }, { totalSegments: 3, segmentsPerRoute: 1 });
+  assert.deepEqual(reorderedResult.itineraries.map(({ id }) => id), result.itineraries.map(({ id }) => id),
+    'schedule-aware retention remains independent of GTFS Map insertion order');
+
+  const forbidden = structuredClone(timetable);
+  forbidden.transfers = [{ fromStopId: 'hub-a', toStopId: 'hub-a', transferType: 3 }];
+  const forbiddenResult = findGtfsItinerariesWithStats(forbidden, searchInput, graphLimits);
+  assert.ok(!forbiddenResult.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === targetTripId)),
+    'retention priority never overrides an explicit forbidden GTFS transfer');
+
+  const cancelled = structuredClone(timetable);
+  cancelled.realtimeTripUpdates = new Map([['feasible-middle\u000020261012', {
+    tripId: targetTripId, startDate: '20261012', relationship: 'CANCELED', stops: [],
+    updatedAt: new Date('2026-10-12T05:00:00Z'), feedTimestamp: new Date('2026-10-12T05:00:00Z'),
+  }]]);
+  const cancelledResult = findGtfsItinerariesWithStats(cancelled, searchInput, graphLimits);
+  assert.ok(!cancelledResult.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === targetTripId)),
+    'canceled trips are excluded from both temporal retention signals and returned itineraries');
+
+  const skipped = structuredClone(timetable);
+  skipped.realtimeTripUpdates = new Map([['feasible-middle\u000020261012', {
+    tripId: targetTripId, startDate: '20261012', relationship: 'SCHEDULED',
+    stops: [{ stopSequence: 1, relationship: 'SKIPPED' }],
+    updatedAt: new Date('2026-10-12T05:00:00Z'), feedTimestamp: new Date('2026-10-12T05:00:00Z'),
+  }]]);
+  const skippedResult = findGtfsItinerariesWithStats(skipped, searchInput, graphLimits);
+  assert.ok(!skippedResult.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === targetTripId)),
+    'skipped boarding stops are excluded from temporal retention and returned itineraries');
 });
 
 test('oversized single trips retain a useful exact direct segment inside the bounded sample', () => {
