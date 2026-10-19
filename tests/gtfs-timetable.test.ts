@@ -191,6 +191,34 @@ test('finds a scheduled direct bus, preserves route/stops, and converts agency l
   assert.equal(journeys[0].arrivalAt.toISOString(), '2026-10-12T05:40:00.000Z');
 });
 
+test('debug search diagnostics separate graph demand from bounded search saturation', () => {
+  const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const originalInfo = console.info;
+  const messages: string[] = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
+  try {
+    findGtfsItinerariesWithStats(feed(), {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+    });
+  } finally {
+    console.info = originalInfo;
+    if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+  }
+
+  const stages = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown });
+  const graph = stages.find((stage) => stage.stage === 'segments-built');
+  const ranked = stages.find((stage) => stage.stage === 'itineraries-ranked');
+  assert.ok(graph, 'segment graph should emit bounded-demand diagnostics');
+  assert.ok(ranked, 'ranked search should emit step/pool diagnostics');
+  assert.equal(typeof graph.estimatedGraphDemand, 'number');
+  assert.equal(typeof graph.graphRoutesBudgetLimited, 'number');
+  assert.equal(typeof graph.globalGraphBudgetBinding, 'number');
+  assert.equal(typeof ranked.searchStepLimit, 'number');
+  assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
+});
+
 test('returns every source stop and its scheduled times for expandable route details', () => {
   const journey = findDirectGtfsJourneys(feed({ withIntermediate: true }), request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'))[0];
   assert.deepEqual(journey?.stops?.map(stop => [stop.name, stop.arrivalAt]), [

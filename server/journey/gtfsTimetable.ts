@@ -1052,7 +1052,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
  */
 export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerarySearchResult {
   const debugStartedAt = Date.now();
-  const debugStage = (stage: string, details: Record<string, number> = {}) => {
+  const debugStage = (stage: string, details: Record<string, number | string> = {}) => {
     if (process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1') {
       const memory = process.memoryUsage();
       console.info(JSON.stringify({ event: 'gtfs.search.debug', stage, elapsedMs: Date.now() - debugStartedAt,
@@ -1384,6 +1384,12 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     candidateDemandByRoute, MAX_GTFS_GRAPH_SEGMENTS, MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE,
   );
   const candidateRouteCount = graphSegmentBudgetByRoute.size;
+  const estimatedGraphDemand = [...candidateDemandByRoute.values()].reduce((sum, value) => sum + value, 0);
+  const graphRoutesBudgetLimited = [...candidateDemandByRoute].filter(([routeId, demand]) =>
+    demand > (graphSegmentBudgetByRoute.get(routeId) ?? 0)).length;
+  const graphRoutesAtPerRouteCap = [...graphSegmentBudgetByRoute.values()]
+    .filter((budget) => budget === MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE).length;
+  const globalGraphBudgetBinding = estimatedGraphDemand > MAX_GTFS_GRAPH_SEGMENTS;
   let segmentGraphTruncated = false;
   // A national feed can produce a very large number of stop-pair candidates.
   // Keep only the stop-time indexes during graph construction and materialize
@@ -1651,6 +1657,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     graphRoutesAtLimit: [...selectedSegmentsByRoute].filter(([routeId, routeSegments]) => routeSegments.length === graphSegmentBudgetByRoute.get(routeId)).length,
     graphSegmentBudgetTotal: [...graphSegmentBudgetByRoute.values()].reduce((sum, value) => sum + value, 0),
     graphSegmentBudgetMax: Math.max(0, ...graphSegmentBudgetByRoute.values()),
+    estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
+    globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
     segmentGraphTruncated: Number(segmentGraphTruncated) });
   const outgoing = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
@@ -2423,6 +2431,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     returned: itineraries.length,
     stopSelectionTruncated: Number(stopSelectionTruncated), searchBudgetTruncated: Number(searchBudgetTruncated),
     searchStepLimitReached: Number(searchSteps >= MAX_SEARCH_STEPS), candidateResultLimitReached: Number(results.size >= MAX_SEARCH_RESULTS),
+    searchStepLimit: MAX_SEARCH_STEPS, candidatePoolReachedAtStep: candidatePoolReachedAtStep ?? 0,
+    candidatePoolReachedAtStepByLegCount: JSON.stringify(Object.fromEntries(candidatePoolReachedAtStepByLegCount)),
     candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
     maxQueuedSearchWork: maximumQueuedSearchWork,
     searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
