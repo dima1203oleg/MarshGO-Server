@@ -227,6 +227,38 @@ export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly Gt
     || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
 }
 
+/** Keep route-chain samples useful to the FASTEST, CHEAPEST, and balanced views. */
+export function sampleGtfsRouteChainCandidates(
+  itineraries: readonly GtfsItinerary[], maximum = 8,
+): GtfsItinerary[] {
+  if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('route-chain sample maximum must be positive');
+  if (itineraries.length <= maximum) return [...itineraries];
+
+  const selected = new Map<string, GtfsItinerary>();
+  const take = (ranked: readonly GtfsItinerary[], count: number) => {
+    for (const item of ranked) {
+      if (selected.size >= maximum || count <= 0) break;
+      if (selected.has(item.id)) continue;
+      selected.set(item.id, item);
+      count--;
+    }
+  };
+  const byDuration = [...itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+  const byFare = itineraries.filter((item) => item.fare?.currency === 'UAH')
+    .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+  const byTransfers = [...itineraries].sort((a, b) => a.transfers - b.transfers || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+  const byWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+  const balanced = rankGtfsItinerariesForCandidateSampling(itineraries);
+
+  take(byDuration, 2);
+  take(byFare, 2);
+  take(balanced, 2);
+  take(byTransfers, 1);
+  take(byWalking, 1);
+  take(balanced, maximum - selected.size);
+  return [...selected.values()];
+}
+
 export interface GtfsStopArrival {
   stopId: string;
   stopName: string;
@@ -1745,6 +1777,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
 
   const results = new Map<string, GtfsItinerary>();
   const resultCountByRouteChain = new Map<string, number>();
+  const resultIdsByRouteChain = new Map<string, Set<string>>();
   const resultIdsByTripChain = new Map<string, Set<string>>();
   const resultCountByLegCount = new Map<number, number>();
   const MAX_RESULTS_PER_ROUTE_CHAIN = 8;
@@ -1829,13 +1862,14 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const routeChain = path.map((segment, index) => index === 0 || path[index - 1].providerId !== segment.providerId
       || path[index - 1].routeId !== segment.routeId ? `${segment.providerId}:${segment.routeId}` : '')
       .filter(Boolean).join('>');
-    const routeChainCount = resultCountByRouteChain.get(routeChain) ?? 0;
+    const routeChainIds = resultIdsByRouteChain.get(routeChain) ?? new Set<string>();
     const tripChain = path.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
     const tripChainIds = resultIdsByTripChain.get(tripChain) ?? new Set<string>();
     const isKnownTripChain = tripChainIds.size > 0;
     const legCount = resultCountByLegCount.get(path.length) ?? 0;
-    if ((!isKnownTripChain && (legCount >= MAX_CANDIDATES_PER_LEG_COUNT
-      || routeChainCount >= MAX_RESULTS_PER_ROUTE_CHAIN || results.size >= MAX_SEARCH_RESULTS))) {
+    const canReplaceRouteChainCandidate = routeChainIds.size >= MAX_RESULTS_PER_ROUTE_CHAIN;
+    if ((!isKnownTripChain && !canReplaceRouteChainCandidate
+      && (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || results.size >= MAX_SEARCH_RESULTS))) {
       candidateSamplingTruncated = true;
       return;
     }
@@ -1884,30 +1918,48 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       return;
     }
 
-    const removedVariantCount = existingVariants.filter((variant) => !selectedIds.has(variant.id)).length;
-    if (results.size - removedVariantCount + 1 > MAX_SEARCH_RESULTS) {
+    const replacedTripVariants = existingVariants.filter((variant) => !selectedIds.has(variant.id));
+    const tripVariantsForRouteSample = [...routeChainIds]
+      .filter((existingId) => !replacedTripVariants.some((variant) => variant.id === existingId))
+      .flatMap((existingId) => {
+        const existing = results.get(existingId);
+        return existing ? [existing] : [];
+      });
+    const selectedRouteVariants = sampleGtfsRouteChainCandidates([...tripVariantsForRouteSample, candidate], MAX_RESULTS_PER_ROUTE_CHAIN);
+    const selectedRouteIds = new Set(selectedRouteVariants.map((itinerary) => itinerary.id));
+    if (!selectedRouteIds.has(id)) {
       candidateSamplingTruncated = true;
       return;
     }
 
-    if (isKnownTripChain) {
-      for (const existingId of tripChainIds) {
-        if (selectedIds.has(existingId)) continue;
-        results.delete(existingId);
-        tripChainIds.delete(existingId);
-        resultCountByRouteChain.set(routeChain, Math.max(0, (resultCountByRouteChain.get(routeChain) ?? 1) - 1));
-        resultCountByLegCount.set(path.length, Math.max(0, (resultCountByLegCount.get(path.length) ?? 1) - 1));
-      }
-    }
-    if (results.size < MAX_SEARCH_RESULTS || isKnownTripChain) {
-      results.set(id, candidate);
-      tripChainIds.add(id);
-      resultIdsByTripChain.set(tripChain, tripChainIds);
-      resultCountByRouteChain.set(routeChain, (resultCountByRouteChain.get(routeChain) ?? 0) + 1);
-      resultCountByLegCount.set(path.length, (resultCountByLegCount.get(path.length) ?? 0) + 1);
-    } else {
+    const removedIds = new Set([...replacedTripVariants.map((variant) => variant.id),
+      ...tripVariantsForRouteSample.filter((variant) => !selectedRouteIds.has(variant.id)).map((variant) => variant.id)]);
+    if (results.size - removedIds.size + 1 > MAX_SEARCH_RESULTS) {
       candidateSamplingTruncated = true;
+      return;
     }
+
+    for (const removedId of removedIds) {
+      const removed = results.get(removedId);
+      if (!removed) continue;
+      results.delete(removedId);
+      routeChainIds.delete(removedId);
+      const removedTripChain = removed.segments.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+      const removedTripChainIds = resultIdsByTripChain.get(removedTripChain);
+      removedTripChainIds?.delete(removedId);
+      if (removedTripChainIds?.size === 0) resultIdsByTripChain.delete(removedTripChain);
+      resultCountByRouteChain.set(routeChain, Math.max(0, (resultCountByRouteChain.get(routeChain) ?? 1) - 1));
+      resultCountByLegCount.set(removed.segments.length,
+        Math.max(0, (resultCountByLegCount.get(removed.segments.length) ?? 1) - 1));
+    }
+    results.set(id, candidate);
+    tripChainIds.add(id);
+    resultIdsByTripChain.set(tripChain, tripChainIds);
+    routeChainIds.add(id);
+    resultIdsByRouteChain.set(routeChain, routeChainIds);
+    resultCountByRouteChain.set(routeChain, (resultCountByRouteChain.get(routeChain) ?? 0) + 1);
+    resultCountByLegCount.set(path.length, (resultCountByLegCount.get(path.length) ?? 0) + 1);
+    if (removedIds.size > 0) candidateSamplingTruncated = true;
   };
 
   // Bound both graph expansion and queued alternatives. Search is round-robin

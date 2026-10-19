@@ -371,6 +371,45 @@ test('keeps fastest and cheapest GTFS candidates when the response limit is tigh
   assert.equal(result.itineraries.find((journey) => journey.segments[0]?.routeId === 'r2')?.fare?.priceMinor, 100);
 });
 
+test('keeps a later faster trip within the same route chain after the route-chain sample fills', () => {
+  const timetable = feed();
+  const origin = timetable.stops.get('origin');
+  const destination = timetable.stops.get('destination');
+  assert.ok(origin && destination);
+  const dailyTrips = Array.from({ length: 10 }, (_, index) => ({
+    id: index === 9 ? 'express-trip' : `regular-${index}`,
+    departure: 8 * 3600 + index * 60,
+    arrival: index === 9 ? 8 * 3600 + 15 * 60 : 8 * 3600 + 25 * 60 + index * 60,
+  }));
+  timetable.trips.delete('t1');
+  timetable.stopTimes.delete('t1');
+  for (const entries of timetable.stopTimesByStop.values()) {
+    for (let index = entries.length - 1; index >= 0; index--) {
+      if (entries[index]?.tripId === 't1') entries.splice(index, 1);
+    }
+  }
+  dailyTrips.forEach((trip) => {
+    timetable.trips.set(trip.id, { routeId: 'r', serviceId: 'weekday', headsign: 'Central station' });
+    const stops = [
+      { stopId: 'origin', sequence: 1, arrivalSeconds: trip.departure, departureSeconds: trip.departure, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: trip.arrival, departureSeconds: trip.arrival, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(trip.id, stops);
+    stops.forEach((stop, index) => timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: trip.id, index },
+    ]));
+  });
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    limit: 10, maximumTransfers: 0, maximumStopDistanceMeters: 1000,
+  });
+
+  assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === 'express-trip'),
+    'candidate sampling must not let earlier regular departures hide a later express arrival on the same route chain');
+  assert.equal(result.resultLimitReached, true, 'discarding additional route-chain candidates remains visible');
+});
+
 test('preserves stops for the reverse direction when nearby stops crowd the same route id', () => {
   const timetable = feed();
   const originalTrip = timetable.trips.get('t1');
