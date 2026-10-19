@@ -1,4 +1,5 @@
-import { JOURNEY_STRATEGIES, type JourneyPreferences, type JourneyStrategy } from './types';
+import { canonicalJourneyTransportType, JOURNEY_STRATEGIES, JOURNEY_TRANSPORT_TYPES, journeyTransportTypeSelected, type JourneyPreferences, type JourneyStrategy } from './types';
+import type { TransitJourneyMode } from './gtfsTimetable';
 
 export interface JourneySearchRequest {
   origin: { name: string; coordinates: [number, number] };
@@ -8,6 +9,60 @@ export interface JourneySearchRequest {
   strategy: JourneyStrategy;
   preferences: JourneyPreferences;
 }
+
+export interface JourneySearchTruncationState {
+  resultsTruncated: boolean;
+  candidateGenerationTruncated: boolean;
+  resultSamplingTruncated: boolean;
+}
+
+export function getJourneySearchTruncationState(input: {
+  candidateGenerationTruncated: boolean;
+  resultSamplingTruncated: boolean;
+  rankedAlternativesOmitted: boolean;
+}): JourneySearchTruncationState {
+  const resultSamplingTruncated = input.resultSamplingTruncated || input.rankedAlternativesOmitted;
+  return {
+    resultsTruncated: input.candidateGenerationTruncated || resultSamplingTruncated,
+    candidateGenerationTruncated: input.candidateGenerationTruncated,
+    resultSamplingTruncated,
+  };
+}
+
+export type JourneySearchPartialReason =
+  | 'candidate_generation_truncated'
+  | 'provider_error'
+  | 'unsupported_preference'
+  | 'walking_routing_unavailable';
+
+/**
+ * Report whether the search is incomplete because of a known limitation.
+ * A scheduled-only or Community result is not partial by itself: freshness,
+ * fare certainty, and provider coverage are represented by their own fields.
+ * An empty result can also be complete when every requested source was checked.
+ */
+export function getJourneySearchPartialReasons(input: {
+  candidateGenerationTruncated: boolean;
+  providerErrorCount: number;
+  unsupportedPreferenceCount: number;
+  scheduledCandidatesNeedWalkingRouting: boolean;
+}): JourneySearchPartialReason[] {
+  return [
+    ...(input.candidateGenerationTruncated ? ['candidate_generation_truncated' as const] : []),
+    ...(input.providerErrorCount > 0 ? ['provider_error' as const] : []),
+    ...(input.unsupportedPreferenceCount > 0 ? ['unsupported_preference' as const] : []),
+    ...(input.scheduledCandidatesNeedWalkingRouting ? ['walking_routing_unavailable' as const] : []),
+  ];
+}
+
+/**
+ * GTFS modes that may participate in a MARSHGO Journey. This is deliberately
+ * narrower than the feed parser's enum: feed ingestion may understand other
+ * GTFS route types for diagnostics, but a feed cannot add a product category.
+ */
+export const JOURNEY_SEARCH_TRANSIT_MODES: readonly TransitJourneyMode[] = [
+  'BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO',
+];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -34,6 +89,8 @@ const preferenceBounds: Record<string, [number, number]> = {
   minimumTransferBufferSeconds: [0, 7200],
   maxCommunityDetourSeconds: [0, 7200],
   maxCommunityDetourMeters: [0, 100_000],
+  maxWalkToRentalMeters: [0, 10_000],
+  maxRentalDurationSeconds: [60, 24 * 60 * 60],
 };
 
 export function parseJourneySearchRequest(value: unknown, now = new Date()): JourneySearchRequest {
@@ -58,7 +115,7 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
   if (!isRecord(rawPreferences)) throw new TypeError('preferences must be an object');
   const allowedPreferences = new Set([
     ...Object.keys(preferenceBounds), 'minDriverRating','preferredVehicleClass',
-    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer',
+    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowBicycle','allowScooter','requireVerifiedReturn','allowStaticRentalDiscovery','allowedProviderIds','blockedProviderIds','allowedTransportTypes','allowedTransitProviders','allowedTransitProvidersByType',
   ]);
   const unknownPreference = Object.keys(rawPreferences).find((key) => !allowedPreferences.has(key));
   if (unknownPreference) throw new TypeError(`unsupported preference: ${unknownPreference}`);
@@ -76,11 +133,53 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
     else if (key === 'minimumTransferBufferSeconds') preferences.minimumTransferBufferSeconds = raw;
     else if (key === 'maxCommunityDetourSeconds') preferences.maxCommunityDetourSeconds = raw;
     else if (key === 'maxCommunityDetourMeters') preferences.maxCommunityDetourMeters = raw;
+    else if (key === 'maxWalkToRentalMeters') preferences.maxWalkToRentalMeters = raw;
+    else if (key === 'maxRentalDurationSeconds') preferences.maxRentalDurationSeconds = raw;
   }
-  for (const key of ['allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer'] as const) {
+  for (const key of ['allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowBicycle','allowScooter','requireVerifiedReturn','allowStaticRentalDiscovery'] as const) {
     const raw = rawPreferences[key];
     if (raw !== undefined && typeof raw !== 'boolean') throw new TypeError(`${key} must be a boolean`);
     if (typeof raw === 'boolean') preferences[key] = raw;
+  }
+  for (const key of ['allowedProviderIds','blockedProviderIds'] as const) {
+    const raw = rawPreferences[key];
+    if (raw === undefined) continue;
+    if (!Array.isArray(raw) || raw.length > 100
+      || raw.some((provider) => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9_-]{1,79}$/.test(provider))
+      || new Set(raw).size !== raw.length) throw new TypeError(`${key} is invalid`);
+    preferences[key] = raw as string[];
+  }
+  if (rawPreferences.allowedTransportTypes !== undefined) {
+    const types = rawPreferences.allowedTransportTypes;
+    if (!Array.isArray(types) || types.length > JOURNEY_TRANSPORT_TYPES.length + 3
+      || types.some((type) => typeof type !== 'string')) throw new TypeError('allowedTransportTypes is invalid');
+    const normalized = (types as string[]).map(canonicalJourneyTransportType);
+    if (normalized.some((type) => type === null) || new Set(normalized).size !== normalized.length) {
+      throw new TypeError('allowedTransportTypes is invalid');
+    }
+    preferences.allowedTransportTypes = normalized as NonNullable<JourneyPreferences['allowedTransportTypes']>;
+  }
+  if (rawPreferences.allowedTransitProviders !== undefined) {
+    const providers = rawPreferences.allowedTransitProviders;
+    if (!Array.isArray(providers) || providers.length > 100
+      || providers.some((provider) => typeof provider !== 'string' || provider.trim().length < 2 || provider.trim().length > 120)
+      || new Set(providers).size !== providers.length) throw new TypeError('allowedTransitProviders is invalid');
+    preferences.allowedTransitProviders = providers as string[];
+  }
+  if (rawPreferences.allowedTransitProvidersByType !== undefined) {
+    const providersByType = rawPreferences.allowedTransitProvidersByType;
+    if (!isRecord(providersByType) || Object.keys(providersByType).length > JOURNEY_TRANSPORT_TYPES.length + 3) {
+      throw new TypeError('allowedTransitProvidersByType is invalid');
+    }
+    const normalized: NonNullable<JourneyPreferences['allowedTransitProvidersByType']> = {};
+    for (const [type, providers] of Object.entries(providersByType)) {
+      const category = canonicalJourneyTransportType(type);
+      if (!category || !Array.isArray(providers) || providers.length > 100
+        || providers.some((provider) => typeof provider !== 'string' || provider.trim().length < 2 || provider.trim().length > 120)
+        || new Set(providers).size !== providers.length) throw new TypeError('allowedTransitProvidersByType is invalid');
+      normalized[category] = [...new Set([...(normalized[category] ?? []), ...(providers as string[]).map((provider) => provider.trim())])];
+    }
+    preferences.allowedTransitProvidersByType = normalized;
   }
   if (rawPreferences.minDriverRating !== undefined) {
     const rating = rawPreferences.minDriverRating;
@@ -93,4 +192,35 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
     preferences.preferredVehicleClass = value.trim();
   }
   return { origin, destination, departureAt, passengers: value.passengers as number, strategy: value.strategy as JourneyStrategy, preferences };
+}
+
+/** Per-mode provider choices take precedence; the flat list remains for older clients. */
+export function transitProviderAllowed(preferences: JourneyPreferences, transportType: string, providerName: string): boolean {
+  const operator = providerName.split(' — ')[0];
+  const category = canonicalJourneyTransportType(transportType);
+  const selectedForType = category ? preferences.allowedTransitProvidersByType?.[category] : undefined;
+  if (selectedForType !== undefined) return selectedForType.includes(operator);
+  return !preferences.allowedTransitProviders?.length || preferences.allowedTransitProviders.includes(operator);
+}
+
+const transportTypesByTransitMode: Record<TransitJourneyMode, readonly NonNullable<JourneyPreferences['allowedTransportTypes']>[number][]> = {
+  BUS: ['bus'], MINIBUS: ['marshrutka'], RAIL: ['train'],
+  TRAM: ['tram'], TROLLEYBUS: ['trolleybus'], METRO: ['metro'], FERRY: [], FUNICULAR: [],
+};
+
+/** Apply specific selected modes first; legacy booleans only gate their matching mode. */
+export function transitModeAllowed(mode: TransitJourneyMode, preferences: JourneyPreferences): boolean {
+  if (preferences.allowPublicTransport === false) return false;
+  if (preferences.allowedTransportTypes !== undefined) {
+    return transportTypesByTransitMode[mode].some((type) => journeyTransportTypeSelected(type, preferences.allowedTransportTypes));
+  }
+  if (mode === 'BUS') return preferences.allowBus !== false;
+  if (mode === 'MINIBUS') return preferences.allowMinibus !== false;
+  if (mode === 'RAIL') return preferences.allowRail !== false;
+  return true;
+}
+
+/** Product route-search guard; unsupported feed modes never become journeys. */
+export function journeySearchTransitModeAllowed(mode: TransitJourneyMode, preferences: JourneyPreferences): boolean {
+  return JOURNEY_SEARCH_TRANSIT_MODES.includes(mode) && transitModeAllowed(mode, preferences);
 }

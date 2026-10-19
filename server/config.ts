@@ -1,5 +1,18 @@
 type RuntimeEnvironment = NodeJS.ProcessEnv;
 
+const MAX_TRUSTED_PROXY_HOPS = 5;
+
+/** Trust only the explicitly configured reverse-proxy chain; Express's fixed hop count is unsafe across deployments. */
+export function getTrustedProxyHops(environment: RuntimeEnvironment): number {
+  const raw = environment.TRUST_PROXY_HOPS?.trim();
+  if (!raw) {
+    if (environment.NODE_ENV === 'production') throw new Error('TRUST_PROXY_HOPS is required in production');
+    return 0;
+  }
+  if (!/^(0|[1-5])$/.test(raw)) throw new Error(`TRUST_PROXY_HOPS must be an integer from 0 to ${MAX_TRUSTED_PROXY_HOPS}`);
+  return Number(raw);
+}
+
 function requireValue(environment: RuntimeEnvironment, name: string): string {
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required in production`);
@@ -38,6 +51,7 @@ function requireHttpsUrl(environment: RuntimeEnvironment, name: string): void {
 
 /** Fail closed before listening if production could silently use dev auth or default CORS. */
 export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
+  getTrustedProxyHops(environment);
   if (environment.NODE_ENV !== 'production') return;
 
   const secret = requireValue(environment, 'SESSION_SECRET');
@@ -57,11 +71,16 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   requireValue(environment, 'TWILIO_AUTH_TOKEN');
   requireValue(environment, 'TWILIO_FROM_NUMBER');
 
+  if (environment.GEOCODING_PROVIDER !== undefined && !['nominatim', 'photon'].includes(environment.GEOCODING_PROVIDER)) {
+    throw new Error('GEOCODING_PROVIDER must be nominatim or photon');
+  }
+
   if ((environment.MAP_RENDERER ?? 'maplibre') !== 'maplibre') throw new Error('MAP_RENDERER=maplibre is required');
   if ((environment.MAP_DATA_PROVIDER ?? 'marshgo') !== 'marshgo') throw new Error('MAP_DATA_PROVIDER=marshgo is required');
   if ((environment.ROUTING_PRIMARY ?? 'osrm') !== 'osrm') throw new Error('ROUTING_PRIMARY=osrm is the only configured production routing provider');
   if ((environment.TRAFFIC_PROVIDER ?? 'none') !== 'none') throw new Error('TRAFFIC_PROVIDER=none is the only configured traffic provider');
   requireHttpsUrl({ ...environment, OSRM_URL: environment.OSRM_URL || environment.ROUTING_ENGINE_URL }, 'OSRM_URL');
+  if (environment.WALKING_ROUTING_URL?.trim()) requireHttpsUrl(environment, 'WALKING_ROUTING_URL');
   requireHttpsUrl(environment, 'GEOCODING_ENGINE_URL');
   requireHttpsUrl(environment, 'GEOCODING_REVERSE_URL');
   requireHttpsUrl(environment, 'MAP_STYLE_MANIFEST_URL');
