@@ -961,8 +961,21 @@ test('honors GTFS forbidden and minimum-time transfer rules', () => {
   assert.equal(findGtfsItineraries(forbiddenFeed, query).length, 0, 'a prohibited connection is never composed');
 
   const constrainedFeed = connectingFeed({ secondRouteType: '3', secondDeparture: '08:40:00', transferType: '2', minimumTransferTime: '900' });
-  assert.equal(constrainedFeed.transfers?.[0]?.minTransferTimeSeconds, 900);
-  assert.ok(findGtfsItineraries(constrainedFeed, query).some((journey) => journey.segments.length === 2));
+  const matchingTransferRules = constrainedFeed.transfers ?? [];
+  constrainedFeed.transfers = [
+    ...Array.from({ length: 2_000 }, (_, index) => ({
+      fromStopId: `unrelated-from-${index}`,
+      toStopId: `unrelated-to-${index}`,
+      transferType: 2,
+      minTransferTimeSeconds: 900,
+    })),
+    ...matchingTransferRules,
+  ];
+  assert.equal(constrainedFeed.transfers?.find((rule) => rule.fromStopId === 'hub')?.minTransferTimeSeconds, 900);
+  const constrainedJourney = findGtfsItineraries(constrainedFeed, query)
+    .find((journey) => journey.segments.length === 2);
+  assert.ok(constrainedJourney, 'an indexed relevant rule still composes through many unrelated rules');
+  assert.deepEqual(constrainedJourney.transferRuleMinimumSeconds, [900]);
   const tooShort = connectingFeed({ secondRouteType: '3', secondDeparture: '08:30:00', transferType: '2', minimumTransferTime: '900' });
   assert.equal(findGtfsItineraries(tooShort, query).length, 0, 'min_transfer_time is a hard feasibility constraint');
 });
