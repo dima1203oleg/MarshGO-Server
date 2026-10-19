@@ -376,6 +376,12 @@ test('preserves stops for the reverse direction when nearby stops crowd the same
 
 test('bounds a dense route graph and reports omitted GTFS segment candidates', () => {
   const timetable = feed();
+  // Routes elsewhere in a national feed must not dilute this corridor's
+  // retention quota when they have no stops in the query's interchange set.
+  for (let index = 0; index < 1_000; index++) {
+    const routeId = `unrelated-${String(index).padStart(4, '0')}`;
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+  }
   const originEntries = [...(timetable.stopTimesByStop.get('origin') ?? [])];
   const destinationEntries = [...(timetable.stopTimesByStop.get('destination') ?? [])];
   for (let index = 0; index < 5_001; index++) {

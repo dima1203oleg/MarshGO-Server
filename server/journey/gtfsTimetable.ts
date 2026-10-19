@@ -194,7 +194,10 @@ function gtfsSegmentRetentionPriority(key: string): number {
 
 function compareGtfsSegmentRetention(a: Pick<RetainedGtfsSegment, 'key' | 'priority'>,
   b: Pick<RetainedGtfsSegment, 'key' | 'priority'>): number {
-  return a.priority-b.priority|| +(a.key>b.key)-+(a.key<b.key);
+  const priorityDifference = a.priority - b.priority;
+  if (priorityDifference !== 0) return priorityDifference;
+  if (a.key === b.key) return 0;
+  return a.key < b.key ? -1 : 1;
 }
 
 // A max-heap retains the lowest-priority-hash K candidates. The root is the
@@ -1268,12 +1271,26 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     corridorWidthMeters: Math.round(corridorWidth) });
 
   const segmentsByRoute = new Map<string, RetainedGtfsSegment[]>();
-  const candidateRouteCount = [...feed.routes].filter(([routeId, route]) => {
-    if (input.allowedModes && !input.allowedModes.includes(route.mode)) return false;
-    const providerCity = feed.providersByRoute?.get(routeId)?.city ?? input.providerCity;
-    const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
-    return !input.allowedTransportTypes || journeyTransportTypeSelected(transportType, input.allowedTransportTypes);
-  }).length;
+  const candidateStopCountByRoute = new Map<string, number>();
+  for (const [stopId, routeIds] of routesByStop) {
+    if (!interchangeStopIds.has(stopId)) continue;
+    for (const routeId of routeIds) {
+      const route = feed.routes.get(routeId);
+      if (!route || (input.allowedModes && !input.allowedModes.includes(route.mode))) continue;
+      const providerCity = feed.providersByRoute?.get(routeId)?.city ?? input.providerCity;
+      const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
+      if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
+      const eligibleStops = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
+        ? localCityCatchmentStops : corridorStops;
+      if (!eligibleStops.has(stopId)) continue;
+      candidateStopCountByRoute.set(routeId, (candidateStopCountByRoute.get(routeId) ?? 0) + 1);
+    }
+  }
+  // Only routes that can contribute at least one stop-pair edge should divide
+  // the graph budget. National feeds often include thousands of irrelevant
+  // city routes; counting all route definitions diluted the useful corridor
+  // quota and dropped valid options even when those routes never entered it.
+  const candidateRouteCount = [...candidateStopCountByRoute.values()].filter((count) => count >= 2).length;
   const graphSegmentLimitPerRoute = Math.max(1, Math.min(MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE,
     Math.floor(MAX_GTFS_GRAPH_SEGMENTS / Math.max(1, candidateRouteCount))));
   let segmentGraphTruncated = false;
