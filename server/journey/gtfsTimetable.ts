@@ -1630,8 +1630,18 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     rule: GtfsTransferRule | null;
   };
 
+  const transferRulesByFromStop = new Map<string, GtfsTransferRule[]>();
+  for (const rule of feed.transfers ?? []) {
+    const rules = transferRulesByFromStop.get(rule.fromStopId) ?? [];
+    rules.push(rule);
+    transferRulesByFromStop.set(rule.fromStopId, rules);
+  }
   const transferRuleFor = (previous: GtfsDirectJourney, next: GtfsDirectJourney): { rule: GtfsTransferRule | null; ambiguous: boolean } => {
-    const matches = (feed.transfers ?? []).filter((rule) => previous.destinationTransferNodeIds.includes(rule.fromStopId)
+    const possibleRules = new Set<GtfsTransferRule>();
+    for (const fromStopId of previous.destinationTransferNodeIds) {
+      for (const candidate of transferRulesByFromStop.get(fromStopId) ?? []) possibleRules.add(candidate);
+    }
+    const matches = [...possibleRules].filter((rule) => previous.destinationTransferNodeIds.includes(rule.fromStopId)
       && next.originTransferNodeIds.includes(rule.toStopId)
       && (!rule.fromTripId || rule.fromTripId === previous.tripId)
       && (!rule.toTripId || rule.toTripId === next.tripId)
@@ -1746,6 +1756,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     return DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS;
   };
   const transferDecision = (previous: GtfsDirectJourney, next: GtfsDirectJourney): TransferDecision => {
+    // Most transfer checks do not match a rule; the lookup is indexed by the
+    // arriving stop so this path only compares rules relevant to the station.
     const { rule, ambiguous } = transferRuleFor(previous, next);
     if (ambiguous || rule?.transferType === 3) {
       return { feasible: false, measure: { walkingMeters: 0, walkingSeconds: 0, geometry: null, inSeat: false }, requiredSeconds: Infinity,
