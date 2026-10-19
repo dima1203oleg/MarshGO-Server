@@ -2101,6 +2101,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const MAX_SEARCH_STEPS = 1_000_000;
   let searchBudgetTruncated = false;
   let maximumQueuedSearchWork = 0;
+  let drainedRouteQueueCount = 0;
 
   // Feed/trip insertion order is not a routing priority. In a dense city feed,
   // the bounded DFS could spend its entire budget on late or poorly connected
@@ -2238,13 +2239,22 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     }));
     while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS && canContinueCandidateSearch()) {
       let processed = false;
-      for (const queue of queues) {
+      // Route groups that have exhausted both their first legs and their
+      // transfer cursors are permanently idle. Remove them immediately so
+      // later fair-search rounds only visit queues that still carry work.
+      for (let queueIndex = 0; queueIndex < queues.length;) {
         if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS || !canContinueCandidateSearch()) break;
+        const queue = queues[queueIndex];
         const work = takeNextWork(queue);
-        if (!work) continue;
+        if (!work) {
+          queues.splice(queueIndex, 1);
+          drainedRouteQueueCount++;
+          continue;
+        }
         processed = true;
         if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass);
         else expandNextChild(work, queue);
+        queueIndex++;
       }
       if (!processed) break;
     }
@@ -2310,6 +2320,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     searchStepLimitReached: Number(searchSteps >= MAX_SEARCH_STEPS), candidateResultLimitReached: Number(results.size >= MAX_SEARCH_RESULTS),
     candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
     maxQueuedSearchWork: maximumQueuedSearchWork,
+    drainedRouteQueues: drainedRouteQueueCount,
     searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
