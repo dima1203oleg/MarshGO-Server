@@ -1,23 +1,51 @@
 import 'dotenv/config';
+import { gzipSync } from 'node:zlib';
 import crypto from 'node:crypto';
+import { cert, getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import express, { NextFunction, Request, Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { Pool, PoolClient } from 'pg';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createClient } from 'redis';
 import { RedisRateLimitStore } from './redisRateLimitStore';
+import { parseBearerToken } from './auth/bearer';
 import type { Duplex } from 'node:stream';
 import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
-import { validateRuntimeConfig } from './config';
-import { parseJourneySearchRequest } from './journey/search';
+import { getTrustedProxyHops, validateRuntimeConfig } from './config';
+import { getJourneySearchPartialReasons, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
+import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
+import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
+import { cachedGtfsTimetable, findGtfsStopArrivals, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
+import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg } from './journey/liveVehicles';
+import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
-import { selectRepresentativeJourneys } from './journey/scoring';
-import { JOURNEY_STRATEGIES, type JourneyOption, type JourneyStrategy } from './journey/types';
+import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePrices } from './journey/scoring';
+import { journeyTransportTypeSelected, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
+import { cachedSnapshot, selectNearby } from './mobility/nearby';
+import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
+import { buildTransportCities } from './mobility/cities';
+import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
+import { cachedKyivMetroTimetable } from './mobility/kyivMetroTimetable';
+import { getTransportFareCatalog } from './mobility/transportTariffs';
+import { bboxContains } from './mobility/types';
+import type { MobilityAssetType } from './mobility/types';
+import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
+import { buildMicromobilityGeofenceFeatures, buildMicromobilityPointFeatures, buildStaticRentalPointFeature } from './mobility/micromobilityFeatures';
+import { buildKiwitaxiAffiliateUrl, intuiTravelStatus, kiwitaxiStatus } from './mobility/transferAdapters';
+import { normalizePlate } from './vehiclePlate';
+import { isExactVehiclePhotoOrder } from './vehiclePhotos';
+import { shouldGrantAdmin } from './adminPhones';
+import { testProviderConnection } from './mobility/connection';
+import { refreshProviderHealth } from './mobility/healthMonitor';
+import { assertPublicHttpsUrl, UnsafeUrlError } from './mobility/safeFetch';
 import { GeocodingUnavailableError, reverseGeocode, suggestPlaces } from './geocoding';
 import { retainNavigationSessions } from './navigation/sessionRetention';
 import { expireDueProposals } from './proposals/expiry';
@@ -29,6 +57,7 @@ import {
 
 const app = express();
 validateRuntimeConfig(process.env);
+app.set('trust proxy', getTrustedProxyHops(process.env));
 const rendezvousSettings = getRendezvousSettings(process.env);
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 12, idleTimeoutMillis: 30_000 });
@@ -67,7 +96,7 @@ function deliverRealtime(userIds: string[], event: string) {
   }
 }
 const supportedOutboxEvents = new Set([
-  'conversation.message.created', 'booking.confirmed', 'booking.cancelled', 'booking.changed',
+  'conversation.message.created', 'booking.confirmed', 'booking.cancelled', 'booking.changed', 'booking.change-requested', 'trip.updated', 'trip.cancelled',
   'proposal.created', 'proposal.countered', 'proposal.updated', 'proposal.accepted', 'proposal.closed', 'proposal.expired',
   'navigation.match.driver-interested', 'navigation.match.passenger-confirmed', 'navigation.route-updated',
   'journey.updated', 'journey.started', 'journey.leg.started', 'journey.leg.completed', 'journey.completed',
@@ -178,6 +207,7 @@ const placeSearchLimiter = rateLimit({
   limit: 60,
   standardHeaders: 'draft-8',
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   ...(process.env.REDIS_URL ? { store: new RedisRateLimitStore(() => realtimeRedis, `${rateLimitPrefix}place-search:`) } : {}),
 });
 const apiRateLimitWindowMs = Number(process.env.API_RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
@@ -214,6 +244,7 @@ app.use('/api', rateLimit({
   ...(apiRateLimitStore ? { store: apiRateLimitStore } : {}),
   standardHeaders: 'draft-8',
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
   handler: (_req, res) => res.status(429).json({ error: { code: 'rate_limit_exceeded', message: 'Too many requests', requestId: res.locals.requestId } }),
 }));
 
@@ -266,7 +297,7 @@ async function insertSession(client: PoolClient, userId: string, familyId: strin
   return { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt };
 }
 function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  const bearer = req.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const bearer = parseBearerToken(req.get('authorization'));
   if (bearer) {
     pool.query<{ id: string; user_id: string }>(
       `SELECT s.id,s.user_id FROM sessions s JOIN users u ON u.id=s.user_id
@@ -322,6 +353,615 @@ function requireStaff(req: AuthenticatedRequest, res: Response, next: NextFuncti
     next();
   }).catch(next);
 }
+
+function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  pool.query<{ allowed: boolean }>(`SELECT EXISTS(SELECT 1 FROM user_roles WHERE user_id=$1 AND role='admin') AS allowed`, [req.userId])
+    .then(({ rows }) => {
+      if (!rows[0]?.allowed) return res.status(403).json({ error: { code: 'forbidden', message: 'Admin role is required', requestId: res.locals.requestId } });
+      next();
+    }).catch(next);
+}
+
+const providerTypes = ['public_transit', 'bike', 'ebike', 'scooter', 'moped', 'carsharing', 'taxi', 'carpool', 'on_demand', 'other'];
+const sourceTypes = ['gtfs', 'gtfs_rt', 'gbfs', 'gofs', 'rest', 'graphql', 'websocket', 'json', 'csv', 'geojson', 'marshgo'];
+const providerColumns = 'id,name,city,country,provider_type,source_type,feed_url,realtime_url,priority,status,health,access,license,update_frequency,coverage,source_ref,commercial_use,attribution_required,last_verified_at,discovery_status,last_checked_at,last_sync_at,last_error,last_report,created_at,updated_at';
+async function auditMobility(actorId: string | undefined, action: string, providerId: string, details: Record<string, unknown>) {
+  await pool.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)', [actorId, action, 'mobility_provider', providerId, JSON.stringify(details)]);
+}
+
+const rentalTypeMap: Record<string, { providerTypes: string[]; assetTypes: MobilityAssetType[] }> = {
+  bike: { providerTypes: ['bike', 'ebike'], assetTypes: ['BIKE', 'EBIKE'] },
+  scooter: { providerTypes: ['scooter'], assetTypes: ['SCOOTER'] },
+  moped: { providerTypes: ['moped'], assetTypes: ['MOPED'] },
+  carsharing: { providerTypes: ['carsharing'], assetTypes: ['CARSHARING'] },
+};
+
+/** What the client may offer: rental modes backed by healthy GBFS providers and public-transit types backed by healthy GTFS feeds. */
+app.get('/api/v1/mobility/availability', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query<{ provider_type: string; source_type: string; city: string; last_report: { counts?: Record<string, number> } }>(
+    `SELECT provider_type,source_type,city,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') AND source_type IN ('gbfs','gtfs','gtfs_rt','json','geojson')`);
+  const modes = Object.entries(rentalTypeMap).map(([mode, config]) => {
+    const matching = rows.filter((row) => row.source_type === 'gbfs' && config.providerTypes.includes(row.provider_type));
+    return { mode, available: matching.length > 0, cities: [...new Set(matching.map((row) => row.city))].sort() };
+  });
+  const transit: Record<string, { available: boolean; cities: string[] }> = {};
+  for (const type of ['bus', 'marshrutka', 'tram', 'trolleybus', 'metro', 'train', 'suburban', 'city_train', 'funicular', 'ferry']) {
+    const cities = [...new Set(rows.filter((row) => row.provider_type === 'public_transit' && ((row.last_report?.counts?.[`routes_${type}`] ?? 0) > 0 || (row.last_report?.counts?.[`vehicles_${type}`] ?? 0) > 0)).map((row) => row.city))].sort();
+    transit[type] = { available: cities.length > 0, cities };
+  }
+  res.json({ data: { modes, transit } });
+}));
+
+/** Transport tiles. `service` narrows public-transit providers by what their feeds actually contain; `nationwide` tiles use sources with city "Україна". */
+const transportTiles: Array<{ id: string; providerTypes: string[]; service?: string; nationwide?: boolean }> = [
+  { id: 'carpool', providerTypes: ['carpool'] }, { id: 'taxi', providerTypes: ['taxi'] }, { id: 'carsharing', providerTypes: ['carsharing'] },
+  { id: 'car_rental', providerTypes: [] }, { id: 'transfer', providerTypes: [] },
+  { id: 'bus', providerTypes: ['public_transit'], service: 'bus', nationwide: false }, { id: 'marshrutka', providerTypes: ['public_transit'], service: 'marshrutka', nationwide: false },
+  { id: 'trolleybus', providerTypes: ['public_transit'], service: 'trolleybus', nationwide: false }, { id: 'tram', providerTypes: ['public_transit'], service: 'tram', nationwide: false }, { id: 'metro', providerTypes: ['public_transit'], service: 'metro', nationwide: false },
+  { id: 'train', providerTypes: ['public_transit'], service: 'train', nationwide: true }, { id: 'suburban_train', providerTypes: ['public_transit'], service: 'suburban', nationwide: true },
+  { id: 'city_train', providerTypes: ['public_transit'], service: 'city_train', nationwide: false }, { id: 'funicular', providerTypes: ['public_transit'], service: 'funicular', nationwide: false },
+  { id: 'intercity_bus', providerTypes: ['public_transit'], service: 'bus', nationwide: true },
+  { id: 'bike', providerTypes: ['bike', 'ebike'] }, { id: 'scooter', providerTypes: ['scooter'] }, { id: 'moped', providerTypes: ['moped'] },
+  { id: 'plane', providerTypes: [] }, { id: 'ferry', providerTypes: ['public_transit'], service: 'ferry', nationwide: false }, { id: 'walk', providerTypes: [] },
+];
+
+/**
+ * Providers per transport tile for a search area. Registry → connected (enabled, healthy) → covers the point (source coverage box) → serves the tile.
+ * Every tile is always returned (with an empty provider list when nothing serves it) so the client can keep it visible.
+ */
+app.get('/api/v1/mobility/providers', requireAuth, asyncHandler(async (req, res) => {
+  const lat = req.query.lat === undefined ? null : Number(req.query.lat), lon = req.query.lon === undefined ? null : Number(req.query.lon);
+  if ((lat !== null && (!Number.isFinite(lat) || Math.abs(lat) > 90)) || (lon !== null && (!Number.isFinite(lon) || Math.abs(lon) > 180))) throw new ApiError(400, 'lat and lon must be valid coordinates', 'invalid_coordinate');
+  const { rows } = await pool.query<{ name: string; city: string; provider_type: string; source_type: string; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
+    `SELECT name,city,provider_type,source_type,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') ORDER BY priority,name`);
+  const servicesOf = (report: { counts?: Record<string, number> }) => new Set(Object.entries(report?.counts ?? {}).filter(([key, count]) => count > 0 && /^(routes|vehicles)_(bus|marshrutka|tram|trolleybus|metro|suburban|train|city_train|funicular|ferry)$/.test(key)).map(([key]) => key.slice(key.indexOf('_') + 1)));
+  const data = transportTiles.map((tile) => {
+    if (tile.id === 'carpool') return { transportType: tile.id, providers: [{ id: 'carpool:MARSHGO', name: 'MARSHGO Community', available: true, cities: [], sources: ['marshgo'], services: [] }] };
+    const entries = new Map<string, { id: string; name: string; available: true; cities: Set<string>; sources: Set<string>; services: Set<string> }>();
+    for (const row of rows) {
+      if (!tile.providerTypes.includes(row.provider_type)) continue;
+      const services = servicesOf(row.last_report);
+      if (tile.service && !services.has(tile.service)) continue;
+      const nationwide = row.city === 'Україна';
+      if (tile.nationwide !== undefined && tile.nationwide !== nationwide) continue;
+      const box = row.last_report?.bbox;
+      if (lat !== null && lon !== null && !nationwide && (!box || !bboxContains(box, lon, lat))) continue;
+      const operator = row.name.split(' — ')[0];
+      const entry = entries.get(operator) ?? { id: `${tile.id}:${operator}`, name: operator, available: true as const, cities: new Set<string>(), sources: new Set<string>(), services: new Set<string>() };
+      entry.cities.add(row.city); entry.sources.add(row.source_type); services.forEach((service) => entry.services.add(service));
+      entries.set(operator, entry);
+    }
+    return { transportType: tile.id, providers: [...entries.values()].map((entry) => ({ id: entry.id, name: entry.name, available: entry.available, cities: [...entry.cities], sources: [...entry.sources], services: [...entry.services] })) };
+  });
+  res.json({ data });
+}));
+
+app.get('/api/v1/mobility/nearby', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
+  const mode = typeof req.query.mode === 'string' ? req.query.mode : '';
+  const lat = Number(req.query.lat), lon = Number(req.query.lon);
+  const radiusM = req.query.radiusM === undefined ? 1000 : Number(req.query.radiusM);
+  const config = rentalTypeMap[mode];
+  if (!config || !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180 || !Number.isFinite(radiusM) || radiusM < 100 || radiusM > 3000) {
+    throw new ApiError(400, 'mode, lat, lon and radiusM (100-3000) are required', 'invalid_nearby_query');
+  }
+  const { rows: providers } = await pool.query<{ id: string; name: string; feed_url: string }>(
+    `SELECT id,name,feed_url FROM mobility_providers WHERE status='enabled' AND health='healthy' AND source_type='gbfs' AND provider_type = ANY($1) ORDER BY priority`, [config.providerTypes]);
+  const settled = await Promise.allSettled(providers.map(async (provider) => ({ providerId: provider.id, providerName: provider.name, snapshot: await cachedSnapshot(provider.id, provider.feed_url) })));
+  const snapshots = settled.flatMap((item) => item.status === 'fulfilled' ? [item.value] : []);
+  const result = selectNearby(snapshots, [lon, lat], radiusM, config.assetTypes);
+  res.json({ data: { mode, radiusM, providers: providers.length, failedProviders: settled.length - snapshots.length, ...result } });
+}));
+
+/** Canonical service-operator registry; legacy feed registry remains available at /mobility/providers. */
+app.get('/api/v1/mobility/operators', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT provider_id,provider_name,provider_group,data_source,source_url,integration_status,data_freshness_seconds,
+            booking_method,pricing_capability,live_availability_capability,commercial_permissions,attribution_requirements,
+            enabled,last_successful_sync,last_sync_error,api_key_configured,
+            COALESCE((SELECT count(*) FROM rental_locations rl WHERE rl.provider_id=mo.provider_id),0)::int AS location_count,
+            COALESCE((SELECT count(*) FROM rental_locations rl WHERE rl.provider_id=mo.provider_id AND rl.availability='AVAILABLE'
+              AND rl.availability_checked_at > now()-interval '5 minutes'),0)::int AS live_available_count
+     FROM mobility_operators mo ORDER BY provider_group,provider_name`,
+  );
+  const kiwi = kiwitaxiStatus(), intui = intuiTravelStatus();
+  const data = rows.map((row) => {
+    const transferStatus = row.provider_id === 'kiwitaxi' ? kiwi : row.provider_id === 'intui_travel' ? intui : null;
+    return transferStatus ? { ...row, integration_status: transferStatus.status, api_key_configured: transferStatus.providerId === 'kiwitaxi' ? Boolean(process.env.KIWITAXI_SECURITY_TOKEN?.trim()) : Boolean(process.env.INTUI_API_LIGHT_CREDENTIALS?.trim()), status_message: transferStatus.message } : { ...row, status_message: null };
+  });
+  res.json({ data });
+}));
+
+app.patch('/api/v1/admin/mobility/operators/:providerId', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const providerId = req.params.providerId;
+  const enabled = req.body?.enabled;
+  if (!/^[a-z0-9][a-z0-9_-]{1,79}$/.test(providerId) || typeof enabled !== 'boolean') throw new ApiError(400, 'providerId and enabled boolean are required', 'invalid_operator_update');
+  const current = await pool.query<{ integration_status: string; enabled: boolean }>('SELECT integration_status,enabled FROM mobility_operators WHERE provider_id=$1', [providerId]);
+  if (!current.rows[0]) throw new ApiError(404, 'Mobility operator not found', 'operator_not_found');
+  if (enabled && !['ACTIVE_LIVE','ACTIVE_STATIC'].includes(current.rows[0].integration_status)) throw new ApiError(409, 'Only verified live or static operators can be enabled', 'operator_not_ready');
+  const { rows } = await pool.query('UPDATE mobility_operators SET enabled=$2,updated_at=now() WHERE provider_id=$1 RETURNING provider_id,provider_name,integration_status,enabled', [providerId, enabled]);
+  await auditMobility(req.userId, 'mobility.operator.updated', providerId, { old: { enabled: current.rows[0].enabled }, new: { enabled } });
+  res.json({ data: rows[0] });
+}));
+
+/** Static points are discoverable here, but only fresh, verified availability is exposed as live. */
+app.get('/api/v1/mobility/rental-locations', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
+  const box = parseBbox(req.query.bbox, 0.6);
+  const modeRaw = typeof req.query.mode === 'string' ? req.query.mode.toUpperCase() : null;
+  const mode = modeRaw === 'BIKE' ? 'BICYCLE' : modeRaw;
+  const providerId = typeof req.query.provider_id === 'string' ? req.query.provider_id : null;
+  const networkId = typeof req.query.network_id === 'string' ? req.query.network_id : null;
+  const sourceStatus = typeof req.query.source_status === 'string' ? req.query.source_status : null;
+  const limit = req.query.limit === undefined ? 500 : Number(req.query.limit);
+  const offset = req.query.offset === undefined ? 0 : Number(req.query.offset);
+  if (!box || (mode !== null && mode !== 'BICYCLE' && mode !== 'SCOOTER')
+    || (providerId !== null && !/^[a-z0-9][a-z0-9_-]{1,79}$/.test(providerId))
+    || (networkId !== null && !/^[a-z0-9][a-z0-9_-]{1,99}$/.test(networkId))
+    || (sourceStatus !== null && !['LIVE','STATIC','UNKNOWN'].includes(sourceStatus))
+    || !Number.isInteger(limit) || limit < 1 || limit > 1000 || !Number.isInteger(offset) || offset < 0 || offset > 100_000) {
+    throw new ApiError(400, 'bbox, valid mode/provider/network filters and bounded pagination are required', 'invalid_rental_location_query');
+  }
+  const { rows } = await pool.query(
+    `SELECT r.id,r.provider_id AS "providerId",o.provider_name AS "providerName",r.network_id AS "networkId",r.mode,
+            r.rental_model AS "rentalModel",r.source,r.external_id AS "externalId",r.object_type AS "objectType",r.name,
+            r.operator_name AS "operatorName",r.network_name AS "networkName",r.brand,r.reference,r.city,r.region,r.address,
+            r.opening_hours AS "openingHours",r.access,r.website,r.phone,r.capacity,r.vehicle_types AS "vehicleTypes",
+            r.pickup_allowed AS "pickupAllowed",r.dropoff_allowed AS "dropoffAllowed",r.geofence_allows_pickup AS "geofenceAllowsPickup",
+            r.geofence_allows_dropoff AS "geofenceAllowsDropoff",r.one_way_return AS "oneWayReturn",
+            CASE WHEN r.availability='AVAILABLE' AND r.availability_checked_at > now()-make_interval(secs => greatest(coalesce(n.maximum_snapshot_age_seconds,300),1)) THEN 'AVAILABLE'
+                 WHEN r.availability='UNAVAILABLE' AND r.availability_checked_at > now()-make_interval(secs => greatest(coalesce(n.maximum_snapshot_age_seconds,300),1)) THEN 'UNAVAILABLE'
+                 ELSE 'UNKNOWN' END AS availability,
+            CASE WHEN r.availability_checked_at > now()-make_interval(secs => greatest(coalesce(n.maximum_snapshot_age_seconds,300),1)) THEN r.available_vehicles ELSE NULL END AS "availableVehicles",
+            CASE WHEN r.availability_checked_at > now()-make_interval(secs => greatest(coalesce(n.maximum_snapshot_age_seconds,300),1)) THEN r.available_docks ELSE NULL END AS "availableDocks",
+            r.availability_checked_at AS "availabilityCheckedAt",r.source_updated_at AS "sourceUpdatedAt",r.source_imported_at AS "sourceImportedAt",
+            r.source_quality AS "sourceQuality",ST_X(ST_PointOnSurface(r.geom)::geometry) AS lon,ST_Y(ST_PointOnSurface(r.geom)::geometry) AS lat,
+            CASE WHEN r.availability_checked_at IS NOT NULL AND r.availability_checked_at > now()-interval '5 minutes' THEN 'LIVE' WHEN r.source='OSM' OR r.source='MANUAL' THEN 'STATIC' ELSE 'UNKNOWN' END AS "sourceStatus"
+     FROM rental_locations r JOIN mobility_operators o ON o.provider_id=r.provider_id
+     LEFT JOIN mobility_networks n ON n.network_id=r.network_id
+     WHERE ST_Intersects(r.geom,ST_MakeEnvelope($1,$2,$3,$4,4326))
+       AND ($5::text IS NULL OR r.mode=$5) AND ($6::text IS NULL OR r.provider_id=$6)
+       AND ($7::text IS NULL OR r.network_id=$7)
+       AND ($8::text IS NULL OR CASE WHEN r.availability_checked_at IS NOT NULL AND r.availability_checked_at > now()-interval '5 minutes' THEN 'LIVE' WHEN r.source IN ('OSM','MANUAL') THEN 'STATIC' ELSE 'UNKNOWN' END=$8)
+     ORDER BY r.provider_id,r.name NULLS LAST LIMIT $9 OFFSET $10`,
+    [box[0], box[1], box[2], box[3], mode, providerId, networkId, sourceStatus, limit, offset],
+  );
+  res.json({ data: rows, meta: { count: rows.length, limit, offset, truncated: rows.length === limit, attribution: '© OpenStreetMap contributors, ODbL 1.0 where source=osm' } });
+}));
+
+/** Refuses a rental if operator/network, live stock, return capacity or applicable rules are unknown. */
+app.post('/api/v1/mobility/rental-compatibility', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
+  const body: unknown = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ApiError(400, 'request must be an object', 'invalid_rental_request');
+  const value = body as Record<string, unknown>;
+  const pickupId = value.pickupLocationId, dropoffId = value.dropoffLocationId, vehicleType = value.vehicleType;
+  const parseDate = (raw: unknown) => typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(raw) ? new Date(raw) : null;
+  const departureAt = parseDate(value.departureAt), arrivalAt = parseDate(value.arrivalAt);
+  if (typeof pickupId !== 'string' || !/^[0-9a-f-]{36}$/i.test(pickupId) || typeof dropoffId !== 'string' || !/^[0-9a-f-]{36}$/i.test(dropoffId)
+    || typeof vehicleType !== 'string' || vehicleType.length < 1 || vehicleType.length > 80 || !departureAt || !arrivalAt || !Number.isFinite(departureAt.getTime()) || !Number.isFinite(arrivalAt.getTime())
+    || typeof value.requireVerifiedReturn !== 'undefined' && typeof value.requireVerifiedReturn !== 'boolean') {
+    throw new ApiError(400, 'pickup/dropoff IDs, vehicleType and timezone-qualified rental times are required', 'invalid_rental_request');
+  }
+  const { rows } = await pool.query<Record<string, unknown>>(
+    `SELECT r.id,r.provider_id AS "providerId",r.network_id AS "networkId",r.mode,r.rental_model AS "rentalModel",r.name,
+            r.pickup_allowed AS "pickupAllowed",r.dropoff_allowed AS "dropoffAllowed",r.geofence_allows_pickup AS "geofenceAllowsPickup",
+            r.geofence_allows_dropoff AS "geofenceAllowsDropoff",r.availability,r.available_vehicles AS "availableVehicles",r.available_docks AS "availableDocks",
+            r.vehicle_types AS "vehicleTypes",r.availability_checked_at AS "availabilityCheckedAt",r.opening_hours AS "openingHours",
+            n.return_rule AS "returnRule",n.compatibility_status AS "compatibilityStatus",n.cross_provider_return_confirmed AS "crossProviderReturnConfirmed",
+            n.provider_ids AS "providerIds",n.maximum_snapshot_age_seconds AS "maximumSnapshotAgeSeconds"
+     FROM rental_locations r LEFT JOIN mobility_networks n ON n.network_id=r.network_id WHERE r.id=ANY($1::uuid[])`,
+    [[pickupId, dropoffId]],
+  );
+  const pickupRow = rows.find((row) => row.id === pickupId), dropoffRow = rows.find((row) => row.id === dropoffId);
+  if (!pickupRow || !dropoffRow) throw new ApiError(404, 'Rental location not found');
+  const dateValue = (raw: unknown) => raw instanceof Date ? raw : typeof raw === 'string' ? new Date(raw) : null;
+  const boolValue = (raw: unknown) => typeof raw === 'boolean' ? raw : null;
+  const rentalLocation = (row: Record<string, unknown>): RentalLocation => ({
+    id: String(row.id), providerId: String(row.providerId), networkId: typeof row.networkId === 'string' ? row.networkId : null,
+    mode: row.mode === 'BICYCLE' || row.mode === 'SCOOTER' ? row.mode : 'BICYCLE',
+    rentalModel: ['STATION_BASED','FREE_FLOATING','STAFFED','CONFIRMED_ONE_WAY'].includes(String(row.rentalModel)) ? row.rentalModel as RentalLocation['rentalModel'] : 'UNKNOWN',
+    name: typeof row.name === 'string' ? row.name : String(row.id), pickupAllowed: boolValue(row.pickupAllowed), dropoffAllowed: boolValue(row.dropoffAllowed),
+    availability: row.availability === 'AVAILABLE' || row.availability === 'UNAVAILABLE' ? row.availability : 'UNKNOWN',
+    availableVehicles: typeof row.availableVehicles === 'number' ? row.availableVehicles : null,
+    availableDocks: typeof row.availableDocks === 'number' ? row.availableDocks : null,
+    vehicleTypes: Array.isArray(row.vehicleTypes) ? row.vehicleTypes.filter((item): item is string => typeof item === 'string') : [],
+    availabilityCheckedAt: dateValue(row.availabilityCheckedAt),
+    // Staffed opening-hours parsing is intentionally fail-closed until a verified hours evaluator is available.
+    openingAtPickup: row.rentalModel === 'STAFFED' ? null : true,
+    openingAtDropoff: row.rentalModel === 'STAFFED' ? null : true,
+    geofenceAllowsPickup: boolValue(row.geofenceAllowsPickup), geofenceAllowsDropoff: boolValue(row.geofenceAllowsDropoff),
+  });
+  const pickup = rentalLocation(pickupRow), dropoff = rentalLocation(dropoffRow);
+  const firstCheckedAt = pickup.availabilityCheckedAt;
+  const networkRule: RentalNetworkRule | null = typeof pickupRow.networkId === 'string' && pickupRow.networkId === dropoffRow.networkId ? {
+    networkId: pickupRow.networkId, providerIds: Array.isArray(pickupRow.providerIds) ? pickupRow.providerIds.filter((item): item is string => typeof item === 'string') : [],
+    status: pickupRow.compatibilityStatus === 'CONFIRMED' ? 'CONFIRMED' : pickupRow.compatibilityStatus === 'DISABLED' ? 'DISABLED' : 'UNKNOWN',
+    returnRule: ['SAME_LOCATION','ANY_NETWORK_LOCATION','FREE_FLOATING_ZONE','ONE_WAY_CONFIRMED'].includes(String(pickupRow.returnRule)) ? pickupRow.returnRule as RentalNetworkRule['returnRule'] : 'UNKNOWN',
+    crossProviderReturnConfirmed: pickupRow.crossProviderReturnConfirmed === true,
+    maximumSnapshotAgeSeconds: typeof pickupRow.maximumSnapshotAgeSeconds === 'number' ? pickupRow.maximumSnapshotAgeSeconds : null,
+  } : null;
+  const compatibility = canRent({ pickup, dropoff, vehicleType, departureAt, arrivalAt, networkRule, requireVerifiedReturn: value.requireVerifiedReturn !== false, now: new Date() });
+  // The top-level timestamp follows the limiting snapshot so clients can explain the freshness of the decision.
+  res.json({ data: { ...compatibility, availabilityCheckedAt: firstCheckedAt?.toISOString() ?? null } });
+}));
+
+/** Search only imported provider catalog rows. This does not call partners or imply a live quote/booking. */
+app.post('/api/v1/mobility/transfers/search', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
+  const value: unknown = req.body;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ApiError(400, 'request must be an object', 'invalid_transfer_search');
+  const body = value as Record<string, unknown>;
+  const placeId = (raw: unknown) => typeof raw === 'string' && /^[0-9a-f-]{36}$/i.test(raw);
+  const passengerCount = body.passengerCount === undefined ? 1 : Number(body.passengerCount);
+  const providerIds = body.providerIds === undefined ? null : Array.isArray(body.providerIds)
+    && body.providerIds.length <= 10 && body.providerIds.every((id) => typeof id === 'string' && /^[a-z0-9][a-z0-9_-]{1,79}$/.test(id)) ? body.providerIds as string[] : undefined;
+  if (!placeId(body.originPlaceId) || !placeId(body.destinationPlaceId) || body.originPlaceId === body.destinationPlaceId
+    || !Number.isInteger(passengerCount) || passengerCount < 1 || passengerCount > 16 || providerIds === undefined) {
+    throw new ApiError(400, 'originPlaceId, destinationPlaceId, passengerCount and providerIds are invalid', 'invalid_transfer_search');
+  }
+  const { rows } = await pool.query<Record<string, unknown>>(
+    `SELECT tr.id AS "offerId",tr.provider_id AS "providerId",o.provider_name AS "providerName",
+            a.external_id AS "originExternalId",a.city AS "originCity",b.external_id AS "destinationExternalId",b.city AS "destinationCity",
+            tr.vehicle_class AS "vehicleClass",tr.seats,tr.luggage,tr.price_minor AS "priceMinor",tr.currency,tr.price_status AS "priceStatus",
+            tr.source_updated_at AS "sourceUpdatedAt",tr.attributes->>'booking_url' AS "bookingUrl"
+       FROM transfer_routes tr JOIN mobility_operators o ON o.provider_id=tr.provider_id
+       JOIN transfer_places a ON a.id=tr.origin_place_id JOIN transfer_places b ON b.id=tr.destination_place_id
+      WHERE tr.origin_place_id=$1 AND tr.destination_place_id=$2 AND ($3::text[] IS NULL OR tr.provider_id=ANY($3::text[]))
+        AND (tr.seats IS NULL OR tr.seats >= $4)
+      ORDER BY CASE WHEN tr.price_status='DYNAMIC' THEN 0 WHEN tr.price_status='CATALOG' THEN 1 ELSE 2 END,
+               tr.price_minor NULLS LAST LIMIT 100`,
+    [body.originPlaceId, body.destinationPlaceId, providerIds, passengerCount],
+  );
+  const offers = rows.map((row) => {
+    let bookingUrl: string | null = null;
+    if (row.providerId === 'kiwitaxi' && typeof row.bookingUrl === 'string') {
+      try { bookingUrl = buildKiwitaxiAffiliateUrl(row.bookingUrl); } catch { bookingUrl = null; }
+    }
+    const sourceUpdatedAt = row.sourceUpdatedAt instanceof Date ? row.sourceUpdatedAt.toISOString() : typeof row.sourceUpdatedAt === 'string' ? row.sourceUpdatedAt : null;
+    return { ...row, sourceUpdatedAt, quoteStatus: row.priceStatus === 'DYNAMIC' ? 'DYNAMIC' : row.priceStatus === 'CATALOG' ? 'CATALOG_ONLY' : 'UNKNOWN', availabilityStatus: 'UNKNOWN', bookingUrl, bookingAvailable: false };
+  });
+  res.json({ data: offers, providers: [kiwitaxiStatus(), intuiTravelStatus()], meta: { catalogOnly: true, liveQuotes: false, bookingAvailable: false, count: offers.length } });
+}));
+
+// ---- Map layers (2D). Everything is loaded per viewport and per layer; the client asks only for layers the user switched on. ----
+type LayerProviderRow = { id: string; name: string; city: string; provider_type: string; source_type: string; feed_url: string; operator_id: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } };
+const layerProviders = async (sourceTypes: string[], providerTypes: string[]) => (await pool.query<LayerProviderRow>(
+  `SELECT mp.id,COALESCE(mo.provider_name,mp.name) AS name,mp.city,mp.provider_type,mp.source_type,mp.feed_url,mp.operator_id,mp.last_report
+     FROM mobility_providers mp LEFT JOIN mobility_operators mo ON mo.provider_id=mp.operator_id
+    WHERE mp.status='enabled' AND mp.health IN ('healthy','degraded') AND mp.source_type = ANY($1) AND mp.provider_type = ANY($2) ORDER BY mp.priority,mp.name`, [sourceTypes, providerTypes],
+)).rows;
+const providerTouches = (row: LayerProviderRow, box: [number, number, number, number]) => row.city === 'Україна' || !row.last_report?.bbox || intersects(box, [row.last_report.bbox[0] - .15, row.last_report.bbox[1] - .1, row.last_report.bbox[2] + .15, row.last_report.bbox[3] + .1]);
+/** Map layers can be hundreds of KB of GeoJSON; compress when the client accepts it. Coordinates are rounded to ~1 m. */
+const sendLayerJson = (req: express.Request, res: express.Response, payload: unknown) => {
+  const body = Buffer.from(JSON.stringify(payload).replace(/(\d+\.\d{5})\d+/g, '$1'));
+  res.setHeader('content-type', 'application/json; charset=utf-8'); res.setHeader('cache-control', 'private, max-age=10');
+  if (String(req.headers['accept-encoding'] ?? '').includes('gzip')) { res.setHeader('content-encoding', 'gzip'); res.setHeader('vary', 'accept-encoding'); res.end(gzipSync(body)); return; }
+  res.end(body);
+};
+const typesParam = (raw: unknown): LineType[] => (typeof raw === 'string' ? raw.split(',').filter(isLineType) : []);
+const layerFetch = <T>(task: Promise<T>) => task.then((value) => ({ ok: true as const, value }), () => ({ ok: false as const }));
+
+/** Which layers can show anything right now (from the connected feeds), so the client can grey out the rest. */
+app.get('/api/v1/transport/layers', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query<{ provider_type: string; source_type: string; last_report: { counts?: Record<string, number> } }>(
+    `SELECT provider_type,source_type,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded')`);
+  const lines = new Set<string>(); const micro = new Set<string>(); let stationsAvailable = false;
+  for (const row of rows) {
+    if (row.provider_type === 'public_transit') for (const [key, count] of Object.entries(row.last_report?.counts ?? {})) { const match = /^(routes|vehicles)_(\w+)$/.exec(key); if (match && count > 0) lines.add(match[2]); }
+    else { micro.add(row.provider_type); if ((row.last_report?.counts?.stations ?? 0) > 0) stationsAvailable = true; }
+  }
+  const publicTransport = ['bus', 'marshrutka', 'trolleybus', 'tram'].some((type) => lines.has(type));
+  res.json({ data: [
+    { id: 'PUBLIC_TRANSPORT', available: publicTransport }, { id: 'METRO', available: lines.has('metro') }, { id: 'BUS', available: lines.has('bus') || lines.has('marshrutka') },
+    { id: 'TRAM', available: lines.has('tram') }, { id: 'TROLLEYBUS', available: lines.has('trolleybus') }, { id: 'STOPS', available: publicTransport || lines.has('train') || lines.has('metro') },
+    { id: 'MINIBUS', available: lines.has('marshrutka') }, { id: 'CITY_TRAIN', available: lines.has('city_train') }, { id: 'FUNICULAR', available: lines.has('funicular') },
+    { id: 'BICYCLE', available: micro.has('bike') || micro.has('ebike') }, { id: 'SCOOTER', available: micro.has('scooter') },
+    { id: 'CARSHARING', available: micro.has('carsharing') }, { id: 'RENTAL_POINTS', available: stationsAvailable },
+  ] });
+}));
+
+/** Cities are discovered from healthy enabled GTFS providers and their validated coverage, not hardcoded in the client. */
+app.get('/api/v1/transport/cities', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query<{ name: string; city: string; source_type: string; license: string | null; source_ref: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } | null }>(
+    `SELECT name,city,source_type,license,source_ref,last_report FROM mobility_providers
+      WHERE provider_type='public_transit' AND source_type IN ('gtfs','gtfs_rt','geojson') AND status='enabled' AND health IN ('healthy','degraded')
+      ORDER BY priority,name`);
+  res.json({ data: buildTransportCities(rows) });
+}));
+
+/** Read-only registry exposes audited licensing and discovery state without leaking feed credentials or internal error text. */
+app.get('/api/v1/transport/providers', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id,name,city,provider_type AS "providerType",source_type AS "sourceType",access,license,
+       commercial_use AS "commercialUse",attribution_required AS "attributionRequired",source_ref AS "sourceRef",
+       update_frequency AS "updateFrequency",discovery_status AS "discoveryStatus",health,status,
+       last_checked_at AS "lastCheckedAt",last_sync_at AS "lastSyncAt",last_report->'counts' AS counts
+     FROM mobility_providers ORDER BY city,priority,name`);
+  res.json({ data: rows });
+}));
+
+app.get('/api/v1/transport/health', requireAuth, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT name,city,source_type AS "sourceType",discovery_status AS "discoveryStatus",health,status,access,
+       last_checked_at AS "lastCheckedAt",last_sync_at AS "lastSyncAt",last_report->'counts' AS counts
+     FROM mobility_providers ORDER BY city,priority,name`);
+  res.json({ data: rows, checkedAt: new Date().toISOString() });
+}));
+
+/** Verified published fares plus explicit dynamic-price requirements; no vendor secret is returned. */
+app.get('/api/v1/transport/fares', requireAuth, asyncHandler(async (req, res) => {
+  const city = typeof req.query.city === 'string' ? req.query.city.trim().slice(0, 80) : undefined;
+  const mode = typeof req.query.mode === 'string' ? req.query.mode.trim().toLocaleLowerCase('uk-UA').slice(0, 40) : undefined;
+  res.json({ data: getTransportFareCatalog({ city, mode }), currency: 'UAH', lastVerifiedAt: '2026-10-13' });
+}));
+
+/** Official Kyiv metro, city-rail and funicular timetable data; these are static schedules, not realtime predictions. */
+app.get('/api/v1/transport/schedules', requireAuth, asyncHandler(async (req, res) => {
+  const rawKind = typeof req.query.mode === 'string' ? req.query.mode : '';
+  if (!['city_train', 'metro', 'funicular'].includes(rawKind)) throw new ApiError(400, 'mode must be city_train, metro, or funicular', 'invalid_transport_query');
+  const station = typeof req.query.station === 'string' ? req.query.station.trim().slice(0, 100) : undefined;
+  const { rows } = await pool.query<{ id: string; name: string; feed_url: string; source_ref: string | null }>(
+    `SELECT id,name,feed_url,source_ref FROM mobility_providers
+      WHERE city='Київ' AND provider_type='public_transit' AND source_type='rest' AND status='enabled' AND health IN ('healthy','degraded')
+      ORDER BY priority,name`);
+  const result = await loadKyivSchedules(rows, rawKind as KyivScheduleKind, station || undefined);
+  sendLayerJson(req, res, result);
+}));
+
+const loadRoutes = async (box: [number, number, number, number], types: LineType[] = []) => {
+  // Skip feeds that contain none of the requested transport types (e.g. a national rail feed when the user asked for trams).
+  const hasTypes = (row: LayerProviderRow) => types.length === 0 || types.some((type) => (row.last_report?.counts?.[`routes_${type}`] ?? 0) > 0);
+  const providers = (await layerProviders(['gtfs', 'geojson'], ['public_transit'])).filter((row) => providerTouches(row, box) && hasTypes(row));
+  const settled = await Promise.all(providers.map((row) => layerFetch((row.source_type === 'gtfs'
+    ? cachedNetwork(row.id, row.feed_url)
+    : (() => { const mode = geoJsonMode(row.name); return mode ? cachedGeoJsonNetwork(row.id, row.feed_url, mode) : Promise.reject(new Error('Unknown GeoJSON transport mode')); })())
+    .then((network) => ({ row, network })))));
+  return { settled, loaded: settled.flatMap((item) => item.ok ? [item.value] : []) };
+};
+
+app.get('/api/v1/transport/routes', requireAuth, asyncHandler(async (req, res) => {
+  const box = parseBbox(req.query.bbox); const types = typesParam(req.query.types);
+  if (!box || types.length === 0) throw new ApiError(400, 'bbox (west,south,east,north, at most 2 degrees) and types are required', 'invalid_transport_query');
+  const { settled, loaded } = await loadRoutes(box, types);
+  const features = loaded.flatMap(({ row, network }) => network.routes.filter((route: NetworkRoute) => types.includes(route.type) && routeInBbox(route, box))
+    .map((route) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${route.id}`, name: route.name, direction: route.direction, stopCount: route.stopCount, transport: route.type, provider: row.name.split(' — ')[0] }, geometry: { type: 'LineString' as const, coordinates: route.coordinates } })));
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 600) }, meta: { failedProviders: settled.length - loaded.length, truncated: features.length > 600 } });
+}));
+
+app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) => {
+  const box = parseBbox(req.query.bbox, 0.5); const types = typesParam(req.query.types);
+  if (!box || types.length === 0) throw new ApiError(400, 'bbox (west,south,east,north, at most 0.5 degree) and types are required; zoom in to see stops', 'invalid_transport_query');
+  const { settled, loaded } = await loadRoutes(box, types);
+  const features = loaded.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat) && stop.types.some((type) => types.includes(type)))
+    .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: stop.types.join(','), provider: row.name.split(' — ')[0] }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } })));
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 2500) }, meta: { failedProviders: settled.length - loaded.length, truncated: features.length > 2500 } });
+}));
+
+/**
+ * Compatibility endpoint used by the legacy map UI. Stop IDs emitted by the
+ * stop layer are provider-scoped (`providerUuid:gtfsStopId`); predictions are
+ * read from that exact provider's schedule and fresh GTFS-Realtime updates.
+ */
+app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) => {
+  const scopedStopId = req.params.stopId;
+  const separator = scopedStopId.indexOf(':');
+  if (separator < 1 || separator === scopedStopId.length - 1 || scopedStopId.length > 380) {
+    throw new ApiError(400, 'stop ID must include its provider scope', 'invalid_stop_id');
+  }
+  const providerId = scopedStopId.slice(0, separator);
+  const stopId = scopedStopId.slice(separator + 1);
+  if (!/^[0-9a-f-]{36}$/i.test(providerId) || stopId.length > 255) {
+    throw new ApiError(400, 'invalid provider-scoped stop ID', 'invalid_stop_id');
+  }
+  const latRaw = typeof req.query.lat === 'string' ? req.query.lat.trim() : '';
+  const lonRaw = typeof req.query.lon === 'string' ? req.query.lon.trim() : '';
+  const lat = Number(latRaw); const lon = Number(lonRaw);
+  if (!latRaw || !lonRaw || !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180) {
+    throw new ApiError(400, 'lat and lon are required', 'invalid_coordinates');
+  }
+  const requestedLimit = req.query.limit === undefined ? 20 : Number(req.query.limit);
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) {
+    throw new ApiError(400, 'limit must be between 1 and 50', 'invalid_limit');
+  }
+
+  const { rows } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; source_type: string }>(
+    `SELECT id,name,city,feed_url,realtime_url,source_type FROM mobility_providers
+      WHERE id=$1 AND provider_type='public_transit' AND access='open' AND status='enabled'
+        AND health IN ('healthy','degraded')`, [providerId]);
+  const provider = rows[0];
+  if (!provider) throw new ApiError(404, 'transit provider is unavailable', 'provider_unavailable');
+  if (provider.source_type !== 'gtfs') {
+    res.json({ data: { stopId: scopedStopId, lat, lon, arrivals: [] },
+      meta: { availability: 'SCHEDULE_UNSUPPORTED', realtimeStatus: 'NOT_CONFIGURED' } });
+    return;
+  }
+
+  let baseFeed: GtfsTimetableFeed;
+  try {
+    baseFeed = await cachedGtfsTimetable(provider.id, provider.feed_url);
+  } catch {
+    console.error(JSON.stringify({ level: 'warn', event: 'transit.stop_arrivals.schedule_unavailable', providerId }));
+    throw new ApiError(503, 'transit schedule is temporarily unavailable', 'schedule_unavailable');
+  }
+  let realtimeStatus: 'AVAILABLE' | 'STALE' | 'UNAVAILABLE' | 'NOT_CONFIGURED' | 'TEMPORARILY_UNAVAILABLE' = provider.realtime_url ? 'UNAVAILABLE' : 'NOT_CONFIGURED';
+  let realtimeUpdatedAt: Date | undefined;
+  let feed = baseFeed;
+  if (provider.realtime_url) {
+    try {
+      const realtime = await cachedGtfsRealtimeTripUpdates(provider.id, provider.realtime_url);
+      if (realtime.fresh) {
+        feed = { ...baseFeed, realtimeTripUpdates: realtime.updates };
+        realtimeStatus = 'AVAILABLE';
+        realtimeUpdatedAt = realtime.feedTimestamp;
+      } else if (realtime.reason === 'STALE') {
+        realtimeStatus = 'STALE';
+      }
+    } catch {
+      realtimeStatus = 'TEMPORARILY_UNAVAILABLE';
+      console.error(JSON.stringify({ level: 'warn', event: 'transit.stop_arrivals.realtime_unavailable', providerId }));
+    }
+  }
+  const arrivals = findGtfsStopArrivals(feed, stopId, { now: new Date(), limit: requestedLimit }).map((arrival) => {
+    const etaMinutes = Math.ceil(arrival.etaSeconds / 60);
+    const routeName = arrival.routeName || arrival.routeId;
+    const live = arrival.source === 'TRIP_UPDATE';
+    return {
+      stopId: scopedStopId, routeId: arrival.routeId, mode: arrival.transportType,
+      tripId: arrival.tripId, scheduledArrival: arrival.scheduledArrivalAt.toISOString(),
+      predictedArrival: arrival.predictedArrivalAt.toISOString(), arrivalSource: arrival.source,
+      confidence: arrival.confidence, ...(arrival.realtimeUpdatedAt ? { realtimeUpdatedAt: arrival.realtimeUpdatedAt.toISOString() } : {}),
+      isRealtime: live, etaSeconds: arrival.etaSeconds,
+      displayLabel: live ? `${routeName} — орієнтовно ${etaMinutes} хв · GTFS-RT` : `${routeName} — ${etaMinutes} хв за розкладом`,
+    };
+  });
+  const stopKnown = baseFeed.stops.has(stopId);
+  res.json({ data: { stopId: scopedStopId, lat, lon, arrivals },
+    meta: { availability: stopKnown ? 'AVAILABLE' : 'STOP_NOT_IN_FEED', scheduleUpdatedAt: baseFeed.fetchedAt.toISOString(),
+      realtimeStatus, ...(realtimeUpdatedAt ? { realtimeUpdatedAt: realtimeUpdatedAt.toISOString() } : {}) } });
+}));
+
+app.get('/api/v1/transport/vehicles', requireAuth, asyncHandler(async (req, res) => {
+  const box = parseBbox(req.query.bbox); const types = typesParam(req.query.types);
+  if (!box || types.length === 0) throw new ApiError(400, 'bbox (west,south,east,north, at most 2 degrees) and types are required', 'invalid_transport_query');
+  const realtime = (await layerProviders(['gtfs_rt', 'json'], ['public_transit'])).filter((row) => providerTouches(row, box));
+  const { loaded } = await loadRoutes(box, types);
+  const names = new Map<string, { name: string; type: LineType }>();
+  for (const { network } of loaded) for (const route of network.routes) names.set(route.id.split('|')[0], { name: route.name, type: route.type });
+  const settled = await Promise.all(realtime.map((row) => layerFetch(cachedVehicles(row.id, row.source_type, row.feed_url, names))));
+  const received = settled.flatMap((item) => item.ok ? item.value : []);
+  const fresh = received.filter((vehicle) => isFreshVehicleTimestamp(vehicle.timestamp));
+  const vehicles = fresh.filter((vehicle) => inBbox(box, vehicle.lon, vehicle.lat) && (vehicle.type === 'other' || types.includes(vehicle.type)));
+  const features = vehicles.slice(0, 1500).map((vehicle) => ({ type: 'Feature' as const, properties: { id: vehicle.id, route: vehicle.route, transport: vehicle.type,
+    bearing: vehicle.bearing, speed: vehicle.speed, updatedAt: vehicle.timestamp?.toISOString() }, geometry: { type: 'Point' as const, coordinates: [vehicle.lon, vehicle.lat] } }));
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features }, meta: { failedProviders: settled.filter((item) => !item.ok).length, filteredStaleVehicles: received.length - fresh.length } });
+}));
+
+app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req, res) => {
+  const box = parseBbox(req.query.bbox, 0.6);
+  const wanted = typeof req.query.types === 'string' ? req.query.types.split(',') : [];
+  const assetTypes = new Set<MobilityAssetType>(wanted.flatMap((type): MobilityAssetType[] => type === 'bike' ? ['BIKE', 'EBIKE'] : type === 'scooter' ? ['SCOOTER'] : type === 'carsharing' ? ['CARSHARING'] : []));
+  const wantStations = wanted.includes('stations');
+  if (!box || (assetTypes.size === 0 && !wantStations)) throw new ApiError(400, 'bbox (at most 0.6 degree) and types (bike, scooter, carsharing, stations) are required', 'invalid_transport_query');
+  const providers = (await layerProviders(['gbfs'], ['bike', 'ebike', 'scooter', 'carsharing'])).filter((row) => providerTouches(row, box));
+  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url).then((snapshot) => ({ row, snapshot })))));
+  const features: unknown[] = [];
+  let staleAssets = 0;
+  for (const item of settled) {
+    if (!item.ok) continue;
+    const provider = { id: item.value.row.id, name: item.value.row.name, operatorId: item.value.row.operator_id };
+    const mapped = buildMicromobilityPointFeatures(provider, item.value.snapshot, { west: box[0], south: box[1], east: box[2], north: box[3] }, assetTypes, { includeStations: wantStations });
+    features.push(...mapped);
+    const timestamp = item.value.snapshot.lastUpdated;
+    const staleAfter = item.value.snapshot.staleAfterSeconds ?? 60;
+    if (timestamp === null || timestamp === undefined || Date.now() - timestamp > staleAfter * 1000) staleAssets += item.value.snapshot.assets.length;
+  }
+  if (assetTypes.has('BIKE') || assetTypes.has('EBIKE')) {
+    const { rows: rentals } = await pool.query<Record<string, unknown>>(
+      `SELECT r.id,r.provider_id AS "providerId",o.provider_name AS "providerName",r.network_id AS "networkId",r.mode,
+              r.rental_model AS "rentalModel",r.source,r.name,r.operator_name AS "operatorName",r.city,r.address,
+              r.pickup_allowed AS "pickupAllowed",r.dropoff_allowed AS "dropoffAllowed",r.availability,
+              r.availability_checked_at AS "availabilityCheckedAt",r.source_updated_at AS "sourceUpdatedAt",r.source_imported_at AS "sourceImportedAt",
+              CASE WHEN r.availability_checked_at IS NOT NULL AND r.availability_checked_at > now()-interval '5 minutes' THEN 'LIVE'
+                   WHEN r.source IN ('OSM','MANUAL') THEN 'STATIC' ELSE 'UNKNOWN' END AS "sourceStatus",
+              ST_X(ST_PointOnSurface(r.geom)::geometry) AS lon,ST_Y(ST_PointOnSurface(r.geom)::geometry) AS lat
+         FROM rental_locations r JOIN mobility_operators o ON o.provider_id=r.provider_id
+        WHERE r.mode='BICYCLE' AND (o.enabled=true OR r.source='OSM') AND ST_Intersects(r.geom,ST_MakeEnvelope($1,$2,$3,$4,4326))
+        ORDER BY r.provider_id,r.name NULLS LAST LIMIT 3000`, [box[0], box[1], box[2], box[3]],
+    );
+    for (const row of rentals) { const feature = buildStaticRentalPointFeature(row); if (feature) features.push(feature); }
+  }
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 3000) }, meta: { failedProviders: settled.filter((item) => !item.ok).length, filteredStaleAssets: staleAssets, truncated: features.length > 3000, attribution: 'Zelectra GBFS; © OpenStreetMap contributors, ODbL 1.0 where source=OSM' } });
+}));
+
+app.get('/api/v1/transport/micromobility/geofences', requireAuth, asyncHandler(async (req, res) => {
+  const box = parseBbox(req.query.bbox, 0.6);
+  if (!box) throw new ApiError(400, 'bbox (at most 0.6 degree) is required', 'invalid_transport_query');
+  const providers = (await layerProviders(['gbfs'], ['scooter'])).filter((row) => providerTouches(row, box));
+  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url).then((snapshot) => ({ row, snapshot })))));
+  const features = settled.flatMap((item) => item.ok ? buildMicromobilityGeofenceFeatures(
+    { id: item.value.row.id, name: item.value.row.name, operatorId: item.value.row.operator_id }, item.value.snapshot,
+    { west: box[0], south: box[1], east: box[2], north: box[3] },
+  ) : []);
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 1000) }, meta: { failedProviders: settled.filter((item) => !item.ok).length, truncated: features.length > 1000, attribution: 'Zelectra GBFS; Mobility Database catalog reports CC BY 4.0' } });
+}));
+
+app.get('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(`SELECT ${providerColumns} FROM mobility_providers ORDER BY city, priority, name`);
+  res.json({ data: rows });
+}));
+
+app.post('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  const { name, city, providerType, sourceType, feedUrl, realtimeUrl, priority } = req.body ?? {};
+  if (typeof name !== 'string' || name.trim().length < 2 || name.length > 120 || typeof city !== 'string' || city.trim().length < 2 || city.length > 120 ||
+      !providerTypes.includes(providerType) || !sourceTypes.includes(sourceType) || typeof feedUrl !== 'string' ||
+      (realtimeUrl !== undefined && realtimeUrl !== null && typeof realtimeUrl !== 'string') ||
+      (priority !== undefined && (!Number.isInteger(priority) || priority < 1 || priority > 1000))) {
+    throw new ApiError(400, 'invalid mobility provider', 'invalid_provider');
+  }
+  try { await assertPublicHttpsUrl(feedUrl); if (realtimeUrl) await assertPublicHttpsUrl(realtimeUrl); }
+  catch (error) { if (error instanceof UnsafeUrlError) throw new ApiError(400, error.message, 'unsafe_url'); throw error; }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO mobility_providers(name,city,provider_type,source_type,feed_url,realtime_url,priority,created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${providerColumns}`,
+      [name.trim(), city.trim(), providerType, sourceType, feedUrl, realtimeUrl || null, priority ?? 100, req.userId],
+    );
+    await auditMobility(req.userId, 'mobility.provider.created', rows[0].id, { name: rows[0].name, city: rows[0].city, sourceType });
+    res.status(201).json({ data: rows[0] });
+  } catch (error) {
+    if ((error as { code?: string }).code === '23505') throw new ApiError(409, 'A provider with this name already exists in the city', 'provider_exists');
+    throw error;
+  }
+}));
+
+app.patch('/api/v1/admin/mobility/providers/:id', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid provider id', 'invalid_provider_id');
+  const { status, priority } = req.body ?? {};
+  if ((status !== undefined && !['enabled', 'disabled', 'paused'].includes(status)) || (priority !== undefined && (!Number.isInteger(priority) || priority < 1 || priority > 1000)) || (status === undefined && priority === undefined)) {
+    throw new ApiError(400, 'status or priority is required', 'invalid_provider_update');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await client.query('SELECT status,priority,health,access,license,commercial_use,last_verified_at,discovery_status FROM mobility_providers WHERE id=$1 FOR UPDATE', [req.params.id]);
+    if (!current.rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
+    if (status === 'enabled' && current.rows[0].access !== 'open') throw new ApiError(409, 'This source needs credentials or a secure endpoint before it can be enabled', 'provider_access_required');
+    if (status === 'enabled' && current.rows[0].health === 'offline') throw new ApiError(409, 'Run a successful connection test before enabling an offline provider', 'provider_offline');
+    if (status === 'enabled' && (!current.rows[0].license || current.rows[0].commercial_use !== true || !current.rows[0].last_verified_at || !['VALIDATED','ENABLED'].includes(current.rows[0].discovery_status))) throw new ApiError(409, 'Record the source licence and validate commercial-use terms before enabling this provider', 'provider_license_unverified');
+    const { rows } = await client.query(`UPDATE mobility_providers SET status=COALESCE($2,status),discovery_status=CASE WHEN $2='enabled' THEN 'ENABLED' ELSE discovery_status END,priority=COALESCE($3,priority),updated_at=now() WHERE id=$1 RETURNING ${providerColumns}`, [req.params.id, status ?? null, priority ?? null]);
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id,details) VALUES ($1,$2,$3,$4,$5)',
+      [req.userId, 'mobility.provider.updated', 'mobility_provider', req.params.id, JSON.stringify({ old: { status: current.rows[0].status, priority: current.rows[0].priority }, new: { status: rows[0].status, priority: rows[0].priority } })]);
+    await client.query('COMMIT');
+    res.json({ data: rows[0] });
+  } catch (error) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
+}));
+
+app.delete('/api/v1/admin/mobility/providers/:id', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid provider id', 'invalid_provider_id');
+  const { rows } = await pool.query('DELETE FROM mobility_providers WHERE id=$1 RETURNING name,city', [req.params.id]);
+  if (!rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
+  await auditMobility(req.userId, 'mobility.provider.deleted', req.params.id, { name: rows[0].name, city: rows[0].city });
+  res.status(204).end();
+}));
+
+app.post('/api/v1/admin/mobility/providers/:id/test', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid provider id', 'invalid_provider_id');
+  const found = await pool.query<{ id: string; name: string; source_type: string; feed_url: string; country: string }>('SELECT id,name,source_type,feed_url,country FROM mobility_providers WHERE id=$1', [req.params.id]);
+  if (!found.rows[0]) throw new ApiError(404, 'provider not found', 'provider_not_found');
+  const report = await testProviderConnection(found.rows[0]);
+  const { rows } = await pool.query(
+    `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_sync_at=CASE WHEN $2='healthy' THEN now() ELSE last_sync_at END,last_error=$3,last_report=$4,
+       status=CASE WHEN $2='offline' AND status='enabled' THEN 'paused' ELSE status END,updated_at=now() WHERE id=$1 RETURNING ${providerColumns}`,
+    [req.params.id, report.health, report.error ?? null, JSON.stringify(report)],
+  );
+  await auditMobility(req.userId, 'mobility.provider.tested', req.params.id, { health: report.health, error: report.error ?? null });
+  res.json({ data: { provider: rows[0], report } });
+}));
+
+app.get('/api/v1/admin/mobility/audit', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT a.id,a.action,a.entity_id,a.details,a.created_at,u.display_name AS actor FROM audit_events a LEFT JOIN users u ON u.id=a.actor_id
+      WHERE a.entity_type='mobility_provider' ORDER BY a.created_at DESC,a.id DESC LIMIT 100`,
+  );
+  res.json({ data: rows });
+}));
 
 app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
 app.get('/readyz', asyncHandler(async (_req, res) => {
@@ -469,7 +1109,8 @@ async function refreshNavigationMatches(sessionId: string, driverId: string) {
   if (!session) throw new ApiError(404, 'navigation session unavailable');
   if (session.state !== 'active' || !session.opt_in) throw new ApiError(409, 'Pause navigation and opt in before looking for passengers', 'matching_not_enabled');
   if (!session.vehicle_seat_count) throw new ApiError(409, 'A verified active vehicle is required for passenger matching', 'verified_vehicle_required');
-  if (!session.current_location || !session.destination || !session.current_location_at || Date.now() - new Date(session.current_location_at).getTime() > 60_000) {
+  if (!session.destination) throw new ApiError(409, 'Choose a destination so MARSHGO can build the route and look for passengers along it', 'destination_required');
+  if (!session.current_location || !session.current_location_at || Date.now() - new Date(session.current_location_at).getTime() > 60_000) {
     throw new ApiError(409, 'A fresh GPS fix is required for route matching', 'location_stale');
   }
 
@@ -590,20 +1231,24 @@ async function refreshNavigationMatches(sessionId: string, driverId: string) {
 
 // Foreground navigation stores only the driver's latest location. It is private to the
 // authenticated driver and removed when the session ends. Matching starts opt-in only.
-app.post('/api/v1/navigation/sessions', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+app.post('/api/v1/navigation/sessions', requireAuth, asyncHandler(async (req, res) => {
   const { origin, destination, destinationName } = req.body ?? {};
   const pointValid = (point: unknown) => Array.isArray(point) && point.length === 2 &&
     point.every((value) => typeof value === 'number' && Number.isFinite(value)) &&
     Math.abs(point[0]) <= 180 && Math.abs(point[1]) <= 90;
-  if (!pointValid(origin) || !pointValid(destination) || typeof destinationName !== 'string' ||
-      destinationName.trim().length < 1 || destinationName.trim().length > 120) {
-    throw new ApiError(400, 'A GPS origin, destination coordinates and destination name are required');
+  // Navigation is for everyone; only passenger matching needs a verified vehicle (enforced below). Navigation may start without a destination ("just drive"); the road route, and with it passenger matching, starts once one is chosen.
+  const freeDrive = destination === undefined || destination === null;
+  if (!pointValid(origin)) throw new ApiError(400, 'A GPS origin is required');
+  if (!freeDrive && (!pointValid(destination) || typeof destinationName !== 'string' || destinationName.trim().length < 1 || destinationName.trim().length > 120)) {
+    throw new ApiError(400, 'Destination coordinates and a destination name are required together');
   }
-  let route: Awaited<ReturnType<typeof getRoadRoute>>;
-  try { route = await getRoadRoute(origin as [number, number], destination as [number, number]); }
-  catch (error) {
-    if (error instanceof RoutingUnavailableError) throw new ApiError(503, error.message, 'routing_unavailable');
-    throw error;
+  let route: Awaited<ReturnType<typeof getRoadRoute>> | null = null;
+  if (!freeDrive) {
+    try { route = await getRoadRoute(origin as [number, number], destination as [number, number]); }
+    catch (error) {
+      if (error instanceof RoutingUnavailableError) throw new ApiError(503, error.message, 'routing_unavailable');
+      throw error;
+    }
   }
   const client = await pool.connect();
   try {
@@ -612,31 +1257,31 @@ app.post('/api/v1/navigation/sessions', requireAuth, requireRole('driver'), asyn
     const active = await client.query('SELECT id FROM navigation_sessions WHERE driver_id=$1 AND state IN (\'active\',\'paused\')', [req.userId]);
     if (active.rows[0]) throw new ApiError(409, 'End the existing navigation session before starting another', 'navigation_already_active');
     const verifiedVehicle = await client.query<{ id: string; seat_count: number }>(
-      `SELECT id,seat_count FROM vehicles WHERE owner_id=$1 AND is_active=true AND verification_status='verified' AND archived_at IS NULL
+      `SELECT id,seat_count FROM vehicles WHERE owner_id=$1 AND is_active=true AND trust_level>=1 AND archived_at IS NULL
        ORDER BY created_at DESC LIMIT 1 FOR SHARE`, [req.userId],
     );
     const matchingVehicle = verifiedVehicle.rows[0];
     const { rows } = await client.query(
-      `INSERT INTO navigation_sessions(driver_id,vehicle_id,vehicle_seat_count,destination_name,destination,route,route_distance_m,route_duration_s)
-       VALUES($1,$2,$3,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,
-         ST_SetSRID(ST_GeomFromGeoJSON($7),4326),$8,$9)
-       RETURNING id,state,destination_name,route_distance_m,route_duration_s,route_version,opt_in,started_at,vehicle_id,vehicle_seat_count,(vehicle_id IS NOT NULL) AS matching_vehicle_available`,
-      [req.userId, matchingVehicle?.id ?? null, matchingVehicle ? Number(matchingVehicle.seat_count) : null, destinationName.trim(), destination[0], destination[1],
-        JSON.stringify({ type: 'LineString', coordinates: route.geometry }), Math.round(route.distanceMeters), Math.round(route.durationSeconds)],
+      `INSERT INTO navigation_sessions(driver_id,vehicle_id,vehicle_seat_count,destination_name,destination,route,route_distance_m,route_duration_s,maneuvers)
+       VALUES($1,$2,$3,$4,CASE WHEN $5::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint($5,$6),4326)::geography END,
+         CASE WHEN $7::text IS NULL THEN NULL ELSE ST_SetSRID(ST_GeomFromGeoJSON($7),4326) END,$8,$9,$10::jsonb)
+       RETURNING id,state,destination_name,route_distance_m,route_duration_s,route_version,opt_in,started_at,vehicle_id,vehicle_seat_count,(vehicle_id IS NOT NULL) AS matching_vehicle_available,maneuvers`,
+      [req.userId, matchingVehicle?.id ?? null, matchingVehicle ? Number(matchingVehicle.seat_count) : null, freeDrive ? null : destinationName.trim(), freeDrive ? null : destination[0], freeDrive ? null : destination[1],
+        route ? JSON.stringify({ type: 'LineString', coordinates: route.geometry }) : null, route ? Math.round(route.distanceMeters) : null, route ? Math.round(route.durationSeconds) : null, JSON.stringify(route?.maneuvers ?? [])],
     );
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES($1,$2,$3,$4)', [req.userId, 'navigation.started', 'navigation_session', rows[0].id]);
     await client.query('COMMIT');
-    res.status(201).json({ data: { ...rows[0], route: route.geometry, current_location: origin, current_location_accuracy_m: null, current_location_at: null } });
+    res.status(201).json({ data: { ...rows[0], route: route?.geometry ?? null, current_location: origin, current_location_accuracy_m: null, current_location_at: null } });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
   } finally { client.release(); }
 }));
 
-app.get('/api/v1/navigation/sessions/active', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+app.get('/api/v1/navigation/sessions/active', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id,state,destination_name,route_distance_m,route_duration_s,route_version,opt_in,started_at,ended_at,vehicle_id,vehicle_seat_count,(vehicle_id IS NOT NULL) AS matching_vehicle_available,
-       ST_AsGeoJSON(route)::json->'coordinates' AS route,
+       ST_AsGeoJSON(route)::json->'coordinates' AS route,maneuvers,
        CASE WHEN current_location IS NULL THEN NULL ELSE json_build_array(ST_X(current_location::geometry),ST_Y(current_location::geometry)) END AS current_location,
        current_location_accuracy_m,current_location_at
      FROM navigation_sessions WHERE driver_id=$1 AND state IN ('active','paused') LIMIT 1`, [req.userId],
@@ -644,7 +1289,7 @@ app.get('/api/v1/navigation/sessions/active', requireAuth, requireRole('driver')
   res.json({ data: rows[0] ?? null });
 }));
 
-app.patch('/api/v1/navigation/sessions/:id/matching', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+app.patch('/api/v1/navigation/sessions/:id/matching', requireAuth, asyncHandler(async (req, res) => {
   const enabled = req.body?.enabled;
   if (typeof enabled !== 'boolean') throw new ApiError(400, 'enabled must be a boolean');
   const client = await pool.connect();
@@ -670,7 +1315,7 @@ app.patch('/api/v1/navigation/sessions/:id/matching', requireAuth, requireRole('
   } finally { client.release(); }
 }));
 
-app.post('/api/v1/navigation/sessions/:id/pause', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+app.post('/api/v1/navigation/sessions/:id/pause', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `UPDATE navigation_sessions SET state='paused',last_activity_at=now() WHERE id=$1 AND driver_id=$2 AND state='active'
      RETURNING id,state,opt_in,current_location_at`, [req.params.id, req.userId],
@@ -679,7 +1324,7 @@ app.post('/api/v1/navigation/sessions/:id/pause', requireAuth, requireRole('driv
   res.json({ data: rows[0] });
 }));
 
-app.post('/api/v1/navigation/sessions/:id/resume', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+app.post('/api/v1/navigation/sessions/:id/resume', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `UPDATE navigation_sessions SET state='active',last_activity_at=now() WHERE id=$1 AND driver_id=$2 AND state='paused'
      RETURNING id,state,opt_in,current_location_at`, [req.params.id, req.userId],
@@ -688,7 +1333,51 @@ app.post('/api/v1/navigation/sessions/:id/resume', requireAuth, requireRole('dri
   res.json({ data: rows[0] });
 }));
 
-app.post('/api/v1/navigation/sessions/:id/reroute', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+app.put('/api/v1/navigation/sessions/:id/destination', requireAuth, asyncHandler(async (req, res) => {
+  const { destination, destinationName } = req.body ?? {};
+  const valid = Array.isArray(destination) && destination.length === 2 && destination.every((v) => typeof v === 'number' && Number.isFinite(v)) && Math.abs(destination[0]) <= 180 && Math.abs(destination[1]) <= 90;
+  if (!valid || typeof destinationName !== 'string' || destinationName.trim().length < 1 || destinationName.trim().length > 120) throw new ApiError(400, 'Destination coordinates and name are required');
+  const { rows } = await pool.query<{ state: string; route_version: number; current_location_at: Date | null; current_lon: number | null; current_lat: number | null }>(
+    `SELECT state,route_version,current_location_at,
+       CASE WHEN current_location IS NULL THEN NULL ELSE ST_X(current_location::geometry) END AS current_lon,
+       CASE WHEN current_location IS NULL THEN NULL ELSE ST_Y(current_location::geometry) END AS current_lat
+     FROM navigation_sessions WHERE id=$1 AND driver_id=$2`, [req.params.id, req.userId],
+  );
+  const snapshot = rows[0];
+  if (!snapshot || snapshot.state !== 'active') throw new ApiError(409, 'Only an active owned navigation session can get a destination', 'NAVIGATION_STATE_CONFLICT');
+  if (!snapshot.current_location_at || snapshot.current_lon === null || snapshot.current_lat === null || Date.now() - new Date(snapshot.current_location_at).getTime() > 90_000) throw new ApiError(409, 'A fresh GPS fix is required to build the route', 'GPS_STALE');
+  let route: Awaited<ReturnType<typeof getRoadRoute>>;
+  try { route = await getRoadRoute([snapshot.current_lon, snapshot.current_lat], destination as [number, number]); }
+  catch (error) {
+    if (error instanceof RoutingUnavailableError) throw new ApiError(503, error.message, error.detail.code);
+    throw error;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const updated = await client.query(
+      `UPDATE navigation_sessions SET destination_name=$3,destination=ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,route=ST_SetSRID(ST_GeomFromGeoJSON($6),4326),
+         route_distance_m=$7,route_duration_s=$8,route_version=route_version+1,last_activity_at=now(),maneuvers=$10::jsonb
+       WHERE id=$1 AND driver_id=$2 AND state='active' AND route_version=$9
+       RETURNING id,state,destination_name,route_distance_m,route_duration_s,route_version,opt_in,started_at,ended_at,
+         vehicle_id,vehicle_seat_count,(vehicle_id IS NOT NULL) AS matching_vehicle_available,
+         ST_AsGeoJSON(route)::json->'coordinates' AS route,maneuvers,
+         json_build_array(ST_X(current_location::geometry),ST_Y(current_location::geometry)) AS current_location,
+         current_location_accuracy_m,current_location_at`,
+      [req.params.id, req.userId, destinationName.trim(), destination[0], destination[1], JSON.stringify({ type: 'LineString', coordinates: route.geometry }), Math.round(route.distanceMeters), Math.round(route.durationSeconds), snapshot.route_version, JSON.stringify(route.maneuvers ?? [])],
+    );
+    if (!updated.rows[0]) throw new ApiError(409, 'Navigation changed; retry', 'NAVIGATION_STATE_CONFLICT');
+    await client.query(`UPDATE navigation_match_candidates SET status='expired' WHERE navigation_session_id=$1 AND status IN ('suggested','driver_interested','passenger_confirmed')`, [req.params.id]);
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES($1,$2,$3,$4)', [req.userId, 'navigation.destination_set', 'navigation_session', req.params.id]);
+    await client.query('COMMIT');
+    res.json({ data: updated.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}));
+
+app.post('/api/v1/navigation/sessions/:id/reroute', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query<{
     state: string; route_version: number; current_location_at: Date | null; current_lon: number | null; current_lat: number | null;
     destination_lon: number; destination_lat: number; destination_name: string; opt_in: boolean;
@@ -715,14 +1404,14 @@ app.post('/api/v1/navigation/sessions/:id/reroute', requireAuth, requireRole('dr
     await client.query('BEGIN');
     const updated = await client.query(
       `UPDATE navigation_sessions SET route=ST_SetSRID(ST_GeomFromGeoJSON($4),4326),route_distance_m=$5,route_duration_s=$6,
-         route_version=route_version+1,opt_in=false,last_activity_at=now()
+         route_version=route_version+1,opt_in=false,last_activity_at=now(),maneuvers=$8::jsonb
        WHERE id=$1 AND driver_id=$2 AND state='active' AND route_version=$3 AND current_location_at=$7
        RETURNING id,state,destination_name,route_distance_m,route_duration_s,route_version,opt_in,started_at,ended_at,
          vehicle_id,vehicle_seat_count,(vehicle_id IS NOT NULL) AS matching_vehicle_available,
-         ST_AsGeoJSON(route)::json->'coordinates' AS route,
+         ST_AsGeoJSON(route)::json->'coordinates' AS route,maneuvers,
          json_build_array(ST_X(current_location::geometry),ST_Y(current_location::geometry)) AS current_location,
          current_location_accuracy_m,current_location_at`,
-      [req.params.id, req.userId, snapshot.route_version, JSON.stringify({ type: 'LineString', coordinates: route.geometry }), Math.round(route.distanceMeters), Math.round(route.durationSeconds), snapshot.current_location_at],
+      [req.params.id, req.userId, snapshot.route_version, JSON.stringify({ type: 'LineString', coordinates: route.geometry }), Math.round(route.distanceMeters), Math.round(route.durationSeconds), snapshot.current_location_at, JSON.stringify(route.maneuvers ?? [])],
     );
     if (!updated.rows[0]) throw new ApiError(409, 'Navigation changed while rerouting; retry with the latest GPS fix', 'NAVIGATION_STATE_CONFLICT');
     await client.query(`UPDATE navigation_match_candidates SET status='expired' WHERE navigation_session_id=$1 AND status IN ('suggested','driver_interested','passenger_confirmed')`, [req.params.id]);
@@ -826,10 +1515,10 @@ app.post('/api/v1/navigation/matches/:candidateId/passenger-confirm', requireAut
   } finally { client.release(); }
 }));
 
-app.get('/api/v1/navigation/sessions/:id', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+app.get('/api/v1/navigation/sessions/:id', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id,state,destination_name,route_distance_m,route_duration_s,route_version,opt_in,started_at,ended_at,vehicle_id,vehicle_seat_count,(vehicle_id IS NOT NULL) AS matching_vehicle_available,
-       ST_AsGeoJSON(route)::json->'coordinates' AS route,
+       ST_AsGeoJSON(route)::json->'coordinates' AS route,maneuvers,
        CASE WHEN current_location IS NULL THEN NULL ELSE json_build_array(ST_X(current_location::geometry),ST_Y(current_location::geometry)) END AS current_location,
        current_location_accuracy_m,current_location_at
      FROM navigation_sessions WHERE id=$1 AND driver_id=$2 AND state IN ('active','paused')`, [req.params.id, req.userId],
@@ -838,7 +1527,7 @@ app.get('/api/v1/navigation/sessions/:id', requireAuth, requireRole('driver'), a
   res.json({ data: rows[0] });
 }));
 
-app.post('/api/v1/navigation/sessions/:id/location', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+app.post('/api/v1/navigation/sessions/:id/location', requireAuth, asyncHandler(async (req, res) => {
   const { coordinates, accuracyMeters, capturedAt } = req.body ?? {};
   const validPoint = Array.isArray(coordinates) && coordinates.length === 2 && coordinates.every((v) => typeof v === 'number' && Number.isFinite(v)) &&
     Math.abs(coordinates[0]) <= 180 && Math.abs(coordinates[1]) <= 90;
@@ -883,7 +1572,7 @@ app.post('/api/v1/navigation/sessions/:id/location', requireAuth, requireRole('d
     const waypointVisited = nextStop.rows[0] && Number(nextStop.rows[0].distance_m) <= Math.max(100, accuracyMeters + 40)
       ? await client.query(`UPDATE navigation_waypoints SET state='visited' WHERE id=$1 AND state='scheduled'`, [nextStop.rows[0].id]) : null;
     await client.query('COMMIT');
-    res.json({ data: { accepted: true, onRoute: update.rows[0].on_route, capturedAt: update.rows[0].current_location_at,
+    res.json({ data: { accepted: true, onRoute: update.rows[0].on_route ?? true, capturedAt: update.rows[0].current_location_at,
       visitedStop: waypointVisited?.rowCount ? { kind: nextStop.rows[0].kind, placeName: nextStop.rows[0].place_name } : null } });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -891,7 +1580,7 @@ app.post('/api/v1/navigation/sessions/:id/location', requireAuth, requireRole('d
   } finally { client.release(); }
 }));
 
-app.post('/api/v1/navigation/sessions/:id/end', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+app.post('/api/v1/navigation/sessions/:id/end', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `UPDATE navigation_sessions SET state='ended',opt_in=false,ended_at=COALESCE(ended_at,now()),destination_name=NULL,destination=NULL,route=NULL,
        current_location=NULL,current_location_accuracy_m=NULL,current_location_at=NULL
@@ -918,6 +1607,14 @@ async function expireStaleProposals() {
     [proposal.driver_id, proposal.passenger_id],
     { proposal_id: proposal.id, demand_id: proposal.demand_id, status: 'expired' },
   ));
+}
+
+async function grantConfiguredAdmin(client: PoolClient, userId: string, phone: string): Promise<boolean> {
+  if (!shouldGrantAdmin(phone)) return false;
+  const inserted = await client.query('INSERT INTO user_roles(user_id,role) VALUES ($1,$2) ON CONFLICT DO NOTHING', [userId, 'admin']);
+  await client.query(`UPDATE users SET roles=(SELECT ARRAY(SELECT DISTINCT unnest(roles || ARRAY['admin']::text[]) ORDER BY 1)) WHERE id=$1 AND NOT ('admin' = ANY(roles))`, [userId]);
+  if (inserted.rowCount) await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$1)', [userId, 'role.admin.granted_by_config', 'user']);
+  return true;
 }
 
 app.post('/api/v1/auth/otp/request', asyncHandler(async (req, res) => {
@@ -999,7 +1696,7 @@ app.post('/api/v1/auth/otp/verify', asyncHandler(async (req, res) => {
     } else {
       const expected = Buffer.from(challenge.code_hash, 'hex');
       const actual = Buffer.from(otpHash(phone, code), 'hex');
-      if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
+      if ((expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual))) {
         await client.query('UPDATE otp_challenges SET attempts=attempts+1 WHERE id=$1', [challenge.id]);
         invalidCode = true;
       } else {
@@ -1022,7 +1719,7 @@ app.post('/api/v1/auth/otp/verify', asyncHandler(async (req, res) => {
             user = inserted.rows[0];
             await client.query('INSERT INTO user_roles(user_id,role) VALUES ($1,$2)', [user.id, 'passenger']);
           }
-          if (user) session = await insertSession(client, user.id);
+          if (user) { if (await grantConfiguredAdmin(client, user.id, phone) && !user.roles.includes('admin')) user.roles = [...user.roles, 'admin']; session = await insertSession(client, user.id); }
         }
       }
     }
@@ -1034,6 +1731,73 @@ app.post('/api/v1/auth/otp/verify', asyncHandler(async (req, res) => {
     client.release();
   }
   if (invalidCode) throw new ApiError(401, 'Verification code is invalid or expired', 'otp_invalid');
+  if (unavailableAccount || !user || !session) throw new ApiError(403, 'Account is not available', 'account_unavailable');
+  setRefreshCookie(res, session.refreshToken, refreshLifetimeMs);
+  res.json({ data: { user, accessToken: session.accessToken, accessExpiresAt: session.accessExpiresAt.toISOString() } });
+}));
+
+function firebaseAuth() {
+  const { FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY } = process.env;
+  if (!FIREBASE_PROJECT_ID || !FIREBASE_CLIENT_EMAIL || !FIREBASE_PRIVATE_KEY) return null;
+  const app = getApps()[0] ?? initializeApp({ credential: cert({ projectId: FIREBASE_PROJECT_ID, clientEmail: FIREBASE_CLIENT_EMAIL, privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') }) });
+  return getAuth(app);
+}
+
+app.post('/api/v1/auth/firebase/verify', asyncHandler(async (req, res) => {
+  const idToken = req.body?.idToken;
+  const displayName = req.body?.displayName;
+  if (typeof idToken !== 'string' || idToken.length > 4096) throw new ApiError(400, 'Firebase ID token is required');
+  if (displayName !== undefined && (typeof displayName !== 'string' || displayName.trim().length < 2 || displayName.trim().length > 80)) {
+    throw new ApiError(400, 'Name must contain 2–80 characters');
+  }
+  const auth = firebaseAuth();
+  if (!auth) throw new ApiError(503, 'Firebase sign-in is not configured', 'firebase_unavailable');
+
+  let decodedToken;
+  try {
+    decodedToken = await auth.verifyIdToken(idToken, true);
+  } catch {
+    throw new ApiError(401, 'Invalid Firebase ID token', 'otp_invalid');
+  }
+
+  const phone = decodedToken.phone_number;
+  if (!phone) throw new ApiError(400, 'Firebase account must have a phone number');
+
+  const client = await pool.connect();
+  let session: Awaited<ReturnType<typeof insertSession>> | undefined;
+  let user: { id: string; display_name: string; phone_e164: string; roles: string[] } | undefined;
+  let unavailableAccount = false;
+
+  try {
+    await client.query('BEGIN');
+    const found = await client.query<{ id: string; display_name: string; phone_e164: string; roles: string[]; account_status: string }>(
+      'SELECT id,display_name,phone_e164,roles,account_status FROM users WHERE phone_e164=$1 FOR UPDATE', [phone],
+    );
+    if (found.rows[0]?.account_status !== undefined && found.rows[0].account_status !== 'active') {
+      unavailableAccount = true;
+    } else {
+      if (found.rows[0]) {
+        user = found.rows[0];
+        await client.query('UPDATE users SET is_verified=true,updated_at=now() WHERE id=$1', [user.id]);
+      } else {
+        const inserted = await client.query<{ id: string; display_name: string; phone_e164: string; roles: string[] }>(
+          `INSERT INTO users(phone_e164,display_name,roles,is_verified)
+           VALUES ($1,$2,ARRAY['passenger']::text[],true) RETURNING id,display_name,phone_e164,roles`,
+          [phone, typeof displayName === 'string' ? displayName.trim() : 'Новий користувач'],
+        );
+        user = inserted.rows[0];
+        await client.query('INSERT INTO user_roles(user_id,role) VALUES ($1,$2)', [user.id, 'passenger']);
+      }
+      if (user) session = await insertSession(client, user.id);
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
   if (unavailableAccount || !user || !session) throw new ApiError(403, 'Account is not available', 'account_unavailable');
   setRefreshCookie(res, session.refreshToken, refreshLifetimeMs);
   res.json({ data: { user, accessToken: session.accessToken, accessExpiresAt: session.accessExpiresAt.toISOString() } });
@@ -1095,11 +1859,47 @@ app.post('/api/v1/auth/logout-all', requireAuth, asyncHandler(async (req, res) =
 
 app.get('/api/v1/users/me', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT id,phone_e164,display_name,email,roles,is_verified,account_status,created_at
+    `SELECT id,phone_e164,display_name,email,roles,is_verified,account_status,created_at,driver_photo_key
        FROM users WHERE id=$1 AND account_status='active'`, [req.userId],
   );
   if (!rows[0]) throw new ApiError(404, 'user unavailable');
-  res.json({ data: rows[0] });
+  const { driver_photo_key: photoKey, ...user } = rows[0];
+  res.json({ data: { ...user, driver_photo_url: photoKey ? await getVehiclePhotoUrl(photoKey).catch(() => null) : null } });
+}));
+
+// ---- Driver face photo (one per person; separate from vehicle photos) ----
+const storageError = (error: unknown) => error instanceof ObjectStorageUnavailableError || (error instanceof Error && error.name === 'CredentialsProviderError');
+app.post('/api/v1/users/me/driver-photo/upload-url', requireAuth, asyncHandler(async (req, res) => {
+  const contentType = req.body?.contentType;
+  if (!isAllowedPhotoType(contentType)) throw new ApiError(400, 'Only JPEG, PNG and WebP photos are allowed', 'invalid_photo_type');
+  const key = `driver-photos/${req.userId}/${crypto.randomUUID()}`;
+  try { res.json({ data: { key, ...(await createVehiclePhotoUpload(key, contentType)) } }); }
+  catch (error) { if (storageError(error)) throw new ApiError(503, 'Photo storage is not configured', 'object_storage_unavailable'); throw error; }
+}));
+app.post('/api/v1/users/me/driver-photo', requireAuth, asyncHandler(async (req, res) => {
+  const { key, contentType } = req.body ?? {};
+  const prefix = `driver-photos/${req.userId}/`;
+  if (typeof key !== 'string' || !key.startsWith(prefix) || !/^[0-9a-f-]{36}$/i.test(key.slice(prefix.length)) || !isAllowedPhotoType(contentType)) throw new ApiError(400, 'invalid driver photo reference');
+  let url: string;
+  try {
+    if (!await verifyVehiclePhotoObject(key, contentType)) { await deleteStoredVehiclePhoto(key).catch(() => undefined); throw new ApiError(400, 'Uploaded file does not match the required image type or size', 'invalid_driver_photo'); }
+    url = await getVehiclePhotoUrl(key);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (storageError(error)) throw new ApiError(503, 'Photo storage is not configured', 'object_storage_unavailable');
+    throw new ApiError(503, 'Uploaded photo could not be verified', 'driver_photo_verification_failed');
+  }
+  const { rows } = await pool.query<{ previous: string | null }>(
+    'UPDATE users u SET driver_photo_key=$2 FROM (SELECT driver_photo_key AS previous FROM users WHERE id=$1 FOR UPDATE) old WHERE u.id=$1 RETURNING old.previous', [req.userId, key]);
+  if (rows[0]?.previous && rows[0].previous !== key) await deleteStoredVehiclePhoto(rows[0].previous).catch(() => undefined);
+  await pool.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'driver.photo.updated', 'user', req.userId]);
+  res.status(201).json({ data: { driver_photo_url: url } });
+}));
+app.delete('/api/v1/users/me/driver-photo', requireAuth, asyncHandler(async (req, res) => {
+  const { rows } = await pool.query<{ previous: string | null }>(
+    'UPDATE users u SET driver_photo_key=NULL FROM (SELECT driver_photo_key AS previous FROM users WHERE id=$1 FOR UPDATE) old WHERE u.id=$1 RETURNING old.previous', [req.userId]);
+  if (rows[0]?.previous) await deleteStoredVehiclePhoto(rows[0].previous).catch(() => undefined);
+  res.json({ data: { driver_photo_url: null } });
 }));
 
 app.get('/api/v1/places/suggest', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
@@ -1210,7 +2010,7 @@ app.post('/api/v1/users/me/roles', requireAuth, asyncHandler(async (req, res) =>
 app.get('/api/v1/users/me/export', requireAuth, asyncHandler(async (req, res) => {
   const [profile, vehicles, bookings, demands] = await Promise.all([
     pool.query('SELECT id,phone_e164,display_name,email,roles,is_verified,created_at FROM users WHERE id=$1', [req.userId]),
-    pool.query('SELECT id,make,model,model_year,seat_count,verification_status,created_at FROM vehicles WHERE owner_id=$1', [req.userId]),
+    pool.query('SELECT id,make,model,model_year,seat_count,verification_status,plate,trust_level,created_at FROM vehicles WHERE owner_id=$1', [req.userId]),
     pool.query(
       `SELECT b.id,b.offer_id,b.seat_count,b.total_price_minor,b.currency,b.fee_class,b.platform_fee_minor,b.fee_rule_version,b.status,b.created_at
          FROM bookings b JOIN offers o ON o.id=b.offer_id WHERE b.passenger_id=$1 OR o.driver_id=$1`, [req.userId],
@@ -1264,7 +2064,7 @@ app.get('/api/v1/offers/mine', requireAuth, requireRole('driver'), asyncHandler(
   const { rows } = await pool.query(
     `SELECT o.id,o.origin_name,o.destination_name,o.departure_at,o.arrival_at,o.distance_m,o.duration_s,o.route_source,
             o.price_per_seat_minor,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
-            ratings.average_rating,ratings.review_count,o.status,photo.object_key AS vehicle_photo_key
+            ratings.average_rating,ratings.review_count,o.status,o.vehicle_id,photo.object_key AS vehicle_photo_key
        FROM offers o JOIN users u ON u.id=o.driver_id
        LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
        LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count
@@ -1275,6 +2075,184 @@ app.get('/api/v1/offers/mine', requireAuth, requireRole('driver'), asyncHandler(
     ...offer, vehicle_photo_url: vehicle_photo_key ? await getVehiclePhotoUrl(vehicle_photo_key).catch(() => null) : null,
   }))) });
 }));
+
+// ---- Editing a published trip ----------------------------------------------------------------------------------------
+/** A departure shift above this, a price increase or another vehicle needs each booked passenger's approval. */
+const SIGNIFICANT_DEPARTURE_SHIFT_MS = 30 * 60_000;
+type ChangeSummary = { price?: { old: number; new: number }; departure?: { old: string; new: string }; vehicle?: { old: string; new: string }; seats?: { old: number; new: number } };
+
+app.patch('/api/v1/offers/:id', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+  const body = req.body ?? {};
+  const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim().slice(0, 300) : null;
+  const wantsPrice = body.pricePerSeatMinor !== undefined, wantsDeparture = body.departureAt !== undefined, wantsSeats = body.totalSeats !== undefined, wantsVehicle = body.vehicleId !== undefined;
+  if (!wantsPrice && !wantsDeparture && !wantsSeats && !wantsVehicle) throw new ApiError(400, 'Nothing to change', 'offer_change_empty');
+  if (wantsPrice && (!Number.isInteger(body.pricePerSeatMinor) || body.pricePerSeatMinor < 0 || body.pricePerSeatMinor > 10_000_000)) throw new ApiError(400, 'pricePerSeatMinor must be a whole amount in kopiyky', 'invalid_price');
+  const newDeparture = wantsDeparture ? new Date(body.departureAt) : null;
+  if (newDeparture && (!Number.isFinite(newDeparture.getTime()) || newDeparture.getTime() < Date.now() + 10 * 60_000 || newDeparture.getTime() > Date.now() + 180 * 86_400_000)) throw new ApiError(400, 'Departure must be at least 10 minutes ahead and within 180 days', 'invalid_departure');
+  if (wantsSeats && (!Number.isInteger(body.totalSeats) || body.totalSeats < 1 || body.totalSeats > 20)) throw new ApiError(400, 'totalSeats must be 1-20', 'invalid_seats');
+  if (wantsVehicle && typeof body.vehicleId !== 'string') throw new ApiError(400, 'vehicleId must be a vehicle id', 'invalid_vehicle');
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: offers } = await client.query<{ id: string; status: string; departure_at: Date; arrival_at: Date | null; price_per_seat_minor: number; total_seats: number; available_seats: number; vehicle_id: string }>(
+      'SELECT id,status,departure_at,arrival_at,price_per_seat_minor,total_seats,available_seats,vehicle_id FROM offers WHERE id=$1 AND driver_id=$2 FOR UPDATE', [req.params.id, req.userId]);
+    const offer = offers[0];
+    if (!offer) throw new ApiError(404, 'offer unavailable');
+    if (offer.status !== 'published' || new Date(offer.departure_at).getTime() <= Date.now()) throw new ApiError(409, 'Only an upcoming published trip can be edited', 'offer_not_editable');
+    const booked = offer.total_seats - offer.available_seats;
+    const changes: Array<{ field: 'price' | 'departure' | 'seats' | 'vehicle'; old: string; next: string; significant: boolean }> = [];
+    const summary: ChangeSummary = {};
+    let price = offer.price_per_seat_minor, departure = new Date(offer.departure_at), arrival = offer.arrival_at ? new Date(offer.arrival_at) : null, total = offer.total_seats, vehicleId = offer.vehicle_id;
+
+    if (wantsPrice && body.pricePerSeatMinor !== offer.price_per_seat_minor) {
+      price = body.pricePerSeatMinor;
+      changes.push({ field: 'price', old: String(offer.price_per_seat_minor), next: String(price), significant: price > offer.price_per_seat_minor });
+      summary.price = { old: offer.price_per_seat_minor, new: price };
+    }
+    if (newDeparture && Math.abs(newDeparture.getTime() - departure.getTime()) >= 60_000) {
+      const shift = newDeparture.getTime() - departure.getTime();
+      changes.push({ field: 'departure', old: departure.toISOString(), next: newDeparture.toISOString(), significant: Math.abs(shift) > SIGNIFICANT_DEPARTURE_SHIFT_MS });
+      summary.departure = { old: departure.toISOString(), new: newDeparture.toISOString() };
+      if (arrival) arrival = new Date(arrival.getTime() + shift);
+      departure = newDeparture;
+    }
+    if (wantsSeats && body.totalSeats !== offer.total_seats) {
+      if (body.totalSeats < booked) throw new ApiError(409, `${booked} seats are already booked; the trip cannot offer fewer`, 'seats_below_booked');
+      total = body.totalSeats;
+      changes.push({ field: 'seats', old: String(offer.total_seats), next: String(total), significant: false });
+      summary.seats = { old: offer.total_seats, new: total };
+    }
+    if (wantsVehicle && body.vehicleId !== offer.vehicle_id) {
+      const { rows: vehicles } = await client.query<{ id: string; seat_count: number; make: string; model: string }>(
+        'SELECT id,seat_count,make,model FROM vehicles WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL AND trust_level>=1', [body.vehicleId, req.userId]);
+      const vehicle = vehicles[0];
+      if (!vehicle) throw new ApiError(409, 'Choose one of your vehicles with a plate and a photo', 'vehicle_not_usable');
+      if (vehicle.seat_count < total) throw new ApiError(409, 'This vehicle has fewer seats than the trip offers', 'vehicle_too_small');
+      const { rows: old } = await client.query<{ make: string; model: string }>('SELECT make,model FROM vehicles WHERE id=$1', [offer.vehicle_id]);
+      vehicleId = vehicle.id;
+      changes.push({ field: 'vehicle', old: offer.vehicle_id, next: vehicle.id, significant: true });
+      summary.vehicle = { old: old[0] ? `${old[0].make} ${old[0].model}` : '—', new: `${vehicle.make} ${vehicle.model}` };
+    }
+    if (changes.length === 0) { await client.query('COMMIT'); res.json({ data: { id: offer.id, changed: false, approvalsRequested: 0, bookingsNotified: 0 } }); return; }
+
+    const { rows: updated } = await client.query(
+      `UPDATE offers SET price_per_seat_minor=$2,departure_at=$3,arrival_at=$4,total_seats=$5::int,available_seats=$5::int-$6::int,vehicle_id=$7 WHERE id=$1
+       RETURNING id,origin_name,destination_name,departure_at,arrival_at,price_per_seat_minor,currency,total_seats,available_seats,status,vehicle_id`,
+      [offer.id, price, departure.toISOString(), arrival?.toISOString() ?? null, total, booked, vehicleId]);
+    for (const change of changes) {
+      await client.query('INSERT INTO offer_changes(offer_id,changed_by,field,old_value,new_value,significant,reason) VALUES($1,$2,$3,$4,$5,$6,$7)',
+        [offer.id, req.userId, change.field, change.old, change.next, change.significant, reason]);
+    }
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'offer.updated', 'offer', offer.id]);
+
+    // Each confirmed booking: a cheaper price applies at once; significant changes wait for the passenger's decision.
+    const significant = changes.some((change) => change.significant);
+    const { rows: bookings } = await client.query<{ id: string; passenger_id: string; seat_count: number; unit_price_minor: number }>(
+      "SELECT id,passenger_id,seat_count,unit_price_minor FROM bookings WHERE offer_id=$1 AND status='confirmed' FOR UPDATE", [offer.id]);
+    let approvalsRequested = 0;
+    for (const booking of bookings) {
+      if (summary.price && price < booking.unit_price_minor) {
+        await client.query('UPDATE bookings SET unit_price_minor=$2,total_price_minor=$2*seat_count WHERE id=$1', [booking.id, price]);
+      }
+      if (significant) {
+        const { rows: previous } = await client.query<{ summary: ChangeSummary; new_unit_price_minor: number | null }>(
+          "UPDATE booking_change_approvals SET status='superseded',decided_at=now() WHERE booking_id=$1 AND status='pending' RETURNING summary,new_unit_price_minor", [booking.id]);
+        // A newer edit keeps the original "before" values the passenger agreed to, so they always compare with their booking.
+        const merged: ChangeSummary = { ...summary };
+        const earlier = previous[0]?.summary;
+        if (earlier?.price && merged.price) merged.price = { old: earlier.price.old, new: merged.price.new };
+        else if (earlier?.price && !merged.price) merged.price = { old: earlier.price.old, new: price };
+        if (earlier?.departure) merged.departure = { old: earlier.departure.old, new: departure.toISOString() };
+        if (earlier?.vehicle) merged.vehicle = { old: earlier.vehicle.old, new: merged.vehicle?.new ?? earlier.vehicle.new };
+        const newUnit = price > booking.unit_price_minor ? price : null;
+        const { rows: approval } = await client.query<{ id: string }>(
+          'INSERT INTO booking_change_approvals(booking_id,summary,new_unit_price_minor) VALUES($1,$2::jsonb,$3) RETURNING id', [booking.id, JSON.stringify(merged), newUnit]);
+        await insertRealtimeOutbox(client, 'booking.change-requested', `booking.change-requested:${approval[0].id}`, [booking.passenger_id], { booking_id: booking.id, offer_id: offer.id, status: 'pending' });
+        approvalsRequested++;
+      } else {
+        await insertRealtimeOutbox(client, 'trip.updated', `trip.updated:${offer.id}:${booking.id}:${Date.now()}`, [booking.passenger_id], { booking_id: booking.id, offer_id: offer.id });
+      }
+    }
+    await client.query('COMMIT');
+    res.json({ data: { ...updated[0], changed: true, approvalsRequested, bookingsNotified: bookings.length } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}));
+
+app.post('/api/v1/offers/:id/cancel', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+  const reason = typeof req.body?.reason === 'string' && req.body.reason.trim() ? req.body.reason.trim().slice(0, 300) : null;
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ id: string; status: string }>('SELECT id,status FROM offers WHERE id=$1 AND driver_id=$2 FOR UPDATE', [req.params.id, req.userId]);
+    const offer = rows[0];
+    if (!offer) throw new ApiError(404, 'offer unavailable');
+    if (offer.status === 'cancelled') { await client.query('COMMIT'); res.json({ data: { id: offer.id, status: 'cancelled', cancelledBookings: 0 }, replayed: true }); return; }
+    if (offer.status !== 'published') throw new ApiError(409, 'Only a trip that has not started can be cancelled', 'offer_not_cancellable');
+    await client.query("UPDATE offers SET status='cancelled',available_seats=total_seats WHERE id=$1", [offer.id]);
+    await client.query("INSERT INTO offer_changes(offer_id,changed_by,field,old_value,new_value,significant,reason) VALUES($1,$2,'status','published','cancelled',true,$3)", [offer.id, req.userId, reason]);
+    const { rows: bookings } = await client.query<{ id: string; passenger_id: string }>(
+      "UPDATE bookings SET status='cancelled',cancelled_at=now() WHERE offer_id=$1 AND status='confirmed' RETURNING id,passenger_id", [offer.id]);
+    for (const booking of bookings) {
+      await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id,reason) VALUES ($1,'confirmed','cancelled',$2,'driver_cancelled_trip')", [booking.id, req.userId]);
+      await client.query("UPDATE booking_change_approvals SET status='superseded',decided_at=now() WHERE booking_id=$1 AND status='pending'", [booking.id]);
+      await client.query(`UPDATE rendezvous_sessions SET state='CANCELLED',location_sharing_enabled=false,cancelled_at=COALESCE(cancelled_at,now()),updated_at=now()
+        WHERE booking_id=$1 AND state NOT IN ('COMPLETED','CANCELLED','EXPIRED')`, [booking.id]);
+      await insertRealtimeOutbox(client, 'trip.cancelled', `trip.cancelled:${offer.id}:${booking.id}`, [booking.passenger_id], { booking_id: booking.id, offer_id: offer.id, status: 'cancelled' });
+    }
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'offer.cancelled', 'offer', offer.id]);
+    await client.query('COMMIT');
+    res.json({ data: { id: offer.id, status: 'cancelled', cancelledBookings: bookings.length } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}));
+
+app.get('/api/v1/offers/:id/changes', requireAuth, asyncHandler(async (req, res) => {
+  const { rows: access } = await pool.query(
+    `SELECT 1 FROM offers o WHERE o.id=$1 AND (o.driver_id=$2 OR EXISTS(SELECT 1 FROM bookings b WHERE b.offer_id=o.id AND b.passenger_id=$2))`, [req.params.id, req.userId]);
+  if (!access[0]) throw new ApiError(404, 'offer unavailable');
+  const { rows } = await pool.query('SELECT id,field,old_value,new_value,significant,reason,created_at FROM offer_changes WHERE offer_id=$1 ORDER BY created_at DESC,id LIMIT 200', [req.params.id]);
+  res.json({ data: rows });
+}));
+
+const decideBookingChange = (accept: boolean) => asyncHandler(async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ id: string; status: string; booking_id: string; new_unit_price_minor: number | null; passenger_id: string; driver_id: string; offer_id: string; seat_count: number; booking_status: string }>(
+      `SELECT a.id,a.status,a.booking_id,a.new_unit_price_minor,b.passenger_id,o.driver_id,b.offer_id,b.seat_count,b.status AS booking_status
+         FROM booking_change_approvals a JOIN bookings b ON b.id=a.booking_id JOIN offers o ON o.id=b.offer_id
+        WHERE a.id=$1 AND b.passenger_id=$2 FOR UPDATE OF a,b`, [req.params.id, req.userId]);
+    const approval = rows[0];
+    if (!approval) throw new ApiError(404, 'change unavailable');
+    if (approval.status !== 'pending' || approval.booking_status !== 'confirmed') throw new ApiError(409, 'This change was already decided or replaced by a newer one', 'change_not_pending');
+    if (accept) {
+      if (approval.new_unit_price_minor !== null) await client.query('UPDATE bookings SET unit_price_minor=$2,total_price_minor=$2*seat_count WHERE id=$1', [approval.booking_id, approval.new_unit_price_minor]);
+      await client.query("UPDATE booking_change_approvals SET status='accepted',decided_at=now() WHERE id=$1", [approval.id]);
+      await insertRealtimeOutbox(client, 'booking.changed', `booking.change-accepted:${approval.id}`, [approval.driver_id], { booking_id: approval.booking_id, offer_id: approval.offer_id, status: 'confirmed' });
+    } else {
+      // Declining a significant change is a free cancellation: the seats go back to the trip.
+      await client.query("UPDATE booking_change_approvals SET status='rejected',decided_at=now() WHERE id=$1", [approval.id]);
+      await client.query("UPDATE bookings SET status='cancelled',cancelled_at=now() WHERE id=$1", [approval.booking_id]);
+      await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id,reason) VALUES ($1,'confirmed','cancelled',$2,'passenger_declined_change')", [approval.booking_id, req.userId]);
+      await client.query("UPDATE offers SET available_seats=LEAST(total_seats,available_seats+$2) WHERE id=$1 AND status='published'", [approval.offer_id, approval.seat_count]);
+      await insertRealtimeOutbox(client, 'booking.cancelled', `booking.change-rejected:${approval.id}`, [approval.driver_id], { booking_id: approval.booking_id, offer_id: approval.offer_id, status: 'cancelled' });
+    }
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, accept ? 'booking.change.accepted' : 'booking.change.rejected', 'booking', approval.booking_id]);
+    await client.query('COMMIT');
+    res.json({ data: { id: approval.id, status: accept ? 'accepted' : 'rejected', bookingStatus: accept ? 'confirmed' : 'cancelled' } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+});
+app.post('/api/v1/booking-changes/:id/accept', requireAuth, decideBookingChange(true));
+app.post('/api/v1/booking-changes/:id/reject', requireAuth, decideBookingChange(false));
 
 app.get('/api/v1/offers', asyncHandler(async (req, res) => {
   const origin = String(req.query.origin || '').trim();
@@ -1295,8 +2273,15 @@ app.get('/api/v1/offers', asyncHandler(async (req, res) => {
     throw new ApiError(400, 'invalid date or passenger count');
   }
   const routeFilter = hasCoordinates
-    ? `AND ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000)
-       AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,20000)`
+    ? `AND (
+         (ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000)
+          AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,20000))
+         OR (o.route IS NOT NULL
+             AND ST_DWithin(o.route::geography,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,15000)
+             AND ST_DWithin(o.route::geography,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,15000)
+             AND ST_LineLocatePoint(o.route,ST_SetSRID(ST_MakePoint($1,$2),4326))
+               < ST_LineLocatePoint(o.route,ST_SetSRID(ST_MakePoint($3,$4),4326)))
+       )`
     : 'AND lower(o.origin_name)=lower($1) AND lower(o.destination_name)=lower($2)';
   const dateParameter = hasCoordinates ? 5 : 3;
   const seatsParameter = hasCoordinates ? 6 : 4;
@@ -1306,7 +2291,7 @@ app.get('/api/v1/offers', asyncHandler(async (req, res) => {
     `AND o.available_seats >= $${seatsParameter}`,
   ].join('\n');
   const parameters = hasCoordinates ? [...coordinates, date, seats] : [origin, destination, date, seats];
-  const { rows } = await pool.query(
+  const searchOffers = (extraFilters: string, extraParameters: unknown[], limit: number) => pool.query(
     `SELECT o.id, o.origin_name, o.destination_name, o.departure_at, o.arrival_at,o.distance_m,o.duration_s,o.route_source,o.price_per_seat_minor,
             o.currency, o.available_seats, o.total_seats, u.display_name AS driver_name,
             ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key
@@ -1314,12 +2299,22 @@ app.get('/api/v1/offers', asyncHandler(async (req, res) => {
        LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
        LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true
       WHERE o.status = 'published' AND o.departure_at > now() AND o.available_seats > 0
-        ${filters}
-      ORDER BY o.departure_at ASC LIMIT 100`,
-    parameters,
+        ${extraFilters}
+      ORDER BY o.departure_at ASC LIMIT ${limit}`,
+    extraParameters,
   );
+  let { rows } = await searchOffers(filters, parameters, 100);
+  let otherDate = false;
+  if (rows.length === 0 && date !== null) {
+    const seatsParameterWithoutDate = hasCoordinates ? 5 : 3;
+    const withoutDate = [routeFilter, `AND o.available_seats >= $${seatsParameterWithoutDate}`].join('\n');
+    rows = (await searchOffers(withoutDate, hasCoordinates ? [...coordinates, seats] : [origin, destination, seats], 20)).rows;
+    otherDate = rows.length > 0;
+  }
   res.json({ data: await Promise.all(rows.map(async ({ vehicle_photo_key, ...offer }) => ({
-    ...offer, vehicle_photo_url: vehicle_photo_key ? await getVehiclePhotoUrl(vehicle_photo_key).catch(() => null) : null,
+    ...offer,
+    other_date: otherDate,
+    vehicle_photo_url: vehicle_photo_key ? await getVehiclePhotoUrl(vehicle_photo_key).catch(() => null) : null,
   }))) });
 }));
 
@@ -1330,7 +2325,8 @@ app.get('/api/v1/offers/:id', asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT o.id,o.origin_name,o.destination_name,o.departure_at,o.arrival_at,o.distance_m,o.duration_s,o.route_source,
             o.price_per_seat_minor,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
-            ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key
+            ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key,
+            CASE WHEN o.route IS NULL THEN NULL ELSE ST_AsGeoJSON(o.route::geometry)::json->'coordinates' END AS route_geometry
        FROM offers o JOIN users u ON u.id=o.driver_id
        LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
        LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true
@@ -1348,16 +2344,30 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
        j.requested_departure_at,j.requested_arrival_at,j.strategy,j.state,j.passenger_count,j.total_price_minor,
        j.confirmed_price_minor,j.estimated_price_min_minor,j.estimated_price_max_minor,j.total_duration_s,
        j.walking_distance_m,j.transfer_count,j.reliability_score,j.comfort_score,j.current_leg_id,j.created_at,j.updated_at,
+       GREATEST(j.total_duration_s-COALESCE(SUM(l.duration_s),0),0)::int AS "waitingSeconds",
        COALESCE(json_agg(json_build_object(
          'id',l.id,'ordinal',l.ordinal,'mode',l.mode,'originName',l.origin_name,'originCoordinates',
          json_build_array(ST_X(l.origin::geometry),ST_Y(l.origin::geometry)),'destinationName',l.destination_name,
          'destinationCoordinates',json_build_array(ST_X(l.destination::geometry),ST_Y(l.destination::geometry)),
-         'departureAt',l.scheduled_departure_at,'arrivalAt',l.scheduled_arrival_at,'durationSeconds',l.duration_s,
+         'departureAt',CASE WHEN l.predicted_departure_at IS NOT NULL AND l.data_source='gtfs-realtime-trip-updates'
+           AND l.last_updated_at >= now()-interval '5 minutes' THEN l.predicted_departure_at ELSE l.scheduled_departure_at END,
+         'arrivalAt',CASE WHEN l.predicted_arrival_at IS NOT NULL AND l.data_source='gtfs-realtime-trip-updates'
+           AND l.last_updated_at >= now()-interval '5 minutes' THEN l.predicted_arrival_at ELSE l.scheduled_arrival_at END,
+         'scheduledDepartureAt',l.scheduled_departure_at,'scheduledArrivalAt',l.scheduled_arrival_at,
+         'predictedDepartureAt',l.predicted_departure_at,'predictedArrivalAt',l.predicted_arrival_at,
+         'liveStatus',CASE WHEN (l.predicted_departure_at IS NOT NULL OR l.predicted_arrival_at IS NOT NULL)
+           AND l.data_source='gtfs-realtime-trip-updates' AND l.last_updated_at >= now()-interval '5 minutes'
+           THEN 'PREDICTED' ELSE 'SCHEDULED' END,
+         'durationSeconds',l.duration_s,
          'distanceMeters',l.distance_m,'priceMinor',l.price_minor,'priceMinMinor',l.price_min_minor,
          'priceMaxMinor',l.price_max_minor,'currency',l.currency,'priceStatus',l.price_status,
          'availabilityStatus',l.availability_status,'providerType',l.provider_type,'offerId',l.offer_id,
+         'fareProductId',l.metadata->>'fareProductId','fareSource',l.metadata->>'fareSource',
+         'fareIncludedByPreviousSegment',COALESCE((l.metadata->>'fareIncludedByPreviousSegment')::boolean,false),
+         'scheduleSemantics',l.metadata->>'scheduleSemantics',
          'bookingId',l.booking_id,'demandId',l.demand_id,'state',l.state,'dataSource',l.data_source,
-         'lastUpdatedAt',l.last_updated_at,'metadata',l.metadata
+         'lastUpdatedAt',l.last_updated_at,'source',l.data_source,'dataSource',l.data_source,
+         'metadata',l.metadata,'routeGeometry',l.metadata->'routeGeometry','stops',l.metadata->'stops'
        ) ORDER BY l.ordinal) FILTER (WHERE l.id IS NOT NULL),'[]'::json) AS legs
   FROM journeys j LEFT JOIN journey_legs l ON l.journey_id=j.id`;
 
@@ -1375,6 +2385,67 @@ app.get('/api/v1/journeys/:id', requireAuth, asyncHandler(async (req, res) => {
   res.json({ data: rows[0] });
 }));
 
+app.get('/api/v1/journeys/:id/live', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid Journey ID', 'invalid_journey_id');
+  }
+  const { rows } = await pool.query<{
+    journey_id: string; leg_id: string; mode: string; provider_id: string | null; vehicle_position_url: string | null;
+    metadata: Record<string, unknown>; scheduled_departure_at: Date | null; scheduled_arrival_at: Date | null;
+  }>(
+    `SELECT j.id AS journey_id,l.id AS leg_id,l.mode,l.provider_id,
+       CASE WHEN p.status='enabled' AND p.health IN ('healthy','degraded') THEN p.vehicle_position_url ELSE NULL END AS vehicle_position_url,
+       l.metadata,l.scheduled_departure_at,l.scheduled_arrival_at
+     FROM journeys j JOIN journey_legs l ON l.journey_id=j.id
+     LEFT JOIN mobility_providers p ON p.id=l.provider_id
+     WHERE j.id=$1 AND j.user_id=$2
+       AND l.mode IN ('BUS','MINIBUS','RAIL','TRAM','TROLLEYBUS','METRO','FERRY','FUNICULAR')
+     ORDER BY l.ordinal`, [req.params.id, req.userId],
+  );
+  if (rows.length === 0) {
+    const journey = await pool.query('SELECT 1 FROM journeys WHERE id=$1 AND user_id=$2', [req.params.id, req.userId]);
+    if (!journey.rows[0]) throw new ApiError(404, 'Journey not found');
+  }
+
+  const now = Date.now();
+  const providerFeeds = new Map<string, Promise<{ ok: true; vehicles: Awaited<ReturnType<typeof cachedVehicles>> } | { ok: false }>>();
+  for (const leg of rows) {
+    if (!leg.provider_id || !leg.vehicle_position_url || providerFeeds.has(leg.provider_id)
+      || !isJourneyLegGpsWindowOpen(leg.scheduled_departure_at, leg.scheduled_arrival_at, now)) continue;
+    providerFeeds.set(leg.provider_id, cachedVehicles(leg.provider_id, 'gtfs_rt', leg.vehicle_position_url, new Map())
+      .then((vehicles) => ({ ok: true as const, vehicles }), () => ({ ok: false as const })));
+  }
+
+  const segments = await Promise.all(rows.map(async (leg) => {
+    const identity = {
+      providerId: leg.provider_id,
+      tripId: typeof leg.metadata.tripId === 'string' ? leg.metadata.tripId : null,
+      routeId: typeof leg.metadata.routeId === 'string' ? leg.metadata.routeId : null,
+      serviceDate: typeof leg.metadata.serviceDate === 'string' ? leg.metadata.serviceDate : null,
+      scheduledDepartureAt: leg.scheduled_departure_at,
+      scheduledArrivalAt: leg.scheduled_arrival_at,
+    };
+    if (!leg.vehicle_position_url || !leg.provider_id) return { legId: leg.leg_id, status: 'SCHEDULED' as const };
+    if (!isJourneyLegGpsWindowOpen(leg.scheduled_departure_at, leg.scheduled_arrival_at, now)) return { legId: leg.leg_id, status: 'SCHEDULED' as const };
+    const feed = await providerFeeds.get(leg.provider_id)!;
+    if (!feed.ok) return { legId: leg.leg_id, status: 'UNVERIFIED' as const, reason: 'provider_unavailable' as const };
+    const vehicle = matchLiveVehicleForJourneyLeg(identity, feed.vehicles, now);
+    if (!vehicle) return { legId: leg.leg_id, status: 'UNVERIFIED' as const, reason: 'no_fresh_matching_vehicle' as const };
+    return {
+      legId: leg.leg_id,
+      status: 'LIVE' as const,
+      vehicle: {
+        coordinates: [vehicle.lon, vehicle.lat] as [number, number],
+        bearing: vehicle.bearing,
+        speed: vehicle.speed,
+        route: typeof leg.metadata.routeName === 'string' ? leg.metadata.routeName : vehicle.route,
+        updatedAt: vehicle.timestamp!.toISOString(),
+      },
+    };
+  }));
+  res.json({ data: { journeyId: req.params.id, checkedAt: new Date(now).toISOString(), segments } });
+}));
+
 app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) => {
   let search;
   try {
@@ -1383,11 +2454,20 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     if (error instanceof TypeError) throw new ApiError(400, error.message, 'invalid_journey_search');
     throw error;
   }
-  if (search.preferences.allowCommunity === false) {
-    res.json({ data: { journeys: [], partial: true, blockedProviders: ['community-disabled','taxi','bus','minibus','rail','public-transport','carsharing','transfer'], providerErrors: [] } });
-    return;
-  }
-
+  const [originLon, originLat] = search.origin.coordinates;
+  const [destinationLon, destinationLat] = search.destination.coordinates;
+  const routeDistanceMeters = (() => {
+    const radians = (value: number) => value * Math.PI / 180;
+    const dLat = radians(destinationLat - originLat), dLon = radians(destinationLon - originLon);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(radians(originLat)) * Math.cos(radians(destinationLat)) * Math.sin(dLon / 2) ** 2;
+    return 6_371_000 * 2 * Math.asin(Math.sqrt(h));
+  })();
+  // City transit should be bounded to a useful passenger search horizon by
+  // default. Intercity journeys keep the full-day horizon; an explicit user
+  // preference always overrides this default.
+  const maximumSearchDurationSeconds = search.preferences.maxTotalDurationSeconds
+    ?? (routeDistanceMeters <= 30_000 ? 6 * 60 * 60 : 24 * 60 * 60);
+  const corridorWidthMeters = Math.max(12_000, Math.min(60_000, routeDistanceMeters * 0.2));
   const { rows } = await pool.query<{
     offer_id: string; driver_id: string; driver_name: string; vehicle_id: string;
     origin_name: string; destination_name: string; origin_lon: number; origin_lat: number;
@@ -1395,29 +2475,40 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     duration_s: number; distance_m: number; route_source: string; price_per_seat_minor: number;
     currency: string; available_seats: number; average_rating: number | null; review_count: number;
     vehicle_make: string; vehicle_model: string; created_at: Date; snapshot_at: Date;
+    origin_offset_m: number; destination_offset_m: number; route_geojson: string | null;
   }>(
     `SELECT o.id AS offer_id,o.driver_id,u.display_name AS driver_name,o.vehicle_id,
             o.origin_name,o.destination_name,ST_X(o.origin::geometry) AS origin_lon,ST_Y(o.origin::geometry) AS origin_lat,
             ST_X(o.destination::geometry) AS destination_lon,ST_Y(o.destination::geometry) AS destination_lat,
+            ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography) AS origin_offset_m,
+            ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography) AS destination_offset_m,
             o.departure_at,o.arrival_at,o.duration_s,o.distance_m,o.route_source,o.price_per_seat_minor,o.currency,o.available_seats,
+            ST_AsGeoJSON(o.route) AS route_geojson,
             ratings.average_rating,ratings.review_count,v.make AS vehicle_make,v.model AS vehicle_model,o.created_at,now() AS snapshot_at
        FROM offers o JOIN users u ON u.id=o.driver_id JOIN vehicles v ON v.id=o.vehicle_id
        LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true
       WHERE o.status='published' AND o.departure_at >= $5 AND o.departure_at <= $5::timestamptz+interval '120 minutes'
         AND o.available_seats >= $6 AND o.driver_id<>$7 AND o.route IS NOT NULL
         AND o.duration_s IS NOT NULL AND o.duration_s>0 AND o.distance_m IS NOT NULL AND o.distance_m>0
-        AND o.route_source IS NOT NULL AND o.route_source<>'development_unrouted'
-        AND ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,25000)
-        AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,25000)
+        AND o.route_source IS NOT NULL AND o.route_source<>'development_unrouted' AND $8::boolean
+        AND ((ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,25000)
+              AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,25000))
+          OR ST_DWithin(o.route::geography,
+              ST_MakeLine(ST_SetSRID(ST_MakePoint($1,$2),4326),ST_SetSRID(ST_MakePoint($3,$4),4326))::geography,$9))
         AND o.departure_at>now()
-      ORDER BY o.departure_at ASC LIMIT 100`,
-    [search.origin.coordinates[0], search.origin.coordinates[1], search.destination.coordinates[0], search.destination.coordinates[1], search.departureAt, search.passengers, req.userId],
+      ORDER BY o.departure_at ASC LIMIT 101`,
+    [search.origin.coordinates[0], search.origin.coordinates[1], search.destination.coordinates[0], search.destination.coordinates[1], search.departureAt, search.passengers, req.userId,
+      search.preferences.allowCommunity !== false && journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes), corridorWidthMeters],
   );
 
-  const candidates = rows.flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number }> => {
-    if (search.preferences.preferredVehicleClass) return [];
+  let candidateGenerationTruncated = rows.length > 100;
+  const candidates = rows.slice(0, 100).flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number; waitingSeconds: number }> => {
+    if (search.preferences.preferredVehicleClass || search.preferences.allowCommunity === false
+      || !journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes)) return [];
+    if (offer.origin_offset_m > 5 || offer.destination_offset_m > 5) return [];
     const arrivalAt = offer.arrival_at ?? new Date(offer.departure_at.getTime() + offer.duration_s * 1000);
     const durationSeconds = Math.ceil((arrivalAt.getTime() - search.departureAt.getTime()) / 1000);
+    const waitingSeconds = Math.max(0, Math.ceil((offer.departure_at.getTime() - search.departureAt.getTime()) / 1000));
     const totalPriceMinor = Number(offer.price_per_seat_minor) * search.passengers;
     const rating = offer.average_rating === null ? null : Number(offer.average_rating);
     if (!Number.isSafeInteger(totalPriceMinor) || totalPriceMinor < 0 || durationSeconds <= 0) return [];
@@ -1426,22 +2517,598 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     if (search.preferences.minDriverRating !== undefined && search.preferences.minDriverRating > 0
       && (rating === null || offer.review_count < 1 || rating < search.preferences.minDriverRating)) return [];
     return [{
-      id: offer.offer_id, source: offer, departureAt: offer.departure_at, arrivalAt,
-      durationSeconds, priceMinor: totalPriceMinor, transfers: 0, walkingMeters: 0,
+      id: offer.offer_id, diversityKey: `offer:${offer.offer_id}`, source: offer, departureAt: offer.departure_at, arrivalAt,
+      durationSeconds, waitingSeconds, priceMinor: totalPriceMinor, transfers: 0, walkingMeters: 0,
       reliability: null, transferRisk: 0, comfort: null, legs: [{ mode: 'COMMUNITY' }], totalPriceMinor,
     }];
   });
 
-  const strategies: JourneyStrategy[] = [search.strategy, ...JOURNEY_STRATEGIES.filter((strategy) => strategy !== search.strategy)];
-  const representatives = selectRepresentativeJourneys(candidates, strategies);
+  const userFacingStrategies: JourneyStrategy[] = ['BALANCED', 'FASTEST', 'CHEAPEST'];
+  const strategies: JourneyStrategy[] = [search.strategy, ...userFacingStrategies.filter((strategy) => strategy !== search.strategy)];
   const preferenceValues = search.preferences;
+  const configuredTransferBufferSeconds = Math.max(
+    preferenceValues.minimumTransferBufferSeconds ?? DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+  );
+  const walkingRoutingUrl = process.env.WALKING_ROUTING_URL?.trim();
+  const walkingRouteBudget = createWalkingRouteBudget();
+  const providerErrors: string[] = [];
+  const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
+    `SELECT id,name,city,feed_url,realtime_url,last_sync_at,last_report FROM mobility_providers
+      WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
+        AND status='enabled' AND health IN ('healthy','degraded')
+      ORDER BY priority,name LIMIT 101`,
+  );
+  if (discoveredGtfsProviders.length > 100) candidateGenerationTruncated = true;
+  const gtfsProviders = discoveredGtfsProviders.slice(0, 100);
+  const transitAllowed = (mode: TransitJourneyMode) => journeySearchTransitModeAllowed(mode, search.preferences);
+  const spatiallyEligibleGtfsProviders = gtfsProviders.filter((provider) => {
+    const box = provider.last_report?.bbox;
+    return Boolean(box && (bboxContains(box, originLon, originLat) || bboxContains(box, destinationLon, destinationLat)
+      || bboxIntersectsRouteCorridor(box, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters)));
+  });
+  const allTransitModes = JOURNEY_SEARCH_TRANSIT_MODES;
+  const allowedTransitModes = allTransitModes.filter(transitAllowed);
+  const typeKeysByMode: Record<TransitJourneyMode, string[]> = {
+    BUS: ['bus', 'intercity_bus'], MINIBUS: ['marshrutka'], RAIL: ['train', 'suburban', 'city_train'],
+    TRAM: ['tram'], TROLLEYBUS: ['trolleybus'], METRO: ['metro'], FERRY: ['ferry'], FUNICULAR: ['funicular'],
+  };
+  const eligibleGtfsProviders = allowedTransitModes.length === 0 ? [] : spatiallyEligibleGtfsProviders.filter((provider) => {
+    const counts = provider.last_report?.counts;
+    if (!counts) return true;
+    return allowedTransitModes.some((mode) => typeKeysByMode[mode].some((type) => Number(counts[`routes_${type}`] ?? 0) > 0));
+  });
+  const providerMetadata = new Map(eligibleGtfsProviders.map((provider) => [provider.id, { name: provider.name, last_sync_at: provider.last_sync_at }]));
+  const kyivMetroBounds: [number, number, number, number] = [30.1, 50.1, 31.0, 50.8];
+  const shouldLoadKyivMetro = allowedTransitModes.includes('METRO')
+    && bboxIntersectsRouteCorridor(kyivMetroBounds, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters);
+  // Start Kyiv's multi-source open-data build alongside regular GTFS fetches.
+  const kyivMetroFeedTask = shouldLoadKyivMetro ? (async () => {
+    const { rows } = await pool.query<{ id: string; name: string; city: string; feed_url: string; source_ref: string | null; source_type: string; last_sync_at: Date | null }>(
+      `SELECT id,name,city,feed_url,source_ref,source_type,last_sync_at FROM mobility_providers
+        WHERE city='Київ' AND provider_type='public_transit' AND source_type IN ('rest','geojson')
+          AND status='enabled' AND health IN ('healthy','degraded') AND name ILIKE '%метро%'
+        ORDER BY priority,name`);
+    const stations = rows.find((row) => row.source_type === 'geojson' && row.name.toLocaleLowerCase('uk-UA').includes('метро (станції)'));
+    const route = rows.find((row) => row.source_type === 'geojson' && row.name.toLocaleLowerCase('uk-UA').includes('метро (геометрія ліній)'));
+    const scheduleSources = rows.filter((row) => row.source_type === 'rest' && row.name.toLocaleLowerCase('uk-UA').includes('метро'));
+    if (!stations || !route || scheduleSources.length < 3) throw new Error('Київські джерела станцій, геометрії, розкладу або пересадок не зареєстровані чи вимкнені');
+    const feed = await cachedKyivMetroTimetable({ stationSource: stations, routeSource: route, scheduleSources });
+    return { routeSource: route, feed };
+  })() : null;
+  const feedLoads = await Promise.allSettled(eligibleGtfsProviders.map(async (provider) => ({
+    provider,
+    feed: await cachedGtfsTimetable(provider.id, provider.feed_url),
+  })));
+  const realtimeProviders = eligibleGtfsProviders.filter((provider) => provider.realtime_url);
+  const realtimeLoads = await Promise.allSettled(realtimeProviders.map(async (provider) => ({
+    provider,
+    realtime: await cachedGtfsRealtimeTripUpdates(provider.id, provider.realtime_url!),
+  })));
+  const realtimeByProvider = new Map<string, Awaited<ReturnType<typeof cachedGtfsRealtimeTripUpdates>>>();
+  realtimeLoads.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      providerErrors.push(`${realtimeProviders[index]?.name ?? 'GTFS-Realtime'}: оновлення рейсів тимчасово недоступні; використовується розклад`);
+      return;
+    }
+    if (!result.value.realtime.fresh) {
+      providerErrors.push(`${result.value.provider.name}: GTFS-Realtime відхилено (${result.value.realtime.reason ?? 'дані неповні'}); використовується розклад`);
+      return;
+    }
+    realtimeByProvider.set(result.value.provider.id, result.value.realtime);
+  });
+  const feedSources: GtfsTimetableSource[] = [];
+  feedLoads.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      providerErrors.push(`${eligibleGtfsProviders[index]?.name ?? 'GTFS'}: розклад тимчасово недоступний`);
+      return;
+    }
+    feedSources.push({ providerId: result.value.provider.id, providerName: result.value.provider.name,
+      providerCity: result.value.provider.city, feed: result.value.feed,
+      ...(realtimeByProvider.get(result.value.provider.id) ? { realtime: realtimeByProvider.get(result.value.provider.id)! } : {}) });
+  });
+  if (kyivMetroFeedTask) {
+    const [metroResult] = await Promise.allSettled([kyivMetroFeedTask]);
+    if (metroResult?.status === 'fulfilled') {
+      const { routeSource, feed } = metroResult.value;
+      const providerName = 'Київ — метро (офіційний інтервальний розклад)';
+      feedSources.push({ providerId: routeSource.id, providerName, providerCity: routeSource.city, feed });
+      providerMetadata.set(routeSource.id, { name: providerName, last_sync_at: routeSource.last_sync_at });
+    } else {
+      providerErrors.push(`Київське метро: ${metroResult?.reason instanceof Error ? metroResult.reason.message : 'відкриті дані тимчасово недоступні'}`);
+    }
+  }
+  const sourcesByTimezone = new Map<string, GtfsTimetableSource[]>();
+  for (const source of feedSources) {
+    const sources = sourcesByTimezone.get(source.feed.timezone) ?? [];
+    sources.push(source); sourcesByTimezone.set(source.feed.timezone, sources);
+  }
+  type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary, 'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified'>>;
+  const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
+    if (!itinerary.fare || search.passengers === 1) return itinerary;
+    return { ...itinerary, fare: scaleGtfsFareForPassengers(itinerary.fare, search.passengers) };
+  };
+  const mergedFeedGroups = [...sourcesByTimezone.values()].flatMap((sources) => {
+    const feed = mergeGtfsTimetables(sources);
+    return feed ? [{ sources, feed }] : [];
+  });
+  let scheduledCandidates: SearchItinerary[] = [];
+  let pedestrianRoutesUnavailable = false;
+  let pedestrianCandidatesRejected = false;
+  let hasUnpricedTransitCandidates = false;
+  const routeTransitItinerary = async (
+    itinerary: GtfsItinerary,
+    origin: [number, number],
+    destination: [number, number],
+    routeBudget: ReturnType<typeof createWalkingRouteBudget>,
+    requireMeasuredWalks: boolean,
+  ): Promise<SearchItinerary | null> => {
+    const first = itinerary.segments[0];
+    const last = itinerary.segments.at(-1);
+    if (!first || !last) return null;
+    if (!walkingRoutingUrl) {
+      if (requireMeasuredWalks && (first.distanceToOriginStopMeters > 0 || last.distanceFromDestinationStopMeters > 0
+        || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
+          && !itinerary.transferWalkingGeometries[index]))) return null;
+      return itinerary;
+    }
+    const transferRequests = itinerary.transferWalkingMeters.map(async (meters, index) => {
+      const previous = itinerary.segments[index];
+      const next = itinerary.segments[index + 1];
+      if (!previous || !next || itinerary.transferInSeat[index] || meters <= 0 || itinerary.transferWalkingGeometries[index]) return null;
+      return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates, walkingRoutingUrl, routeBudget);
+    });
+    const [access, egress, ...transfers] = await Promise.all([
+      first.distanceToOriginStopMeters > 0
+        ? routePedestrianPath(origin, first.originStop.coordinates, walkingRoutingUrl, routeBudget) : null,
+      last.distanceFromDestinationStopMeters > 0
+        ? routePedestrianPath(last.destinationStop.coordinates, destination, walkingRoutingUrl, routeBudget) : null,
+      ...transferRequests,
+    ]);
+    const missingRequiredPath = (first.distanceToOriginStopMeters > 0 && !access)
+      || (last.distanceFromDestinationStopMeters > 0 && !egress)
+      || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
+        && !itinerary.transferWalkingGeometries[index] && !transfers[index]);
+    if (missingRequiredPath) return null;
+    return applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
+      maximumAccessMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+      maximumEgressMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+      maximumTransferMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+    });
+  };
+
+  for (const { sources, feed: mergedFeed } of mergedFeedGroups) {
+    const itinerarySearch = findGtfsItinerariesWithStats(mergedFeed, {
+      providerId: sources[0].providerId, providerName: sources[0].providerName, origin: search.origin.coordinates,
+      destination: search.destination.coordinates, earliestDeparture: search.departureAt,
+      latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 100,
+      maximumJourneySeconds: maximumSearchDurationSeconds,
+      maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
+      maximumWaitSeconds: 4 * 60 * 60,
+      minimumTransferBufferSeconds: configuredTransferBufferSeconds,
+      maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+      maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+      maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+      allowedModes: allowedTransitModes,
+      allowedTransportTypes: search.preferences.allowedTransportTypes,
+    });
+    candidateGenerationTruncated ||= itinerarySearch.searchTruncated || itinerarySearch.resultLimitReached;
+    const itineraries = itinerarySearch.itineraries.map(fareForPassengerCount);
+    const feasibleItineraries = itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
+      && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes))
+      && candidate.segments.every((segment) => transitProviderAllowed(search.preferences, segment.transportType, segment.providerName))
+      && (walkingRoutingUrl || (search.preferences.maxWalkingMeters === undefined && search.preferences.maxTotalDurationSeconds === undefined)
+        || (candidate.segments[0]?.distanceToOriginStopMeters === 0
+          && candidate.segments.at(-1)?.distanceFromDestinationStopMeters === 0
+          && candidate.transferWalkingMeters.every((meters, index) => meters === 0 || candidate.transferInSeat[index]
+            || Boolean(candidate.transferWalkingGeometries[index]))))
+      && (walkingRoutingUrl || search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
+      && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers));
+    for (const itinerary of feasibleItineraries) {
+      const comparableUahFare = itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
+      if (search.preferences.maxPriceMinor !== undefined) {
+        if (comparableUahFare === null) {
+          hasUnpricedTransitCandidates = true;
+          continue;
+        }
+        if (comparableUahFare > search.preferences.maxPriceMinor) continue;
+      }
+      scheduledCandidates.push(itinerary);
+    }
+  }
+  if (walkingRoutingUrl) {
+    const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary) => {
+      const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, search.destination.coordinates, walkingRouteBudget, false);
+      if (!routed && walkingRouteBudget.remaining > 0) pedestrianRoutesUnavailable = true;
+      if (!routed) {
+        pedestrianCandidatesRejected = true;
+        return null;
+      }
+      return routed;
+    }));
+    scheduledCandidates = routedCandidates.filter((itinerary): itinerary is SearchItinerary => itinerary !== null)
+      .filter((itinerary) => (search.preferences.maxWalkingMeters === undefined || itinerary.walkingMeters <= search.preferences.maxWalkingMeters)
+        && (search.preferences.maxTotalDurationSeconds === undefined || itinerary.durationSeconds <= search.preferences.maxTotalDurationSeconds));
+    if (pedestrianRoutesUnavailable) {
+      providerErrors.push('Пішохідний маршрутизатор не повернув підтверджений шлях для частини варіантів; ці варіанти приховано.');
+    }
+    if (pedestrianCandidatesRejected) {
+      providerErrors.push('Частину варіантів відхилено: фактичний час або відстань пішохідного шляху не дозволяє здійснити маршрут.');
+    }
+    if (walkingRouteBudget.exhausted) {
+      candidateGenerationTruncated = true;
+      providerErrors.push(`Пішохідний маршрутизатор обмежив пошук ${walkingRouteBudget.limit} маршрутами; частину альтернатив не перевірено.`);
+    }
+  }
+
+  const MAX_COMMUNITY_COMPOSITION_OFFERS = 6;
+  const MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE = 2;
+  const MAX_COMMUNITY_TRANSIT_CANDIDATES = 24;
+  const communityTransferBufferSeconds = Math.max(configuredTransferBufferSeconds, 600);
+  const communityWalkingBudget = createWalkingRouteBudget(24);
+  const communityTransitCandidates: Array<ReturnType<typeof composeCommunityTransitJourneys>[number]> = [];
+  const parseOfferGeometry = (value: string | null): Array<[number, number]> | null => {
+    if (!value) return null;
+    try {
+      const parsed = JSON.parse(value) as { type?: unknown; coordinates?: unknown };
+      if (parsed.type !== 'LineString' || !Array.isArray(parsed.coordinates) || parsed.coordinates.length < 2) return null;
+      const coordinates = parsed.coordinates.flatMap((point): Array<[number, number]> =>
+        Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1])
+          && Math.abs(point[0] as number) <= 180 && Math.abs(point[1] as number) <= 90
+          ? [[point[0] as number, point[1] as number]] : []);
+      return coordinates.length >= 2 ? coordinates : null;
+    } catch {
+      return null;
+    }
+  };
+  const searchTransitBetween = async (
+    origin: { name: string; coordinates: [number, number] },
+    destination: { name: string; coordinates: [number, number] },
+    earliestDeparture: Date,
+    latestDeparture: Date,
+  ): Promise<SearchItinerary[]> => {
+    if (allowedTransitModes.length === 0 || latestDeparture < earliestDeparture) return [];
+    const paths: SearchItinerary[] = [];
+    for (const { sources, feed } of mergedFeedGroups) {
+      const searchResult = findGtfsItinerariesWithStats(feed, {
+        providerId: sources[0].providerId, providerName: sources[0].providerName, origin: origin.coordinates,
+        destination: destination.coordinates, earliestDeparture, latestDeparture,
+        limit: MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE,
+        maximumJourneySeconds: maximumSearchDurationSeconds,
+        maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
+        maximumWaitSeconds: 4 * 60 * 60,
+        minimumTransferBufferSeconds: configuredTransferBufferSeconds,
+        maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+        maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+        maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+        allowedModes: allowedTransitModes,
+        allowedTransportTypes: search.preferences.allowedTransportTypes,
+      });
+      candidateGenerationTruncated ||= searchResult.searchTruncated || searchResult.resultLimitReached;
+      const allowedPaths = searchResult.itineraries.map(fareForPassengerCount).filter((itinerary) => itinerary.segments.every((segment) =>
+        transitAllowed(segment.mode)
+        && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes)
+        && transitProviderAllowed(search.preferences, segment.transportType, segment.providerName)));
+      for (const itinerary of allowedPaths) {
+        const routed = await routeTransitItinerary(itinerary, origin.coordinates, destination.coordinates, communityWalkingBudget, true);
+        if (routed) paths.push(routed);
+        else if (communityWalkingBudget.remaining > 0) pedestrianRoutesUnavailable = true;
+        if (paths.length >= MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE) break;
+      }
+      if (paths.length >= MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE) break;
+    }
+    return [...new Map(paths.map((path) => [path.id, path])).values()]
+      .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.durationSeconds - b.durationSeconds)
+      .slice(0, MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE);
+  };
+
+  if (!search.preferences.preferredVehicleClass && search.preferences.allowCommunity !== false
+    && journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes) && mergedFeedGroups.length > 0) {
+    const composableOffers = rows.filter((offer) => {
+      const rating = offer.average_rating === null ? null : Number(offer.average_rating);
+      return (search.preferences.minDriverRating === undefined || search.preferences.minDriverRating <= 0
+        || (rating !== null && offer.review_count > 0 && rating >= search.preferences.minDriverRating))
+        && parseOfferGeometry(offer.route_geojson) !== null;
+    });
+    if (composableOffers.length > MAX_COMMUNITY_COMPOSITION_OFFERS) candidateGenerationTruncated = true;
+    for (const offer of composableOffers.slice(0, MAX_COMMUNITY_COMPOSITION_OFFERS)) {
+      const arrivalAt = offer.arrival_at ?? new Date(offer.departure_at.getTime() + offer.duration_s * 1000);
+      if (!Number.isFinite(arrivalAt.getTime()) || arrivalAt <= offer.departure_at) continue;
+      const ride: CommunityRideOption = {
+        id: offer.offer_id, driverId: offer.driver_id,
+        departureAt: offer.departure_at, arrivalAt,
+        origin: { name: offer.origin_name, coordinates: [offer.origin_lon, offer.origin_lat] },
+        destination: { name: offer.destination_name, coordinates: [offer.destination_lon, offer.destination_lat] },
+        distanceMeters: Number(offer.distance_m), pricePerSeatMinor: Number(offer.price_per_seat_minor),
+        currency: offer.currency.trim().toUpperCase(), availableSeats: Number(offer.available_seats),
+        routeGeometry: parseOfferGeometry(offer.route_geojson), snapshotAt: offer.snapshot_at,
+        metadata: { driverName: offer.driver_name, vehicleId: offer.vehicle_id,
+          vehicleMake: offer.vehicle_make, vehicleModel: offer.vehicle_model,
+          rating: offer.average_rating === null ? null : Number(offer.average_rating),
+          reviewCount: offer.review_count, offerCreatedAt: offer.created_at },
+      };
+      const pickupExact = offer.origin_offset_m <= 5;
+      const dropoffExact = offer.destination_offset_m <= 5;
+      const prefixLatest = new Date(Math.min(search.departureAt.getTime() + 120 * 60_000, offer.departure_at.getTime()));
+      const suffixEarliest = new Date(arrivalAt.getTime() + communityTransferBufferSeconds * 1000);
+      const [prefixes, suffixes] = await Promise.all([
+        pickupExact ? Promise.resolve([]) : searchTransitBetween(search.origin, ride.origin, search.departureAt, prefixLatest),
+        dropoffExact ? Promise.resolve([]) : searchTransitBetween(ride.destination, search.destination, suffixEarliest, new Date(suffixEarliest.getTime() + 4 * 60 * 60_000)),
+      ]);
+      const combinations = composeCommunityTransitJourneys({
+        offer: ride, prefixes, suffixes, requestedDepartureAt: search.departureAt,
+        origin: search.origin.coordinates, destination: search.destination.coordinates,
+        passengers: search.passengers, minimumTransferBufferSeconds: communityTransferBufferSeconds,
+        maximumDurationSeconds: maximumSearchDurationSeconds,
+        maximumWalkingMeters: search.preferences.maxWalkingMeters,
+        maximumResults: 6,
+      }).filter((journey) => search.preferences.maxTransfers === undefined || journey.transfers <= search.preferences.maxTransfers);
+      for (const combination of combinations) {
+        if (search.preferences.maxPriceMinor !== undefined) {
+          if (combination.priceMinor === null) {
+            hasUnpricedTransitCandidates = true;
+            continue;
+          }
+          if (combination.priceMinor > search.preferences.maxPriceMinor) continue;
+        }
+        communityTransitCandidates.push(combination);
+        if (communityTransitCandidates.length >= MAX_COMMUNITY_TRANSIT_CANDIDATES) {
+          candidateGenerationTruncated = true;
+          break;
+        }
+      }
+      if (communityTransitCandidates.length >= MAX_COMMUNITY_TRANSIT_CANDIDATES) break;
+      if (communityWalkingBudget.exhausted) {
+        candidateGenerationTruncated = true;
+        break;
+      }
+    }
+    if (pedestrianRoutesUnavailable) {
+      providerErrors.push('Пішохідний маршрутизатор не підтвердив шлях до точки посадки/висадки попутки; такі комбінації приховано.');
+    }
+    if (communityWalkingBudget.exhausted) {
+      candidateGenerationTruncated = true;
+      providerErrors.push(`Пішохідний маршрутизатор обмежив перевірку комбінацій ${communityWalkingBudget.limit} шляхами; частину варіантів не перевірено.`);
+    }
+  }
+  scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
+  if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
+  scheduledCandidates.splice(100);
+  const transitRouteChainKey = (itinerary: GtfsItinerary) => {
+    const routes: string[] = [];
+    for (const segment of itinerary.segments) {
+      const key = `${segment.providerId}:${segment.routeId}`;
+      if (routes.at(-1) !== key) routes.push(key);
+    }
+    return routes.join('>');
+  };
+  const rankedCandidates = [
+    ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
+    ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
+    ...scheduledCandidates.map((itinerary) => ({
+      id: itinerary.id,
+      diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
+      durationSeconds: itinerary.durationSeconds,
+      priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+      transfers: itinerary.transfers,
+      walkingMeters: itinerary.walkingMeters,
+      reliability: null,
+      transferRisk: itinerary.transfers ? 0.3 : 0,
+      comfort: null,
+      legs: [
+        ...(itinerary.segments[0].distanceToOriginStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
+        ...itinerary.segments.flatMap((segment, index) => [
+          ...(index > 0 && itinerary.transferWalkingMeters[index - 1] > 0 ? [{ mode: 'WALK' as const }] : []),
+          { mode: segment.mode, providerId: segment.providerId },
+        ]),
+        ...(itinerary.segments.at(-1)!.distanceFromDestinationStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
+      ],
+      kind: 'gtfs' as const,
+      itinerary,
+    })),
+  ];
+  const availableStrategies = strategiesWithComparablePrices(rankedCandidates, strategies)
+    .filter((strategy) => strategy !== 'CHEAPEST' || !hasUnpricedTransitCandidates);
+  const alternativeLimitPerStrategy = 12;
+  const paretoCandidates = paretoFrontier(rankedCandidates);
+  const representatives = selectStrategyAlternatives(rankedCandidates, availableStrategies, alternativeLimitPerStrategy);
+  const selectedCandidateIds = new Set(representatives.map(({ journey }) => journey.id));
+  const routePlannerTypes = new Set<string>(['carpool']);
+  for (const source of feedSources) {
+    for (const route of source.feed.routes.values()) {
+      // Provider inventory is not permission to expand the canonical route
+      // product. Ferry/funicular feeds may be parsed for diagnostics, but this
+      // Journey API only routes the approved GTFS-backed categories.
+      if (!JOURNEY_SEARCH_TRANSIT_MODES.includes(route.mode)) continue;
+      routePlannerTypes.add(route.transportType);
+      if (route.transportType === 'intercity_bus') routePlannerTypes.add('bus');
+      if (route.transportType === 'suburban_train' || route.transportType === 'city_train') routePlannerTypes.add('train');
+    }
+  }
+  const canonicalRouteTypes = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'];
+  const requestedRouteTypes = search.preferences.allowedTransportTypes ?? canonicalRouteTypes;
+  const unsupportedSelectedTypes = requestedRouteTypes
+    .filter((type) => !routePlannerTypes.has(type))
+    .map((type) => `transportType:${type}:not-in-route-engine`);
+  const blockedProviders = [
+    ...canonicalRouteTypes.filter((type) => !routePlannerTypes.has(type))
+      .map((type) => `transportType:${type}:no-routed-provider-in-corridor`),
+    ...(!walkingRoutingUrl ? ['door-to-door-walking:requires-WALKING_ROUTING_URL'] : []),
+    'walking-transfers-between-unmatched-stops',
+    'community-intermediate-pickup:requires-explicit-driver-approved-stop',
+  ];
   const client = await pool.connect();
   const journeys: Array<Record<string, unknown>> = [];
   try {
     await client.query('BEGIN');
     for (const representative of representatives) {
       const candidate = representative.journey;
-      const offer = candidate.source;
+      if (candidate.kind === 'community-transit') {
+        const composition = candidate;
+        const offer = composition.offer;
+        const stored = await client.query<{ id: string }>(
+          `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
+           VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$11,$11,$11,$12,$13,$14,NULL,NULL)
+           RETURNING id`,
+          [req.userId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
+            search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
+            search.departureAt, representative.strategy, search.passengers, composition.priceMinor, composition.durationSeconds,
+            composition.walkingMeters, composition.transfers],
+        );
+        const journeyId = stored.rows[0].id;
+        await client.query(
+          `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
+          [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
+            preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
+            preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
+            preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
+            preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
+            configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
+            preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+            JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
+        );
+
+        const responseLegs: Array<Record<string, unknown>> = [];
+        let ordinal = 0;
+        let firstServiceLegId: string | null = null;
+        const insertWalk = async (
+          from: { name: string; coordinates: [number, number] },
+          to: { name: string; coordinates: [number, number] },
+          departureAt: Date,
+          distanceMeters: number,
+          durationSeconds: number,
+          source: string,
+          geometry?: Array<[number, number]> | null,
+        ) => {
+          if (distanceMeters <= 0) return;
+          const arrivalAt = new Date(departureAt.getTime() + durationSeconds * 1000);
+          const inserted = await client.query<{ id: string }>(
+            `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_status,availability_status,provider_type,state,data_source,last_updated_at,metadata)
+             VALUES($1,$2,'WALK',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$12,'UAH','UNKNOWN','AVAILABLE','walking','SUGGESTED',$13,now(),$14::jsonb) RETURNING id`,
+            [journeyId, ordinal++, from.coordinates[0], from.coordinates[1], from.name,
+              to.coordinates[0], to.coordinates[1], to.name, departureAt, arrivalAt, durationSeconds,
+              distanceMeters, source, JSON.stringify({ routeGeometry: geometry ?? null })],
+          );
+          responseLegs.push({ id: inserted.rows[0].id, mode: 'WALK', offerId: null, origin: from, destination: to,
+            departureAt, arrivalAt, durationSeconds, distanceMeters, priceMinor: null, currency: null,
+            priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source, routeGeometry: geometry ?? null,
+            lastUpdatedAt: new Date().toISOString(), dataFreshnessSeconds: 0, liveStatus: 'UNVERIFIED',
+            driver: null, vehicle: null });
+        };
+        const insertTransitPath = async (path: SearchItinerary, startFrom?: { name: string; coordinates: [number, number] },
+          endAt?: { name: string; coordinates: [number, number] }) => {
+          const first = path.segments[0];
+          const last = path.segments.at(-1);
+          if (!first || !last) return;
+          const accessWalk = path.accessWalk ?? null;
+          if (accessWalk && startFrom) {
+            await insertWalk(startFrom, { name: first.originStop.name, coordinates: first.originStop.coordinates },
+              path.departureAt, accessWalk.distanceMeters, accessWalk.durationSeconds, 'osrm-foot-route', accessWalk.geometry);
+          }
+          for (const [segmentIndex, segment] of path.segments.entries()) {
+            if (segmentIndex > 0) {
+              const previous = path.segments[segmentIndex - 1]!;
+              const meters = path.transferWalkingMeters[segmentIndex - 1] ?? 0;
+              const seconds = path.transferWalkingSeconds[segmentIndex - 1] ?? 0;
+              const geometry = path.transferWalks?.[segmentIndex - 1]?.geometry
+                ?? path.transferWalkingGeometries[segmentIndex - 1] ?? null;
+              if (meters > 0 && !path.transferInSeat[segmentIndex - 1]) {
+                await insertWalk({ name: previous.destinationStop.name, coordinates: previous.destinationStop.coordinates },
+                  { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
+                  previous.arrivalAt, meters, seconds, geometry ? 'gtfs-pathway' : 'walking-route', geometry);
+              }
+            }
+            const allocation = path.fare?.allocations[segmentIndex] ?? null;
+            const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
+            const provider = providerMetadata.get(segment.providerId);
+            const inserted = await client.query<{ id: string }>(
+              `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
+               VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb) RETURNING id`,
+              [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
+                segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
+                segment.scheduledDepartureAt, segment.scheduledArrivalAt,
+                segment.realtimeUpdatedAt ? segment.departureAt : null, segment.realtimeUpdatedAt ? segment.arrivalAt : null,
+                durationSeconds, allocation?.priceMinor ?? null, path.fare?.currency ?? 'UAH', allocation ? 'ESTIMATED' : 'UNKNOWN',
+                segment.providerId, segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+                segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
+                JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
+                  transportType: segment.transportType, headsign: segment.headsign, tripId: segment.tripId,
+                  serviceDate: segment.serviceDate, scheduleSemantics: segment.scheduleSemantics,
+                  fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+                  ...(allocation ? { fareProductId: allocation.fareProductId,
+                    fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
+                  ...(segment.stops ? { stops: segment.stops } : {}),
+                  ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
+            );
+            firstServiceLegId ??= inserted.rows[0].id;
+            responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, offerId: null,
+              origin: { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
+              destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
+              departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
+              scheduledDepartureAt: segment.scheduledDepartureAt, scheduledArrivalAt: segment.scheduledArrivalAt,
+              ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
+              durationSeconds, distanceMeters: null, priceMinor: allocation?.priceMinor ?? null,
+              currency: allocation ? path.fare?.currency ?? null : null,
+              priceStatus: allocation ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+              ...(allocation ? { fareProductId: allocation.fareProductId,
+                fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
+              ...(segment.stops ? { stops: segment.stops } : {}),
+              liveStatus: segment.realtimeUpdatedAt ? 'PREDICTED' : 'SCHEDULED',
+              dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - (segment.realtimeUpdatedAt ?? segment.sourceFreshAt).getTime()) / 1000)),
+              source: segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+              lastUpdatedAt: segment.realtimeUpdatedAt ?? segment.sourceFreshAt, providerName: segment.providerName,
+              routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign,
+              scheduleSemantics: segment.scheduleSemantics,
+              ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}), driver: null, vehicle: null });
+          }
+          const egressWalk = path.egressWalk ?? null;
+          if (egressWalk && endAt) {
+            await insertWalk({ name: last.destinationStop.name, coordinates: last.destinationStop.coordinates }, endAt,
+              last.arrivalAt, egressWalk.distanceMeters, egressWalk.durationSeconds, 'osrm-foot-route', egressWalk.geometry);
+          }
+        };
+
+        const prefix = composition.prefix as SearchItinerary | null;
+        const suffix = composition.suffix as SearchItinerary | null;
+        if (prefix) await insertTransitPath(prefix, search.origin, offer.origin);
+        const communityPriceMinor = offer.pricePerSeatMinor * search.passengers;
+        const safeCommunityPriceMinor = Number.isSafeInteger(communityPriceMinor) && communityPriceMinor >= 0 ? communityPriceMinor : null;
+        const communityInserted = await client.query<{ id: string }>(
+          `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_type,offer_id,state,data_source,data_freshness_seconds,last_updated_at,metadata)
+           VALUES($1,$2,'COMMUNITY',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$13,$13,$13,$14,$15,'AVAILABLE','community',$16,'SELECTED','community-offer',0,$17,$18::jsonb) RETURNING id`,
+          [journeyId, ordinal++, offer.origin.coordinates[0], offer.origin.coordinates[1], offer.origin.name,
+            offer.destination.coordinates[0], offer.destination.coordinates[1], offer.destination.name,
+            offer.departureAt, offer.arrivalAt, Math.ceil((offer.arrivalAt.getTime() - offer.departureAt.getTime()) / 1000),
+            offer.distanceMeters, safeCommunityPriceMinor,
+            offer.currency, offer.currency === 'UAH' && safeCommunityPriceMinor !== null ? 'ESTIMATED' : 'UNKNOWN', offer.id, offer.snapshotAt,
+            JSON.stringify({ ...offer.metadata, driverId: offer.driverId, routeGeometry: offer.routeGeometry,
+              pricePerSeatMinor: offer.pricePerSeatMinor, availableSeatsAtSearch: offer.availableSeats })],
+        );
+        firstServiceLegId ??= communityInserted.rows[0].id;
+        responseLegs.push({ id: communityInserted.rows[0].id, mode: 'COMMUNITY', offerId: offer.id,
+          origin: offer.origin, destination: offer.destination, departureAt: offer.departureAt, arrivalAt: offer.arrivalAt,
+          durationSeconds: Math.ceil((offer.arrivalAt.getTime() - offer.departureAt.getTime()) / 1000),
+          distanceMeters: offer.distanceMeters, priceMinor: offer.currency === 'UAH' ? safeCommunityPriceMinor : null,
+          pricePerSeatMinor: offer.pricePerSeatMinor, currency: offer.currency,
+          priceStatus: offer.currency === 'UAH' && safeCommunityPriceMinor !== null ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'AVAILABLE',
+          source: 'community-offer', routeGeometry: offer.routeGeometry, lastUpdatedAt: offer.snapshotAt,
+          dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshotAt.getTime()) / 1000)),
+          liveStatus: 'SCHEDULED', availableSeats: offer.availableSeats, driver: offer.metadata });
+        if (suffix) await insertTransitPath(suffix, offer.destination, search.destination);
+        if (firstServiceLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstServiceLegId]);
+        journeys.push({ id: journeyId, offerId: offer.id, strategy: representative.strategy,
+          requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: composition.waitingSeconds,
+          recommendedStrategies: representative.recommendedStrategies, strategyRanks: representative.strategyRanks,
+          score: representative.score, state: 'PLANNED', source: 'community-transit',
+          totalDurationSeconds: composition.durationSeconds, totalPriceMinor: composition.priceMinor,
+          confirmedPriceMinor: null, estimatedPriceMinMinor: composition.priceMinor, estimatedPriceMaxMinor: composition.priceMinor,
+          currency: composition.currency, priceStatus: composition.priceMinor === null ? 'UNKNOWN' : 'ESTIMATED',
+          walkingMeters: composition.walkingMeters, transfers: composition.transfers, reliabilityScore: null, legs: responseLegs });
+        continue;
+      }
+      if (candidate.kind !== 'community') continue;
+      const offer = candidate.offer;
       const stored = await client.query<{ id: string }>(
         `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
          VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$11,$11,$11,$12,0,0,NULL,NULL)
@@ -1452,15 +3119,16 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       );
       const journeyId = stored.rows[0].id;
       await client.query(
-        `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
         [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
           preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
           preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
           preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
           preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
-          preferenceValues.minimumTransferBufferSeconds ?? 600, preferenceValues.maxCommunityDetourSeconds ?? 900,
-          preferenceValues.maxCommunityDetourMeters ?? 10000],
+          configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
+          preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+          JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
       );
       const leg = await client.query<{ id: string }>(
         `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,eta_uncertainty_seconds,distance_m,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_type,offer_id,reliability_score,transfer_risk_score,state,data_source,data_freshness_seconds,last_updated_at,metadata)
@@ -1475,7 +3143,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       );
       await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, leg.rows[0].id]);
       journeys.push({
-        id: journeyId, offerId: offer.offer_id, strategy: representative.strategy, score: representative.score, state: 'PLANNED',
+        id: journeyId, offerId: offer.offer_id, strategy: representative.strategy,
+        requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: candidate.waitingSeconds,
+        recommendedStrategies: representative.recommendedStrategies, strategyRanks: representative.strategyRanks,
+        score: representative.score, state: 'PLANNED',
+        source: 'community-offer',
         totalDurationSeconds: candidate.durationSeconds, totalPriceMinor: candidate.totalPriceMinor,
         confirmedPriceMinor: null, estimatedPriceMinMinor: candidate.totalPriceMinor, estimatedPriceMaxMinor: candidate.totalPriceMinor,
         walkingMeters: 0, transfers: 0, reliabilityScore: null,
@@ -1485,9 +3157,161 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           departureAt: offer.departure_at, arrivalAt: candidate.arrivalAt, durationSeconds: offer.duration_s,
           distanceMeters: offer.distance_m, priceMinor: candidate.totalPriceMinor, priceStatus: 'ESTIMATED',
           availabilityStatus: 'AVAILABLE', source: 'community-offer', lastUpdatedAt: offer.snapshot_at,
-          driver: { id: offer.driver_id, name: offer.driver_name, averageRating: offer.average_rating, reviewCount: offer.review_count },
+          transportType: 'carpool', liveStatus: 'SCHEDULED',
+          dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshot_at.getTime()) / 1000)),
+          driver: { id: offer.driver_id, name: offer.driver_name,
+            averageRating: offer.average_rating === null ? null : Number(offer.average_rating), reviewCount: offer.review_count },
           vehicle: { id: offer.vehicle_id, make: offer.vehicle_make, model: offer.vehicle_model } }],
       });
+    }
+    for (const representative of representatives) {
+      const ranked = representative.journey;
+      if (ranked.kind !== 'gtfs') continue;
+      const itinerary: SearchItinerary = ranked.itinerary;
+      const first = itinerary.segments[0];
+      const last = itinerary.segments.at(-1)!;
+      const stored = await client.query<{ id: string }>(
+        `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
+         VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$14,$14,$14,$11,$12,$13,NULL,NULL) RETURNING id`,
+        [req.userId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
+          search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
+          search.departureAt, representative.strategy, search.passengers, itinerary.durationSeconds,
+          itinerary.walkingMeters, itinerary.transfers,
+          itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null],
+      );
+      const journeyId = stored.rows[0].id;
+      await client.query(
+        `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
+        [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
+          preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
+          preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
+          preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
+          preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
+          configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
+          preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+          JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
+      );
+
+      const responseLegs: Array<Record<string, unknown>> = [];
+      let ordinal = 0;
+      let firstTransitLegId: string | null = null;
+      const saveWalkLeg = async (
+        origin: { name: string; coordinates: [number, number] },
+        destination: { name: string; coordinates: [number, number] },
+        departureAt: Date,
+        meters: number,
+        label: string,
+        options: { durationSeconds?: number; routeGeometry?: Array<[number, number]> | null; source?: string } = {},
+      ) => {
+        if (meters <= 0) return;
+        const durationSeconds = options.durationSeconds ?? Math.ceil(meters / 1.25);
+        const arrivalAt = new Date(departureAt.getTime() + durationSeconds * 1000);
+        const inserted = await client.query<{ id: string }>(
+          `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_status,availability_status,provider_type,state,data_source,last_updated_at,metadata)
+           VALUES($1,$2,'WALK',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$12,'UAH','UNKNOWN','AVAILABLE','walking','SUGGESTED',$14,now(),$13::jsonb) RETURNING id`,
+          [journeyId, ordinal++, origin.coordinates[0], origin.coordinates[1], origin.name,
+            destination.coordinates[0], destination.coordinates[1], destination.name, departureAt, arrivalAt,
+            durationSeconds, meters, JSON.stringify({ estimate: !options.source,
+              method: options.source ?? (options.routeGeometry ? 'gtfs-pathways' : 'straight-line-distance'),
+              ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
+              ...(!options.source ? { walkingSpeedMetersPerSecond: 1.25 } : {}) }),
+            options.source ?? 'straight-line-estimate'],
+        );
+        responseLegs.push({ id: inserted.rows[0].id, mode: 'WALK', offerId: null, origin, destination,
+          departureAt, arrivalAt, durationSeconds, distanceMeters: meters, priceMinor: null,
+          priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source: options.source ?? 'walking-estimate',
+          ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
+          lastUpdatedAt: new Date().toISOString(), dataFreshnessSeconds: 0, liveStatus: 'UNVERIFIED',
+          driver: null, vehicle: null, title: label });
+      };
+
+      await saveWalkLeg(
+        { name: search.origin.name, coordinates: search.origin.coordinates },
+        { name: first.originStop.name, coordinates: first.originStop.coordinates },
+        itinerary.departureAt, itinerary.accessWalk?.distanceMeters ?? first.distanceToOriginStopMeters, 'До першої зупинки',
+        itinerary.accessWalk ? { durationSeconds: itinerary.accessWalk.durationSeconds, routeGeometry: itinerary.accessWalk.geometry, source: 'osrm-foot-route' } : {},
+      );
+      for (const [segmentIndex, segment] of itinerary.segments.entries()) {
+        if (segmentIndex > 0) {
+          const previous = itinerary.segments[segmentIndex - 1];
+          await saveWalkLeg(
+            { name: previous.destinationStop.name, coordinates: previous.destinationStop.coordinates },
+            { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
+            previous.arrivalAt, itinerary.transferWalkingMeters[segmentIndex - 1], 'Пересадка між зупинками',
+            { durationSeconds: itinerary.transferWalkingSeconds[segmentIndex - 1],
+              routeGeometry: itinerary.transferWalks?.[segmentIndex - 1]?.geometry ?? itinerary.transferWalkingGeometries[segmentIndex - 1],
+              source: itinerary.transferWalks?.[segmentIndex - 1] ? 'osrm-foot-route'
+                : itinerary.transferWalkingGeometries[segmentIndex - 1] ? 'gtfs-pathway' : undefined },
+          );
+        }
+        const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
+        const provider = providerMetadata.get(segment.providerId);
+        const inserted = await client.query<{ id: string }>(
+          `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
+           VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb) RETURNING id`,
+          [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
+            segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
+            segment.scheduledDepartureAt, segment.scheduledArrivalAt,
+            segment.realtimeUpdatedAt ? segment.departureAt : null,
+            segment.realtimeUpdatedAt ? segment.arrivalAt : null,
+            durationSeconds,
+            itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
+            itinerary.fare?.currency ?? 'UAH', itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', segment.providerId,
+            segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+            segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
+          JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
+              headsign: segment.headsign, tripId: segment.tripId, serviceDate: segment.serviceDate,
+              scheduleSemantics: segment.scheduleSemantics,
+              fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+              ...(itinerary.fare?.allocations[segmentIndex] ? { fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
+                fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
+                fareSource: itinerary.fare.source } : {}),
+              ...(segment.stops ? { stops: segment.stops } : {}),
+              ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
+        );
+        firstTransitLegId ??= inserted.rows[0].id;
+        responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, offerId: null,
+          origin: { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
+          destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
+          departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
+          scheduledDepartureAt: segment.scheduledDepartureAt, scheduledArrivalAt: segment.scheduledArrivalAt,
+          ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
+          durationSeconds,
+          distanceMeters: null, priceMinor: itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
+          currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+          ...(itinerary.fare?.allocations[segmentIndex] ? {
+            fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
+            fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
+            fareSource: itinerary.fare.source,
+          } : {}),
+          ...(segment.stops ? { stops: segment.stops } : {}),
+          liveStatus: segment.realtimeUpdatedAt ? 'PREDICTED' : 'SCHEDULED',
+          dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - (segment.realtimeUpdatedAt ?? segment.sourceFreshAt).getTime()) / 1000)),
+          source: segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+          lastUpdatedAt: segment.realtimeUpdatedAt ?? segment.sourceFreshAt, providerName: segment.providerName,
+          routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign,
+          scheduleSemantics: segment.scheduleSemantics,
+          ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}), driver: null, vehicle: null });
+      }
+      await saveWalkLeg(
+        { name: last.destinationStop.name, coordinates: last.destinationStop.coordinates },
+        { name: search.destination.name, coordinates: search.destination.coordinates },
+        last.arrivalAt, itinerary.egressWalk?.distanceMeters ?? last.distanceFromDestinationStopMeters, 'Від останньої зупинки',
+        itinerary.egressWalk ? { durationSeconds: itinerary.egressWalk.durationSeconds, routeGeometry: itinerary.egressWalk.geometry, source: 'osrm-foot-route' } : {},
+      );
+      if (firstTransitLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstTransitLegId]);
+      journeys.push({ id: journeyId, offerId: null, source: 'gtfs-static', providerName: itinerary.providerName,
+        requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: itinerary.waitingSeconds,
+        strategy: representative.strategy, recommendedStrategies: representative.recommendedStrategies,
+        strategyRanks: representative.strategyRanks,
+        score: representative.score, state: 'PLANNED',
+        totalDurationSeconds: itinerary.durationSeconds,
+        totalPriceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null, confirmedPriceMinor: null,
+        estimatedPriceMinMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+        estimatedPriceMaxMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+        currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', walkingMeters: itinerary.walkingMeters,
+        transfers: itinerary.transfers, reliabilityScore: null, legs: responseLegs });
     }
     await client.query('COMMIT');
   } catch (error) {
@@ -1496,18 +3320,40 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   } finally {
     client.release();
   }
+  const unsupportedPreferences = [
+    ...unsupportedSelectedTypes,
+    ...(search.preferences.preferredVehicleClass ? ['preferredVehicleClass'] : []),
+    ...(hasUnpricedTransitCandidates ? ['maxPriceMinor:public-transit-fare-unavailable'] : []),
+    ...(search.strategy === 'CHEAPEST' && (scheduledCandidates.length > 0 || hasUnpricedTransitCandidates) ? ['CHEAPEST:public-transit-fares-unavailable'] : []),
+    ...(search.preferences.maxTransfers !== undefined && search.preferences.maxTransfers > MAX_GTFS_TRANSFERS ? [`maxTransfers:limited-to-${MAX_GTFS_TRANSFERS}`] : []),
+  ];
+  const partialReasons = getJourneySearchPartialReasons({
+    candidateGenerationTruncated,
+    providerErrorCount: providerErrors.length,
+    unsupportedPreferenceCount: unsupportedPreferences.length,
+    scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0 && !walkingRoutingUrl,
+  });
   res.json({ data: {
     journeys,
-    partial: true,
-    blockedProviders: ['taxi','bus','minibus','rail','public-transport','carsharing','transfer','walking'],
-    unsupportedPreferences: search.preferences.preferredVehicleClass ? ['preferredVehicleClass'] : [],
-    providerErrors: [],
+    requestedStrategy: search.strategy,
+    availableStrategies,
+    candidateCount: rankedCandidates.length,
+    paretoCount: paretoCandidates.length,
+    returnedCount: journeys.length,
+    alternativeLimitPerStrategy,
+    resultsTruncated: candidateGenerationTruncated || paretoCandidates.some((candidate) => !selectedCandidateIds.has(candidate.id)),
+    candidateGenerationTruncated,
+    partial: partialReasons.length > 0,
+    partialReasons,
+    blockedProviders,
+    unsupportedPreferences,
+    providerErrors,
   } });
 }));
 
 app.get('/api/v1/vehicles', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT id, make, model, model_year, seat_count, verification_status, is_active, created_at
+    `SELECT id, make, model, model_year, seat_count, verification_status, plate, trust_level, is_active, created_at
        FROM vehicles WHERE owner_id = $1 AND archived_at IS NULL ORDER BY is_active DESC,created_at DESC`, [req.userId],
   );
   res.json({ data: rows });
@@ -1516,7 +3362,7 @@ app.get('/api/v1/vehicles', requireAuth, asyncHandler(async (req, res) => {
 app.get('/api/v1/users/me/verification', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT DISTINCT ON (verification_type,vehicle_id)
-            id,verification_type,vehicle_id,status,created_at,reviewed_at
+            id,verification_type,vehicle_id,status,created_at,reviewed_at,review_note
        FROM verification_records WHERE user_id=$1
       ORDER BY verification_type,vehicle_id,created_at DESC,id DESC`, [req.userId],
   );
@@ -1681,7 +3527,8 @@ app.post('/api/v1/admin/verification/:id/decision', requireAuth, requireStaff, a
       const { vehicle_document, driver_license } = statuses.rows[0];
       vehicleStatus = vehicle_document === 'approved' && driver_license === 'approved' ? 'verified'
         : vehicle_document === 'rejected' || driver_license === 'rejected' ? 'rejected' : 'pending';
-      await client.query('UPDATE vehicles SET verification_status=$2 WHERE id=$1', [record.vehicle_id, vehicleStatus]);
+      await client.query(`UPDATE vehicles SET verification_status=$2,trust_level=GREATEST(trust_level,CASE WHEN $3::text='approved' AND $4::text='approved' THEN 3 WHEN $3::text='approved' THEN 2 ELSE 0 END) WHERE id=$1`,
+        [record.vehicle_id, vehicleStatus, vehicle_document, driver_license]);
       if (driver_license === 'approved') {
         await client.query(
           `INSERT INTO driver_profiles(user_id,verification_level,profile_status)
@@ -1707,6 +3554,8 @@ app.post('/api/v1/admin/verification/:id/decision', requireAuth, requireStaff, a
 
 app.post('/api/v1/vehicles', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
   const { make, model, modelYear, seats } = req.body ?? {};
+  const plate = normalizePlate(req.body?.plate);
+  if (!plate) throw new ApiError(400, 'A valid licence plate is required (e.g. AA1234BB)', 'invalid_plate');
   if (typeof make !== 'string' || make.trim().length < 1 || make.length > 80 ||
       typeof model !== 'string' || model.trim().length < 1 || model.length > 100 ||
       !Number.isInteger(modelYear) || modelYear < 1950 || modelYear > new Date().getUTCFullYear() + 1 ||
@@ -1720,14 +3569,15 @@ app.post('/api/v1/vehicles', requireAuth, requireRole('driver'), asyncHandler(as
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [req.userId]);
     const active = await client.query('SELECT 1 FROM vehicles WHERE owner_id=$1 AND is_active AND archived_at IS NULL', [req.userId]);
     ({ rows } = await client.query(
-      `INSERT INTO vehicles(owner_id,make,model,model_year,seat_count,is_active)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       RETURNING id,make,model,model_year,seat_count,verification_status,is_active,created_at`,
-      [req.userId, make.trim(), model.trim(), modelYear, seats, active.rowCount === 0],
+      `INSERT INTO vehicles(owner_id,make,model,model_year,seat_count,is_active,plate)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id,make,model,model_year,seat_count,verification_status,plate,trust_level,is_active,created_at`,
+      [req.userId, make.trim(), model.trim(), modelYear, seats, active.rowCount === 0, plate],
     ));
     await client.query('COMMIT');
   } catch (error) {
     await client.query('ROLLBACK');
+    if ((error as { code?: string }).code === '23505') throw new ApiError(409, 'A vehicle with this plate is already registered', 'plate_exists');
     throw error;
   } finally {
     client.release();
@@ -1738,6 +3588,8 @@ app.post('/api/v1/vehicles', requireAuth, requireRole('driver'), asyncHandler(as
 
 app.patch('/api/v1/vehicles/:id', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
   const { make, model, modelYear, seats } = req.body ?? {};
+  const plate = req.body?.plate === undefined ? undefined : normalizePlate(req.body.plate);
+  if (plate === null) throw new ApiError(400, 'A valid licence plate is required (e.g. AA1234BB)', 'invalid_plate');
   if ((make !== undefined && (typeof make !== 'string' || make.trim().length < 1 || make.trim().length > 80)) ||
       (model !== undefined && (typeof model !== 'string' || model.trim().length < 1 || model.trim().length > 100)) ||
       (modelYear !== undefined && (!Number.isInteger(modelYear) || modelYear < 1950 || modelYear > new Date().getUTCFullYear() + 1)) ||
@@ -1756,10 +3608,11 @@ app.patch('/api/v1/vehicles/:id', requireAuth, requireRole('driver'), asyncHandl
       if (incompatible.rows[0]) throw new ApiError(409, 'Vehicle capacity cannot be reduced below an upcoming published trip', 'vehicle_capacity_in_use');
     }
     const { rows } = await client.query(
-      `UPDATE vehicles SET make=COALESCE($3,make),model=COALESCE($4,model),model_year=COALESCE($5,model_year),seat_count=COALESCE($6,seat_count)
+      `UPDATE vehicles SET make=COALESCE($3,make),model=COALESCE($4,model),model_year=COALESCE($5,model_year),seat_count=COALESCE($6,seat_count),plate=COALESCE($7,plate),
+        trust_level=CASE WHEN COALESCE($7,plate) IS NOT NULL AND trust_level<1 AND EXISTS (SELECT 1 FROM vehicle_photos p WHERE p.vehicle_id=vehicles.id) THEN 1 ELSE trust_level END
         WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL
-        RETURNING id,make,model,model_year,seat_count,verification_status,is_active,created_at`,
-      [req.params.id, req.userId, make?.trim() ?? null, model?.trim() ?? null, modelYear ?? null, seats ?? null],
+        RETURNING id,make,model,model_year,seat_count,verification_status,plate,trust_level,is_active,created_at`,
+      [req.params.id, req.userId, make?.trim() ?? null, model?.trim() ?? null, modelYear ?? null, seats ?? null, plate ?? null],
     );
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'vehicle.updated', 'vehicle', req.params.id]);
     await client.query('COMMIT');
@@ -1782,7 +3635,7 @@ app.post('/api/v1/vehicles/:id/activate', requireAuth, requireRole('driver'), as
     await client.query('UPDATE vehicles SET is_active=false WHERE owner_id=$1 AND is_active', [req.userId]);
     const { rows } = await client.query(
       `UPDATE vehicles SET is_active=true WHERE id=$1 AND owner_id=$2
-       RETURNING id,make,model,model_year,seat_count,verification_status,is_active,created_at`, [req.params.id, req.userId],
+       RETURNING id,make,model,model_year,seat_count,verification_status,plate,trust_level,is_active,created_at`, [req.params.id, req.userId],
     );
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'vehicle.activated', 'vehicle', req.params.id]);
     await client.query('COMMIT');
@@ -1799,16 +3652,25 @@ app.delete('/api/v1/vehicles/:id', requireAuth, requireRole('driver'), asyncHand
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const vehicle = await client.query('SELECT id FROM vehicles WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL FOR UPDATE', [req.params.id, req.userId]);
+    const vehicle = await client.query<{ id: string; is_active: boolean }>('SELECT id,is_active FROM vehicles WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL FOR UPDATE', [req.params.id, req.userId]);
     if (!vehicle.rows[0]) throw new ApiError(404, 'vehicle unavailable');
     const activeTrips = await client.query(
       `SELECT 1 FROM offers o WHERE o.vehicle_id=$1 AND o.departure_at>now() AND o.status='published' LIMIT 1`, [req.params.id],
     );
     if (activeTrips.rows[0]) throw new ApiError(409, 'Vehicle has upcoming trips and cannot be archived', 'vehicle_has_upcoming_trips');
+    // Archived, not erased: past trips and bookings keep pointing at the vehicle they were made with.
     await client.query('UPDATE vehicles SET is_active=false,archived_at=now() WHERE id=$1', [req.params.id]);
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'vehicle.archived', 'vehicle', req.params.id]);
+    // The active vehicle was removed: the most recently added remaining one takes over so the driver is never left without an active car.
+    let activatedVehicleId: string | null = null;
+    if (vehicle.rows[0].is_active) {
+      const next = await client.query<{ id: string }>(
+        `UPDATE vehicles SET is_active=true WHERE id=(SELECT id FROM vehicles WHERE owner_id=$1 AND archived_at IS NULL ORDER BY (trust_level>=1) DESC,created_at DESC LIMIT 1) RETURNING id`, [req.userId]);
+      activatedVehicleId = next.rows[0]?.id ?? null;
+      if (activatedVehicleId) await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'vehicle.activated', 'vehicle', activatedVehicleId]);
+    }
     await client.query('COMMIT');
-    res.json({ data: { id: req.params.id, archived: true } });
+    res.json({ data: { id: req.params.id, archived: true, activatedVehicleId } });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -1817,11 +3679,16 @@ app.delete('/api/v1/vehicles/:id', requireAuth, requireRole('driver'), asyncHand
   }
 }));
 
+/** Photos per vehicle: one is required, up to this many are allowed. The limit lives in one place so it can be raised without changing the data model. */
+const MAX_VEHICLE_PHOTOS = Math.max(1, Math.min(10, Number(process.env.MAX_VEHICLE_PHOTOS) || 3));
+
 app.post('/api/v1/vehicles/:id/photos/upload-url', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
   const contentType = req.body?.contentType;
   if (!isAllowedPhotoType(contentType)) throw new ApiError(400, 'Only JPEG, PNG, and WebP vehicle photos are allowed');
   const { rows } = await pool.query('SELECT 1 FROM vehicles WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL', [req.params.id, req.userId]);
   if (!rows[0]) throw new ApiError(404, 'vehicle unavailable');
+  const stored = await pool.query<{ count: number }>('SELECT count(*)::int AS count FROM vehicle_photos WHERE vehicle_id=$1', [req.params.id]);
+  if (stored.rows[0].count >= MAX_VEHICLE_PHOTOS) throw new ApiError(409, `A vehicle can have at most ${MAX_VEHICLE_PHOTOS} photos`, 'vehicle_photo_limit');
   const key = `vehicle-photos/${req.userId}/${req.params.id}/${crypto.randomUUID()}`;
   try {
     const upload = await createVehiclePhotoUpload(key, contentType);
@@ -1863,14 +3730,22 @@ app.post('/api/v1/vehicles/:id/photos', requireAuth, requireRole('driver'), asyn
   try {
     await client.query('BEGIN');
     await client.query('SELECT id FROM vehicles WHERE id=$1 AND owner_id=$2 FOR UPDATE', [req.params.id, req.userId]);
-    const existing = await client.query('SELECT 1 FROM vehicle_photos WHERE vehicle_id=$1 LIMIT 1', [req.params.id]);
+    const existing = await client.query<{ count: number; next_sort_order: number }>(
+      'SELECT count(*)::int AS count,(COALESCE(max(sort_order),-1)+1)::int AS next_sort_order FROM vehicle_photos WHERE vehicle_id=$1', [req.params.id]);
+    if (existing.rows[0].count >= MAX_VEHICLE_PHOTOS) {
+      await deleteStoredVehiclePhoto(key).catch(() => undefined);
+      throw new ApiError(409, `A vehicle can have at most ${MAX_VEHICLE_PHOTOS} photos`, 'vehicle_photo_limit');
+    }
     const { rows } = await client.query(
-      'INSERT INTO vehicle_photos(vehicle_id,object_key,is_primary) VALUES ($1,$2,$3) RETURNING id,vehicle_id,is_primary,created_at',
-      [req.params.id, key, existing.rowCount === 0],
+      'INSERT INTO vehicle_photos(vehicle_id,object_key,is_primary,sort_order) VALUES ($1,$2,$3,$4) RETURNING id,vehicle_id,is_primary,sort_order,created_at',
+      [req.params.id, key, existing.rows[0].count === 0, existing.rows[0].next_sort_order],
     );
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'vehicle.photo.added', 'vehicle', req.params.id]);
+    // Level 1 is automatic: a valid plate plus a validated photo make the vehicle usable without an administrator.
+    const promoted = await client.query("UPDATE vehicles SET trust_level=GREATEST(trust_level,1) WHERE id=$1 AND plate IS NOT NULL AND trust_level<1 RETURNING id", [req.params.id]);
+    if (promoted.rowCount) await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'vehicle.auto_verified', 'vehicle', req.params.id]);
     await client.query('COMMIT');
-    res.status(201).json({ data: { ...rows[0], url: photoUrl } });
+    res.status(201).json({ data: { ...rows[0], url: photoUrl, trust_level: Math.max(promoted.rowCount ? 1 : 0, 0) } });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -1881,8 +3756,8 @@ app.post('/api/v1/vehicles/:id/photos', requireAuth, requireRole('driver'), asyn
 
 app.get('/api/v1/vehicles/:id/photos', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT p.id,p.is_primary,p.created_at,p.object_key FROM vehicle_photos p JOIN vehicles v ON v.id=p.vehicle_id
-      WHERE p.vehicle_id=$1 AND v.owner_id=$2 AND v.archived_at IS NULL ORDER BY p.is_primary DESC,p.created_at`, [req.params.id, req.userId],
+    `SELECT p.id,p.is_primary,p.sort_order,p.created_at,p.object_key FROM vehicle_photos p JOIN vehicles v ON v.id=p.vehicle_id
+      WHERE p.vehicle_id=$1 AND v.owner_id=$2 AND v.archived_at IS NULL ORDER BY p.sort_order,p.is_primary DESC,p.created_at,p.id`, [req.params.id, req.userId],
   );
   if (!rows.length) {
     const owned = await pool.query('SELECT 1 FROM vehicles WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL', [req.params.id, req.userId]);
@@ -1900,6 +3775,33 @@ app.get('/api/v1/vehicles/:id/photos', requireAuth, asyncHandler(async (req, res
   }
 }));
 
+app.put('/api/v1/vehicles/:id/photos/order', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
+  const requested = req.body?.photoIds;
+  if (!Array.isArray(requested) || requested.length > MAX_VEHICLE_PHOTOS) throw new ApiError(400, 'photoIds must list this vehicle\'s photos in display order', 'invalid_vehicle_photo_order');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const vehicle = await client.query('SELECT id FROM vehicles WHERE id=$1 AND owner_id=$2 AND archived_at IS NULL FOR UPDATE', [req.params.id, req.userId]);
+    if (!vehicle.rows[0]) throw new ApiError(404, 'vehicle unavailable');
+    const photos = await client.query<{ id: string }>('SELECT id FROM vehicle_photos WHERE vehicle_id=$1 FOR UPDATE', [req.params.id]);
+    const existingIds = photos.rows.map((photo) => photo.id);
+    if (!isExactVehiclePhotoOrder(requested, existingIds, MAX_VEHICLE_PHOTOS)) {
+      throw new ApiError(409, 'photoIds must contain each owned vehicle photo exactly once', 'invalid_vehicle_photo_order');
+    }
+    await client.query(
+      `WITH ordered AS (SELECT id,ordinality::int-1 AS sort_order FROM unnest($2::uuid[]) WITH ORDINALITY AS item(id,ordinality))
+       UPDATE vehicle_photos AS photo SET sort_order=ordered.sort_order FROM ordered
+       WHERE photo.vehicle_id=$1 AND photo.id=ordered.id`, [req.params.id, requested],
+    );
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'vehicle.photo.order_changed', 'vehicle', req.params.id]);
+    await client.query('COMMIT');
+    res.json({ data: { photoIds: requested } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}));
+
 app.patch('/api/v1/vehicles/:id/photos/:photoId/primary', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1911,7 +3813,7 @@ app.patch('/api/v1/vehicles/:id/photos/:photoId/primary', requireAuth, requireRo
     if (!photo.rows[0]) throw new ApiError(404, 'vehicle photo unavailable');
     await client.query('UPDATE vehicle_photos SET is_primary=false WHERE vehicle_id=$1', [req.params.id]);
     const { rows } = await client.query(
-      'UPDATE vehicle_photos SET is_primary=true WHERE id=$1 RETURNING id,vehicle_id,is_primary,created_at', [req.params.photoId],
+      'UPDATE vehicle_photos SET is_primary=true WHERE id=$1 RETURNING id,vehicle_id,is_primary,sort_order,created_at', [req.params.photoId],
     );
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'vehicle.photo.primary_changed', 'vehicle', req.params.id]);
     await client.query('COMMIT');
@@ -1947,9 +3849,13 @@ app.delete('/api/v1/vehicles/:id/photos/:photoId', requireAuth, requireRole('dri
     if (!removed.rows[0]) throw new ApiError(404, 'vehicle photo unavailable');
     if (removed.rows[0].is_primary) {
       await client.query(
-        'UPDATE vehicle_photos SET is_primary=true WHERE id=(SELECT id FROM vehicle_photos WHERE vehicle_id=$1 ORDER BY created_at,id LIMIT 1)', [req.params.id],
+        'UPDATE vehicle_photos SET is_primary=true WHERE id=(SELECT id FROM vehicle_photos WHERE vehicle_id=$1 ORDER BY sort_order,created_at,id LIMIT 1)', [req.params.id],
       );
     }
+    await client.query(
+      `WITH ordered AS (SELECT id,row_number() OVER (ORDER BY sort_order,created_at,id)-1 AS position FROM vehicle_photos WHERE vehicle_id=$1)
+       UPDATE vehicle_photos AS photo SET sort_order=ordered.position FROM ordered WHERE photo.id=ordered.id`, [req.params.id],
+    );
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'vehicle.photo.deleted', 'vehicle', req.params.id]);
     await client.query('COMMIT');
   } catch (error) {
@@ -1991,7 +3897,7 @@ app.post('/api/v1/offers', requireAuth, requireRole('driver'), asyncHandler(asyn
     await client.query('BEGIN');
     const vehicle = await client.query<{ seat_count: number; has_photo: boolean }>(
       `SELECT v.seat_count,EXISTS(SELECT 1 FROM vehicle_photos p WHERE p.vehicle_id=v.id) AS has_photo
-         FROM vehicles v WHERE v.id=$1 AND v.owner_id=$2 AND v.verification_status='verified' FOR SHARE`,
+         FROM vehicles v WHERE v.id=$1 AND v.owner_id=$2 AND v.trust_level>=1 FOR SHARE`,
       [vehicleId, req.userId],
     );
     if (!vehicle.rows[0]) throw new ApiError(404, 'verified vehicle unavailable');
@@ -2023,7 +3929,10 @@ app.get('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
             o.origin_name, o.destination_name, o.departure_at, u.display_name AS driver_name, p.display_name AS passenger_name,
             (o.driver_id=$1) AS current_user_is_driver,
             (SELECT count(*)::int FROM booking_completion_confirmations cc WHERE cc.booking_id=b.id) AS completion_confirmation_count,
-            EXISTS(SELECT 1 FROM booking_completion_confirmations cc WHERE cc.booking_id=b.id AND cc.user_id=$1) AS current_user_confirmed_completion
+            EXISTS(SELECT 1 FROM booking_completion_confirmations cc WHERE cc.booking_id=b.id AND cc.user_id=$1) AS current_user_confirmed_completion,
+            EXISTS(SELECT 1 FROM reviews rv WHERE rv.booking_id=b.id AND rv.author_id=$1) AS current_user_has_review,
+            (SELECT json_build_object('id',a.id,'summary',a.summary,'new_unit_price_minor',a.new_unit_price_minor,'created_at',a.created_at)
+               FROM booking_change_approvals a WHERE a.booking_id=b.id AND a.status='pending' LIMIT 1) AS pending_change
        FROM bookings b JOIN offers o ON o.id = b.offer_id JOIN users u ON u.id = o.driver_id
        JOIN users p ON p.id=b.passenger_id
       WHERE b.passenger_id = $1 OR o.driver_id=$1 ORDER BY b.created_at DESC LIMIT 100`, [req.userId],
@@ -2094,16 +4003,51 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     if (Number(currentOffer.available_seats) < seats) throw new ApiError(409, 'not enough available seats');
 
     if (hasJourneyReference) {
-      const selected = await client.query<{ passenger_count: number; journey_state: string; leg_state: string; offer_id: string; booking_id: string | null; leg_count: number }>(
-        `SELECT j.passenger_count,j.state AS journey_state,l.state AS leg_state,l.offer_id,l.booking_id,
-                (SELECT count(*)::int FROM journey_legs all_legs WHERE all_legs.journey_id=j.id) AS leg_count
+      const selected = await client.query<{ passenger_count: number; journey_state: string; leg_state: string; leg_mode: string; offer_id: string; booking_id: string | null; leg_count: number; community_leg_count: number }>(
+        `SELECT j.passenger_count,j.state AS journey_state,l.state AS leg_state,l.mode AS leg_mode,l.offer_id,l.booking_id,
+                (SELECT count(*)::int FROM journey_legs all_legs WHERE all_legs.journey_id=j.id) AS leg_count,
+                (SELECT count(*)::int FROM journey_legs community_legs WHERE community_legs.journey_id=j.id AND community_legs.mode='COMMUNITY') AS community_leg_count
            FROM journeys j JOIN journey_legs l ON l.journey_id=j.id
           WHERE j.id=$1 AND l.id=$2 AND j.user_id=$3 FOR UPDATE OF j,l`, [journeyId, journeyLegId, userId],
       );
       const journeySelection = selected.rows[0];
-      if (!journeySelection || journeySelection.offer_id !== offerId || journeySelection.leg_state !== 'SELECTED'
-          || journeySelection.booking_id || journeySelection.journey_state !== 'PLANNED' || journeySelection.leg_count !== 1
-          || Number(journeySelection.passenger_count) !== seats) {
+      const normalJourneyBooking = journeySelection?.leg_mode === 'COMMUNITY' && journeySelection.offer_id === offerId && journeySelection.leg_state === 'SELECTED'
+        && !journeySelection.booking_id && journeySelection.journey_state === 'PLANNED' && journeySelection.community_leg_count === 1
+        && Number(journeySelection.passenger_count) === seats;
+      let rescueJourneyBooking = false;
+      if (journeySelection?.journey_state === 'REPLANNING' && journeySelection.leg_state === 'CANCELLED'
+          && journeySelection.booking_id && journeySelection.leg_count === 1
+          && Number(journeySelection.passenger_count) === seats) {
+        const rescue = await client.query<{ allowed: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1
+               FROM bookings cancelled
+               JOIN offers original ON original.id=cancelled.offer_id
+               JOIN offers replacement ON replacement.id=$2
+              WHERE cancelled.id=$1 AND cancelled.passenger_id=$3 AND cancelled.status='cancelled'
+                AND original.id<>replacement.id AND replacement.status='published'
+                AND replacement.departure_at>now() AND replacement.available_seats >= $4
+                AND replacement.departure_at BETWEEN GREATEST(now(),original.departure_at-interval '2 hours')
+                                                  AND original.departure_at+interval '4 hours'
+                AND ST_DWithin(replacement.destination,original.destination,20000)
+                AND (
+                  ST_DWithin(replacement.origin,original.origin,20000)
+                  OR (original.route IS NOT NULL AND replacement.route IS NOT NULL
+                    AND replacement.route_source IS NOT NULL AND replacement.route_source<>'development_unrouted'
+                    AND ST_DWithin(replacement.origin,original.route::geography,20000)
+                    AND ST_LineLocatePoint(original.route,replacement.origin::geometry)
+                      < ST_LineLocatePoint(original.route,replacement.destination::geometry))
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM user_blocks blocked
+                   WHERE (blocked.blocker_id=replacement.driver_id AND blocked.blocked_id=cancelled.passenger_id)
+                      OR (blocked.blocker_id=cancelled.passenger_id AND blocked.blocked_id=replacement.driver_id)
+                )
+           ) AS allowed`, [journeySelection.booking_id, offerId, userId, seats],
+        );
+        rescueJourneyBooking = rescue.rows[0]?.allowed === true;
+      }
+      if (!normalJourneyBooking && !rescueJourneyBooking) {
         throw new ApiError(409, 'Journey leg is no longer bookable or does not match this offer and passenger count', 'journey_leg_unavailable');
       }
     }
@@ -2128,17 +4072,51 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
         available_seats: Number(currentOffer.available_seats) - seats,
       });
     if (hasJourneyReference) {
-      await client.query(
-        `UPDATE journey_legs SET booking_id=$2,state='CONFIRMED',price_status='LOCKED',price_minor=$3,
-           price_min_minor=$3,price_max_minor=$3,updated_at=now() WHERE id=$1`, [journeyLegId, booking.rows[0].id, total],
+      const selectedLeg = await client.query<{ state: string; ordinal: number }>(
+        'SELECT state,ordinal FROM journey_legs WHERE id=$1 AND journey_id=$2', [journeyLegId, journeyId],
       );
-      await client.query(
-        `UPDATE journeys SET confirmed_price_minor=$2,total_price_minor=$2,estimated_price_min_minor=$2,
-           estimated_price_max_minor=$2,state='READY',updated_at=now() WHERE id=$1`, [journeyId, total],
+      if (selectedLeg.rows[0]?.state === 'CANCELLED') {
+        await client.query("UPDATE journey_legs SET state='REPLACED',updated_at=now() WHERE id=$1", [journeyLegId]);
+        await client.query(
+          `INSERT INTO journey_legs(
+             journey_id,ordinal,mode,origin,origin_name,destination,destination_name,
+             scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,
+             price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,
+             offer_id,booking_id,state,data_source,last_updated_at,metadata
+           )
+           SELECT $1,$2,'COMMUNITY',o.origin,o.origin_name,o.destination,o.destination_name,
+                  o.departure_at,o.arrival_at,o.duration_s,o.distance_m,$3,$3,$3,o.currency,'LOCKED','AVAILABLE',
+                  o.id,$4,'CONFIRMED','MARSHGO Community',now(),jsonb_build_object('rescue_from_leg_id',$6::text)
+             FROM offers o WHERE o.id=$5`,
+          [journeyId, selectedLeg.rows[0].ordinal + 1, total, booking.rows[0].id, offerId, journeyLegId],
+        );
+      } else {
+        await client.query(
+          `UPDATE journey_legs SET booking_id=$2,state='CONFIRMED',price_status='LOCKED',price_minor=$3,
+             price_min_minor=$3,price_max_minor=$3,updated_at=now() WHERE id=$1`, [journeyLegId, booking.rows[0].id, total],
+        );
+      }
+      const journeyLegCount = await client.query<{ leg_count: number }>(
+        'SELECT count(*)::int AS leg_count FROM journey_legs WHERE journey_id=$1', [journeyId],
       );
+      const compositeJourney = Number(journeyLegCount.rows[0]?.leg_count ?? 0) > 1;
+      if (compositeJourney) {
+        // The private-ride leg is now confirmed, while public-transit legs are
+        // still suggestions. Do not present this single payment as the price
+        // for the entire multimodal journey.
+        await client.query(
+          `UPDATE journeys SET confirmed_price_minor=NULL,state='PARTIALLY_RESERVED',updated_at=now() WHERE id=$1`, [journeyId],
+        );
+      } else {
+        await client.query(
+          `UPDATE journeys SET confirmed_price_minor=$2,total_price_minor=$2,estimated_price_min_minor=$2,
+             estimated_price_max_minor=$2,state='READY',updated_at=now() WHERE id=$1`, [journeyId, total],
+        );
+      }
       await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [userId, 'journey.leg.booked', 'journey', journeyId]);
       await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:booking:${booking.rows[0].id}`,
-        [userId], { journey_id: journeyId, journey_leg_id: journeyLegId, booking_id: booking.rows[0].id, state: 'READY' });
+        [userId], { journey_id: journeyId, journey_leg_id: journeyLegId, booking_id: booking.rows[0].id,
+          state: compositeJourney ? 'PARTIALLY_RESERVED' : 'READY' });
     }
     await client.query('COMMIT');
     res.status(201).json({ data: booking.rows[0], replayed: false });
@@ -2211,11 +4189,12 @@ app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res
   const { rows: bookings } = await pool.query<{
     id: string; passenger_id: string; status: string; seat_count: number; departure_at: Date;
     origin_name: string; destination_name: string; origin_lon: number; origin_lat: number;
-    destination_lon: number; destination_lat: number; offer_id: string;
+    destination_lon: number; destination_lat: number; offer_id: string; route_geojson: string | null;
   }>(
     `SELECT b.id,b.passenger_id,b.status,b.seat_count,o.departure_at,o.origin_name,o.destination_name,
             ST_X(o.origin::geometry) AS origin_lon,ST_Y(o.origin::geometry) AS origin_lat,
-            ST_X(o.destination::geometry) AS destination_lon,ST_Y(o.destination::geometry) AS destination_lat,o.id AS offer_id
+            ST_X(o.destination::geometry) AS destination_lon,ST_Y(o.destination::geometry) AS destination_lat,
+            o.id AS offer_id,ST_AsGeoJSON(o.route) AS route_geojson
        FROM bookings b JOIN offers o ON o.id=b.offer_id
       WHERE b.id=$1 AND b.passenger_id=$2`, [req.params.id, req.userId],
   );
@@ -2228,8 +4207,14 @@ app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res
             ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key,
             round(ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography))::int AS origin_distance_m,
             round(ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography))::int AS destination_distance_m,
+            CASE WHEN ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000)
+                 THEN 'ENDPOINTS' ELSE 'ALONG_CANCELLED_ROUTE' END AS rescue_match,
+            CASE WHEN route.route IS NULL THEN NULL
+                 ELSE round(ST_Distance(o.origin,route.route::geography))::int END AS route_origin_distance_m,
             'MARSHGO Community'::text AS source
        FROM offers o JOIN users u ON u.id=o.driver_id
+       CROSS JOIN (SELECT CASE WHEN $9::text IS NULL THEN NULL::geometry
+                               ELSE ST_GeomFromGeoJSON($9::text) END AS route) route
        LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
        LEFT JOIN LATERAL (SELECT round(avg(r.rating)::numeric,2) AS average_rating,count(*)::int AS review_count
                             FROM reviews r WHERE r.target_id=o.driver_id) ratings ON true
@@ -2237,12 +4222,22 @@ app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res
         AND o.available_seats >= $7
         AND o.departure_at >= GREATEST(now(),$8::timestamptz-interval '2 hours')
         AND o.departure_at <= $8::timestamptz+interval '4 hours'
-        AND ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000)
         AND ST_DWithin(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,20000)
-        AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.blocker_id=o.driver_id AND b.blocked_id=$6) OR (b.blocker_id=$6 AND b.blocked_id=o.driver_id))
-      ORDER BY ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography)+ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography),ABS(extract(epoch FROM (o.departure_at-$8::timestamptz)))
+        AND (
+          ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000)
+          OR (
+            route.route IS NOT NULL AND o.route IS NOT NULL
+            AND o.route_source IS NOT NULL AND o.route_source<>'development_unrouted'
+            AND ST_DWithin(o.origin,route.route::geography,20000)
+            AND ST_LineLocatePoint(route.route,o.origin::geometry) < ST_LineLocatePoint(route.route,o.destination::geometry)
+          )
+        )
+        AND NOT EXISTS(SELECT 1 FROM user_blocks ub WHERE (ub.blocker_id=o.driver_id AND ub.blocked_id=$6) OR (ub.blocker_id=$6 AND ub.blocked_id=o.driver_id))
+      ORDER BY CASE WHEN ST_DWithin(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography,20000) THEN 0 ELSE 1 END,
+        ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography)+ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography),
+        ABS(extract(epoch FROM (o.departure_at-$8::timestamptz)))
       LIMIT 20`, [booking.origin_lon, booking.origin_lat, booking.destination_lon, booking.destination_lat,
-      booking.offer_id, req.userId, booking.seat_count, booking.departure_at],
+      booking.offer_id, req.userId, booking.seat_count, booking.departure_at, booking.route_geojson],
   );
   res.json({ data: {
     booking_id: booking.id,
@@ -2859,7 +4854,7 @@ app.post('/api/v1/demands/:id/proposals', requireAuth, requireRole('driver'), as
         `SELECT c.id,s.vehicle_id,s.vehicle_seat_count,v.seat_count,s.route_version,c.route_version AS candidate_route_version
            FROM navigation_match_candidates c
            JOIN navigation_sessions s ON s.id=c.navigation_session_id
-           LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.owner_id=s.driver_id AND v.verification_status='verified'
+           LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.owner_id=s.driver_id AND v.trust_level>=1
           WHERE c.id=$1 AND c.demand_id=$2 AND s.driver_id=$3 AND s.state='paused' AND s.opt_in=true
             AND s.current_location_at>now()-interval '2 minutes' AND c.status='passenger_confirmed' AND c.expires_at>now()
           FOR UPDATE OF c,s`, [navigationCandidateId, req.params.id, req.userId],
@@ -2873,7 +4868,7 @@ app.post('/api/v1/demands/:id/proposals', requireAuth, requireRole('driver'), as
       if (existing.rowCount) throw new ApiError(409, 'a proposal already exists for this navigation match', 'navigation_proposal_exists');
     }
     const { rows: vehicles } = await client.query<{ seat_count: number }>(
-      "SELECT seat_count FROM vehicles WHERE id=$1 AND owner_id=$2 AND verification_status='verified' FOR SHARE", [vehicleId, req.userId],
+      "SELECT seat_count FROM vehicles WHERE id=$1 AND owner_id=$2 AND trust_level>=1 FOR SHARE", [vehicleId, req.userId],
     );
     if (!vehicles[0]) throw new ApiError(404, 'verified vehicle unavailable');
     if (Number(vehicles[0].seat_count) < Number(demand.passenger_count)) throw new ApiError(400, 'vehicle has too few passenger seats');
@@ -3020,7 +5015,7 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
        FROM proposals p JOIN navigation_match_candidates c ON c.id=p.navigation_candidate_id
        JOIN navigation_sessions s ON s.id=c.navigation_session_id
        JOIN passenger_demands d ON d.id=c.demand_id
-       JOIN vehicles v ON v.id=s.vehicle_id AND v.owner_id=s.driver_id AND v.verification_status='verified'
+       JOIN vehicles v ON v.id=s.vehicle_id AND v.owner_id=s.driver_id AND v.trust_level>=1
        WHERE p.id=$1 AND d.passenger_id=$2 AND p.vehicle_id=s.vehicle_id
          AND d.status='open' AND c.status='passenger_confirmed' AND c.expires_at>now()
          AND c.route_version=s.route_version AND s.state='paused' AND s.opt_in=true
@@ -3104,7 +5099,7 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
                 ST_Distance(s.current_location,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography) AS movement_m
            FROM navigation_match_candidates c
            JOIN navigation_sessions s ON s.id=c.navigation_session_id
-           LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.owner_id=s.driver_id AND v.verification_status='verified'
+           LEFT JOIN vehicles v ON v.id=s.vehicle_id AND v.owner_id=s.driver_id AND v.trust_level>=1
           WHERE c.id=$1 AND c.demand_id=$2 AND s.state='paused' AND s.opt_in=true
             AND s.current_location_at>now()-interval '2 minutes' AND c.status='passenger_confirmed' AND c.expires_at>now()
              AND s.route_version=$5
@@ -3133,7 +5128,7 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     const departure = new Date(proposal.departure_at);
     if (departure < new Date(demand.earliest_departure) || departure > new Date(demand.latest_departure)) throw new ApiError(409, 'proposal time is outside the demand window');
     const { rows: vehicles } = await client.query(
-      "SELECT id FROM vehicles WHERE id=$1 AND owner_id=$2 AND verification_status='verified' FOR SHARE", [proposal.vehicle_id, proposal.driver_id],
+      "SELECT id FROM vehicles WHERE id=$1 AND owner_id=$2 AND trust_level>=1 FOR SHARE", [proposal.vehicle_id, proposal.driver_id],
     );
     if (!vehicles[0]) throw new ApiError(409, 'driver vehicle is no longer verified');
     const { rows: offers } = await client.query(
@@ -3174,12 +5169,13 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     if (navigationPlan) {
       const updatedSession = await client.query<{ route_version: number }>(
         `UPDATE navigation_sessions SET route=ST_SetSRID(ST_GeomFromGeoJSON($3),4326),route_distance_m=$4,route_duration_s=$5,
-            route_version=route_version+1,opt_in=false,last_activity_at=now()
+            route_version=route_version+1,opt_in=false,last_activity_at=now(),maneuvers=$7::jsonb
           WHERE id=$1 AND driver_id=$2 AND state='paused' AND opt_in=true AND route_version=$6
           RETURNING route_version`,
         [navigationPlan.sessionId, proposal.driver_id,
           JSON.stringify({ type: 'LineString', coordinates: navigationPlan.navigationRoute.geometry }),
-          Math.round(navigationPlan.navigationRoute.distanceMeters), Math.round(navigationPlan.navigationRoute.durationSeconds), navigationPlan.routeVersion],
+          Math.round(navigationPlan.navigationRoute.distanceMeters), Math.round(navigationPlan.navigationRoute.durationSeconds), navigationPlan.routeVersion,
+          JSON.stringify(navigationPlan.navigationRoute.maneuvers ?? [])],
       );
       if (!updatedSession.rows[0]) throw new ApiError(409, 'navigation session changed before route update', 'navigation_session_changed');
       const oldWaypointRows = await client.query<{
@@ -3430,14 +5426,29 @@ app.post('/api/v1/realtime/ticket', requireAuth, asyncHandler(async (req, res) =
 }));
 
 app.get('/api/v1/conversations/:id/messages', requireAuth, asyncHandler(async (req, res) => {
-  const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
-  const { rows } = await pool.query(
+  const paged = req.query.limit !== undefined || req.query.before !== undefined;
+  const rawLimit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+  if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 100) throw new ApiError(400, 'limit must be an integer from 1 to 100');
+  let cursor: { createdAt: string; id: string } | null = null;
+  if (typeof req.query.before === 'string') {
+    try {
+      const decoded = Buffer.from(req.query.before, 'base64url').toString('utf8');
+      const separator = decoded.lastIndexOf('|');
+      const createdAt = decoded.slice(0, separator);
+      const id = decoded.slice(separator + 1);
+      if (separator < 1 || !Number.isFinite(new Date(createdAt).getTime())
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new Error('invalid cursor');
+      cursor = { createdAt, id };
+    } catch { throw new ApiError(400, 'before cursor is invalid'); }
+  }
+  const { rows } = await pool.query<{ id: string; sender_id: string; sender_name: string; body: string; created_at: Date }>(
     `SELECT m.id,m.sender_id,u.display_name AS sender_name,m.body,m.created_at
        FROM messages m JOIN users u ON u.id=m.sender_id
       WHERE m.conversation_id=$1 AND EXISTS (
         SELECT 1 FROM conversation_members cm WHERE cm.conversation_id=m.conversation_id AND cm.user_id=$2
-      )
-      ORDER BY m.created_at DESC,m.id DESC LIMIT $3`, [req.params.id, req.userId, limit],
+      ) AND ($3::timestamptz IS NULL OR (m.created_at,m.id)<($3::timestamptz,$4::uuid))
+      ORDER BY m.created_at DESC,m.id DESC LIMIT $5`,
+    [req.params.id, req.userId, cursor?.createdAt ?? null, cursor?.id ?? null, rawLimit + 1],
   );
   const { rows: membership } = await pool.query(
     'SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2', [req.params.id, req.userId],
@@ -3447,7 +5458,73 @@ app.get('/api/v1/conversations/:id/messages', requireAuth, asyncHandler(async (r
     'SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id<>$2 LIMIT 1', [req.params.id, req.userId],
   );
   if (peers[0] && await usersBlockEachOther(req.userId!, peers[0].user_id)) throw new ApiError(404, 'conversation unavailable');
-  res.json({ data: rows.reverse() });
+  const hasMore = rows.length > rawLimit;
+  const messages = rows.slice(0, rawLimit);
+  const oldest = messages.at(-1);
+  const nextCursor = hasMore && oldest
+    ? Buffer.from(`${new Date(oldest.created_at).toISOString()}|${oldest.id}`).toString('base64url')
+    : null;
+  if (!paged) {
+    res.json({ data: messages.reverse() });
+    return;
+  }
+  res.json({ data: { messages: messages.reverse(), pagination: { hasMore, nextCursor } } });
+}));
+
+app.get('/api/v1/conversation-unread-counts', requireAuth, asyncHandler(async (req, res) => {
+  const { rows } = await pool.query<{ conversation_id: string; booking_id: string | null; unread_count: number }>(
+    `SELECT c.id AS conversation_id,c.booking_id,count(m.id)::int AS unread_count
+       FROM conversations c
+       JOIN conversation_members cm ON cm.conversation_id=c.id AND cm.user_id=$1
+       LEFT JOIN messages cursor ON cursor.id=cm.last_read_message_id
+       LEFT JOIN messages m ON m.conversation_id=c.id AND m.sender_id<>$1
+         AND (cursor.id IS NULL OR (m.created_at,m.id)>(cursor.created_at,cursor.id))
+      WHERE NOT EXISTS (
+        SELECT 1 FROM conversation_members peer JOIN user_blocks b
+          ON (b.blocker_id=$1 AND b.blocked_id=peer.user_id) OR (b.blocker_id=peer.user_id AND b.blocked_id=$1)
+         WHERE peer.conversation_id=c.id AND peer.user_id<>$1
+      )
+      GROUP BY c.id,c.booking_id ORDER BY c.created_at DESC,c.id`, [req.userId],
+  );
+  res.json({ data: rows });
+}));
+
+app.post('/api/v1/conversations/:id/read', requireAuth, asyncHandler(async (req, res) => {
+  if (typeof req.params.id !== 'string' || !/^[0-9a-f-]{36}$/i.test(req.params.id)) {
+    throw new ApiError(404, 'conversation unavailable');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows: members } = await client.query<{ user_id: string }>(
+      `SELECT cm.user_id FROM conversation_members cm
+        WHERE cm.conversation_id=$1 AND cm.user_id=$2 FOR UPDATE`, [req.params.id, req.userId],
+    );
+    if (!members[0]) throw new ApiError(404, 'conversation unavailable');
+    const { rows: peers } = await client.query<{ user_id: string }>(
+      `SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND user_id<>$2 LIMIT 1`, [req.params.id, req.userId],
+    );
+    if (peers[0] && await usersBlockEachOther(req.userId!, peers[0].user_id)) throw new ApiError(404, 'conversation unavailable');
+    const { rows: latest } = await client.query<{ id: string | null }>(
+      'SELECT id FROM messages WHERE conversation_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1', [req.params.id],
+    );
+    await client.query(
+      'UPDATE conversation_members SET last_read_message_id=$3 WHERE conversation_id=$1 AND user_id=$2',
+      [req.params.id, req.userId, latest[0]?.id ?? null],
+    );
+    const { rows: counts } = await client.query<{ unread_count: number }>(
+      `SELECT count(m.id)::int AS unread_count FROM conversation_members cm
+         LEFT JOIN messages cursor ON cursor.id=cm.last_read_message_id
+         LEFT JOIN messages m ON m.conversation_id=cm.conversation_id AND m.sender_id<>cm.user_id
+           AND (cursor.id IS NULL OR (m.created_at,m.id)>(cursor.created_at,cursor.id))
+        WHERE cm.conversation_id=$1 AND cm.user_id=$2`, [req.params.id, req.userId],
+    );
+    await client.query('COMMIT');
+    res.json({ data: { conversation_id: req.params.id, last_read_message_id: latest[0]?.id ?? null, unread_count: counts[0]?.unread_count ?? 0 } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
 }));
 
 app.post('/api/v1/conversations/:id/messages', requireAuth, asyncHandler(async (req, res) => {
@@ -3567,6 +5644,12 @@ const navigationExpiryTimer = setInterval(() => {
 }, 15_000);
 navigationExpiryTimer.unref();
 void expireStaleProposals().catch((error: unknown) => console.error(JSON.stringify({ level: 'error', event: 'proposal.expiry_failed', message: error instanceof Error ? error.message : 'unknown_error' })));
+// Keep connected transport sources honest: re-check their health in the background (status stays an admin decision).
+const mobilityHealthIntervalMs = Math.max(5 * 60_000, Number(process.env.MOBILITY_HEALTH_INTERVAL_MS) || 30 * 60_000);
+const runMobilityHealth = () => { if (process.env.MOBILITY_HEALTH_DISABLED === 'true') return; void refreshProviderHealth(pool, (entry) => console.log(JSON.stringify(entry))).catch(() => undefined); };
+const mobilityHealthStart = setTimeout(runMobilityHealth, 60_000);
+const mobilityHealthTimer = setInterval(runMobilityHealth, mobilityHealthIntervalMs);
+mobilityHealthStart.unref(); mobilityHealthTimer.unref();
 const proposalExpiryTimer = setInterval(() => {
   void expireStaleProposals().catch((error: unknown) => console.error(JSON.stringify({ level: 'error', event: 'proposal.expiry_failed', message: error instanceof Error ? error.message : 'unknown_error' })));
 }, 30_000);

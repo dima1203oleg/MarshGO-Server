@@ -36,6 +36,17 @@ export interface ProviderOption {
   sourceFreshAt: Date | null;
   dataSource: string;
   metadata: Record<string, unknown>;
+  /** A bike/scooter option represents one already-paired rental session, never a loose pickup asset. */
+  rental?: {
+    sessionId: string;
+    mode: 'BICYCLE' | 'SCOOTER';
+    pickupLocationId: string;
+    dropoffLocationId: string;
+    networkId: string;
+    returnRule: 'SAME_LOCATION' | 'ANY_NETWORK_LOCATION' | 'FREE_FLOATING_ZONE' | 'ONE_WAY_CONFIRMED';
+    confirmationLevel: 'VERIFIED' | 'CONDITIONAL' | 'UNKNOWN';
+    availabilityStatus: 'AVAILABLE' | 'UNKNOWN';
+  };
 }
 
 export interface ProviderQuote {
