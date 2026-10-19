@@ -1658,19 +1658,21 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const graphRoutesUnderfilled = perRouteBudgetUsage.filter(({ budget, retained }) => retained < budget).length;
   const graphRouteBudgetMaxUnused = Math.max(0, ...perRouteBudgetUsage.map(({ budget, retained }) => budget - retained));
   const overflowReservoirSizes = [...overflowSegmentsByRoute.values()].map((reservoir) => reservoir.toSortedArray().length);
-  const routeBudgetUnderfillSample = [...graphSegmentBudgetByRoute].map(([routeId, budget]) => {
-    const retainedSegments = selectedSegmentsByRoute.get(routeId)?.length ?? 0;
-    const wholeTripSegments = (segmentsByRoute.get(routeId) ?? [])
-      .reduce((total, trip) => total + trip.segments.length, 0);
-    const overflowCandidates = overflowSegmentsByRoute.get(routeId)?.toSortedArray().length ?? 0;
-    return {
-      routeId, budget, estimatedDemand: candidateDemandByRoute.get(routeId) ?? 0,
-      wholeTripSegments, overflowCandidates, overflowAdded: Math.max(0, retainedSegments - wholeTripSegments),
-      unused: Math.max(0, budget - retainedSegments),
-    };
-  }).filter((route) => route.unused > 0)
-    .sort((left, right) => right.unused - left.unused || compareStableId(left.routeId, right.routeId))
-    .slice(0, 10);
+  const routeBudgetUnderfillSample = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
+    ? [...graphSegmentBudgetByRoute].map(([routeId, budget]) => {
+      const retainedSegments = selectedSegmentsByRoute.get(routeId)?.length ?? 0;
+      const wholeTripSegments = (segmentsByRoute.get(routeId) ?? [])
+        .reduce((total, trip) => total + trip.segments.length, 0);
+      const overflowCandidates = overflowSegmentsByRoute.get(routeId)?.toSortedArray().length ?? 0;
+      return {
+        routeId, budget, estimatedDemand: candidateDemandByRoute.get(routeId) ?? 0,
+        wholeTripSegments, overflowCandidates, overflowAdded: Math.max(0, retainedSegments - wholeTripSegments),
+        unused: Math.max(0, budget - retainedSegments),
+      };
+    }).filter((route) => route.unused > 0)
+      .sort((left, right) => right.unused - left.unused || compareStableId(left.routeId, right.routeId))
+      .slice(0, 10)
+    : undefined;
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
     serviceDates: serviceDates.size, corridorStops: corridorStops.size,
     candidateRouteCount, graphRoutesWithCandidates: segmentsByRoute.size,
@@ -1681,7 +1683,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     graphRoutesUnderfilled, graphRouteBudgetMaxUnused,
     overflowReservoirRetained: overflowReservoirSizes.reduce((sum, size) => sum + size, 0),
     overflowReservoirsAtCap: overflowReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_SEGMENTS).length,
-    routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample),
+    ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
     globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
     segmentGraphTruncated: Number(segmentGraphTruncated) });
