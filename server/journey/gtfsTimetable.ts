@@ -1728,7 +1728,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   // across first-leg route groups: a dense early route cannot spend the whole
   // budget before later lines contribute candidates to fastest/cheapest/balanced.
   let searchSteps = 0;
-  const MAX_SEARCH_STEPS = 100_000;
+  // Dense urban feeds can require hundreds of thousands of bounded cursor
+  // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
+  // but do not cut off ordinary city results at the first-route frontier.
+  const MAX_SEARCH_STEPS = 1_000_000;
   const MAX_SEARCH_RESULTS = limit * 25;
   let searchBudgetTruncated = false;
   let maximumQueuedSearchWork = 0;
