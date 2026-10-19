@@ -19,9 +19,13 @@ export const isLineType = (value: string): value is LineType => LINE_TYPES.has(v
 export interface NetworkStop { id: string; name: string; lon: number; lat: number; types: LineType[]; routes: string[] }
 export interface NetworkRoute { id: string; name: string; type: LineType; direction: string; directionId?: string; geometrySource?: 'gtfs_shape' | 'stop_sequence' | 'provider_geojson'; stopCount: number; coordinates: Array<[number, number]> }
 export interface TransportNetwork { stops: NetworkStop[]; routes: NetworkRoute[]; bbox: Bbox | null }
-const networkSchema = z.object({
+export const networkSchema = z.object({
   stops: z.array(z.object({ id: z.string(), name: z.string(), lon: z.number().finite().min(-180).max(180), lat: z.number().finite().min(-90).max(90), types: z.array(z.enum(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular'])), routes: z.array(z.string()) })),
-  routes: z.array(z.object({ id: z.string(), name: z.string(), type: z.enum(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular']), direction: z.string(), stopCount: z.number().int().nonnegative(), coordinates: z.array(z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)])).min(2).max(250_000) })),
+  routes: z.array(z.object({
+    id: z.string(), name: z.string(), type: z.enum(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular']),
+    direction: z.string(), directionId: z.string().optional(), geometrySource: z.enum(['gtfs_shape', 'stop_sequence', 'provider_geojson']).optional(),
+    stopCount: z.number().int().nonnegative(), coordinates: z.array(z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)])).min(2).max(250_000),
+  })),
   bbox: z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90), z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)]).nullable(),
 });
 
