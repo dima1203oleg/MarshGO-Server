@@ -3,7 +3,7 @@ import { tsImport } from 'tsx/esm/api';
 
 if (!parentPort) throw new Error('GTFS search worker requires a parent port');
 
-const [{ cachedGtfsTimetable, mergeGtfsTimetables }, { cachedGtfsRealtimeTripUpdates },
+const [{ cachedGtfsTimetable, mergeGtfsTimetables, getCachedGtfsTimetableStats }, { cachedGtfsRealtimeTripUpdates },
   { cachedKyivMetroTimetable }, { GtfsSearchGroupCache, buildGtfsSearchGroups, searchGtfsGroup, selectGtfsTripMetadata, selectGtfsStopArrivals }] = await Promise.all([
   tsImport('./gtfsTimetable.ts', import.meta.url),
   tsImport('./gtfsRealtime.ts', import.meta.url),
@@ -55,6 +55,15 @@ async function buildGroups(providers, metro) {
 parentPort.on('message', async (message) => {
   const { id, type } = message;
   try {
+    if (type === 'diagnostics') {
+      if (message.collectGarbage && typeof globalThis.gc === 'function') globalThis.gc();
+      const memory = globalThis.process.memoryUsage();
+      parentPort.postMessage({ id, ok: true, value: {
+        rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, externalBytes: memory.external,
+        feedCache: getCachedGtfsTimetableStats(), groupCacheEntries: groups.size,
+      } });
+      return;
+    }
     if (type === 'search') {
       activeSearchId = id;
       const { descriptors, errors } = await buildGroups(message.providers, message.metro);

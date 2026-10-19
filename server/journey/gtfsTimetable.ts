@@ -2333,6 +2333,11 @@ const feedCache = new BoundedPromiseCache<GtfsTimetableFeed>(
   FAILED_FEED_CACHE_TTL_MS,
 );
 
+/** Internal worker diagnostics; this is not exposed as a public API route. */
+export function getCachedGtfsTimetableStats(): { entries: number; estimatedBytes: number } {
+  return { entries: feedCache.size, estimatedBytes: feedCache.weight };
+}
+
 // Parsed JS objects use substantially more memory than their source CSV. This
 // deliberately conservative estimate accounts for map entries and per-row
 // objects; it is a cache bound, not a claim about exact process RSS.

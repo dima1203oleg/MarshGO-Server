@@ -41,6 +41,11 @@ test('GTFS search worker starts and returns an empty snapshot without configured
     assert.deepEqual(result.descriptors, []);
     assert.deepEqual(result.searches, []);
     assert.deepEqual(result.errors, []);
+    const diagnostics = await client.diagnostics();
+    assert.ok(diagnostics.rssBytes > 0);
+    assert.ok(diagnostics.heapUsedBytes > 0);
+    assert.deepEqual(diagnostics.feedCache, { entries: 0, estimatedBytes: 0 });
+    assert.equal(diagnostics.groupCacheEntries, 0);
   } finally {
     await client.close();
   }

@@ -38,6 +38,14 @@ export interface GtfsWorkerTripMetadata {
   stopTimes: Array<[string, Array<{ stopId: string; sourceStopId?: string; sequence: number }>]>
 }
 
+export interface GtfsWorkerDiagnostics {
+  rssBytes: number;
+  heapUsedBytes: number;
+  externalBytes: number;
+  feedCache: { entries: number; estimatedBytes: number };
+  groupCacheEntries: number;
+}
+
 interface SearchResult {
   descriptors: GtfsWorkerGroup[];
   errors: Array<{ providerId?: string; name: string; kind: 'schedule' | 'realtime'; detail?: string }>;
@@ -82,6 +90,11 @@ export class GtfsSearchWorkerClient {
 
   async tripMetadata(provider: GtfsWorkerProvider, tripIds: string[]): Promise<GtfsWorkerTripMetadata> {
     return this.enqueue<GtfsWorkerTripMetadata>({ type: 'trip-metadata', provider, tripIds });
+  }
+
+  /** Internal operational diagnostics, not mounted as a public HTTP endpoint. */
+  async diagnostics(collectGarbage = false): Promise<GtfsWorkerDiagnostics> {
+    return this.enqueue<GtfsWorkerDiagnostics>({ type: 'diagnostics', collectGarbage });
   }
 
   async close(): Promise<void> {
