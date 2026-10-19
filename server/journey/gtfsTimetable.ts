@@ -194,7 +194,7 @@ type RetainedGtfsSegment = {
 };
 type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
 // Small deterministic endpoint-only reservoir to use route-budget gaps left by whole-trip bundles.
-const MAX_ROUTE_OVERFLOW_SEGMENTS = 100;
+const MAX_ROUTE_OVERFLOW_SEGMENTS = 200;
 
 // Keep the same deterministic, order-independent sample for a feed snapshot.
 // GTFS feeds are often written in departure-time order, so a simple prefix cap
