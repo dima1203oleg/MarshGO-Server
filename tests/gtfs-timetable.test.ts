@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
@@ -558,6 +558,26 @@ test('does not treat an unknown fare as free in balanced GTFS candidate sampling
   const ranked = rankGtfsItinerariesForCandidateSampling([unknown, known, slowerKnown]);
   assert.deepEqual(ranked.map((itinerary) => itinerary.id), ['known-zero-fare', 'unknown-fare', 'slower-known-fare']);
   assert.equal(unknown.fare, null, 'unknown fare remains unknown in the candidate data');
+});
+
+test('route-chain sample preserves both FASTEST and CHEAPEST extremes', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const ordinary = Array.from({ length: 10 }, (_, index) => ({
+    ...base, id: `ordinary-${index}`, durationSeconds: 4_000 + index * 30,
+    fare: { priceMinor: 600 + index * 20, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  }));
+  const fastest = { ...base, id: 'fastest-extreme', durationSeconds: 1_800,
+    fare: { priceMinor: 1_500, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const cheapest = { ...base, id: 'cheapest-extreme', durationSeconds: 7_200,
+    fare: { priceMinor: 100, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const selected = sampleGtfsRouteChainCandidates([...ordinary, fastest, cheapest], 8);
+
+  assert.equal(selected.length, 8);
+  assert.ok(selected.some((journey) => journey.id === fastest.id), 'the fastest option survives route-chain sampling');
+  assert.ok(selected.some((journey) => journey.id === cheapest.id), 'the cheapest known-fare option survives route-chain sampling');
 });
 
 test('round-robins transfer search so a late cheapest line survives a dense candidate list', () => {
