@@ -592,6 +592,22 @@ test('does not treat an unknown fare as free in balanced GTFS candidate sampling
   assert.equal(unknown.fare, null, 'unknown fare remains unknown in the candidate data');
 });
 
+test('GTFS balanced candidate sampling applies the same transfer time cost as final journey scoring', () => {
+  const base = findGtfsItineraries(connectingFeed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+  })[0];
+  assert.ok(base);
+  const direct = { ...base, id: 'direct', durationSeconds: 3_000, transfers: 0,
+    fare: { priceMinor: 1_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const connection = { ...base, id: 'one-transfer', durationSeconds: 2_700, transfers: 1,
+    fare: { priceMinor: 1_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+
+  assert.equal(rankGtfsItinerariesForCandidateSampling([connection, direct])[0]?.id, 'direct',
+    'a five-minute onboard saving must not outrank the direct route after the eight-minute transfer effort is included');
+});
+
 test('route-chain sample preserves both FASTEST and CHEAPEST extremes', () => {
   const base = findGtfsItineraries(feed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
