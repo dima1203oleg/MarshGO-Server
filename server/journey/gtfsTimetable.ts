@@ -229,6 +229,43 @@ export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly Gt
     || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
 }
 
+/** Keep useful boarding/alighting choices for the same scheduled vehicle chain. */
+export function sampleGtfsTripChainCandidates(
+  itineraries: readonly GtfsItinerary[], maximum = 2,
+): GtfsItinerary[] {
+  if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('trip-chain sample maximum must be positive');
+  if (itineraries.length <= maximum) return [...itineraries];
+
+  const selected = new Map<string, GtfsItinerary>();
+  const take = (ranked: readonly GtfsItinerary[], count: number) => {
+    for (const item of ranked) {
+      if (selected.size >= maximum || count <= 0) break;
+      if (selected.has(item.id)) continue;
+      selected.set(item.id, item);
+      count--;
+    }
+  };
+  const byDuration = [...itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds
+    || compareStableId(a.id, b.id));
+  const byFare = itineraries.filter((item) => item.fare?.currency === 'UAH')
+    .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const byWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+
+  const fastest = byDuration[0];
+  if (fastest) selected.set(fastest.id, fastest);
+  const cheapest = byFare[0];
+  if (cheapest && selected.size < maximum
+    && (fastest?.fare?.currency !== 'UAH' || cheapest.fare!.priceMinor < fastest.fare.priceMinor)) {
+    selected.set(cheapest.id, cheapest);
+  }
+  take(byWalking, maximum - selected.size);
+  take(rankGtfsItinerariesForCandidateSampling(itineraries), maximum - selected.size);
+  take(byDuration, maximum - selected.size);
+  return [...selected.values()];
+}
+
 /** Keep route-chain samples useful to the FASTEST, CHEAPEST, and balanced views. */
 export function sampleGtfsRouteChainCandidates(
   itineraries: readonly GtfsItinerary[], maximum = 8,
@@ -1998,8 +2035,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       const existing = results.get(existingId);
       return existing ? [existing] : [];
     });
-    const selectedVariants = rankGtfsItinerariesForCandidateSampling([...existingVariants, candidate])
-      .slice(0, MAX_RESULTS_PER_TRIP_CHAIN);
+    const selectedVariants = sampleGtfsTripChainCandidates([...existingVariants, candidate], MAX_RESULTS_PER_TRIP_CHAIN);
     const selectedIds = new Set(selectedVariants.map((itinerary) => itinerary.id));
     if (!selectedIds.has(id)) {
       candidateSamplingTruncated = true;

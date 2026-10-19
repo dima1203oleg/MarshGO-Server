@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
@@ -336,6 +336,38 @@ test('limits duplicate stop-pair alternatives for the same scheduled trip chain'
     'a bounded number of stop-pair choices should share the same scheduled vehicle chain');
   assert.equal(result.resultLimitReached, true,
     'suppressing additional stop-pair variants must be visible as candidate sampling');
+});
+
+test('same-trip sampling preserves a genuinely cheaper stop-pair option under the two-variant cap', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const fastest = { ...base, id: 'fastest-stops', durationSeconds: 3_900, walkingMeters: 900,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const cheaper = { ...base, id: 'cheaper-stops', durationSeconds: 4_200, walkingMeters: 700,
+    fare: { priceMinor: 2_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const shortestWalk = { ...base, id: 'shortest-walk-stops', durationSeconds: 4_300, walkingMeters: 300,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+
+  const selected = sampleGtfsTripChainCandidates([shortestWalk, cheaper, fastest]);
+  assert.deepEqual(new Set(selected.map((journey) => journey.id)), new Set([fastest.id, cheaper.id]));
+});
+
+test('same-trip sampling uses the lower-walking boarding choice when fares are equal', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const fastest = { ...base, id: 'fastest-stops', durationSeconds: 3_900, walkingMeters: 900,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const shortestWalk = { ...base, id: 'shortest-walk-stops', durationSeconds: 4_300, walkingMeters: 300,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const ordinary = { ...base, id: 'ordinary-stops', durationSeconds: 4_200, walkingMeters: 700,
+    fare: { priceMinor: 2_300, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+
+  const selected = sampleGtfsTripChainCandidates([ordinary, shortestWalk, fastest]);
+  assert.deepEqual(new Set(selected.map((journey) => journey.id)), new Set([fastest.id, shortestWalk.id]));
 });
 
 test('keeps fastest and cheapest GTFS candidates when the response limit is tight', () => {
