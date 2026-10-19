@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
-function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
+function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
   const routeRows = [
     'route_id,agency_id,route_short_name,route_long_name,route_type',
     `r,a,7,${overrides.routeName ?? 'Test bus'},${overrides.routeType ?? '3'}`,
@@ -30,7 +30,7 @@ function feed(overrides: { monday?: string; exceptionDate?: string; exceptionTyp
       `t1,${overrides.arrival ?? '08:40:00'},${overrides.arrival ?? '08:40:00'},destination,${overrides.withIntermediate ? '3' : '2'},0,${overrides.dropoff ?? '0'}`,
       ...(overrides.withArrivalAlternatives ? ['t2,08:00:00,08:00:00,origin,1,0,0', 't2,08:21:00,08:21:00,destination,2,0,0', 't3,08:00:00,08:00:00,origin,1,0,0', 't3,08:22:00,08:22:00,destination,2,0,0'] : []),
     ].join('\n')),
-    'calendar.txt': new TextEncoder().encode(`service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,${overrides.monday ?? '1'},0,0,0,0,0,0,20261001,20261031`),
+    'calendar.txt': new TextEncoder().encode(`service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,${overrides.monday ?? '1'},${overrides.tuesday ?? '0'},0,0,0,0,0,20261001,20261031`),
   };
   if (overrides.withShape) files['shapes.txt'] = new TextEncoder().encode([
     'shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence',
@@ -189,6 +189,55 @@ test('finds a scheduled direct bus, preserves route/stops, and converts agency l
   assert.equal(journeys[0].routeGeometry, undefined, 'a missing source shape must not be replaced with a straight line');
   assert.equal(journeys[0].departureAt.toISOString(), '2026-10-12T05:00:00.000Z');
   assert.equal(journeys[0].arrivalAt.toISOString(), '2026-10-12T05:40:00.000Z');
+});
+
+test('keeps the same GTFS trip as distinct scheduled instances on different service dates', () => {
+  const result = findGtfsItinerariesWithStats(feed({ tuesday: '1' }), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-13T05:30:00Z'),
+    maximumJourneySeconds: 48 * 60 * 60,
+    maximumWaitSeconds: 48 * 60 * 60,
+    maximumTransfers: 0,
+  });
+
+  const serviceDates = result.itineraries.map((journey) => journey.segments[0].serviceDate).sort();
+  assert.deepEqual(serviceDates, ['20261012', '20261013']);
+  assert.equal(new Set(result.itineraries.map((journey) => journey.id)).size, 2,
+    'the same trip_id on separate dates must not collapse to one itinerary');
+});
+
+test('debug search diagnostics separate graph demand from bounded search saturation', () => {
+  const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const originalInfo = console.info;
+  const messages: string[] = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
+  try {
+    findGtfsItinerariesWithStats(feed(), {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+    });
+  } finally {
+    console.info = originalInfo;
+    if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+  }
+
+  const stages = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown });
+  const graph = stages.find((stage) => stage.stage === 'segments-built');
+  const ranked = stages.find((stage) => stage.stage === 'itineraries-ranked');
+  assert.ok(graph, 'segment graph should emit bounded-demand diagnostics');
+  assert.ok(ranked, 'ranked search should emit step/pool diagnostics');
+  assert.equal(typeof graph.estimatedGraphDemand, 'number');
+  assert.equal(typeof graph.graphRoutesBudgetLimited, 'number');
+  assert.equal(typeof graph.globalGraphBudgetBinding, 'number');
+  assert.equal(typeof graph.graphSegmentBudgetUnused, 'number');
+  assert.equal(typeof graph.graphRoutesUnderfilled, 'number');
+  assert.equal(typeof graph.graphRouteBudgetMaxUnused, 'number');
+  assert.equal(typeof graph.overflowReservoirRetained, 'number');
+  assert.equal(typeof graph.overflowReservoirsAtCap, 'number');
+  assert.equal(typeof graph.routeBudgetUnderfillSample, 'string');
+  assert.ok(Array.isArray(JSON.parse(String(graph.routeBudgetUnderfillSample))));
+  assert.equal(typeof ranked.searchStepLimit, 'number');
+  assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
 });
 
 test('returns every source stop and its scheduled times for expandable route details', () => {
@@ -527,6 +576,63 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
   assert.equal(result.searchTruncated, true, 'omitting graph candidates must be visible as a partial search');
   assert.equal(result.candidateGraphTruncated, true, 'the internal result identifies graph-level truncation');
   assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
+
+  const reordered = structuredClone(timetable);
+  reordered.trips = new Map([...reordered.trips].reverse());
+  const reorderedResult = findGtfsItinerariesWithStats(reordered, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+  assert.deepEqual(reorderedResult.itineraries.map(({ id }) => id), result.itineraries.map(({ id }) => id),
+    'bounded retention and leftover-budget fill must ignore GTFS Map insertion order');
+  assert.equal(reorderedResult.searchTruncated, result.searchTruncated);
+});
+
+test('oversized single trips retain a useful exact direct segment inside the bounded sample', () => {
+  const timetable = feed();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  const stopIds = ['origin', 'dense-destination'];
+  for (let index = 1; index <= 300; index++) stopIds.push(`dense-stop-${String(index).padStart(3, '0')}`);
+  timetable.stops.set('dense-destination', { id: 'dense-destination', name: 'Destination stop', lon: 24.0301, lat: 49.8501 });
+  for (let index = 1; index <= 300; index++) {
+    const stopId = `dense-stop-${String(index).padStart(3, '0')}`;
+    const fraction = index / 300;
+    timetable.stops.set(stopId, {
+      id: stopId, name: stopId,
+      lon: 24.0301 + fraction * 0.001,
+      lat: 49.8501 + fraction * 0.001,
+    });
+  }
+  timetable.routes.set('dense-support-route', { name: 'Support', mode: 'TRAM', transportType: 'tram' });
+  const makeStopTimes = () => stopIds.map((stopId, index) => ({
+    stopId,
+    sequence: index + 1,
+    arrivalSeconds: 8 * 3600 + index * 60,
+    departureSeconds: 8 * 3600 + index * 60,
+    pickupType: 0,
+    dropOffType: 0,
+  }));
+  for (const [tripId, routeId] of [['oversized-trip', 'r'], ['oversized-support-trip', 'dense-support-route']] as const) {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    const stopTimes = makeStopTimes();
+    timetable.stopTimes.set(tripId, stopTimes);
+    stopTimes.forEach((stopTime, index) => {
+      timetable.stopTimesByStop.set(stopTime.stopId, [
+        ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+      ]);
+    });
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+
+  assert.ok(result.candidateGraphTruncated, 'a bounded sample must report omitted candidate graph segments');
+  assert.ok(result.itineraries.some((journey) => journey.segments.some((segment) =>
+    segment.tripId === 'oversized-trip' && segment.originStop.id === 'origin'
+      && segment.destinationStop.id === 'dense-destination')),
+  `sampling must preserve the exact direct scheduled segment needed for this query (returned ${result.itineraries.length}, trips: ${result.itineraries.flatMap((journey) => journey.segments.map((segment) => segment.tripId)).slice(0, 10).join(',')})`);
 });
 
 test('excludes isolated remote trip endpoints from the transfer graph and retains a feasible chain', () => {

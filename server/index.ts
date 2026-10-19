@@ -3033,7 +3033,6 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             const found = await searchStationPath(station.coordinates, search.destination.coordinates, earliest);
             candidateGenerationTruncated ||= found.searchTruncated;
             resultSamplingTruncated ||= found.resultLimitReached;
-            resultSamplingTruncated ||= found.resultLimitReached;
             for (const itinerary of found.itineraries) {
               if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
               const routed = await routeTransitItinerary(itinerary, station.coordinates, search.destination.coordinates, walkingRouteBudget, false);
@@ -3048,7 +3047,6 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const stationPlace = { name: station.name, coordinates: station.coordinates };
         const found = await searchStationPath(search.origin.coordinates, station.coordinates, search.departureAt);
         candidateGenerationTruncated ||= found.searchTruncated;
-        resultSamplingTruncated ||= found.resultLimitReached;
         resultSamplingTruncated ||= found.resultLimitReached;
         for (const itinerary of found.itineraries) {
           if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
@@ -3118,7 +3116,6 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         continue;
       }
       candidateGenerationTruncated ||= searchResult.searchTruncated;
-      resultSamplingTruncated ||= searchResult.resultLimitReached;
       resultSamplingTruncated ||= searchResult.resultLimitReached;
       const allowedPaths = searchResult.itineraries.map(fareForPassengerCount).filter((itinerary) => itinerary.segments.every((segment) =>
         transitAllowed(segment.mode)
