@@ -40,12 +40,13 @@ describe('transport layer network', () => {
   });
   it('classifies GTFS routes named as marshrutkas consistently with journey search', () => {
     const network = buildNetwork({
-      'routes.txt': 'route_id,route_short_name,route_long_name,route_type\nR1,5,Маршрутка № 5,3\n',
+      'routes.txt': 'route_id,route_short_name,route_long_name,route_type\nR1,5,Маршрутка № 5,3\nR2,Тр24,вул. Шота Руставелі - проспект Червоної Калини,3\n',
       'stops.txt': 'stop_id,stop_name,stop_lat,stop_lon\nA,Львів,49.84,24.03\nB,Стрий,49.25,23.85\n',
-      'trips.txt': 'route_id,trip_id,direction_id,shape_id\nR1,T1,0,\n',
-      'stop_times.txt': 'trip_id,stop_id,stop_sequence\nT1,A,1\nT1,B,2\n',
+      'trips.txt': 'route_id,trip_id,direction_id,shape_id\nR1,T1,0,\nR2,T2,0,\n',
+      'stop_times.txt': 'trip_id,stop_id,stop_sequence\nT1,A,1\nT1,B,2\nT2,A,1\nT2,B,2\n',
     });
     assert.equal(network.routes[0]?.type, 'marshrutka');
+    assert.equal(network.routes[1]?.type, 'trolleybus');
   });
   it('keeps only valid stops that a known route serves, with the transport types serving them', () => {
     assert.deepEqual(network.stops.map((stop) => stop.id).sort(), ['A', 'B', 'C']);
