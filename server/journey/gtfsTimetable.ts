@@ -8,6 +8,7 @@ import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealti
 import { retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
 import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
+import { TRANSFER_TIME_PENALTY_SECONDS } from './scoring';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
@@ -205,8 +206,10 @@ function gtfsSegmentRetentionPriority(key: string): number {
 export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly GtfsItinerary[]): GtfsItinerary[] {
   if (!itineraries.length) return [];
   const comparableFares = itineraries.filter((itinerary) => itinerary.fare?.currency === 'UAH');
-  const minDuration = Math.min(...itineraries.map((itinerary) => itinerary.durationSeconds));
-  const maxDuration = Math.max(...itineraries.map((itinerary) => itinerary.durationSeconds));
+  const generalizedDuration = (itinerary: GtfsItinerary) => itinerary.durationSeconds
+    + itinerary.transfers * TRANSFER_TIME_PENALTY_SECONDS;
+  const minDuration = Math.min(...itineraries.map(generalizedDuration));
+  const maxDuration = Math.max(...itineraries.map(generalizedDuration));
   const minFare = comparableFares.length ? Math.min(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
   const maxFare = comparableFares.length ? Math.max(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
   const minTransfers = Math.min(...itineraries.map((itinerary) => itinerary.transfers));
@@ -219,7 +222,7 @@ export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly Gt
     const fareCost = comparableFares.length
       ? hasComparableFare ? normalize(itinerary.fare!.priceMinor, minFare, maxFare) : 1
       : 0;
-    return 0.35 * normalize(itinerary.durationSeconds, minDuration, maxDuration)
+    return 0.35 * normalize(generalizedDuration(itinerary), minDuration, maxDuration)
       + 0.25 * fareCost
       + 0.10 * normalize(itinerary.transfers, minTransfers, maxTransfers)
       + 0.10 * normalize(itinerary.walkingMeters, minWalking, maxWalking)
