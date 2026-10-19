@@ -7,6 +7,7 @@ import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
 import { retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
+import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
@@ -1279,13 +1280,49 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       candidateStopCountByRoute.set(routeId, (candidateStopCountByRoute.get(routeId) ?? 0) + 1);
     }
   }
-  // Only routes that can contribute at least one stop-pair edge should divide
-  // the graph budget. National feeds often include thousands of irrelevant
-  // city routes; counting all route definitions diluted the useful corridor
-  // quota and dropped valid options even when those routes never entered it.
-  const candidateRouteCount = [...candidateStopCountByRoute.values()].filter((count) => count >= 2).length;
-  const graphSegmentLimitPerRoute = Math.max(1, Math.min(MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE,
-    Math.floor(MAX_GTFS_GRAPH_SEGMENTS / Math.max(1, candidateRouteCount))));
+  // Weight route budgets by eligible service volume and stop-pair opportunity.
+  // Equal shares waste most of the global graph limit on low-frequency lines,
+  // while a single busy corridor can hit its share and truncate useful trips.
+  const candidateDemandByRoute = new Map<string, number>();
+  for (const [tripId, trip] of feed.trips) {
+    const candidateStops = candidateStopCountByRoute.get(trip.routeId) ?? 0;
+    if (candidateStops < 2) continue;
+    const stops = feed.stopTimes.get(tripId);
+    if (!stops || stops.length < 2) continue;
+    const providerCity = feed.providersByRoute?.get(trip.routeId)?.city ?? input.providerCity;
+    const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
+      ? localCityCatchmentStops : corridorStops;
+    const eligibleStopTimes = stops.filter((stopTime) => eligibleStopIds.has(stopTime.stopId)
+      && interchangeStopIds.has(stopTime.stopId));
+    if (eligibleStopTimes.length < 2) continue;
+    let pairOpportunities = 0;
+    for (let fromCursor = 0; fromCursor < eligibleStopTimes.length - 1; fromCursor++) {
+      if (eligibleStopTimes[fromCursor].pickupType !== 0) continue;
+      // Mirror the graph's bounded forward stop-pair window without
+      // materializing candidate segment objects in this demand pass.
+      const toEnd = Math.min(eligibleStopTimes.length, fromCursor + 21);
+      for (let toCursor = fromCursor + 1; toCursor < toEnd; toCursor++) {
+        if (eligibleStopTimes[toCursor].dropOffType === 0) pairOpportunities++;
+      }
+    }
+    if (pairOpportunities === 0) continue;
+    let activeServiceInstances = 0;
+    for (const serviceDate of serviceDates) {
+      if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
+      const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
+      if (update?.relationship === 'CANCELED' || update?.relationship === 'DELETED') continue;
+      activeServiceInstances++;
+    }
+    if (activeServiceInstances === 0) continue;
+    const boundedPairOpportunities = Math.min(MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE,
+      pairOpportunities * activeServiceInstances);
+    candidateDemandByRoute.set(trip.routeId,
+      (candidateDemandByRoute.get(trip.routeId) ?? 0) + boundedPairOpportunities);
+  }
+  const graphSegmentBudgetByRoute = allocateBoundedGraphBudgets(
+    candidateDemandByRoute, MAX_GTFS_GRAPH_SEGMENTS, MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE,
+  );
+  const candidateRouteCount = graphSegmentBudgetByRoute.size;
   let segmentGraphTruncated = false;
   // A national feed can produce a very large number of stop-pair candidates.
   // Keep only the stop-time indexes during graph construction and materialize
@@ -1349,6 +1386,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const providerCity = provider?.city ?? input.providerCity;
     const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
     if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
+    const graphSegmentLimitPerRoute = graphSegmentBudgetByRoute.get(trip.routeId) ?? 0;
+    if (graphSegmentLimitPerRoute === 0) continue;
     const localFeedInIntercitySearch = intercitySearch && providerCity !== undefined && providerCity !== 'Україна';
     const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : corridorStops;
     const eligibleIndexes = stops.flatMap((stop, index) => eligibleStopIds.has(stop.stopId)
@@ -1470,8 +1509,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
     serviceDates: serviceDates.size, corridorStops: corridorStops.size,
     candidateRouteCount, graphRoutesWithCandidates: segmentsByRoute.size,
-    graphRoutesAtLimit: [...retainedSegmentCountByRoute.values()].filter((count) => count === graphSegmentLimitPerRoute).length,
-    graphSegmentLimitPerRoute, segmentGraphTruncated: Number(segmentGraphTruncated) });
+    graphRoutesAtLimit: [...retainedSegmentCountByRoute].filter(([routeId, count]) => count === graphSegmentBudgetByRoute.get(routeId)).length,
+    graphSegmentBudgetTotal: [...graphSegmentBudgetByRoute.values()].reduce((sum, value) => sum + value, 0),
+    graphSegmentBudgetMax: Math.max(0, ...graphSegmentBudgetByRoute.values()),
+    segmentGraphTruncated: Number(segmentGraphTruncated) });
   const outgoing = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
     const choices = outgoing.get(segment.originStop.id) ?? [];
