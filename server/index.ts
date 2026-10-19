@@ -2856,7 +2856,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       allowedTransportTypes: search.preferences.allowedTransportTypes,
     });
     // Reaching the requested top-N result count is normal ranking behavior;
-    // only a hard search budget/step cap means candidate generation was cut short.
+    // a stop, graph, or search-budget cap means candidate generation was cut short.
     candidateGenerationTruncated ||= itinerarySearch.searchTruncated;
     resultSamplingTruncated ||= itinerarySearch.resultLimitReached;
     const itineraries = itinerarySearch.itineraries.map(fareForPassengerCount);

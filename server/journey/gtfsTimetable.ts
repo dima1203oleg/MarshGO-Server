@@ -17,6 +17,12 @@ const MAX_STOPS_PER_SIDE = 48;
 const MAX_STOPS_PER_ROUTE_PATTERN = 2;
 const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
+// Bound the per-request materialized GTFS graph. A dense city feed can create
+// millions of stop-pair objects before the later itinerary sampling limits
+// apply; that used to exhaust the Node heap. The route-proportional ceiling
+// preserves a fair slice for each line and makes truncation explicit.
+const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
+const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 export const MAX_GTFS_TRANSFERS = 4;
 export const DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS = 180;
 export const DEFAULT_MAX_ACCESS_WALKING_METERS = 900;
@@ -170,6 +176,7 @@ export interface GtfsItinerarySearchResult {
   itineraries: GtfsItinerary[];
   searchTruncated: boolean;
   resultLimitReached: boolean;
+  candidateGraphTruncated: boolean;
 }
 
 /**
@@ -1032,7 +1039,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const destinationStops = closestStops(input.destination, egressRadius);
   debugStage('stops-selected', { originStops: originStops.length, destinationStops: destinationStops.length });
   if (!originStops.length || !destinationStops.length) {
-    return { itineraries: [], searchTruncated: false, resultLimitReached: false };
+    return { itineraries: [], searchTruncated: false, resultLimitReached: false, candidateGraphTruncated: false };
   }
 
   const routeDistance = distanceMeters(input.origin, input.destination);
@@ -1211,6 +1218,16 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     corridorWidthMeters: Math.round(corridorWidth) });
 
   const segments: GtfsDirectJourney[] = [];
+  const candidateRouteCount = [...feed.routes].filter(([routeId, route]) => {
+    if (input.allowedModes && !input.allowedModes.includes(route.mode)) return false;
+    const providerCity = feed.providersByRoute?.get(routeId)?.city ?? input.providerCity;
+    const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
+    return !input.allowedTransportTypes || journeyTransportTypeSelected(transportType, input.allowedTransportTypes);
+  }).length;
+  const graphSegmentLimitPerRoute = Math.max(1, Math.min(MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE,
+    Math.floor(MAX_GTFS_GRAPH_SEGMENTS / Math.max(1, candidateRouteCount))));
+  const graphSegmentsByRoute = new Map<string, number>();
+  let segmentGraphTruncated = false;
   // A national feed can produce a very large number of stop-pair candidates.
   // Keep only the stop-time indexes during graph construction and materialize
   // route shapes for the small set of itineraries that will actually be shown.
@@ -1239,7 +1256,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const key = `${primary}\u0000${parent ?? ''}`;
     const cached = transferNodeCache.get(key);
     if (cached) return cached;
-    const value = [primary, ...(parent ? [parent] : [])];
+    const value = parent && parent !== primary ? [primary, parent] : [primary];
     transferNodeCache.set(key, value);
     return value;
   };
@@ -1329,6 +1346,12 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
           const key = `${from.stopId}:${to.stopId}:${departureAt.getTime()}`;
           if (seenTripSegments.has(key)) continue;
           seenTripSegments.add(key);
+          const routeSegmentCount = graphSegmentsByRoute.get(trip.routeId) ?? 0;
+          if (routeSegmentCount >= graphSegmentLimitPerRoute) {
+            segmentGraphTruncated = true;
+            continue;
+          }
+          graphSegmentsByRoute.set(trip.routeId, routeSegmentCount + 1);
           const segment: GtfsDirectJourney = {
             providerId: provider?.id ?? input.providerId, providerName: provider?.name ?? input.providerName,
             providerCity: providerCity ?? input.providerCity, mode: route.mode,
@@ -1357,7 +1380,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     }
   }
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
-    serviceDates: serviceDates.size, corridorStops: corridorStops.size });
+    serviceDates: serviceDates.size, corridorStops: corridorStops.size,
+    graphSegmentLimitPerRoute, segmentGraphTruncated: Number(segmentGraphTruncated) });
   const outgoing = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
     const choices = outgoing.get(segment.originStop.id) ?? [];
@@ -1370,11 +1394,14 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   // geographic grid contains each stop once; it never stores a copy of every
   // scheduled segment in the cell, which made the old dense-city lookup
   // quadratic on real Lviv data.
-  const outgoingByTransferNodeId = new Map<string, Set<GtfsDirectJourney>>();
+  // Each segment is indexed once per distinct canonical boarding node. Store
+  // these references in arrays: transferNodeList is already de-duplicated, so
+  // a Set per node adds hashing/table overhead without changing membership.
+  const outgoingByTransferNodeId = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
     for (const nodeId of segment.originTransferNodeIds) {
-      const choices = outgoingByTransferNodeId.get(nodeId) ?? new Set<GtfsDirectJourney>();
-      choices.add(segment);
+      const choices = outgoingByTransferNodeId.get(nodeId) ?? [];
+      choices.push(segment);
       outgoingByTransferNodeId.set(nodeId, choices);
     }
   }
@@ -1999,15 +2026,17 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     returned: itineraries.length,
     stopSelectionTruncated: Number(stopSelectionTruncated), searchBudgetTruncated: Number(searchBudgetTruncated),
     searchStepLimitReached: Number(searchSteps >= MAX_SEARCH_STEPS), candidateResultLimitReached: Number(results.size >= MAX_SEARCH_RESULTS),
-    candidateSamplingTruncated: Number(candidateSamplingTruncated), maxQueuedSearchWork: maximumQueuedSearchWork,
-    searchTruncated: Number(stopSelectionTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
+    candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
+    maxQueuedSearchWork: maximumQueuedSearchWork,
+    searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
   return {
     itineraries,
-    searchTruncated: stopSelectionTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
+    searchTruncated: stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS,
     resultLimitReached: rankedResults.length > itineraries.length || candidateSamplingTruncated,
+    candidateGraphTruncated: segmentGraphTruncated,
   };
 }
 

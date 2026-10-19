@@ -374,6 +374,33 @@ test('preserves stops for the reverse direction when nearby stops crowd the same
   assert.equal(result.searchTruncated, false, 'all in-radius route patterns fit within the bounded stop set');
 });
 
+test('bounds a dense route graph and reports omitted GTFS segment candidates', () => {
+  const timetable = feed();
+  const originEntries = [...(timetable.stopTimesByStop.get('origin') ?? [])];
+  const destinationEntries = [...(timetable.stopTimesByStop.get('destination') ?? [])];
+  for (let index = 0; index < 5_001; index++) {
+    const tripId = `dense-${String(index).padStart(4, '0')}`;
+    timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Destination' });
+    timetable.stopTimes.set(tripId, [
+      { stopId: 'origin', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: 8 * 3600 + 40 * 60, departureSeconds: 8 * 3600 + 40 * 60, pickupType: 0, dropOffType: 0 },
+    ]);
+    originEntries.push({ tripId, index: 0 });
+    destinationEntries.push({ tripId, index: 1 });
+  }
+  timetable.stopTimesByStop.set('origin', originEntries);
+  timetable.stopTimesByStop.set('destination', destinationEntries);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+
+  assert.ok(result.itineraries.length > 0, 'the bounded graph still returns feasible scheduled options');
+  assert.equal(result.searchTruncated, true, 'omitting graph candidates must be visible as a partial search');
+  assert.equal(result.candidateGraphTruncated, true, 'the internal result identifies graph-level truncation');
+  assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
+});
+
 test('does not treat an unknown fare as free in balanced GTFS candidate sampling', () => {
   const base = findGtfsItineraries(connectingFeed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
