@@ -40,12 +40,14 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     vehicle: crypto.randomUUID(),
     offer: crypto.randomUUID(),
     journeyOffer: crypto.randomUUID(),
+    transitCompositionOffer: crypto.randomUUID(),
     rendezvousOffer: crypto.randomUUID(),
     expiredOffer: crypto.randomUUID(),
   };
   const keys = Array.from({ length: 20 }, () => `api-test-${crypto.randomUUID()}`);
   const passengerA = ids.passengers[0];
   const passengerB = ids.passengers[1];
+  const compositionPassenger = ids.passengers[2];
   let apiCreatedVehicleId: string | null = null;
   const extraVehicleIds: string[] = [];
   const verificationIds: string[] = [];
@@ -300,13 +302,14 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         walkingLegs: modeData.journeys.flatMap((journey) => journey.legs).filter((leg) => leg.mode === 'WALK').length,
       });
     }
+    const multiSearchDeparture = nextKyivMorningDeparture();
     const multiResponse = await fetch(`${apiUrl}/api/v1/journeys/search`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
       body: JSON.stringify({
         ...body,
         origin: { name: 'Малоголосківська, Львів', coordinates: [24.0029933, 49.8681678] },
         destination: { name: 'Сихів, Львів', coordinates: [24.057585, 49.794117] },
-        departureAt: nextKyivMorningDeparture(),
+        departureAt: multiSearchDeparture,
         strategy: 'BALANCED',
         preferences: { allowCommunity: true, allowedTransportTypes: ['bus','tram'] },
       }),
@@ -314,6 +317,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(multiResponse.status, 200);
     const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; totalDurationSeconds: number; totalPriceMinor: number | null; legs: Array<{
       mode: string; transportType?: string; routeGeometry?: [number, number][];
+      departureAt?: string; arrivalAt?: string;
       origin?: { coordinates: [number, number] }; destination?: { coordinates: [number, number] };
       stops?: Array<{ coordinates: [number, number]; arrivalAt: string }>;
     }> }> } }).data;
@@ -356,6 +360,95 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         assert.ok(leg.stops!.every((stop, index) => index === 0
           || Date.parse(leg.stops![index - 1]!.arrivalAt) <= Date.parse(stop.arrivalAt)), 'GTFS stop calls remain in time order');
       }
+
+      const transitLegs = multiData.journeys.flatMap((candidate) => candidate.legs.filter((leg) => leg.mode !== 'WALK'));
+      const buses = transitLegs.filter((leg) => leg.transportType === 'bus' && leg.origin && leg.destination && leg.arrivalAt);
+      const trams = transitLegs.filter((leg) => leg.transportType === 'tram' && leg.origin && leg.destination);
+      const compositionPair = buses.flatMap((bus) => trams.flatMap((tram) => {
+        const busArrival = Date.parse(bus.arrivalAt!);
+        const requestAt = Date.parse(multiSearchDeparture);
+        const gapMeters = Math.hypot(
+          (bus.destination!.coordinates[0] - tram.origin!.coordinates[0]) * 111_320,
+          (bus.destination!.coordinates[1] - tram.origin!.coordinates[1]) * 110_574,
+        );
+        if (busArrival - requestAt < 60_000 || busArrival - requestAt > 100 * 60_000 || gapMeters < 250 || gapMeters > 10_000) return [];
+        return [{ bus, tram, gapMeters }];
+      }))[0];
+      assert.ok(compositionPair, 'the current Lviv timetable exposes nearby bus and tram stops for the integration scenario');
+      const suffixProbeDeparture = new Date(Date.parse(compositionPair.bus.arrivalAt!) + 25 * 60_000);
+      const suffixProbeResponse = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
+        body: JSON.stringify({ origin: { name: 'API tram boarding stop', coordinates: compositionPair.tram.origin!.coordinates },
+          destination: { name: 'API tram alighting stop', coordinates: compositionPair.tram.destination!.coordinates },
+          departureAt: suffixProbeDeparture.toISOString(), passengers: 1, strategy: 'FASTEST',
+          preferences: { allowedTransportTypes: ['tram'] } }),
+      });
+      assert.equal(suffixProbeResponse.status, 200);
+      const suffixProbe = (await suffixProbeResponse.json() as { data: { journeys: Array<{ legs: Array<{
+        transportType?: string; departureAt?: string;
+      }> }> } }).data;
+      const nextTramDeparture = suffixProbe.journeys.flatMap((journey) => journey.legs)
+        .find((leg) => leg.transportType === 'tram' && leg.departureAt)?.departureAt;
+      assert.ok(nextTramDeparture, 'the static Lviv feed has a later tram service after the private-ride transfer buffer');
+      const compositionDepartureAt = new Date(Date.parse(compositionPair.bus.arrivalAt!) + 10 * 60_000);
+      const compositionArrivalAt = new Date(Date.parse(nextTramDeparture) - 10 * 60_000);
+      const compositionDurationSeconds = Math.ceil((compositionArrivalAt.getTime() - compositionDepartureAt.getTime()) / 1000);
+      assert.ok(compositionDurationSeconds >= 300, 'the offer has time to make the connection after both 10-minute transfer buffers');
+      const offerOrigin = compositionPair.bus.destination!.coordinates;
+      const offerDestination = compositionPair.tram.origin!.coordinates;
+      const offerDistanceMeters = Math.max(250, Math.ceil(compositionPair.gapMeters * 1.3));
+      const offerRouteGeoJson = JSON.stringify({ type: 'LineString', coordinates: [offerOrigin, offerDestination] });
+      await pool.query(
+        `INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
+         VALUES($1,$2,$3,'API transit handoff pickup','API transit handoff dropoff',
+           ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,
+           ST_SetSRID(ST_GeomFromGeoJSON($8),4326),$9,$10,$11,$12,'api_integration_fixture',1000,2,2)`,
+        [ids.transitCompositionOffer, ids.driver, ids.vehicle, offerOrigin[0], offerOrigin[1], offerDestination[0], offerDestination[1],
+          offerRouteGeoJson, compositionDepartureAt, compositionArrivalAt, offerDistanceMeters, compositionDurationSeconds],
+      );
+      const composedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
+        body: JSON.stringify({
+          origin: { name: 'API bus departure stop', coordinates: compositionPair.bus.origin!.coordinates },
+          destination: { name: 'API tram arrival stop', coordinates: compositionPair.tram.destination!.coordinates },
+          departureAt: multiSearchDeparture, passengers: 1, strategy: 'FASTEST',
+          preferences: { allowCommunity: true, allowedTransportTypes: ['bus','tram','carpool'] },
+        }),
+      });
+      assert.equal(composedSearch.status, 200);
+      const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partialReasons?: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated?: boolean; journeys: Array<{
+        id: string; offerId: string | null; source?: string; state: string;
+        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string }>;
+      }> } });
+      const composedData = composedPayload.data;
+      const composedJourney = composedData.journeys.find((candidate) => candidate.source === 'community-transit'
+        && candidate.offerId === ids.transitCompositionOffer);
+      assert.ok(composedJourney, 'the production API composes and persists a real GTFS prefix, Community ride, and GTFS suffix');
+      assert.deepEqual(composedJourney.legs.map((leg) => leg.mode), ['BUS','COMMUNITY','TRAM']);
+      assert.equal(composedJourney.legs[1]!.offerId, ids.transitCompositionOffer);
+      assert.equal(composedJourney.legs[1]!.availabilityStatus, 'AVAILABLE');
+      const storedComposition = await pool.query<{ state: string; modes: string[]; leg_states: string[] }>(
+        `SELECT j.state,array_agg(l.mode ORDER BY l.ordinal) AS modes,array_agg(l.state ORDER BY l.ordinal) AS leg_states
+           FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 AND j.user_id=$2 GROUP BY j.id`,
+        [composedJourney.id, compositionPassenger],
+      );
+      assert.deepEqual(storedComposition.rows[0], { state: 'PLANNED', modes: ['BUS','COMMUNITY','TRAM'], leg_states: ['SUGGESTED','SELECTED','SUGGESTED'] });
+      const selectedCommunityLeg = composedJourney.legs[1]!;
+      const compositionBooking = await fetch(`${apiUrl}/api/v1/bookings`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger,
+          'idempotency-key': `composed-leg-${crypto.randomUUID()}` },
+        body: JSON.stringify({ offerId: ids.transitCompositionOffer, seats: 1,
+          journeyId: composedJourney.id, journeyLegId: selectedCommunityLeg.id }),
+      });
+      assert.equal(compositionBooking.status, 201, 'the selected private leg can be booked through the normal atomic booking API');
+      const bookedComposition = await pool.query<{ state: string; confirmed: number; stillSuggestedTransit: number }>(
+        `SELECT j.state,
+                count(*) FILTER (WHERE l.mode='COMMUNITY' AND l.state='CONFIRMED')::int AS confirmed,
+                count(*) FILTER (WHERE l.mode IN ('BUS','TRAM') AND l.state='SUGGESTED')::int AS still_suggested_transit
+           FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 GROUP BY j.id`, [composedJourney.id],
+      );
+      assert.deepEqual(bookedComposition.rows[0], { state: 'PARTIALLY_RESERVED', confirmed: 1, still_suggested_transit: 2 },
+        'booking the private leg does not pretend the transit legs are reservations');
     } else {
       assert.equal(multiData.journeys.length, 0, 'an empty provider registry must not produce fabricated transit alternatives');
       assert.ok(multiData.blockedProviders.some((value) => value.startsWith('transportType:bus:')));
