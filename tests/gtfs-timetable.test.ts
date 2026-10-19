@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
@@ -327,6 +327,35 @@ test('keeps fastest and cheapest GTFS candidates when the response limit is tigh
 
   assert.deepEqual(new Set(result.itineraries.map((journey) => journey.segments[0]?.routeId)), new Set(['r', 'r2']));
   assert.equal(result.itineraries.find((journey) => journey.segments[0]?.routeId === 'r2')?.fare?.priceMinor, 100);
+});
+
+test('does not treat an unknown fare as free in balanced GTFS candidate sampling', () => {
+  const base = findGtfsItineraries(connectingFeed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+  })[0];
+  assert.ok(base);
+  const known = {
+    ...base,
+    id: 'known-zero-fare',
+    durationSeconds: base.durationSeconds + 60,
+    fare: { priceMinor: 0, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  };
+  const unknown = {
+    ...base,
+    id: 'unknown-fare',
+    fare: null,
+  };
+  const slowerKnown = {
+    ...known,
+    id: 'slower-known-fare',
+    durationSeconds: base.durationSeconds + 3600,
+  };
+
+  const ranked = rankGtfsItinerariesForCandidateSampling([unknown, known, slowerKnown]);
+  assert.deepEqual(ranked.map((itinerary) => itinerary.id), ['known-zero-fare', 'unknown-fare', 'slower-known-fare']);
+  assert.equal(unknown.fare, null, 'unknown fare remains unknown in the candidate data');
 });
 
 test('round-robins transfer search so a late cheapest line survives a dense candidate list', () => {

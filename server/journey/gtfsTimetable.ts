@@ -172,6 +172,39 @@ export interface GtfsItinerarySearchResult {
   resultLimitReached: boolean;
 }
 
+/**
+ * Keep a balanced sample of GTFS candidates for the cross-provider scorer.
+ * When comparable fares exist, an unknown fare must not receive the same
+ * zero-cost score as the cheapest known fare. It remains eligible for the
+ * other sampling objectives (time, transfers, and walking).
+ */
+export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly GtfsItinerary[]): GtfsItinerary[] {
+  if (!itineraries.length) return [];
+  const comparableFares = itineraries.filter((itinerary) => itinerary.fare?.currency === 'UAH');
+  const minDuration = Math.min(...itineraries.map((itinerary) => itinerary.durationSeconds));
+  const maxDuration = Math.max(...itineraries.map((itinerary) => itinerary.durationSeconds));
+  const minFare = comparableFares.length ? Math.min(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
+  const maxFare = comparableFares.length ? Math.max(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
+  const minTransfers = Math.min(...itineraries.map((itinerary) => itinerary.transfers));
+  const maxTransfers = Math.max(...itineraries.map((itinerary) => itinerary.transfers));
+  const minWalking = Math.min(...itineraries.map((itinerary) => itinerary.walkingMeters));
+  const maxWalking = Math.max(...itineraries.map((itinerary) => itinerary.walkingMeters));
+  const normalize = (value: number, min: number, max: number) => max === min ? 0 : (value - min) / (max - min);
+  const score = (itinerary: GtfsItinerary) => {
+    const hasComparableFare = itinerary.fare?.currency === 'UAH';
+    const fareCost = comparableFares.length
+      ? hasComparableFare ? normalize(itinerary.fare!.priceMinor, minFare, maxFare) : 1
+      : 0;
+    return 0.35 * normalize(itinerary.durationSeconds, minDuration, maxDuration)
+      + 0.25 * fareCost
+      + 0.10 * normalize(itinerary.transfers, minTransfers, maxTransfers)
+      + 0.10 * normalize(itinerary.walkingMeters, minWalking, maxWalking)
+      + 0.20 * (itinerary.transfers > 0 ? 0.3 : 0);
+  };
+  return [...itineraries].sort((a, b) => score(a) - score(b)
+    || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+}
+
 export interface GtfsStopArrival {
   stopId: string;
   stopName: string;
@@ -1901,26 +1934,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
   const byWalking = [...rankedResults].sort((a, b) => a.walkingMeters - b.walkingMeters
     || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
-  const minDuration = Math.min(...rankedResults.map((itinerary) => itinerary.durationSeconds));
-  const maxDuration = Math.max(...rankedResults.map((itinerary) => itinerary.durationSeconds));
-  const minFare = byComparableFare.length
-    ? Math.min(...byComparableFare.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
-  const maxFare = byComparableFare.length
-    ? Math.max(...byComparableFare.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
-  const minTransfers = Math.min(...rankedResults.map((itinerary) => itinerary.transfers));
-  const maxTransfers = Math.max(...rankedResults.map((itinerary) => itinerary.transfers));
-  const minWalking = Math.min(...rankedResults.map((itinerary) => itinerary.walkingMeters));
-  const maxWalking = Math.max(...rankedResults.map((itinerary) => itinerary.walkingMeters));
-  const normalize = (value: number, min: number, max: number) => max === min ? 0 : (value - min) / (max - min);
-  const balanced = [...rankedResults].sort((a, b) => {
-    const score = (itinerary: GtfsItinerary) => 0.35 * normalize(itinerary.durationSeconds, minDuration, maxDuration)
-      + 0.25 * (itinerary.fare?.currency === 'UAH' && maxFare > minFare
-        ? normalize(itinerary.fare.priceMinor, minFare, maxFare) : 0)
-      + 0.10 * normalize(itinerary.transfers, minTransfers, maxTransfers)
-      + 0.10 * normalize(itinerary.walkingMeters, minWalking, maxWalking)
-      + 0.20 * (itinerary.transfers > 0 ? 0.3 : 0);
-    return score(a) - score(b) || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id);
-  });
+  const balanced = rankGtfsItinerariesForCandidateSampling(rankedResults);
 
   // Preserve objective extremes before filling the remaining response with
   // the fastest alternatives. The API scores these candidates again together
