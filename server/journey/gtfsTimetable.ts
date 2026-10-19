@@ -11,6 +11,7 @@ const CACHE_TTL_MS = 6 * 60 * 60_000;
 const FAILED_FEED_CACHE_TTL_MS = 5 * 60_000;
 const MERGED_FEED_CACHE_TTL_MS = 60_000;
 const MAX_MERGED_FEED_CACHE_ENTRIES = 2;
+const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
 const MAX_STOPS_PER_SIDE = 48;
 const MAX_STOPS_PER_ROUTE = 2;
@@ -806,9 +807,9 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
   if (!Number.isInteger(limit) || limit < 1 || limit > 30) throw new TypeError('limit must be between 1 and 30');
 
   const originStops = [...feed.stops.values()].map((stop) => ({ stop, distance: distanceMeters(input.origin, [stop.lon, stop.lat]) }))
-    .filter(({ distance }) => distance <= radius).sort((a, b) => a.distance - b.distance).slice(0, MAX_STOPS_PER_SIDE);
+    .filter(({ distance }) => distance <= radius).sort((a, b) => a.distance - b.distance).slice(0, MAX_DIRECT_STOPS_PER_SIDE);
   const destinationStops = [...feed.stops.values()].map((stop) => ({ stop, distance: distanceMeters(input.destination, [stop.lon, stop.lat]) }))
-    .filter(({ distance }) => distance <= radius).sort((a, b) => a.distance - b.distance).slice(0, MAX_STOPS_PER_SIDE);
+    .filter(({ distance }) => distance <= radius).sort((a, b) => a.distance - b.distance).slice(0, MAX_DIRECT_STOPS_PER_SIDE);
   if (originStops.length === 0 || destinationStops.length === 0) return [];
   const originById = new Map(originStops.map((item) => [item.stop.id, item]));
   const destinationById = new Map(destinationStops.map((item) => [item.stop.id, item]));
