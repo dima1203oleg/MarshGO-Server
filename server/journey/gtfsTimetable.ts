@@ -1434,6 +1434,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const segments = [...segmentsByRoute.values()].flatMap((candidates) => candidates.map(({ segment }) => segment));
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
     serviceDates: serviceDates.size, corridorStops: corridorStops.size,
+    candidateRouteCount, graphRoutesWithCandidates: segmentsByRoute.size,
+    graphRoutesAtLimit: [...segmentsByRoute.values()].filter((candidates) => candidates.length === graphSegmentLimitPerRoute).length,
     graphSegmentLimitPerRoute, segmentGraphTruncated: Number(segmentGraphTruncated) });
   const outgoing = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
