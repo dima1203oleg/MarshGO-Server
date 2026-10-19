@@ -1637,6 +1637,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     transferRulesByFromStop.set(rule.fromStopId, rules);
   }
   const transferRuleFor = (previous: GtfsDirectJourney, next: GtfsDirectJourney): { rule: GtfsTransferRule | null; ambiguous: boolean } => {
+    if (transferRulesByFromStop.size === 0) return { rule: null, ambiguous: false };
     const possibleRules = new Set<GtfsTransferRule>();
     for (const fromStopId of previous.destinationTransferNodeIds) {
       for (const candidate of transferRulesByFromStop.get(fromStopId) ?? []) possibleRules.add(candidate);
