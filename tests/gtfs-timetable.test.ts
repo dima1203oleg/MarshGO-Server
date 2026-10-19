@@ -329,6 +329,51 @@ test('keeps fastest and cheapest GTFS candidates when the response limit is tigh
   assert.equal(result.itineraries.find((journey) => journey.segments[0]?.routeId === 'r2')?.fare?.priceMinor, 100);
 });
 
+test('preserves stops for the reverse direction when nearby stops crowd the same route id', () => {
+  const timetable = feed();
+  const originalTrip = timetable.trips.get('t1');
+  assert.ok(originalTrip);
+  timetable.trips.set('t1', { ...originalTrip, directionId: '0' });
+  const terminal = { id: 'far-terminal', name: 'Far terminal', lon: 24.07, lat: 49.87 };
+  timetable.stops.set(terminal.id, terminal);
+
+  // Twenty closer stops all belong to the same route direction. A valid
+  // reverse-direction boarding stop ranks 21st but remains inside the access shed.
+  for (let index = 1; index <= 19; index++) {
+    const stopId = `near-${index}`;
+    const tripId = `near-trip-${index}`;
+    timetable.stops.set(stopId, { id: stopId, name: `Near ${index}`, lon: 24.02 + index * 0.00014, lat: 49.84 });
+    timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Central station', directionId: '0' });
+    timetable.stopTimes.set(tripId, [
+      { stopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: terminal.id, sequence: 2, arrivalSeconds: 9 * 3600, departureSeconds: 9 * 3600, pickupType: 0, dropOffType: 0 },
+    ]);
+    timetable.stopTimesByStop.set(stopId, [{ tripId, index: 0 }]);
+    timetable.stopTimesByStop.set(terminal.id, [
+      ...(timetable.stopTimesByStop.get(terminal.id) ?? []), { tripId, index: 1 },
+    ]);
+  }
+
+  const reverseOriginId = 'reverse-origin';
+  timetable.stops.set(reverseOriginId, { id: reverseOriginId, name: 'Reverse direction stop', lon: 24.0235, lat: 49.84 });
+  timetable.trips.set('reverse-trip', { routeId: 'r', serviceId: 'weekday', headsign: 'South terminal', directionId: '1' });
+  timetable.stopTimes.set('reverse-trip', [
+    { stopId: reverseOriginId, sequence: 1, arrivalSeconds: 8 * 3600 + 5 * 60, departureSeconds: 8 * 3600 + 5 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: 'destination', sequence: 2, arrivalSeconds: 8 * 3600 + 25 * 60, departureSeconds: 8 * 3600 + 25 * 60, pickupType: 0, dropOffType: 0 },
+  ]);
+  timetable.stopTimesByStop.set(reverseOriginId, [{ tripId: 'reverse-trip', index: 0 }]);
+  timetable.stopTimesByStop.set('destination', [
+    ...(timetable.stopTimesByStop.get('destination') ?? []), { tripId: 'reverse-trip', index: 1 },
+  ]);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+
+  assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === 'reverse-trip'));
+  assert.equal(result.searchTruncated, false, 'all in-radius route patterns fit within the bounded stop set');
+});
+
 test('does not treat an unknown fare as free in balanced GTFS candidate sampling', () => {
   const base = findGtfsItineraries(connectingFeed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),

@@ -14,7 +14,7 @@ const MAX_MERGED_FEED_CACHE_ENTRIES = 2;
 const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
 const MAX_STOPS_PER_SIDE = 48;
-const MAX_STOPS_PER_ROUTE = 2;
+const MAX_STOPS_PER_ROUTE_PATTERN = 2;
 const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
 export const MAX_GTFS_TRANSFERS = 4;
@@ -985,23 +985,28 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       .filter(({ distance }) => distance <= radius)
       .sort((a, b) => a.distance - b.distance);
     const selected = new Map<string, typeof ranked[number]>();
-    const selectedByRoute = new Map<string, number>();
-    const routeIdsByStop = new Map<string, Set<string>>();
-    const routesAtStop = (stopId: string) => {
-      const cached = routeIdsByStop.get(stopId);
+    const selectedByRoutePattern = new Map<string, number>();
+    const routePatternsByStop = new Map<string, Set<string>>();
+    const routePatternsAtStop = (stopId: string) => {
+      const cached = routePatternsByStop.get(stopId);
       if (cached) return cached;
-      const routeIds = new Set<string>();
+      const routePatterns = new Set<string>();
       for (const entry of feed.stopTimesByStop.get(stopId) ?? []) {
         const trip = feed.trips.get(entry.tripId);
-        if (trip && feed.routes.has(trip.routeId)) routeIds.add(trip.routeId);
+        if (trip && feed.routes.has(trip.routeId)) {
+          // GTFS route_id can contain both directions and branched headsigns.
+          // Counting only route_id lets the nearest stops crowd out every
+          // stop on the reverse direction before candidate generation starts.
+          routePatterns.add(`${trip.routeId}:${trip.directionId ?? ''}:${trip.headsign.trim()}`);
+        }
       }
-      routeIdsByStop.set(stopId, routeIds);
-      return routeIds;
+      routePatternsByStop.set(stopId, routePatterns);
+      return routePatterns;
     };
     const addSelected = (item: typeof ranked[number]) => {
       selected.set(item.stop.id, item);
-      for (const routeId of routesAtStop(item.stop.id)) {
-        selectedByRoute.set(routeId, (selectedByRoute.get(routeId) ?? 0) + 1);
+      for (const routePattern of routePatternsAtStop(item.stop.id)) {
+        selectedByRoutePattern.set(routePattern, (selectedByRoutePattern.get(routePattern) ?? 0) + 1);
       }
     };
 
@@ -1012,9 +1017,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     for (const item of ranked.slice(0, MAX_NEAREST_STOPS_PER_SIDE)) addSelected(item);
     for (const item of ranked) {
       if (selected.has(item.stop.id)) continue;
-      const addsRouteCoverage = [...routesAtStop(item.stop.id)]
-        .some((routeId) => (selectedByRoute.get(routeId) ?? 0) < MAX_STOPS_PER_ROUTE);
-      if (!addsRouteCoverage) continue;
+      const addsRoutePatternCoverage = [...routePatternsAtStop(item.stop.id)]
+        .some((pattern) => (selectedByRoutePattern.get(pattern) ?? 0) < MAX_STOPS_PER_ROUTE_PATTERN);
+      if (!addsRoutePatternCoverage) continue;
       if (selected.size >= MAX_STOPS_PER_SIDE) { stopSelectionTruncated = true; break; }
       addSelected(item);
     }
