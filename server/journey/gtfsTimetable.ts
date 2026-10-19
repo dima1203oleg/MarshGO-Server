@@ -1215,6 +1215,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       routesByParentStation.set(stop.parentStation, routes);
     }
   }
+  // A trip endpoint alone is not a transfer node. Add a stop only when a
+  // second route, explicit GTFS transfer/pathway, shared station, or measured
+  // nearby cross-route platform can connect there; isolated termini otherwise
+  // inflate a bounded graph with edges the passenger cannot use to change lines.
   // A valid transfer can be between two distinct nearby stop IDs when a feed
   // does not publish a transfers.txt rule. Add those stops to the candidate
   // graph using the configured walk shed, but keep the exact GTFS/pathway and
@@ -1258,13 +1262,6 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   for (const [stopId, stop] of feed.stops) {
     if (stop.parentStation && (routesByParentStation.get(stop.parentStation)?.size ?? 0) > 1) {
       interchangeStopIds.add(stopId);
-    }
-  }
-  // Include trip termini so same-route short-turn services remain transferable.
-  for (const stops of feed.stopTimes.values()) {
-    if (stops.length > 1) {
-      interchangeStopIds.add(stops[0].stopId);
-      interchangeStopIds.add(stops.at(-1)!.stopId);
     }
   }
   debugStage('corridor-selected', { corridorStops: corridorStops.size, interchangeStops: interchangeStopIds.size,

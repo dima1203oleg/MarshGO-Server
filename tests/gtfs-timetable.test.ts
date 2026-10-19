@@ -416,6 +416,40 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
   assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
 });
 
+test('excludes isolated remote trip endpoints from the transfer graph and retains a feasible chain', () => {
+  const timetable = connectingFeed();
+  const noiseOrigin = 'noise-origin';
+  const noiseDestination = 'noise-destination';
+  timetable.stops.set(noiseOrigin, { id: noiseOrigin, name: 'Remote line start', lon: 24.0201, lat: 49.86 });
+  timetable.stops.set(noiseDestination, { id: noiseDestination, name: 'Remote line end', lon: 24.0201, lat: 49.862 });
+
+  const originEntries = [...(timetable.stopTimesByStop.get(noiseOrigin) ?? [])];
+  const destinationEntries = [...(timetable.stopTimesByStop.get(noiseDestination) ?? [])];
+  for (let index = 0; index < 11_000; index++) {
+    const tripId = `noise-${String(index).padStart(5, '0')}`;
+    timetable.trips.set(tripId, { routeId: 'rail', serviceId: 'weekday', headsign: 'Remote line end' });
+    timetable.stopTimes.set(tripId, [
+      { stopId: noiseOrigin, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: noiseDestination, sequence: 2, arrivalSeconds: 8 * 3600 + 10 * 60, departureSeconds: 8 * 3600 + 10 * 60, pickupType: 0, dropOffType: 0 },
+    ]);
+    originEntries.push({ tripId, index: 0 });
+    destinationEntries.push({ tripId, index: 1 });
+  }
+  timetable.stopTimesByStop.set(noiseOrigin, originEntries);
+  timetable.stopTimesByStop.set(noiseDestination, destinationEntries);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+  });
+
+  assert.ok(result.itineraries.some((journey) => journey.segments.map((segment) => segment.tripId).join(',') === 'b1,r1'),
+    'the valid bus-to-rail connection remains in the candidate graph');
+  assert.equal(result.candidateGraphTruncated, false, 'isolated one-way endpoints do not create an artificial graph overflow');
+  assert.equal(result.searchTruncated, false, 'the complete small corridor query is not reported as partial');
+});
+
 test('does not treat an unknown fare as free in balanced GTFS candidate sampling', () => {
   const base = findGtfsItineraries(connectingFeed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
