@@ -5,6 +5,7 @@ import type { RouteRequest, RouteResult } from '../shared/navigation/contracts';
 export { RoutingUnavailableError } from './routing/providers/osrmTransport';
 export type { RoadRoute, RoadRouteLeg } from './routing/providers/osrmTransport';
 import type { RoadRoute } from './routing/providers/osrmTransport';
+import { fetchOsrmRoute, RoutingUnavailableError } from './routing/providers/osrmTransport';
 export async function getRoadRoute(origin: [number, number], destination: [number, number]): Promise<RoadRoute> {
   return getRoadRouteThroughPoints([origin,destination]);
 }
@@ -13,6 +14,12 @@ export async function getRoadRouteThroughPoints(points: [number, number][]): Pro
   const route = await provider.route({ origin: points[0], destination: points.at(-1)!, waypoints: points.slice(1,-1), profile: { mode: 'CAR' }, requestId: crypto.randomUUID() });
   return { geometry: decodePolyline6(route.geometry.value), distanceMeters: route.distanceMeters, durationSeconds: route.durationSeconds,
     ...(route.legs.length ? { legs: route.legs } : {}) };
+}
+
+export async function getWalkingRoute(origin: [number, number], destination: [number, number]): Promise<RoadRoute> {
+  const endpoint = process.env.WALKING_ROUTING_ENGINE_URL;
+  if (!endpoint) throw new RoutingUnavailableError('Walking routing is not configured');
+  return fetchOsrmRoute([origin, destination], endpoint);
 }
 
 export async function calculateCanonicalRoute(request: RouteRequest): Promise<RouteResult> {

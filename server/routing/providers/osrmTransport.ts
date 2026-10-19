@@ -24,9 +24,11 @@ export async function fetchOsrmRoute(points: [number, number][], base: string | 
   if (!base) throw new RoutingUnavailableError();
   let url: URL;
   try {
-    const normalizedBase = base.endsWith('/') ? base : `${base}/`;
+    const endpoint = new URL(base);
     const path = points.map(([longitude, latitude]) => `${longitude},${latitude}`).join(';');
-    url = new URL(`${path}?overview=full&geometries=geojson&steps=true`, normalizedBase);
+    endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, '')}/${path}`;
+    endpoint.search = new URLSearchParams({ overview: 'full', geometries: 'geojson', steps: 'true' }).toString();
+    url = endpoint;
   } catch { throw new RoutingUnavailableError('Routing endpoint is invalid'); }
 
   const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { accept: 'application/json', 'user-agent': 'MARSHGO/1.0 (road routing)' } }).catch((error: unknown) => { throw new RoutingUnavailableError('Road routing request failed', error instanceof Error && error.name === 'TimeoutError' ? 'ROUTING_TIMEOUT' : 'ROUTING_PROVIDER_UNAVAILABLE'); });

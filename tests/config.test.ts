@@ -46,6 +46,7 @@ describe('runtime production configuration', () => {
 
   it('fails closed when production map/routing assets or provider settings are incompatible', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, OSRM_URL: 'http://localhost:5000/route' }), /OSRM_URL must be a public HTTPS URL/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_ENGINE_URL: 'http://localhost:5000/route/v1/foot' }), /WALKING_ROUTING_ENGINE_URL must be a public HTTPS URL/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, MAP_STYLE_MANIFEST_URL: undefined }), /MAP_STYLE_MANIFEST_URL is required/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, ROUTING_PRIMARY: 'here' }), /only configured production routing provider/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, HERE_TRAFFIC_ENABLED: 'true' }), /provider adapter is implemented/);

@@ -8,7 +8,7 @@ import { createClient } from 'redis';
 import { RedisRateLimitStore } from './redisRateLimitStore';
 import type { Duplex } from 'node:stream';
 import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
-import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
+import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, getWalkingRoute, RoutingUnavailableError } from './routing';
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { validateRuntimeConfig } from './config';
@@ -2258,7 +2258,7 @@ app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res
 type RendezvousDbRow = {
   id: string; booking_id: string; journey_leg_id: string | null; driver_id: string; passenger_id: string;
   pickup_lon: number; pickup_lat: number; pickup_label: string; planned_pickup_at: Date; predicted_pickup_at: Date | null;
-  state: RendezvousState; location_sharing_enabled: boolean; activation_at: Date; driver_arrived_at: Date | null;
+  state: RendezvousState; location_sharing_enabled: boolean; driver_sharing_consented: boolean; passenger_sharing_consented: boolean; activation_at: Date; driver_arrived_at: Date | null;
   passenger_arrived_at: Date | null; boarding_started_at: Date | null; completed_at: Date | null; cancelled_at: Date | null;
   booking_status: string;
 };
@@ -2288,7 +2288,7 @@ async function getOrCreateRendezvous(bookingId: string, userId: string): Promise
   const { rows } = await pool.query<RendezvousDbRow>(
     `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
        ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
-       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.driver_sharing_consented,r.passenger_sharing_consented,r.activation_at,
        r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
       FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
      WHERE r.booking_id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2)`, [bookingId, userId],
@@ -2322,9 +2322,12 @@ async function rendezvousResponse(row: RendezvousDbRow, viewerId: string) {
     pickup: { label: row.pickup_label, coordinates: [row.pickup_lon, row.pickup_lat] },
     plannedPickupAt: row.planned_pickup_at, predictedPickupAt: row.predicted_pickup_at,
     activationAt: row.activation_at, locationSharingEnabled: row.location_sharing_enabled,
+    sharingConsent: { driver: row.driver_sharing_consented, passenger: row.passenger_sharing_consented },
     driverArrivedAt: row.driver_arrived_at, passengerArrivedAt: row.passenger_arrived_at,
     boardingStartedAt: row.boarding_started_at, completedAt: row.completed_at, cancelledAt: row.cancelled_at,
     currentParticipant: viewerId === row.driver_id ? 'driver' : 'passenger', locations,
+    currentParticipantConsent: viewerId === row.driver_id ? row.driver_sharing_consented : row.passenger_sharing_consented,
+    otherParticipantConsent: viewerId === row.driver_id ? row.passenger_sharing_consented : row.driver_sharing_consented,
   };
 }
 
@@ -2332,6 +2335,66 @@ app.get('/api/v1/bookings/:bookingId/rendezvous', requireAuth, asyncHandler(asyn
   if (!/^[0-9a-f-]{36}$/i.test(req.params.bookingId)) throw new ApiError(400, 'invalid booking ID');
   const rendezvous = await getOrCreateRendezvous(req.params.bookingId, req.userId!);
   res.json({ data: await rendezvousResponse(rendezvous, req.userId!) });
+}));
+
+app.get('/api/v1/rendezvous/:id/approaches', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid rendezvous ID');
+  const { rows } = await pool.query<RendezvousDbRow>(
+    `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
+       ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
+       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,
+       r.driver_sharing_consented,r.passenger_sharing_consented,r.activation_at,
+       r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
+      FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+     WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2)`, [req.params.id, req.userId],
+  );
+  const session = rows[0];
+  if (!session) throw new ApiError(404, 'rendezvous unavailable');
+  if (!session.location_sharing_enabled || !session.driver_sharing_consented || !session.passenger_sharing_consented
+      || !['confirmed','boarding','in_progress'].includes(session.booking_status)
+      || ['CANCELLED','EXPIRED','COMPLETED'].includes(session.state)) {
+    throw new ApiError(409, 'both participants must consent to active rendezvous sharing', 'rendezvous_consent_required');
+  }
+  if (!realtimeRedis?.isReady) throw new ApiError(503, 'ephemeral location service is unavailable', 'location_service_unavailable');
+  const [driverRaw, passengerRaw] = await Promise.all([
+    realtimeRedis.get(rendezvousLocationKey(session.id, 'driver')),
+    realtimeRedis.get(rendezvousLocationKey(session.id, 'passenger')),
+  ]);
+  const now = Date.now();
+  const parseFresh = (raw: string | null) => {
+    if (!raw) return null;
+    try {
+      const sample = JSON.parse(raw) as { coordinates?: unknown; capturedAt?: unknown };
+      const capturedAt = typeof sample.capturedAt === 'string' ? Date.parse(sample.capturedAt) : NaN;
+      if (!Array.isArray(sample.coordinates) || sample.coordinates.length !== 2
+          || !sample.coordinates.every((n) => typeof n === 'number' && Number.isFinite(n))
+          || !Number.isFinite(capturedAt) || now - capturedAt < -30_000 || now - capturedAt > 90_000) return null;
+      return { coordinates: sample.coordinates as [number, number], capturedAt: new Date(capturedAt).toISOString() };
+    } catch { return null; }
+  };
+  const driverLocation = parseFresh(driverRaw);
+  const passengerLocation = parseFresh(passengerRaw);
+  const pickup: [number, number] = [Number(session.pickup_lon), Number(session.pickup_lat)];
+  const calculate = async (origin: [number, number] | null, mode: 'CAR' | 'FOOT') => {
+    if (!origin) return { status: 'LOCATION_UNAVAILABLE' as const, geometry: null, distanceMeters: null, durationSeconds: null };
+    try {
+      const route = mode === 'CAR' ? await getRoadRoute(origin, pickup) : await getWalkingRoute(origin, pickup);
+      return { status: 'ROUTED' as const, geometry: route.geometry, distanceMeters: route.distanceMeters,
+        durationSeconds: route.durationSeconds, calculatedAt: new Date().toISOString() };
+    } catch {
+      return { status: 'ROUTING_UNAVAILABLE' as const, geometry: null, distanceMeters: null, durationSeconds: null };
+    }
+  };
+  const [driverApproach, passengerApproach] = await Promise.all([
+    calculate(driverLocation?.coordinates ?? null, 'CAR'),
+    calculate(passengerLocation?.coordinates ?? null, 'FOOT'),
+  ]);
+  res.json({ data: {
+    rendezvousId: session.id, pickup: { label: session.pickup_label, coordinates: pickup },
+    driver: { location: driverLocation, approach: driverApproach },
+    passenger: { location: passengerLocation, approach: passengerApproach },
+    updatedAt: new Date().toISOString(),
+  } });
 }));
 
 app.post('/api/v1/bookings/:bookingId/rendezvous/activate', requireAuth, asyncHandler(async (req, res) => {
@@ -2348,7 +2411,7 @@ app.post('/api/v1/bookings/:bookingId/rendezvous/activate', requireAuth, asyncHa
     const { rows } = await client.query<RendezvousDbRow>(
       `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
          ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
-         r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+         r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.driver_sharing_consented,r.passenger_sharing_consented,r.activation_at,
          r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
         FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
        WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF r,b`, [rendezvous.id, req.userId],
@@ -2356,11 +2419,11 @@ app.post('/api/v1/bookings/:bookingId/rendezvous/activate', requireAuth, asyncHa
     const current = rows[0];
     if (!current) throw new ApiError(404, 'rendezvous unavailable');
     if (!['confirmed', 'boarding', 'in_progress'].includes(current.booking_status)) throw new ApiError(409, 'booking is no longer active');
-    if (current.state === 'SCHEDULED' || current.state === 'ACTIVATING') {
-      await client.query("UPDATE rendezvous_sessions SET state='ACTIVE',location_sharing_enabled=true,updated_at=now() WHERE id=$1", [current.id]);
-      await client.query('INSERT INTO rendezvous_events(rendezvous_id,actor_id,event_type) VALUES($1,$2,$3)', [current.id, req.userId, 'rendezvous.activated']);
-      await insertRealtimeOutbox(client, 'rendezvous.activated', `rendezvous.activated:${current.id}`,
-        [current.driver_id, current.passenger_id], { rendezvous_id: current.id, state: 'ACTIVE' });
+    if (current.state === 'SCHEDULED') {
+      await client.query("UPDATE rendezvous_sessions SET state='ACTIVATING',updated_at=now() WHERE id=$1", [current.id]);
+      await client.query('INSERT INTO rendezvous_events(rendezvous_id,actor_id,event_type) VALUES($1,$2,$3)', [current.id, req.userId, 'rendezvous.prepared']);
+      await insertRealtimeOutbox(client, 'rendezvous.prepared', `rendezvous.prepared:${current.id}`,
+        [current.driver_id, current.passenger_id], { rendezvous_id: current.id, state: 'ACTIVATING' });
     }
     await client.query('COMMIT');
   } catch (error) {
@@ -2368,6 +2431,66 @@ app.post('/api/v1/bookings/:bookingId/rendezvous/activate', requireAuth, asyncHa
     throw error;
   } finally { client.release(); }
   const updated = await getOrCreateRendezvous(req.params.bookingId, req.userId!);
+  res.json({ data: await rendezvousResponse(updated, req.userId!) });
+}));
+
+app.post('/api/v1/rendezvous/:id/consent', requireAuth, asyncHandler(async (req, res) => {
+  if (typeof req.body?.enabled !== 'boolean') throw new ApiError(400, 'enabled must be a boolean');
+  const client = await pool.connect();
+  let session: RendezvousDbRow;
+  let participant: 'driver' | 'passenger';
+  const enabled = req.body.enabled as boolean;
+  let nextSharing: boolean;
+  let nextState: string;
+  let eventType: string;
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<RendezvousDbRow>(
+      `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
+         ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
+         r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,
+         r.driver_sharing_consented,r.passenger_sharing_consented,r.activation_at,
+         r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
+        FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+       WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF r,b`, [req.params.id, req.userId],
+    );
+    session = rows[0]!;
+    if (!session) throw new ApiError(404, 'rendezvous unavailable');
+    if (!['confirmed','boarding','in_progress'].includes(session.booking_status)
+        || ['CANCELLED','EXPIRED','COMPLETED'].includes(session.state)) throw new ApiError(409, 'rendezvous is closed');
+    if (new Date(session.activation_at).getTime() > Date.now()) throw new ApiError(409, 'location sharing is not active yet', 'rendezvous_not_active');
+    participant = req.userId === session.driver_id ? 'driver' : 'passenger';
+    const otherConsent = participant === 'driver' ? session.passenger_sharing_consented : session.driver_sharing_consented;
+    const bothConsented = enabled && otherConsent;
+    nextState = enabled ? (bothConsented ? 'ACTIVE' : 'ACTIVATING') : 'ACTIVATING';
+    nextSharing = enabled && bothConsented;
+    if (nextSharing) {
+      if (!realtimeRedis?.isReady) throw new ApiError(503, 'ephemeral location service is unavailable', 'location_service_unavailable');
+      await Promise.all([
+        realtimeRedis.del(rendezvousLocationKey(session.id, 'driver')),
+        realtimeRedis.del(rendezvousLocationKey(session.id, 'passenger')),
+      ]);
+    }
+    eventType = nextSharing ? 'rendezvous.activated' : enabled ? 'rendezvous.consent_given' : 'rendezvous.consent_revoked';
+    await client.query(
+      `UPDATE rendezvous_sessions SET ${participant}_sharing_consented=$2,location_sharing_enabled=$3,state=$4,updated_at=now() WHERE id=$1`,
+      [session.id, enabled, nextSharing, nextState],
+    );
+    await client.query('INSERT INTO rendezvous_events(rendezvous_id,actor_id,event_type) VALUES($1,$2,$3)', [session.id, req.userId, eventType]);
+    await insertRealtimeOutbox(client, eventType, `${eventType}:${session.id}:${crypto.randomUUID()}`,
+      [session.driver_id, session.passenger_id], { rendezvous_id: session.id, participant, state: nextState, location_sharing_enabled: nextSharing });
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+  if (!enabled && realtimeRedis?.isReady) {
+    await Promise.all([
+      realtimeRedis.del(rendezvousLocationKey(session.id, 'driver')),
+      realtimeRedis.del(rendezvousLocationKey(session.id, 'passenger')),
+    ]);
+  }
+  const updated = await getOrCreateRendezvous(session.booking_id, req.userId!);
   res.json({ data: await rendezvousResponse(updated, req.userId!) });
 }));
 
@@ -2382,7 +2505,7 @@ app.post('/api/v1/rendezvous/:id/location', requireAuth, asyncHandler(async (req
   const { rows } = await pool.query<RendezvousDbRow>(
     `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
        ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
-       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.driver_sharing_consented,r.passenger_sharing_consented,r.activation_at,
        r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
       FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
      WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2)`, [req.params.id, req.userId],
@@ -2431,7 +2554,7 @@ app.post('/api/v1/rendezvous/:id/status', requireAuth, asyncHandler(async (req, 
     const { rows } = await client.query<RendezvousDbRow>(
       `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
          ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
-         r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+         r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.driver_sharing_consented,r.passenger_sharing_consented,r.activation_at,
          r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
         FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
        WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF r,b`, [req.params.id, req.userId],
@@ -2465,7 +2588,7 @@ app.post('/api/v1/rendezvous/:id/status', requireAuth, asyncHandler(async (req, 
   const current = await pool.query<RendezvousDbRow>(
     `SELECT r.id,r.booking_id,r.journey_leg_id,o.driver_id,b.passenger_id,
        ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
-       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.activation_at,
+       r.pickup_label,r.planned_pickup_at,r.predicted_pickup_at,r.state,r.location_sharing_enabled,r.driver_sharing_consented,r.passenger_sharing_consented,r.activation_at,
        r.driver_arrived_at,r.passenger_arrived_at,r.boarding_started_at,r.completed_at,r.cancelled_at,b.status AS booking_status
       FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id WHERE r.id=$1`, [req.params.id],
   );

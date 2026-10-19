@@ -62,6 +62,7 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   if ((environment.ROUTING_PRIMARY ?? 'osrm') !== 'osrm') throw new Error('ROUTING_PRIMARY=osrm is the only configured production routing provider');
   if ((environment.TRAFFIC_PROVIDER ?? 'none') !== 'none') throw new Error('TRAFFIC_PROVIDER=none is the only configured traffic provider');
   requireHttpsUrl({ ...environment, OSRM_URL: environment.OSRM_URL || environment.ROUTING_ENGINE_URL }, 'OSRM_URL');
+  if (environment.WALKING_ROUTING_ENGINE_URL?.trim()) requireHttpsUrl(environment, 'WALKING_ROUTING_ENGINE_URL');
   requireHttpsUrl(environment, 'GEOCODING_ENGINE_URL');
   requireHttpsUrl(environment, 'GEOCODING_REVERSE_URL');
   requireHttpsUrl(environment, 'MAP_STYLE_MANIFEST_URL');

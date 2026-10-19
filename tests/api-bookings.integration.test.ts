@@ -383,9 +383,25 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal(prematureLocation.status, 409);
 
-    const activate = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous/activate`, { method: 'POST', headers: driverHeaders });
-    assert.equal(activate.status, 200);
-    const active = await activate.json() as { data: { state: string; locationSharingEnabled: boolean } };
+    const prepared = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous/activate`, { method: 'POST', headers: driverHeaders });
+    assert.equal(prepared.status, 200);
+    const pending = await prepared.json() as { data: { state: string; locationSharingEnabled: boolean; currentParticipantConsent: boolean; otherParticipantConsent: boolean } };
+    assert.deepEqual({ state: pending.data.state, sharing: pending.data.locationSharingEnabled,
+      ownConsent: pending.data.currentParticipantConsent, otherConsent: pending.data.otherParticipantConsent },
+      { state: 'ACTIVATING', sharing: false, ownConsent: false, otherConsent: false });
+    const driverConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: driverHeaders, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(driverConsent.status, 200);
+    const driverPending = await driverConsent.json() as { data: { state: string; locationSharingEnabled: boolean; currentParticipantConsent: boolean; otherParticipantConsent: boolean } };
+    assert.deepEqual({ state: driverPending.data.state, sharing: driverPending.data.locationSharingEnabled,
+      ownConsent: driverPending.data.currentParticipantConsent, otherConsent: driverPending.data.otherParticipantConsent },
+      { state: 'ACTIVATING', sharing: false, ownConsent: true, otherConsent: false });
+    const passengerConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: passengerHeaders, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(passengerConsent.status, 200);
+    const active = await passengerConsent.json() as { data: { state: string; locationSharingEnabled: boolean } };
     assert.deepEqual({ state: active.data.state, sharing: active.data.locationSharingEnabled }, { state: 'ACTIVE', sharing: true });
 
     const capturedAt = new Date().toISOString();
@@ -406,6 +422,20 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const driverState = await driverView.json() as { data: { locations: { passenger: { freshness: string; coordinates: number[] } | null } } };
     assert.deepEqual(driverState.data.locations.passenger?.coordinates, [24, 49]);
     assert.equal(driverState.data.locations.passenger?.freshness, 'LIVE');
+    const driverLocation = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: driverHeaders,
+      body: JSON.stringify({ longitude: 24.001, latitude: 49.001, accuracyMeters: 8, capturedAt: new Date().toISOString() }),
+    });
+    assert.equal(driverLocation.status, 200);
+    const approaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: passengerHeaders });
+    assert.equal(approaches.status, 200);
+    const approachData = await approaches.json() as { data: { driver: { approach: { status: string; geometry: unknown } }; passenger: { approach: { status: string; geometry: unknown } } } };
+    assert.equal(approachData.data.driver.approach.status, 'ROUTING_UNAVAILABLE');
+    assert.equal(approachData.data.driver.approach.geometry, null);
+    assert.equal(approachData.data.passenger.approach.status, 'ROUTING_UNAVAILABLE');
+    assert.equal(approachData.data.passenger.approach.geometry, null);
+    const outsiderApproaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: { 'x-dev-user-id': passengerB } });
+    assert.equal(outsiderApproaches.status, 404);
 
     const driverArrived = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/status`, {
       method: 'POST', headers: driverHeaders, body: JSON.stringify({ action: 'arrived' }),
