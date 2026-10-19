@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGeoJsonNetwork, buildNetwork, decimate, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, networkRoutesForRoute, parseBbox, parseVehicleTimestamp, routeInBbox } from '../server/mobility/transportLayers';
+import { buildGeoJsonNetwork, buildNetwork, decimate, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, networkRoutesForRoute, NETWORK_CACHE_SCHEMA_VERSION, parseBbox, parseVehicleTimestamp, routeInBbox } from '../server/mobility/transportLayers';
+import { cacheKey } from '../server/cache/cacheService';
 import { isFreshMobilityTimestamp, parseMobilityTimestamp } from '../server/mobility/timestamps';
 
 const files = {
@@ -13,6 +14,12 @@ const files = {
 
 describe('transport layer network', () => {
   const network = buildNetwork(files);
+  it('bumps the shared network cache key when the cached payload schema changes', () => {
+    const common = { providerId: 'lviv', url: 'https://example.test/feed.zip', sourceVersion: 'feed-v1' };
+    const oldKey = cacheKey('gtfs_network', { ...common, schemaVersion: NETWORK_CACHE_SCHEMA_VERSION - 1 });
+    const currentKey = cacheKey('gtfs_network', { ...common, schemaVersion: NETWORK_CACHE_SCHEMA_VERSION });
+    assert.notEqual(currentKey, oldKey);
+  });
   it('draws a stop-sequence line from the longest trip when a route has no shape', () => {
     const bus = network.routes.find((route) => route.name === '47')!;
     assert.equal(bus.type, 'bus');
