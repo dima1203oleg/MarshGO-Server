@@ -1292,30 +1292,42 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const providerCity = feed.providersByRoute?.get(trip.routeId)?.city ?? input.providerCity;
     const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
       ? localCityCatchmentStops : corridorStops;
-    const eligibleStopTimes = stops.filter((stopTime) => eligibleStopIds.has(stopTime.stopId)
-      && interchangeStopIds.has(stopTime.stopId));
+    const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
+      && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
+    const eligibleStopTimes = eligibleIndexes.map((index) => stops[index]);
     if (eligibleStopTimes.length < 2) continue;
     let pairOpportunities = 0;
-    for (let fromCursor = 0; fromCursor < eligibleStopTimes.length - 1; fromCursor++) {
-      if (eligibleStopTimes[fromCursor].pickupType !== 0) continue;
-      // Mirror the graph's bounded forward stop-pair window without
-      // materializing candidate segment objects in this demand pass.
-      const toEnd = Math.min(eligibleStopTimes.length, fromCursor + 21);
-      for (let toCursor = fromCursor + 1; toCursor < toEnd; toCursor++) {
-        if (eligibleStopTimes[toCursor].dropOffType === 0) pairOpportunities++;
-      }
-    }
-    if (pairOpportunities === 0) continue;
-    let activeServiceInstances = 0;
     for (const serviceDate of serviceDates) {
       if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
       const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
       if (update?.relationship === 'CANCELED' || update?.relationship === 'DELETED') continue;
-      activeServiceInstances++;
+      const dated = update?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
+      if (dated && dated.stops.length !== stops.length) continue;
+      const scheduledTimes = eligibleIndexes.map((index) => dated?.stops[index] ?? {
+        departureAt: serviceTimeToUtc(serviceDate, stops[index].departureSeconds),
+        arrivalAt: serviceTimeToUtc(serviceDate, stops[index].arrivalSeconds),
+        skipped: false,
+      });
+      for (let fromCursor = 0; fromCursor < eligibleStopTimes.length - 1; fromCursor++) {
+        const from = eligibleStopTimes[fromCursor];
+        if (from.pickupType !== 0 || scheduledTimes[fromCursor].skipped) continue;
+        const departureAt = scheduledTimes[fromCursor].departureAt;
+        if (!departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
+        // Mirror the graph's bounded forward stop-pair and schedule window
+        // without materializing candidate segment objects in this demand pass.
+        const toEnd = Math.min(eligibleStopTimes.length, fromCursor + 21);
+        for (let toCursor = fromCursor + 1; toCursor < toEnd; toCursor++) {
+          const to = eligibleStopTimes[toCursor];
+          if (to.dropOffType !== 0 || scheduledTimes[toCursor].skipped || to.arrivalSeconds < from.departureSeconds) continue;
+          const arrivalAt = scheduledTimes[toCursor].arrivalAt;
+          if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
+            || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
+          pairOpportunities++;
+        }
+      }
     }
-    if (activeServiceInstances === 0) continue;
-    const boundedPairOpportunities = Math.min(MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE,
-      pairOpportunities * activeServiceInstances);
+    if (pairOpportunities === 0) continue;
+    const boundedPairOpportunities = Math.min(MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE, pairOpportunities);
     candidateDemandByRoute.set(trip.routeId,
       (candidateDemandByRoute.get(trip.routeId) ?? 0) + boundedPairOpportunities);
   }
