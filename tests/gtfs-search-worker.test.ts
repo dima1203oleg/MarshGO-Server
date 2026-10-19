@@ -51,6 +51,19 @@ test('GTFS search worker starts and returns an empty snapshot without configured
   }
 });
 
+test('GTFS worker applies a hard bound to active plus queued requests', async () => {
+  const client = new GtfsSearchWorkerClient();
+  try {
+    const outcomes = await Promise.allSettled(Array.from({ length: 9 }, () => client.diagnostics()));
+    assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 8);
+    const rejected = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+    assert.equal(rejected.length, 1);
+    assert.match(String(rejected[0]?.reason), /capacity is temporarily full/);
+  } finally {
+    await client.close();
+  }
+});
+
 test('worker search groups preserve feed-scoped routes and match the direct timetable search result', () => {
   const source = { providerId: 'lviv-provider', providerName: 'Lviv Transit', providerCity: 'Львів', feed: fixtureFeed() };
   const built = buildGtfsSearchGroups([source], 'unit-search');
