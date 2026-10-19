@@ -388,6 +388,13 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
     originEntries.push({ tripId, index: 0 });
     destinationEntries.push({ tripId, index: 1 });
   }
+  // This useful departure is deliberately last in feed insertion order. A
+  // prefix cap drops it even though it is the fastest feasible direct option.
+  timetable.trips.set('fast-late-trip', { routeId: 'r', serviceId: 'weekday', headsign: 'Destination' });
+  timetable.stopTimes.set('fast-late-trip', [
+    { stopId: 'origin', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+    { stopId: 'destination', sequence: 2, arrivalSeconds: 8 * 3600 + 5 * 60, departureSeconds: 8 * 3600 + 5 * 60, pickupType: 0, dropOffType: 0 },
+  ]);
   timetable.stopTimesByStop.set('origin', originEntries);
   timetable.stopTimesByStop.set('destination', destinationEntries);
 
@@ -396,6 +403,8 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
   });
 
   assert.ok(result.itineraries.length > 0, 'the bounded graph still returns feasible scheduled options');
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === 'fast-late-trip')),
+    'bounded retention must not favor early rows in a chronologically ordered feed');
   assert.equal(result.searchTruncated, true, 'omitting graph candidates must be visible as a partial search');
   assert.equal(result.candidateGraphTruncated, true, 'the internal result identifies graph-level truncation');
   assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
