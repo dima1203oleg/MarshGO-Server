@@ -1728,11 +1728,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   // across first-leg route groups: a dense early route cannot spend the whole
   // budget before later lines contribute candidates to fastest/cheapest/balanced.
   let searchSteps = 0;
-  const MAX_SEARCH_STEPS = 50_000;
+  const MAX_SEARCH_STEPS = 100_000;
   const MAX_SEARCH_RESULTS = limit * 25;
-  const MAX_PENDING_PATHS_PER_ROUTE = Math.max(128, Math.min(limit * 50, 2_000));
   let searchBudgetTruncated = false;
-  let routeQueueTruncated = false;
+  let maximumQueuedSearchWork = 0;
   let activeDepthLimitReached = false;
 
   // Feed/trip insertion order is not a routing priority. In a dense city feed,
@@ -1755,35 +1754,56 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         || a.destinationStop.id.localeCompare(b.destinationStop.id);
     });
 
+  type PathWork = { kind: 'path'; path: GtfsDirectJourney[] };
+  type ChildWork = {
+    kind: 'children';
+    path: GtfsDirectJourney[];
+    last: GtfsDirectJourney;
+    choices: GtfsDirectJourney[];
+    nextIndex: number;
+    latestNext: number;
+    remainingLegs: number;
+    previousIds: Set<string>;
+    visitedStops: Set<string>;
+  };
+  type SearchWork = PathWork | ChildWork;
   type RouteSearchQueue = {
     firstLegs: GtfsDirectJourney[];
     firstLegIndex: number;
-    paths: GtfsDirectJourney[][];
-    pathIndex: number;
+    work: SearchWork[];
+    workIndex: number;
     preferFirstLeg: boolean;
   };
-  const takeNextPath = (queue: RouteSearchQueue): GtfsDirectJourney[] | undefined => {
+  const enqueueWork = (queue: RouteSearchQueue, work: SearchWork) => {
+    queue.work.push(work);
+    maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
+      queuesPendingWork + 1);
+    queuesPendingWork++;
+  };
+  let queuesPendingWork = 0;
+  const takeNextWork = (queue: RouteSearchQueue): SearchWork | undefined => {
     if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length) {
       queue.preferFirstLeg = false;
-      return [queue.firstLegs[queue.firstLegIndex++]];
+      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]] };
     }
-    if (queue.pathIndex < queue.paths.length) {
+    if (queue.workIndex < queue.work.length) {
       queue.preferFirstLeg = true;
-      const path = queue.paths[queue.pathIndex++];
-      if (queue.pathIndex >= 128 && queue.pathIndex * 2 >= queue.paths.length) {
-        queue.paths.splice(0, queue.pathIndex);
-        queue.pathIndex = 0;
+      const work = queue.work[queue.workIndex++];
+      queuesPendingWork--;
+      if (queue.workIndex >= 128 && queue.workIndex * 2 >= queue.work.length) {
+        queue.work.splice(0, queue.workIndex);
+        queue.workIndex = 0;
       }
-      return path;
+      return work;
     }
     if (queue.firstLegIndex < queue.firstLegs.length) {
       queue.preferFirstLeg = false;
-      return [queue.firstLegs[queue.firstLegIndex++]];
+      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]] };
     }
     return undefined;
   };
   const hasQueuedWork = (queues: RouteSearchQueue[]) => queues.some((queue) =>
-    queue.firstLegIndex < queue.firstLegs.length || queue.pathIndex < queue.paths.length);
+    queue.firstLegIndex < queue.firstLegs.length || queue.workIndex < queue.work.length);
   const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number) => {
     searchSteps++;
     const last = path.at(-1)!;
@@ -1807,20 +1827,22 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) low = middle + 1;
       else high = middle;
     }
-    let pendingCount = queue.paths.length - queue.pathIndex;
-    for (let index = low; index < choices.length; index++) {
-      const next = choices[index];
-      if (next.departureAt.getTime() > latestNext) break;
-      if (!reachableWithin[remainingLegs - 1].has(next.destinationStop.id)) continue;
-      if (previousIds.has(next.tripId) || visitedStops.has(next.destinationStop.id)) continue;
-      if (!transferDecision(last, next).feasible) continue;
-      if (pendingCount >= MAX_PENDING_PATHS_PER_ROUTE) {
-        candidateSamplingTruncated = true;
-        routeQueueTruncated = true;
-        break;
-      }
-      queue.paths.push([...path, next]);
-      pendingCount++;
+    if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
+    enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
+      remainingLegs, previousIds, visitedStops });
+  };
+  const expandNextChild = (work: ChildWork, queue: RouteSearchQueue) => {
+    searchSteps++;
+    const next = work.choices[work.nextIndex++];
+    if (next.departureAt.getTime() <= work.latestNext
+      && reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id)
+      && !work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
+      && transferDecision(work.last, next).feasible) {
+      enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
+    }
+    if (work.nextIndex < work.choices.length
+      && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
+      enqueueWork(queue, work);
     }
   };
   // Give each possible chain length an explicit share of the bounded search.
@@ -1844,8 +1866,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       group.push(segment);
       firstLegGroups.set(key, group);
     }
+    queuesPendingWork = 0;
     const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
-      firstLegs: group, firstLegIndex: 0, paths: [], pathIndex: 0, preferFirstLeg: true,
+      firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true,
     }));
     while (!activeDepthLimitReached && searchSteps < stepLimit
       && searchSteps < MAX_SEARCH_STEPS && results.size < MAX_SEARCH_RESULTS) {
@@ -1853,10 +1876,11 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       for (const queue of queues) {
         if (activeDepthLimitReached || searchSteps >= stepLimit
           || searchSteps >= MAX_SEARCH_STEPS || results.size >= MAX_SEARCH_RESULTS) break;
-        const path = takeNextPath(queue);
-        if (!path) continue;
+        const work = takeNextWork(queue);
+        if (!work) continue;
         processed = true;
-        expandPath(path, queue, maximumLegsForPass);
+        if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass);
+        else expandNextChild(work, queue);
       }
       if (!processed) break;
     }
@@ -1930,14 +1954,14 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     returned: itineraries.length,
     stopSelectionTruncated: Number(stopSelectionTruncated), searchBudgetTruncated: Number(searchBudgetTruncated),
     searchStepLimitReached: Number(searchSteps >= MAX_SEARCH_STEPS), candidateResultLimitReached: Number(results.size >= MAX_SEARCH_RESULTS),
-    candidateSamplingTruncated: Number(candidateSamplingTruncated), routeQueueTruncated: Number(routeQueueTruncated),
+    candidateSamplingTruncated: Number(candidateSamplingTruncated), maxQueuedSearchWork: maximumQueuedSearchWork,
     searchTruncated: Number(stopSelectionTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
-      || results.size >= MAX_SEARCH_RESULTS || routeQueueTruncated),
+      || results.size >= MAX_SEARCH_RESULTS),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
   return {
     itineraries,
     searchTruncated: stopSelectionTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
-      || results.size >= MAX_SEARCH_RESULTS || routeQueueTruncated,
+      || results.size >= MAX_SEARCH_RESULTS,
     resultLimitReached: rankedResults.length > itineraries.length || candidateSamplingTruncated,
   };
 }
