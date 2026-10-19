@@ -416,11 +416,19 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         }),
       });
       assert.equal(composedSearch.status, 200);
-      const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partialReasons?: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated?: boolean; journeys: Array<{
+      const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partial: boolean; partialReasons: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated: boolean; candidateGenerationTruncated: boolean; resultSamplingTruncated: boolean; journeys: Array<{
         id: string; offerId: string | null; source?: string; state: string;
         legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string }>;
       }> } });
       const composedData = composedPayload.data;
+      assert.equal(typeof composedData.partial, 'boolean');
+      assert.equal(composedData.partial, composedData.partialReasons.length > 0,
+        'the API partial flag must agree with its explicit reasons');
+      assert.equal(composedData.resultsTruncated,
+        composedData.candidateGenerationTruncated || composedData.resultSamplingTruncated,
+        'the API must surface both candidate-generation truncation and sampled result pages');
+      assert.equal(composedData.partialReasons.includes('candidate_generation_truncated'), composedData.candidateGenerationTruncated,
+        'candidate omission must be explained as an explicit partial reason');
       const composedJourney = composedData.journeys.find((candidate) => candidate.source === 'community-transit'
         && candidate.offerId === ids.transitCompositionOffer);
       assert.ok(composedJourney, 'the production API composes and persists a real GTFS prefix, Community ride, and GTFS suffix');

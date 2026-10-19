@@ -22,8 +22,8 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, findGtfsStopArrivals, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
-import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
@@ -37,7 +37,6 @@ import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbo
 import { buildTransportCities } from './mobility/cities';
 import { buildTransportLayerAvailability } from './mobility/transportLayerAvailability';
 import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
-import { cachedKyivMetroTimetable } from './mobility/kyivMetroTimetable';
 import { getTransportFareCatalog } from './mobility/transportTariffs';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
@@ -888,37 +887,16 @@ app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) 
     return;
   }
 
-  let baseFeed: GtfsTimetableFeed;
+  let timetable: Awaited<ReturnType<typeof gtfsSearchWorker.stopArrivals>>;
   try {
-    baseFeed = await cachedGtfsTimetable(provider.id, provider.feed_url);
+    timetable = await gtfsSearchWorker.stopArrivals({ id: provider.id, name: provider.name, city: provider.city,
+      feedUrl: provider.feed_url, ...(provider.realtime_url ? { realtimeUrl: provider.realtime_url } : {}) },
+    stopId, new Date(), requestedLimit, { ...(routeId ? { routeId } : {}), ...(headsign ? { headsign } : {}) });
   } catch {
     console.error(JSON.stringify({ level: 'warn', event: 'transit.stop_arrivals.schedule_unavailable', providerId }));
     throw new ApiError(503, 'transit schedule is temporarily unavailable', 'schedule_unavailable');
   }
-  let realtimeStatus: 'AVAILABLE' | 'STALE' | 'UNAVAILABLE' | 'NOT_CONFIGURED' | 'TEMPORARILY_UNAVAILABLE' = provider.realtime_url ? 'UNAVAILABLE' : 'NOT_CONFIGURED';
-  let realtimeUpdatedAt: Date | undefined;
-  let realtimeFeedTimestamp: Date | undefined;
-  let feed = baseFeed;
-  if (provider.realtime_url) {
-    try {
-      const realtime = await cachedGtfsRealtimeTripUpdates(provider.id, provider.realtime_url);
-      if (realtime.feedTimestamp.getTime() > 0) realtimeFeedTimestamp = realtime.feedTimestamp;
-      if (realtime.fresh) {
-        feed = { ...baseFeed, realtimeTripUpdates: realtime.updates };
-        realtimeStatus = 'AVAILABLE';
-        realtimeUpdatedAt = realtime.feedTimestamp;
-      } else if (realtime.reason === 'STALE') {
-        realtimeStatus = 'STALE';
-      }
-    } catch {
-      realtimeStatus = 'TEMPORARILY_UNAVAILABLE';
-      console.error(JSON.stringify({ level: 'warn', event: 'transit.stop_arrivals.realtime_unavailable', providerId }));
-    }
-  }
-  const arrivals = findGtfsStopArrivals(feed, stopId, {
-    now: new Date(), limit: requestedLimit,
-    ...(routeId ? { routeId } : {}), ...(headsign ? { headsign } : {}),
-  }).map((arrival) => {
+  const arrivals = timetable.arrivals.map((arrival) => {
     const etaMinutes = Math.ceil(arrival.etaSeconds / 60);
     const routeName = arrival.routeName || arrival.routeId;
     const live = arrival.source === 'TRIP_UPDATE';
@@ -931,12 +909,12 @@ app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) 
       displayLabel: live ? `${routeName} — орієнтовно ${etaMinutes} хв · GTFS-RT` : `${routeName} — ${etaMinutes} хв за розкладом`,
     };
   });
-  const stopKnown = baseFeed.stops.has(stopId);
+  const stopKnown = timetable.stopKnown;
   res.json({ data: { stopId: scopedStopId, lat, lon, arrivals },
-    meta: { availability: stopKnown ? 'AVAILABLE' : 'STOP_NOT_IN_FEED', scheduleUpdatedAt: baseFeed.fetchedAt.toISOString(),
-      realtimeStatus,
-      ...(realtimeUpdatedAt ? { realtimeUpdatedAt: realtimeUpdatedAt.toISOString() } : {}),
-      ...(realtimeFeedTimestamp ? { realtimeFeedTimestamp: realtimeFeedTimestamp.toISOString() } : {}) } });
+    meta: { availability: stopKnown ? 'AVAILABLE' : 'STOP_NOT_IN_FEED', scheduleUpdatedAt: timetable.scheduleUpdatedAt.toISOString(),
+      realtimeStatus: timetable.realtimeStatus,
+      ...(timetable.realtimeUpdatedAt ? { realtimeUpdatedAt: timetable.realtimeUpdatedAt.toISOString() } : {}),
+      ...(timetable.realtimeFeedTimestamp ? { realtimeFeedTimestamp: timetable.realtimeFeedTimestamp.toISOString() } : {}) } });
 }));
 
 app.get('/api/v1/transport/vehicles', requireAuth, asyncHandler(async (req, res) => {
@@ -2694,6 +2672,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const walkingRoutingUrl = process.env.WALKING_ROUTING_URL?.trim();
   const walkingRouteBudget = createWalkingRouteBudget();
   const providerErrors: string[] = [];
+  let gtfsSecondarySearchUnavailable = false;
   const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
     `SELECT id,name,city,feed_url,realtime_url,last_sync_at,last_report FROM mobility_providers
       WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
@@ -2725,8 +2704,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const kyivMetroBounds: [number, number, number, number] = [30.1, 50.1, 31.0, 50.8];
   const shouldLoadKyivMetro = allowedTransitModes.includes('METRO')
     && bboxIntersectsRouteCorridor(kyivMetroBounds, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters);
-  // Start Kyiv's multi-source open-data build alongside regular GTFS fetches.
-  const kyivMetroFeedTask = shouldLoadKyivMetro ? (async () => {
+  // Pass the source definitions to the worker so it owns the parsed schedule and
+  // keeps CPU-heavy timetable searches away from the API event loop.
+  const kyivMetroSourcesTask = shouldLoadKyivMetro ? (async (): Promise<GtfsWorkerMetroSources> => {
     const { rows } = await pool.query<{ id: string; name: string; city: string; feed_url: string; source_ref: string | null; source_type: string; last_sync_at: Date | null }>(
       `SELECT id,name,city,feed_url,source_ref,source_type,last_sync_at FROM mobility_providers
         WHERE city='Київ' AND provider_type='public_transit' AND source_type IN ('rest','geojson')
@@ -2736,65 +2716,48 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const route = rows.find((row) => row.source_type === 'geojson' && row.name.toLocaleLowerCase('uk-UA').includes('метро (геометрія ліній)'));
     const scheduleSources = rows.filter((row) => row.source_type === 'rest' && row.name.toLocaleLowerCase('uk-UA').includes('метро'));
     if (!stations || !route || scheduleSources.length < 3) throw new Error('Київські джерела станцій, геометрії, розкладу або пересадок не зареєстровані чи вимкнені');
-    const feed = await cachedKyivMetroTimetable({ stationSource: stations, routeSource: route, scheduleSources });
-    return { routeSource: route, feed };
+    return { stationSource: stations, routeSource: route, scheduleSources };
   })() : null;
-  const feedLoads = await Promise.allSettled(eligibleGtfsProviders.map(async (provider) => ({
-    provider,
-    feed: await cachedGtfsTimetable(provider.id, provider.feed_url),
-  })));
-  const realtimeProviders = eligibleGtfsProviders.filter((provider) => provider.realtime_url);
-  const realtimeLoads = await Promise.allSettled(realtimeProviders.map(async (provider) => ({
-    provider,
-    realtime: await cachedGtfsRealtimeTripUpdates(provider.id, provider.realtime_url!),
-  })));
-  const realtimeByProvider = new Map<string, Awaited<ReturnType<typeof cachedGtfsRealtimeTripUpdates>>>();
-  realtimeLoads.forEach((result, index) => {
-    if (result.status === 'rejected') {
-      providerErrors.push(`${realtimeProviders[index]?.name ?? 'GTFS-Realtime'}: оновлення рейсів тимчасово недоступні; використовується розклад`);
-      return;
-    }
-    if (!result.value.realtime.fresh) {
-      providerErrors.push(`${result.value.provider.name}: GTFS-Realtime відхилено (${result.value.realtime.reason ?? 'дані неповні'}); використовується розклад`);
-      return;
-    }
-    realtimeByProvider.set(result.value.provider.id, result.value.realtime);
-  });
-  const feedSources: GtfsTimetableSource[] = [];
-  feedLoads.forEach((result, index) => {
-    if (result.status === 'rejected') {
-      providerErrors.push(`${eligibleGtfsProviders[index]?.name ?? 'GTFS'}: розклад тимчасово недоступний`);
-      return;
-    }
-    feedSources.push({ providerId: result.value.provider.id, providerName: result.value.provider.name,
-      providerCity: result.value.provider.city, feed: result.value.feed,
-      ...(realtimeByProvider.get(result.value.provider.id) ? { realtime: realtimeByProvider.get(result.value.provider.id)! } : {}) });
-  });
-  if (kyivMetroFeedTask) {
-    const [metroResult] = await Promise.allSettled([kyivMetroFeedTask]);
-    if (metroResult?.status === 'fulfilled') {
-      const { routeSource, feed } = metroResult.value;
-      const providerName = 'Київ — метро (офіційний інтервальний розклад)';
-      feedSources.push({ providerId: routeSource.id, providerName, providerCity: routeSource.city, feed });
-      providerMetadata.set(routeSource.id, { name: providerName, last_sync_at: routeSource.last_sync_at, routeGeometrySource: 'official_geojson' });
-    } else {
-      providerErrors.push(`Київське метро: ${metroResult?.reason instanceof Error ? metroResult.reason.message : 'відкриті дані тимчасово недоступні'}`);
-    }
-  }
-  const sourcesByTimezone = new Map<string, GtfsTimetableSource[]>();
-  for (const source of feedSources) {
-    const sources = sourcesByTimezone.get(source.feed.timezone) ?? [];
-    sources.push(source); sourcesByTimezone.set(source.feed.timezone, sources);
-  }
   type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary, 'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified'>>;
   const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
     if (!itinerary.fare || search.passengers === 1) return itinerary;
     return { ...itinerary, fare: scaleGtfsFareForPassengers(itinerary.fare, search.passengers) };
   };
-  const mergedFeedGroups = [...sourcesByTimezone.values()].flatMap((sources) => {
-    const feed = mergeGtfsTimetables(sources);
-    return feed ? [{ sources, feed }] : [];
-  });
+  let metroSources: GtfsWorkerMetroSources | undefined;
+  if (kyivMetroSourcesTask) {
+    try {
+      metroSources = await kyivMetroSourcesTask;
+      providerMetadata.set(metroSources.routeSource.id, { name: 'Київ — метро (офіційний інтервальний розклад)',
+        last_sync_at: metroSources.routeSource.last_sync_at ?? null, routeGeometrySource: 'official_geojson' });
+    } catch (error) {
+      providerErrors.push(`Київське метро: ${error instanceof Error ? error.message : 'відкриті дані тимчасово недоступні'}`);
+    }
+  }
+  let gtfsWorkerSearch: Awaited<ReturnType<typeof gtfsSearchWorker.search>> = { descriptors: [], errors: [], searches: [] };
+  try {
+    if (eligibleGtfsProviders.length > 0 || metroSources) {
+      gtfsWorkerSearch = await gtfsSearchWorker.search({
+        providerId: 'worker', providerName: 'worker', origin: search.origin.coordinates, destination: search.destination.coordinates,
+        earliestDeparture: search.departureAt, latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 100,
+        maximumJourneySeconds: maximumSearchDurationSeconds,
+        maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
+        maximumWaitSeconds: 4 * 60 * 60, minimumTransferBufferSeconds: configuredTransferBufferSeconds,
+        maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+        maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+        maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+        allowedModes: allowedTransitModes, allowedTransportTypes: search.preferences.allowedTransportTypes,
+      }, eligibleGtfsProviders.map((provider) => ({ id: provider.id, name: provider.name, city: provider.city,
+        feedUrl: provider.feed_url, ...(provider.realtime_url ? { realtimeUrl: provider.realtime_url } : {}) })), metroSources);
+    }
+  } catch (error) {
+    providerErrors.push(`GTFS-пошук тимчасово недоступний${error instanceof Error && error.message.includes('capacity') ? ': черга заповнена' : ''}; інші типи маршрутів перевіряються окремо`);
+  }
+  const mergedFeedGroups: GtfsWorkerGroup[] = gtfsWorkerSearch.descriptors;
+  for (const error of gtfsWorkerSearch.errors) {
+    if (error.kind === 'realtime') providerErrors.push(`${error.name}: GTFS-Realtime відхилено (${error.detail ?? 'дані неповні'}); використовується розклад`);
+    else if (error.providerId && providerMetadata.has(error.providerId)) providerErrors.push(`${error.name}: розклад тимчасово недоступний`);
+    else providerErrors.push(`${error.name}: відкриті дані тимчасово недоступні`);
+  }
   let scheduledCandidates: SearchItinerary[] = [];
   let pedestrianRoutesUnavailable = false;
   let pedestrianCandidatesRejected = false;
@@ -2840,21 +2803,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     });
   };
 
-  for (const { sources, feed: mergedFeed } of mergedFeedGroups) {
-    const itinerarySearch = findGtfsItinerariesWithStats(mergedFeed, {
-      providerId: sources[0].providerId, providerName: sources[0].providerName, origin: search.origin.coordinates,
-      destination: search.destination.coordinates, earliestDeparture: search.departureAt,
-      latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 100,
-      maximumJourneySeconds: maximumSearchDurationSeconds,
-      maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
-      maximumWaitSeconds: 4 * 60 * 60,
-      minimumTransferBufferSeconds: configuredTransferBufferSeconds,
-      maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
-      maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
-      maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
-      allowedModes: allowedTransitModes,
-      allowedTransportTypes: search.preferences.allowedTransportTypes,
-    });
+  for (const itinerarySearch of gtfsWorkerSearch.searches) {
     // Reaching the requested top-N result count is normal ranking behavior;
     // a stop, graph, or search-budget cap means candidate generation was cut short.
     candidateGenerationTruncated ||= itinerarySearch.searchTruncated;
@@ -3042,11 +2991,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   // timetable station and ask the same metro feed for the connecting service.
   if (requestedMicromobilityModes.length && allowedTransitModes.includes('METRO')) {
     const maxMicromobilityTransferStations = 6;
-    const stationPathSearch = (feed: GtfsTimetableFeed, providerId: string, providerName: string) => memoizeRequestSearch(
+    const stationPathSearch = (group: GtfsWorkerGroup, providerId: string, providerName: string) => memoizeRequestSearch(
       (origin: [number, number], destination: [number, number], earliestDeparture: Date) => JSON.stringify([
-        origin, destination, earliestDeparture.getTime(), providerId,
+        origin, destination, earliestDeparture.getTime(), providerId, group.id,
       ]),
-      (origin: [number, number], destination: [number, number], earliestDeparture: Date) => findGtfsItinerariesWithStats(feed, {
+      async (origin: [number, number], destination: [number, number], earliestDeparture: Date) => {
+        try { return await gtfsSearchWorker.searchGroup(group.id, {
         providerId, providerName, origin, destination, earliestDeparture,
         latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 18,
         maximumJourneySeconds: Math.max(60, maximumSearchDurationSeconds - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000))),
@@ -3055,18 +3005,14 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS, maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
         maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS, allowedModes: ['METRO'],
         allowedTransportTypes: search.preferences.allowedTransportTypes,
-      }),
-    );
-    for (const group of mergedFeedGroups.filter(({ feed }) => [...feed.routes.values()].some((route) => route.mode === 'METRO'))) {
-      const metroStops = new Map<string, { name: string; coordinates: [number, number] }>();
-      for (const [tripId, trip] of group.feed.trips) {
-        if (group.feed.routes.get(trip.routeId)?.mode !== 'METRO') continue;
-        for (const call of group.feed.stopTimes.get(tripId) ?? []) {
-          const stop = group.feed.stops.get(call.stopId);
-          if (stop) metroStops.set(stop.id, { name: stop.name, coordinates: [stop.lon, stop.lat] });
+        }); } catch {
+          gtfsSecondarySearchUnavailable = true;
+          return { itineraries: [], searchTruncated: false, resultLimitReached: false };
         }
-      }
-      const stations = [...metroStops.values()];
+      },
+    );
+    for (const group of mergedFeedGroups.filter(({ hasMetro }) => hasMetro)) {
+      const stations = group.metroStations;
       const closestStations = (place: { coordinates: [number, number] }) => stations
         .map((station) => ({ station, distance: Math.hypot((station.coordinates[0] - place.coordinates[0]) * 70_000, (station.coordinates[1] - place.coordinates[1]) * 111_000) }))
         .filter((item) => item.distance <= 18_000).sort((a, b) => a.distance - b.distance)
@@ -3074,7 +3020,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const providerId = group.sources[0]?.providerId;
       const providerName = group.sources[0]?.providerName ?? 'Київ — метро';
       if (!providerId) continue;
-      const searchStationPath = stationPathSearch(group.feed, providerId, providerName);
+      const searchStationPath = stationPathSearch(group, providerId, providerName);
 
       const originStations = closestStations(search.origin);
       for (const station of originStations) {
@@ -3084,8 +3030,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           for (const estimate of estimates) {
             const earliest = new Date(estimate.arrivalAt.getTime() + configuredTransferBufferSeconds * 1000);
             if (earliest.getTime() > search.departureAt.getTime() + 120 * 60_000) continue;
-            const found = searchStationPath(station.coordinates, search.destination.coordinates, earliest);
+            const found = await searchStationPath(station.coordinates, search.destination.coordinates, earliest);
             candidateGenerationTruncated ||= found.searchTruncated;
+            resultSamplingTruncated ||= found.resultLimitReached;
             resultSamplingTruncated ||= found.resultLimitReached;
             for (const itinerary of found.itineraries) {
               if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
@@ -3099,8 +3046,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const destinationStations = closestStations(search.destination);
       for (const station of destinationStations) {
         const stationPlace = { name: station.name, coordinates: station.coordinates };
-        const found = searchStationPath(search.origin.coordinates, station.coordinates, search.departureAt);
+        const found = await searchStationPath(search.origin.coordinates, station.coordinates, search.departureAt);
         candidateGenerationTruncated ||= found.searchTruncated;
+        resultSamplingTruncated ||= found.resultLimitReached;
         resultSamplingTruncated ||= found.resultLimitReached;
         for (const itinerary of found.itineraries) {
           if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
@@ -3148,9 +3096,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   ): Promise<SearchItinerary[]> => {
     if (allowedTransitModes.length === 0 || latestDeparture < earliestDeparture) return [];
     const paths: SearchItinerary[] = [];
-    for (const { sources, feed } of mergedFeedGroups) {
-      const searchResult = findGtfsItinerariesWithStats(feed, {
-        providerId: sources[0].providerId, providerName: sources[0].providerName, origin: origin.coordinates,
+    for (const group of mergedFeedGroups) {
+      const source = group.sources[0];
+      if (!source) continue;
+      let searchResult;
+      try { searchResult = await gtfsSearchWorker.searchGroup(group.id, {
+        providerId: source.providerId, providerName: source.providerName, origin: origin.coordinates,
         destination: destination.coordinates, earliestDeparture, latestDeparture,
         limit: MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE,
         maximumJourneySeconds: maximumSearchDurationSeconds,
@@ -3162,8 +3113,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
         allowedModes: allowedTransitModes,
         allowedTransportTypes: search.preferences.allowedTransportTypes,
-      });
+      }); } catch {
+        gtfsSecondarySearchUnavailable = true;
+        continue;
+      }
       candidateGenerationTruncated ||= searchResult.searchTruncated;
+      resultSamplingTruncated ||= searchResult.resultLimitReached;
       resultSamplingTruncated ||= searchResult.resultLimitReached;
       const allowedPaths = searchResult.itineraries.map(fareForPassengerCount).filter((itinerary) => itinerary.segments.every((segment) =>
         transitAllowed(segment.mode)
@@ -3299,17 +3254,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   // Do not report “not in route engine” just because no rental pair was found.
   if (wantsBike && microPoints.length > 0) routePlannerTypes.add('bike');
   if (wantsScooter && scooterRouteProviders.length > 0) routePlannerTypes.add('scooter');
-  for (const source of feedSources) {
-    for (const route of source.feed.routes.values()) {
-      // Provider inventory is not permission to expand the canonical route
-      // product. Ferry/funicular feeds may be parsed for diagnostics, but this
-      // Journey API only routes the approved GTFS-backed categories.
-      if (!JOURNEY_SEARCH_TRANSIT_MODES.includes(route.mode)) continue;
-      routePlannerTypes.add(route.transportType);
-      if (route.transportType === 'intercity_bus') routePlannerTypes.add('bus');
-      if (route.transportType === 'suburban_train' || route.transportType === 'city_train') routePlannerTypes.add('train');
-    }
-  }
+  for (const group of mergedFeedGroups) for (const routeType of group.routeTypes) routePlannerTypes.add(routeType);
   const canonicalRouteTypes = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'];
   const requestedRouteTypes = search.preferences.allowedTransportTypes ?? canonicalRouteTypes;
   const unsupportedSelectedTypes = requestedRouteTypes
@@ -3873,6 +3818,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     throw error;
   } finally {
     client.release();
+  }
+  if (gtfsSecondarySearchUnavailable) {
+    providerErrors.push('Частину додаткових мультимодальних пересадок не вдалося перевірити; основні результати залишено без непідтверджених комбінацій.');
   }
   const unsupportedPreferences = [
     ...unsupportedSelectedTypes,
@@ -6345,6 +6293,7 @@ void startServer().catch((error: unknown) => {
 });
 async function closeResources() {
   const tasks: Promise<unknown>[] = [pool.end()];
+  tasks.push(gtfsSearchWorker.close());
   tasks.push(smartCache.close());
   if (realtimeSubscriber) tasks.push(realtimeSubscriber.quit());
   if (realtimeRedis) tasks.push(realtimeRedis.quit());

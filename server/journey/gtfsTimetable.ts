@@ -8,10 +8,13 @@ import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealti
 import { retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
 import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
+import { BoundedPromiseCache } from './boundedPromiseCache';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
 const FAILED_FEED_CACHE_TTL_MS = 5 * 60_000;
+const MAX_CACHED_GTFS_FEEDS = 32;
+const MAX_ESTIMATED_GTFS_CACHE_BYTES = 256 * 1024 * 1024;
 const MERGED_FEED_CACHE_TTL_MS = 60_000;
 const MAX_MERGED_FEED_CACHE_ENTRIES = 2;
 const MAX_DIRECT_STOPS_PER_SIDE = 20;
@@ -2323,19 +2326,46 @@ export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerar
   return findGtfsItinerariesWithStats(feed, input).itineraries;
 }
 
-const feedCache = new Map<string, { cachedAt: number; failedAt?: number; promise: Promise<GtfsTimetableFeed> }>();
+const feedCache = new BoundedPromiseCache<GtfsTimetableFeed>(
+  MAX_CACHED_GTFS_FEEDS,
+  MAX_ESTIMATED_GTFS_CACHE_BYTES,
+  CACHE_TTL_MS,
+  FAILED_FEED_CACHE_TTL_MS,
+);
+
+/** Internal worker diagnostics; this is not exposed as a public API route. */
+export function getCachedGtfsTimetableStats(): { entries: number; estimatedBytes: number } {
+  return { entries: feedCache.size, estimatedBytes: feedCache.weight };
+}
+
+// Parsed JS objects use substantially more memory than their source CSV. This
+// deliberately conservative estimate accounts for map entries and per-row
+// objects; it is a cache bound, not a claim about exact process RSS.
+function estimateGtfsFeedCacheBytes(feed: GtfsTimetableFeed): number {
+  let stopTimeRows = 0;
+  for (const rows of feed.stopTimes.values()) stopTimeRows += rows.length;
+  let shapePoints = 0;
+  for (const points of feed.shapes?.values() ?? []) shapePoints += points.length;
+  const retainedRecords = stopTimeRows * 512
+    + feed.stops.size * 768
+    + feed.stopTimesByStop.size * 192
+    + feed.trips.size * 512
+    + shapePoints * 48
+    + feed.routes.size * 768
+    + feed.calendars.size * 512
+    + (feed.transfers?.length ?? 0) * 512;
+  const ancillary = (feed.pathways?.length ?? 0) * 512
+    + (feed.fareProducts?.size ?? 0) * 512
+    + (feed.fareRules?.size ?? 0) * 512
+    + (feed.exceptions.size * 256);
+  return Math.max(1, retainedRecords + ancillary);
+}
 
 export function cachedGtfsTimetable(providerId: string, url: string, now = Date.now()): Promise<GtfsTimetableFeed> {
-  const hit = feedCache.get(providerId);
-  if (hit && now - (hit.failedAt ?? hit.cachedAt) < (hit.failedAt === undefined ? CACHE_TTL_MS : FAILED_FEED_CACHE_TTL_MS)) return hit.promise;
-  const promise = (async () => {
+  return feedCache.getOrLoad(providerId, async () => {
     const { data } = await fetchBinary(url, MAX_FEED_BYTES, 15_000);
     const unzipped = unzipSync(data, { filter: (file) => /(^|\/)(agency|routes|stops|trips|stop_times|calendar|calendar_dates|shapes|transfers|pathways|levels|fare_attributes|fare_rules|fare_media|fare_products|fare_leg_rules|fare_leg_join_rules|fare_transfer_rules|rider_categories|timeframes|networks|route_networks|areas|stop_areas)\.txt$/.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
     const files = Object.fromEntries(Object.entries(unzipped).map(([name, content]) => [name.split('/').pop() as string, content]));
     return parseGtfsTimetable(files);
-  })();
-  const entry: { cachedAt: number; failedAt?: number; promise: Promise<GtfsTimetableFeed> } = { cachedAt: now, promise };
-  feedCache.set(providerId, entry);
-  promise.catch(() => { if (feedCache.get(providerId) === entry) entry.failedAt = Date.now(); });
-  return promise;
+  }, estimateGtfsFeedCacheBytes, now);
 }

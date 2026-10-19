@@ -3,8 +3,8 @@ import { compareStableId } from './stableOrdering';
 /**
  * Allocate a hard graph-segment budget proportionally to estimated route demand.
  * Every positive-demand route gets one slot when the budget permits; routes
- * cannot exceed the per-route ceiling, and unused ceiling capacity is
- * redistributed deterministically.
+ * cannot exceed either the route's estimated candidate supply or the per-route
+ * ceiling. Any budget beyond total estimated supply remains unassigned.
  */
 export function allocateBoundedGraphBudgets(
   demandByRoute: ReadonlyMap<string, number>,
@@ -17,6 +17,7 @@ export function allocateBoundedGraphBudgets(
   }
   const candidates = [...demandByRoute]
     .filter(([routeId, demand]) => routeId.length > 0 && Number.isFinite(demand) && demand > 0)
+    .map(([routeId, demand]) => [routeId, demand, Math.min(maximumPerRoute, Math.ceil(demand))] as const)
     .sort(([a], [b]) => compareStableId(a, b));
   if (totalBudget === 0 || candidates.length === 0) return new Map();
 
@@ -27,23 +28,26 @@ export function allocateBoundedGraphBudgets(
     ? [...candidates].sort(([aId, a], [bId, b]) => b - a || compareStableId(aId, bId)).slice(0, totalBudget)
       .sort(([a], [b]) => compareStableId(a, b))
     : candidates;
+  const capacityByRoute = new Map(active.map(([routeId, , capacity]) => [routeId, capacity]));
   const budgets = new Map(active.map(([routeId]) => [routeId, 1]));
   let remaining = totalBudget - active.length;
-  let allocatable = active.filter(([routeId]) => (budgets.get(routeId) ?? 0) < maximumPerRoute);
+  let allocatable = active.filter(([routeId, , capacity]) => (budgets.get(routeId) ?? 0) < capacity);
 
   while (remaining > 0 && allocatable.length > 0) {
     const weightTotal = allocatable.reduce((sum, [routeId]) => sum + (demandByRoute.get(routeId) ?? 0), 0);
     if (!(weightTotal > 0) || !Number.isFinite(weightTotal)) break;
     const capped = allocatable.filter(([routeId]) => {
       const current = budgets.get(routeId) ?? 0;
-      return current + remaining * (demandByRoute.get(routeId) ?? 0) / weightTotal >= maximumPerRoute;
+      const capacity = capacityByRoute.get(routeId) ?? maximumPerRoute;
+      return current + remaining * (demandByRoute.get(routeId) ?? 0) / weightTotal >= capacity;
     });
     if (capped.length > 0) {
       const cappedIds = new Set(capped.map(([routeId]) => routeId));
       for (const [routeId] of capped) {
         const current = budgets.get(routeId) ?? 0;
-        const added = maximumPerRoute - current;
-        budgets.set(routeId, maximumPerRoute);
+        const capacity = capacityByRoute.get(routeId) ?? maximumPerRoute;
+        const added = capacity - current;
+        budgets.set(routeId, capacity);
         remaining -= added;
       }
       allocatable = allocatable.filter(([routeId]) => !cappedIds.has(routeId));
@@ -58,7 +62,8 @@ export function allocateBoundedGraphBudgets(
     let assigned = 0;
     for (const share of shares) {
       const current = budgets.get(share.routeId) ?? 0;
-      const added = Math.min(share.whole, maximumPerRoute - current);
+      const capacity = capacityByRoute.get(share.routeId) ?? maximumPerRoute;
+      const added = Math.min(share.whole, capacity - current);
       budgets.set(share.routeId, current + added);
       assigned += added;
     }
@@ -67,11 +72,12 @@ export function allocateBoundedGraphBudgets(
     for (const share of byRemainder) {
       if (remaining <= 0) break;
       const current = budgets.get(share.routeId) ?? 0;
-      if (current >= maximumPerRoute) continue;
+      const capacity = capacityByRoute.get(share.routeId) ?? maximumPerRoute;
+      if (current >= capacity) continue;
       budgets.set(share.routeId, current + 1);
       remaining--;
     }
-    allocatable = allocatable.filter(([routeId]) => (budgets.get(routeId) ?? 0) < maximumPerRoute);
+    allocatable = allocatable.filter(([routeId, , capacity]) => (budgets.get(routeId) ?? 0) < capacity);
     if (assigned === 0 && remaining > 0 && allocatable.length === 0) break;
   }
 
