@@ -1,17 +1,53 @@
 import { bboxOf, type ConnectionReport, type MobilityAsset, type MobilityAssetType, type MobilityStation } from './types';
 import { fetchJson } from './safeFetch';
 import { gbfsTimestamp, normalizeGeofencingZones, type GbfsGeofence, type GbfsGeofenceRule } from './gbfsGeofences';
+import { UKRAINE_BOUNDARY } from './ukraineBoundary';
 
 type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
 const validPoint = (lon: unknown, lat: unknown): lon is number => typeof lon === 'number' && typeof lat === 'number' && Number.isFinite(lon) && Number.isFinite(lat) && Math.abs(lon) <= 180 && Math.abs(lat) <= 90;
 
-/** Conservative Ukraine envelope used only to catch a source whose live coordinates contradict its declared UA coverage. */
-export function pointIsInsideUkraine([longitude, latitude]: [number, number]): boolean {
-  return longitude >= 21.9 && longitude <= 40.3 && latitude >= 44.2 && latitude <= 52.5;
+type LonLat = readonly [number, number];
+
+function pointOnRingEdge([longitude, latitude]: LonLat, ring: readonly LonLat[]): boolean {
+  for (let index = 0; index < ring.length; index++) {
+    const [x1, y1] = ring[index]!;
+    const [x2, y2] = ring[(index + 1) % ring.length]!;
+    const cross = (longitude - x1) * (y2 - y1) - (latitude - y1) * (x2 - x1);
+    const scale = Math.max(1, Math.abs(x1), Math.abs(x2), Math.abs(y1), Math.abs(y2));
+    if (Math.abs(cross) <= Number.EPSILON * 16 * scale
+      && longitude >= Math.min(x1, x2) - 1e-10 && longitude <= Math.max(x1, x2) + 1e-10
+      && latitude >= Math.min(y1, y2) - 1e-10 && latitude <= Math.max(y1, y2) + 1e-10) return true;
+  }
+  return false;
 }
 
-/** Reject a Ukrainian feed's polygon layer when none of its vertices touch the conservative Ukraine envelope. */
+function pointInRing(point: LonLat, ring: readonly LonLat[]): boolean {
+  if (pointOnRingEdge(point, ring)) return true;
+  const [longitude, latitude] = point;
+  let inside = false;
+  for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index++) {
+    const [currentLongitude, currentLatitude] = ring[index]!;
+    const [previousLongitude, previousLatitude] = ring[previous]!;
+    const crossesLatitude = (currentLatitude > latitude) !== (previousLatitude > latitude);
+    if (crossesLatitude && longitude < (previousLongitude - currentLongitude) * (latitude - currentLatitude)
+      / (previousLatitude - currentLatitude) + currentLongitude) inside = !inside;
+  }
+  return inside;
+}
+
+/** Point-in-polygon against the bundled Natural Earth 1:10m Ukraine-view boundary. */
+export function pointIsInsideUkraine([longitude, latitude]: [number, number]): boolean {
+  // Reject impossible points cheaply before evaluating the detailed multipolygon.
+  if (longitude < 22.1 || longitude > 40.2 || latitude < 44.3 || latitude > 52.4) return false;
+  return UKRAINE_BOUNDARY.coordinates.some((polygon) => {
+    const [outerRing, ...holes] = polygon;
+    if (!outerRing || !pointInRing([longitude, latitude], outerRing)) return false;
+    return !holes.some((hole) => pointInRing([longitude, latitude], hole));
+  });
+}
+
+/** Reject a Ukrainian feed's polygon layer when none of its vertices fall inside the Ukraine boundary. */
 export function geometryHasUkrainePoint(coordinates: unknown): boolean {
   if (!Array.isArray(coordinates)) return false;
   if (coordinates.length >= 2 && typeof coordinates[0] === 'number' && typeof coordinates[1] === 'number') {

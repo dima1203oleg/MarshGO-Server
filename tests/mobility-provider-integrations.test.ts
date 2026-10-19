@@ -138,7 +138,13 @@ test('GBFS normalization preserves only approved Zelectra links, current battery
 
 test('Ukrainian GBFS coverage rejects live records outside the declared country', () => {
   assert.equal(pointIsInsideUkraine([30.52,50.45]), true);
+  assert.equal(pointIsInsideUkraine([24.0316,49.8429]), true, 'Lviv is in Ukraine');
+  assert.equal(pointIsInsideUkraine([34.1084,44.9521]), true, 'Ukraine-view boundary includes Crimea');
+  assert.equal(pointIsInsideUkraine([36.23,49.99]), true, 'Kharkiv is in Ukraine');
   assert.equal(pointIsInsideUkraine([-77.04,-12.04]), false);
+  assert.equal(pointIsInsideUkraine([23.5,50.5]), false, 'Poland is outside Ukraine even though it is inside the old envelope');
+  assert.equal(pointIsInsideUkraine([28.8,47.0]), false, 'Moldova is outside Ukraine even though it is inside the old envelope');
+  assert.equal(pointIsInsideUkraine([26.1,44.4]), false, 'Romania is outside Ukraine even though it is inside the old envelope');
   assert.equal([
     [-77.04,-12.04] as [number,number], [-77.05,-12.03] as [number,number],
   ].filter(pointIsInsideUkraine).length, 0);
