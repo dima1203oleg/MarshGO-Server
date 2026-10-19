@@ -6,6 +6,7 @@ import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type 
 import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
 import { retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
+import { compareStableId } from './stableOrdering';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
@@ -192,11 +193,6 @@ function gtfsSegmentRetentionPriority(key: string): number {
     hash = Math.imul(hash ^ key.charCodeAt(index), 0x01000193);
   }
   return hash >>> 0;
-}
-
-/** Compare opaque GTFS identifiers with a locale-independent, reproducible order. */
-function compareStableId(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**

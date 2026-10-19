@@ -1,4 +1,5 @@
 import type { JourneyOption, JourneyStrategy } from './types';
+import { compareStableId } from './stableOrdering';
 
 export interface ScoreWeights {
   time: number;
@@ -199,7 +200,7 @@ export function scoreJourneys<T extends JourneyOption>(
         return a.journey.priceMinor - b.journey.priceMinor;
       }
     }
-    return a.score - b.score || a.journey.id.localeCompare(b.journey.id);
+    return a.score - b.score || compareStableId(a.journey.id, b.journey.id);
   });
 }
 
