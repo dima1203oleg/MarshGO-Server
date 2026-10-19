@@ -527,6 +527,15 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
   assert.equal(result.searchTruncated, true, 'omitting graph candidates must be visible as a partial search');
   assert.equal(result.candidateGraphTruncated, true, 'the internal result identifies graph-level truncation');
   assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
+
+  const reordered = structuredClone(timetable);
+  reordered.trips = new Map([...reordered.trips].reverse());
+  const reorderedResult = findGtfsItinerariesWithStats(reordered, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+  assert.deepEqual(reorderedResult.itineraries.map(({ id }) => id), result.itineraries.map(({ id }) => id),
+    'bounded retention and leftover-budget fill must ignore GTFS Map insertion order');
+  assert.equal(reorderedResult.searchTruncated, result.searchTruncated);
 });
 
 test('oversized single trips retain a useful exact direct segment inside the bounded sample', () => {

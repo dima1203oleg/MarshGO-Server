@@ -193,6 +193,8 @@ type RetainedGtfsSegment = {
   sampleKey?: string;
 };
 type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
+// Small deterministic endpoint-only reservoir to use route-budget gaps left by whole-trip bundles.
+const MAX_ROUTE_OVERFLOW_SEGMENTS = 100;
 
 // Keep the same deterministic, order-independent sample for a feed snapshot.
 // GTFS feeds are often written in departure-time order, so a simple prefix cap
@@ -1311,6 +1313,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
 
   const segmentsByRoute = new Map<string, RetainedGtfsTrip[]>();
   const retainedSegmentCountByRoute = new Map<string, number>();
+  const overflowSegmentsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
   const candidateStopCountByRoute = new Map<string, number>();
   for (const [stopId, routeIds] of routesByStop) {
     if (!interchangeStopIds.has(stopId)) continue;
@@ -1477,7 +1480,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     }
     return compareStableId(left.sampleKey ?? '', right.sampleKey ?? '');
   };
-  for (const [tripId, trip] of feed.trips) {
+  // Feed trip insertion order is not a stable selection policy. Keep graph
+  // retention and any bounded overflow fill reproducible across feed encodings.
+  for (const [tripId, trip] of [...feed.trips].sort(([left], [right]) => compareStableId(left, right))) {
     tripsConsidered++;
     const route = feed.routes.get(trip.routeId);
     const stops = feed.stopTimes.get(tripId);
@@ -1584,6 +1589,18 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         segmentGraphTruncated = true;
       }
       if (tripCandidates.length) {
+        const overflowCapacity = Math.min(MAX_ROUTE_OVERFLOW_SEGMENTS, graphSegmentLimitPerRoute);
+        const overflow = overflowSegmentsByRoute.get(trip.routeId)
+          ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
+        for (const candidate of tripCandidates) {
+          const startsAtOrigin = originStopIds.has(candidate.segment.originStop.id);
+          const canCatchOrigin = startsAtOrigin && candidate.segment.departureAt.getTime()
+            >= input.earliestDeparture.getTime()
+              + Math.ceil(candidate.segment.distanceToOriginStopMeters / 1.25) * 1000;
+          const endsAtDestination = destinationStopIds.has(candidate.segment.destinationStop.id);
+          if (canCatchOrigin || endsAtDestination) overflow.consider(candidate);
+        }
+        overflowSegmentsByRoute.set(trip.routeId, overflow);
         for (const { segment, fromIndex, toIndex } of tripCandidates) {
           shapeIndexesBySegment.set(segment, { fromIndex, toIndex, serviceDate });
           if (dated?.update?.stops.length) {
@@ -1615,11 +1632,23 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       }
     }
   }
-  const segments = [...segmentsByRoute.values()].flatMap((trips) => trips.flatMap((trip) => trip.segments.map(({ segment }) => segment)));
+  const selectedSegmentsByRoute = new Map<string, RetainedGtfsSegment[]>();
+  for (const [routeId, trips] of segmentsByRoute) {
+    const selected = trips.flatMap((trip) => trip.segments);
+    const selectedKeys = new Set(selected.map(({ segment }) =>
+      `${segment.providerId}\u0000${segment.serviceDate}\u0000${segment.tripId}\u0000${segment.originStop.id}\u0000${segment.destinationStop.id}\u0000${segment.departureAt.getTime()}\u0000${segment.arrivalAt.getTime()}`));
+    const remaining = Math.max(0, (graphSegmentBudgetByRoute.get(routeId) ?? 0) - selected.length);
+    const overflow = overflowSegmentsByRoute.get(routeId)?.toSortedArray() ?? [];
+    const fill = overflow.filter(({ segment }) => !selectedKeys.has(
+      `${segment.providerId}\u0000${segment.serviceDate}\u0000${segment.tripId}\u0000${segment.originStop.id}\u0000${segment.destinationStop.id}\u0000${segment.departureAt.getTime()}\u0000${segment.arrivalAt.getTime()}`))
+      .slice(0, remaining);
+    selectedSegmentsByRoute.set(routeId, [...selected, ...fill]);
+  }
+  const segments = [...selectedSegmentsByRoute.values()].flatMap((routeSegments) => routeSegments.map(({ segment }) => segment));
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
     serviceDates: serviceDates.size, corridorStops: corridorStops.size,
     candidateRouteCount, graphRoutesWithCandidates: segmentsByRoute.size,
-    graphRoutesAtLimit: [...retainedSegmentCountByRoute].filter(([routeId, count]) => count === graphSegmentBudgetByRoute.get(routeId)).length,
+    graphRoutesAtLimit: [...selectedSegmentsByRoute].filter(([routeId, routeSegments]) => routeSegments.length === graphSegmentBudgetByRoute.get(routeId)).length,
     graphSegmentBudgetTotal: [...graphSegmentBudgetByRoute.values()].reduce((sum, value) => sum + value, 0),
     graphSegmentBudgetMax: Math.max(0, ...graphSegmentBudgetByRoute.values()),
     segmentGraphTruncated: Number(segmentGraphTruncated) });
