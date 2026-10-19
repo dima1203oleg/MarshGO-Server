@@ -11,6 +11,15 @@ export function pointIsInsideUkraine([longitude, latitude]: [number, number]): b
   return longitude >= 21.9 && longitude <= 40.3 && latitude >= 44.2 && latitude <= 52.5;
 }
 
+/** Reject a Ukrainian feed's polygon layer when none of its vertices touch the conservative Ukraine envelope. */
+export function geometryHasUkrainePoint(coordinates: unknown): boolean {
+  if (!Array.isArray(coordinates)) return false;
+  if (coordinates.length >= 2 && typeof coordinates[0] === 'number' && typeof coordinates[1] === 'number') {
+    return pointIsInsideUkraine([coordinates[0], coordinates[1]]);
+  }
+  return coordinates.some(geometryHasUkrainePoint);
+}
+
 /** GBFS 2.x nests feeds per language ({data:{en:{feeds}}}); 3.x has {data:{feeds}}. */
 export function discoverFeeds(discovery: unknown): Map<string, string> {
   const feeds = new Map<string, string>();
@@ -33,7 +42,7 @@ export function assetTypeFor(formFactor: unknown, propulsion: unknown): Mobility
   }
 }
 
-export function normalizeVehicles(providerId: string, vehicleTypes: unknown, status: unknown): { assets: MobilityAsset[]; rejected: number } {
+export function normalizeVehicles(providerId: string, vehicleTypes: unknown, status: unknown, expectedCountry?: string): { assets: MobilityAsset[]; rejected: number } {
   const typeById = new Map<string, MobilityAssetType>();
   const typeList = isObject(vehicleTypes) && isObject(vehicleTypes.data) && Array.isArray(vehicleTypes.data.vehicle_types) ? vehicleTypes.data.vehicle_types : [];
   for (const type of typeList) if (isObject(type) && typeof type.vehicle_type_id === 'string') { const mapped = assetTypeFor(type.form_factor, type.propulsion_type); if (mapped) typeById.set(type.vehicle_type_id, mapped); }
@@ -46,7 +55,8 @@ export function normalizeVehicles(providerId: string, vehicleTypes: unknown, sta
     const typeId = typeof item.vehicle_type_id === 'string' ? item.vehicle_type_id : undefined;
     const type = (typeId && typeById.get(typeId)) || (item.is_reserved === undefined && !typeId ? 'BIKE' : null);
     const lon = item.lon, lat = item.lat;
-    if (!id || !type || !validPoint(lon, lat)) { rejected++; continue; }
+    if (!id || !type || !validPoint(lon, lat)
+      || (expectedCountry === 'UA' && !pointIsInsideUkraine([lon as number, lat as number]))) { rejected++; continue; }
     const asset: MobilityAsset = { id, providerId, type, location: [lon, lat as number], available: item.is_reserved !== true && item.is_disabled !== true };
     if (typeof item.current_fuel_percent === 'number' && Number.isFinite(item.current_fuel_percent) && item.current_fuel_percent >= 0 && item.current_fuel_percent <= 100) asset.batteryPercent = item.current_fuel_percent;
     if (typeof item.current_range_meters === 'number') asset.rangeMeters = item.current_range_meters;
@@ -71,14 +81,15 @@ export function normalizeVehicles(providerId: string, vehicleTypes: unknown, sta
   return { assets, rejected };
 }
 
-export function normalizeStations(providerId: string, info: unknown, status: unknown): { stations: MobilityStation[]; rejected: number } {
+export function normalizeStations(providerId: string, info: unknown, status: unknown, expectedCountry?: string): { stations: MobilityStation[]; rejected: number } {
   const infoList = isObject(info) && isObject(info.data) && Array.isArray(info.data.stations) ? info.data.stations : [];
   const statusList = isObject(status) && isObject(status.data) && Array.isArray(status.data.stations) ? status.data.stations : [];
   const statusById = new Map<string, Json>();
   for (const item of statusList) if (isObject(item) && typeof item.station_id === 'string') statusById.set(item.station_id, item);
   const stations: MobilityStation[] = []; let rejected = 0;
   for (const item of infoList) {
-    if (!isObject(item) || typeof item.station_id !== 'string' || !validPoint(item.lon, item.lat)) { rejected++; continue; }
+    if (!isObject(item) || typeof item.station_id !== 'string' || !validPoint(item.lon, item.lat)
+      || (expectedCountry === 'UA' && !pointIsInsideUkraine([item.lon as number, item.lat as number]))) { rejected++; continue; }
     const live = statusById.get(item.station_id);
     const rawName = isObject(item) ? item.name : undefined;
     const name = typeof rawName === 'string' ? rawName : Array.isArray(rawName) && isObject(rawName[0]) && typeof rawName[0].text === 'string' ? rawName[0].text : item.station_id;
@@ -111,8 +122,8 @@ export async function testGbfsConnection(providerId: string, discoveryUrl: strin
   const statusFeed = vehicleStatus ?? freeBikes;
   let rejected = 0;
   const points: Array<[number, number]> = [];
-  if (statusFeed) { const { assets, rejected: bad } = normalizeVehicles(providerId, vehicleTypes ?? undefined, statusFeed); counts.vehicles = assets.length; rejected += bad; for (const asset of assets) points.push(asset.location); checks.push({ name: 'Vehicles', ok: assets.length > 0, detail: `${assets.length} valid, ${bad} rejected` }); }
-  if (stationInfo) { const { stations, rejected: bad } = normalizeStations(providerId, stationInfo, stationStatus ?? undefined); counts.stations = stations.length; rejected += bad; for (const station of stations) points.push(station.location); checks.push({ name: 'Stations', ok: stations.length > 0 || (counts.vehicles ?? 0) > 0, detail: `${stations.length} valid, ${bad} rejected` }); }
+  if (statusFeed) { const { assets, rejected: bad } = normalizeVehicles(providerId, vehicleTypes ?? undefined, statusFeed, expectedCountry); counts.vehicles = assets.length; rejected += bad; for (const asset of assets) points.push(asset.location); checks.push({ name: 'Vehicles', ok: assets.length > 0, detail: `${assets.length} valid, ${bad} rejected` }); }
+  if (stationInfo) { const { stations, rejected: bad } = normalizeStations(providerId, stationInfo, stationStatus ?? undefined, expectedCountry); counts.stations = stations.length; rejected += bad; for (const station of stations) points.push(station.location); checks.push({ name: 'Stations', ok: stations.length > 0 || (counts.vehicles ?? 0) > 0, detail: `${stations.length} valid, ${bad} rejected` }); }
   if (!statusFeed && !stationInfo) { checks.push({ name: 'Vehicle or station data', ok: false }); return fail('No vehicle or station feed'); }
   if (expectedCountry === 'UA') {
     const localPoints = points.filter(pointIsInsideUkraine).length;
@@ -163,7 +174,7 @@ function normalizePricingPlans(payload: unknown): NonNullable<GbfsSnapshot['pric
 }
 
 /** Loads the current vehicles and stations of a GBFS provider (used by the nearby-assets endpoint, cached by the caller). */
-export async function loadGbfsSnapshot(providerId: string, discoveryUrl: string): Promise<GbfsSnapshot> {
+export async function loadGbfsSnapshot(providerId: string, discoveryUrl: string, expectedCountry?: string): Promise<GbfsSnapshot> {
   const feeds = discoverFeeds((await fetchJson(discoveryUrl)).data);
   const load = async (name: string) => { const url = feeds.get(name); if (!url) return undefined; try { return (await fetchJson(url)).data; } catch { return undefined; } };
   const [vehicleTypes, vehicleStatus, freeBikes, stationInfo, stationStatus, geofencing, pricingPlans] = await Promise.all([load('vehicle_types'), load('vehicle_status'), load('free_bike_status'), load('station_information'), load('station_status'), load('geofencing_zones'), load('system_pricing_plans')]);
@@ -176,9 +187,10 @@ export async function loadGbfsSnapshot(providerId: string, discoveryUrl: string)
   const lastUpdated = updatedValues.length ? Math.min(...updatedValues) : null;
   const staleAfterSeconds = ttlSeconds === null ? 60 : Math.max(15, ttlSeconds === 0 ? 30 : ttlSeconds * 2);
   return {
-    assets: statusFeed ? normalizeVehicles(providerId, vehicleTypes, statusFeed).assets : [],
-    stations: stationInfo ? normalizeStations(providerId, stationInfo, stationStatus).stations : [],
-    geofences: zones.geofences, globalRules: zones.globalRules,
+    assets: statusFeed ? normalizeVehicles(providerId, vehicleTypes, statusFeed, expectedCountry).assets : [],
+    stations: stationInfo ? normalizeStations(providerId, stationInfo, stationStatus, expectedCountry).stations : [],
+    geofences: expectedCountry === 'UA' ? zones.geofences.filter((zone) => geometryHasUkrainePoint(zone.geometry.coordinates)) : zones.geofences,
+    globalRules: zones.globalRules,
     pricingPlans: normalizePricingPlans(pricingPlans),
     fetchedAt: Date.now(), lastUpdated, ttlSeconds, staleAfterSeconds,
   };

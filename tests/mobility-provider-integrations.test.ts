@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { canRent, type RentalLocation, type RentalNetworkRule } from '../server/mobility/rentalCompatibility';
 import { geofenceRulesAt, normalizeGeofencingZones } from '../server/mobility/gbfsGeofences';
-import { normalizeVehicles, pointIsInsideUkraine, type GbfsSnapshot } from '../server/mobility/gbfs';
+import { geometryHasUkrainePoint, normalizeStations, normalizeVehicles, pointIsInsideUkraine, type GbfsSnapshot } from '../server/mobility/gbfs';
 import { buildMicromobilityGeofenceFeatures, buildMicromobilityPointFeatures, buildStaticRentalPointFeature } from '../server/mobility/micromobilityFeatures';
 import { normalizeOsmBikeRental, parseOsmGeoJsonSequence } from '../server/mobility/osmBikeRentals';
 import { kiwitaxiConfigured, parseKiwitaxiTsv } from '../server/mobility/kiwitaxiTsv';
@@ -142,6 +142,28 @@ test('Ukrainian GBFS coverage rejects live records outside the declared country'
   assert.equal([
     [-77.04,-12.04] as [number,number], [-77.05,-12.03] as [number,number],
   ].filter(pointIsInsideUkraine).length, 0);
+  assert.equal(geometryHasUkrainePoint([[[-77.05,-12.03],[-77.03,-12.03],[-77.03,-12.05],[-77.05,-12.05],[-77.05,-12.03]]]), false);
+  assert.equal(geometryHasUkrainePoint([[[30.5,50.4],[30.6,50.4],[30.6,50.5],[30.5,50.5],[30.5,50.4]]]), true);
+});
+
+test('Ukrainian GBFS snapshots exclude out-of-country vehicles and stations while non-UA providers keep global coverage', () => {
+  const vehicleTypes = { data: { vehicle_types: [{ vehicle_type_id: 'scooter', form_factor: 'scooter', propulsion_type: 'electric' }] } };
+  const vehicleStatus = { last_updated: Math.floor(now.getTime() / 1000), data: { vehicles: [
+    { vehicle_id: 'kyiv-scooter', vehicle_type_id: 'scooter', lon: 30.52, lat: 50.45 },
+    { vehicle_id: 'lima-scooter', vehicle_type_id: 'scooter', lon: -77.04, lat: -12.04 },
+  ] } };
+  const ukraineVehicles = normalizeVehicles('zelectra', vehicleTypes, vehicleStatus, 'UA');
+  assert.deepEqual(ukraineVehicles.assets.map((asset) => asset.id), ['kyiv-scooter']);
+  assert.equal(ukraineVehicles.rejected, 1);
+  assert.deepEqual(normalizeVehicles('international-provider', vehicleTypes, vehicleStatus).assets.map((asset) => asset.id), ['kyiv-scooter', 'lima-scooter']);
+
+  const stationInfo = { data: { stations: [
+    { station_id: 'kyiv-station', name: 'Kyiv', lon: 30.52, lat: 50.45 },
+    { station_id: 'lima-station', name: 'Lima', lon: -77.04, lat: -12.04 },
+  ] } };
+  const ukraineStations = normalizeStations('zelectra', stationInfo, { last_updated: vehicleStatus.last_updated, data: { stations: [] } }, 'UA');
+  assert.deepEqual(ukraineStations.stations.map((station) => station.id), ['kyiv-station']);
+  assert.equal(ukraineStations.rejected, 1);
 });
 
 test('micromobility map features separate fresh inventory, pricing, geofences, and static rental unknowns', () => {
