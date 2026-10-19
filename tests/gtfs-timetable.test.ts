@@ -137,7 +137,7 @@ function crowdedBusStops() {
   result.trips.clear();
   result.stopTimes.clear();
   result.stopTimesByStop.clear();
-  for (let index = 0; index < 15; index++) {
+  for (let index = 0; index < 25; index++) {
     const originId = `noise-origin-${index}`;
     const destinationId = `noise-destination-${index}`;
     result.stops.set(originId, { id: originId, name: `Bus stop ${index}`, lon: 24.02001 + index * 0.00001, lat: 49.8401 });
@@ -654,12 +654,23 @@ test('composes four scheduled transport segments with three feasible transfers',
   ]);
 });
 
-test('keeps the nearest stop for each transport type and reports the bounded stop search', () => {
+test('keeps nearest stops, represents distinct routes, and reports the bounded stop search', () => {
   const rail = transferFeed({ routeType: '2', routeName: 'Regional train', fromId: 'rail-origin', fromName: 'Rail station',
     fromLon: '24.0203', fromLat: '49.8401', toId: 'rail-destination', toName: 'Rail destination',
     toLon: '24.0300', toLat: '49.8500', departure: '08:00:00', arrival: '08:40:00' });
+  const busyBuses = crowdedBusStops();
+  busyBuses.routes.set('r2', { name: 'Express bus', mode: 'BUS', transportType: 'bus' });
+  busyBuses.trips.set('express-trip', { routeId: 'r2', serviceId: 'weekday', headsign: 'Destination' });
+  busyBuses.stops.set('express-origin', { id: 'express-origin', name: 'Express stop', lon: 24.0204, lat: 49.84015 });
+  busyBuses.stops.set('express-destination', { id: 'express-destination', name: 'Express destination', lon: 24.03, lat: 49.85 });
+  busyBuses.stopTimes.set('express-trip', [
+    { stopId: 'express-origin', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+    { stopId: 'express-destination', sequence: 2, arrivalSeconds: 8 * 3600 + 25 * 60, departureSeconds: 8 * 3600 + 25 * 60, pickupType: 0, dropOffType: 0 },
+  ]);
+  busyBuses.stopTimesByStop.set('express-origin', [{ tripId: 'express-trip', index: 0 }]);
+  busyBuses.stopTimesByStop.set('express-destination', [{ tripId: 'express-trip', index: 1 }]);
   const merged = mergeGtfsTimetables([
-    { providerId: 'busy-city', providerName: 'Busy city buses', providerCity: 'Львів', feed: crowdedBusStops() },
+    { providerId: 'busy-city', providerName: 'Busy city buses', providerCity: 'Львів', feed: busyBuses },
     { providerId: 'rail', providerName: 'Regional rail', providerCity: 'Україна', feed: rail },
   ])!;
   const result = findGtfsItinerariesWithStats(merged, {
@@ -667,9 +678,11 @@ test('keeps the nearest stop for each transport type and reports the bounded sto
     maximumStopDistanceMeters: 1000,
     maximumTransfers: 0,
   });
-  assert.equal(result.itineraries.length, 1);
-  assert.equal(result.itineraries[0].segments[0].transportType, 'train');
-  assert.equal(result.itineraries[0].segments[0].providerId, 'rail');
+  assert.equal(result.itineraries.length, 2);
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments[0].transportType === 'train'
+    && itinerary.segments[0].providerId === 'rail'));
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.length === 1
+    && itinerary.segments[0].routeId.endsWith(':r2')), 'the distinct bus route at the 21st-nearest stop must remain searchable');
   assert.equal(result.searchTruncated, true);
 });
 

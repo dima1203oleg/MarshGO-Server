@@ -11,8 +11,9 @@ const CACHE_TTL_MS = 6 * 60 * 60_000;
 const FAILED_FEED_CACHE_TTL_MS = 5 * 60_000;
 const MERGED_FEED_CACHE_TTL_MS = 60_000;
 const MAX_MERGED_FEED_CACHE_ENTRIES = 2;
-const MAX_STOPS_PER_SIDE = 20;
-const MAX_STOPS_PER_TRANSPORT_TYPE = 2;
+const MAX_NEAREST_STOPS_PER_SIDE = 20;
+const MAX_STOPS_PER_SIDE = 48;
+const MAX_STOPS_PER_ROUTE = 2;
 const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
 export const MAX_GTFS_TRANSFERS = 4;
@@ -946,27 +947,42 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const closestStops = (point: [number, number], radius: number) => {
     const ranked = [...feed.stops.values()]
       .filter((stop) => feed.stopTimesByStop.has(stop.id))
-      .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]), types: new Set<GtfsTransportType>() }))
+      .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]) }))
       .filter(({ distance }) => distance <= radius)
       .sort((a, b) => a.distance - b.distance);
     const selected = new Map<string, typeof ranked[number]>();
-    for (const item of ranked.slice(0, MAX_STOPS_PER_SIDE)) selected.set(item.stop.id, item);
-    const selectedByType = new Map<GtfsTransportType, number>();
-    for (const item of ranked) {
-      for (const entry of feed.stopTimesByStop.get(item.stop.id) ?? []) {
+    const selectedByRoute = new Map<string, number>();
+    const routeIdsByStop = new Map<string, Set<string>>();
+    const routesAtStop = (stopId: string) => {
+      const cached = routeIdsByStop.get(stopId);
+      if (cached) return cached;
+      const routeIds = new Set<string>();
+      for (const entry of feed.stopTimesByStop.get(stopId) ?? []) {
         const trip = feed.trips.get(entry.tripId);
-        const route = trip ? feed.routes.get(trip.routeId) : undefined;
-        if (!route) continue;
-        const providerCity = feed.providersByRoute?.get(trip!.routeId)?.city ?? input.providerCity;
-        const type = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
-        item.types.add(type);
+        if (trip && feed.routes.has(trip.routeId)) routeIds.add(trip.routeId);
       }
-      for (const type of item.types) {
-        const count = selectedByType.get(type) ?? 0;
-        if (count >= MAX_STOPS_PER_TRANSPORT_TYPE) continue;
-        if (!selected.has(item.stop.id)) selected.set(item.stop.id, item);
-        selectedByType.set(type, count + 1);
+      routeIdsByStop.set(stopId, routeIds);
+      return routeIds;
+    };
+    const addSelected = (item: typeof ranked[number]) => {
+      selected.set(item.stop.id, item);
+      for (const routeId of routesAtStop(item.stop.id)) {
+        selectedByRoute.set(routeId, (selectedByRoute.get(routeId) ?? 0) + 1);
       }
+    };
+
+    // Preserve nearby alternatives, then add stops that expose a route not
+    // represented by those nearest stops. A mode-only cap discarded distinct
+    // bus/tram routes whenever the closest stops were already served by that
+    // same mode, including routes whose first useful stop ranked 21st.
+    for (const item of ranked.slice(0, MAX_NEAREST_STOPS_PER_SIDE)) addSelected(item);
+    for (const item of ranked) {
+      if (selected.has(item.stop.id)) continue;
+      const addsRouteCoverage = [...routesAtStop(item.stop.id)]
+        .some((routeId) => (selectedByRoute.get(routeId) ?? 0) < MAX_STOPS_PER_ROUTE);
+      if (!addsRouteCoverage) continue;
+      if (selected.size >= MAX_STOPS_PER_SIDE) { stopSelectionTruncated = true; break; }
+      addSelected(item);
     }
     if (selected.size < ranked.length) stopSelectionTruncated = true;
     return [...selected.values()];
