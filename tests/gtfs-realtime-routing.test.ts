@@ -63,8 +63,10 @@ test('accepts only fresh, timestamped, full-snapshot GTFS-Realtime trip updates'
   assert.equal(parsed.fresh, true);
   assert.equal(parsed.updates.get(gtfsRealtimeTripUpdateKey('t1', '2026-10-12'))?.stops[0]?.arrival?.delaySeconds, 900);
 
-  const stale = parseGtfsRealtimeTripUpdates(realtimeBytes({ timestamp: Math.floor((now.getTime() - 6 * 60_000) / 1000) }), now);
+  const staleTimestamp = new Date(now.getTime() - 6 * 60_000);
+  const stale = parseGtfsRealtimeTripUpdates(realtimeBytes({ timestamp: Math.floor(staleTimestamp.getTime() / 1000) }), now);
   assert.equal(stale.reason, 'STALE');
+  assert.equal(stale.feedTimestamp.toISOString(), staleTimestamp.toISOString(), 'retain the source time so the API can explain why it fell back to schedule data');
   assert.equal(stale.updates.size, 0);
 
   const differential = parseGtfsRealtimeTripUpdates(realtimeBytes({
