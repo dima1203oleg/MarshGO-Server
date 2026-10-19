@@ -1394,6 +1394,11 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       + `\u0001${previous.destinationTransferNodeIds.join('\u0000')}`;
   const transferCandidateViewKey = (previous: GtfsDirectJourney) => `${transferCandidateKey(previous)}\u0001${previous.routeId}`;
   const transferCandidateViewCache = new Map<string, GtfsDirectJourney[]>();
+  // At each transfer depth, many scheduled segments lead to stops that cannot
+  // reach the destination with the remaining leg budget. Cache a reachability-
+  // filtered view once per equivalent transfer state so queue expansion does
+  // not spend one search step per known-dead segment on every path.
+  const transferCandidateReachableCache = new Map<string, GtfsDirectJourney[]>();
 
   const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
   type TransferMeasure = { walkingMeters: number; walkingSeconds: number; geometry: Array<[number, number]> | null; inSeat: boolean };
@@ -1683,6 +1688,15 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     }
     reachableWithin.push(reachable);
   }
+  const transferCandidatesWithin = (previous: GtfsDirectJourney, remainingLegs: number) => {
+    const cacheKey = `${transferCandidateViewKey(previous)}\u0001${remainingLegs}`;
+    const cached = transferCandidateReachableCache.get(cacheKey);
+    if (cached) return cached;
+    const canReach = reachableWithin[remainingLegs - 1];
+    const candidates = transferCandidates(previous).filter((candidate) => canReach.has(candidate.destinationStop.id));
+    transferCandidateReachableCache.set(cacheKey, candidates);
+    return candidates;
+  };
   debugStage('reachability-built', { transferStates: transferCandidateCache.size,
     routeStates: transferCandidateViewCache.size, reachableStops: reachableWithin.at(-1)?.size ?? 0 });
   const maxFirstDeparture = input.latestDeparture.getTime();
@@ -1860,7 +1874,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const previousIds = new Set(path.map((segment) => segment.tripId));
     const visitedStops = new Set(path.map((segment) => segment.originStop.id));
     visitedStops.add(last.destinationStop.id);
-    const choices = transferCandidates(last);
+    const choices = transferCandidatesWithin(last, remainingLegs);
     const latestNext = Math.min(last.arrivalAt.getTime() + maximumWaitSeconds * 1000, journeyEnd.getTime());
     let low = 0, high = choices.length;
     while (low < high) {
