@@ -529,6 +529,54 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
   assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
 });
 
+test('oversized single trips retain a useful exact direct segment inside the bounded sample', () => {
+  const timetable = feed();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  const stopIds = ['origin', 'dense-destination'];
+  for (let index = 1; index <= 300; index++) stopIds.push(`dense-stop-${String(index).padStart(3, '0')}`);
+  timetable.stops.set('dense-destination', { id: 'dense-destination', name: 'Destination stop', lon: 24.0301, lat: 49.8501 });
+  for (let index = 1; index <= 300; index++) {
+    const stopId = `dense-stop-${String(index).padStart(3, '0')}`;
+    const fraction = index / 300;
+    timetable.stops.set(stopId, {
+      id: stopId, name: stopId,
+      lon: 24.0301 + fraction * 0.001,
+      lat: 49.8501 + fraction * 0.001,
+    });
+  }
+  timetable.routes.set('dense-support-route', { name: 'Support', mode: 'TRAM', transportType: 'tram' });
+  const makeStopTimes = () => stopIds.map((stopId, index) => ({
+    stopId,
+    sequence: index + 1,
+    arrivalSeconds: 8 * 3600 + index * 60,
+    departureSeconds: 8 * 3600 + index * 60,
+    pickupType: 0,
+    dropOffType: 0,
+  }));
+  for (const [tripId, routeId] of [['oversized-trip', 'r'], ['oversized-support-trip', 'dense-support-route']] as const) {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    const stopTimes = makeStopTimes();
+    timetable.stopTimes.set(tripId, stopTimes);
+    stopTimes.forEach((stopTime, index) => {
+      timetable.stopTimesByStop.set(stopTime.stopId, [
+        ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+      ]);
+    });
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+
+  assert.ok(result.candidateGraphTruncated, 'a bounded sample must report omitted candidate graph segments');
+  assert.ok(result.itineraries.some((journey) => journey.segments.some((segment) =>
+    segment.tripId === 'oversized-trip' && segment.originStop.id === 'origin'
+      && segment.destinationStop.id === 'dense-destination')),
+  `sampling must preserve the exact direct scheduled segment needed for this query (returned ${result.itineraries.length}, trips: ${result.itineraries.flatMap((journey) => journey.segments.map((segment) => segment.tripId)).slice(0, 10).join(',')})`);
+});
+
 test('excludes isolated remote trip endpoints from the transfer graph and retains a feasible chain', () => {
   const timetable = connectingFeed();
   const noiseOrigin = 'noise-origin';

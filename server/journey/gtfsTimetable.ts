@@ -5,7 +5,7 @@ import { journeyTransportTypeSelected, type JourneyTransportType } from './types
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
 import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
-import { retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
+import { BoundedBestK, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
 import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
 import { BoundedPromiseCache } from './boundedPromiseCache';
@@ -185,7 +185,13 @@ export interface GtfsItinerarySearchResult {
   candidateGraphTruncated: boolean;
 }
 
-type RetainedGtfsSegment = { segment: GtfsDirectJourney };
+type RetainedGtfsSegment = {
+  segment: GtfsDirectJourney;
+  fromIndex: number;
+  toIndex: number;
+  sampleRank?: [number, number, number, number, number];
+  sampleKey?: string;
+};
 type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
 
 // Keep the same deterministic, order-independent sample for a feed snapshot.
@@ -1429,6 +1435,48 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     return value;
   };
   const emptyTraveledZoneIds: string[] = [];
+  const compareTripSegments = (left: RetainedGtfsSegment, right: RetainedGtfsSegment) => {
+    const rank = (candidate: RetainedGtfsSegment): [number, number, number, number, number] => {
+      if (candidate.sampleRank) return candidate.sampleRank;
+      const value = candidate.segment;
+      const startsAtOrigin = originStopIds.has(value.originStop.id);
+      const endsAtDestination = destinationStopIds.has(value.destinationStop.id);
+      const accessSeconds = Math.ceil(value.distanceToOriginStopMeters / 1.25);
+      const canCatchOrigin = startsAtOrigin && value.departureAt.getTime()
+        >= input.earliestDeparture.getTime() + accessSeconds * 1000;
+      const duration = value.arrivalAt.getTime() - value.departureAt.getTime();
+      const rankValue: [number, number, number, number, number] = canCatchOrigin && endsAtDestination
+        ? [0, value.distanceToOriginStopMeters + value.distanceFromDestinationStopMeters,
+          duration, value.departureAt.getTime(), value.arrivalAt.getTime()]
+        : canCatchOrigin
+          ? [1, value.distanceToOriginStopMeters, value.departureAt.getTime(), duration, value.arrivalAt.getTime()]
+          : endsAtDestination
+            ? [2, value.distanceFromDestinationStopMeters, value.arrivalAt.getTime(), duration, value.departureAt.getTime()]
+            : [3, 0, duration, value.departureAt.getTime(), value.arrivalAt.getTime()];
+      if (rankValue[0] === 3) {
+        const connectedRoutes = new Set<string>();
+        for (const stopId of [...value.originTransferNodeIds, value.destinationStop.id,
+          ...value.destinationTransferNodeIds]) {
+          for (const routeId of routesByStop.get(stopId) ?? []) connectedRoutes.add(routeId);
+          const stop = feed.stops.get(stopId);
+          if (stop?.parentStation) {
+            for (const routeId of routesByParentStation.get(stop.parentStation) ?? []) connectedRoutes.add(routeId);
+          }
+        }
+        connectedRoutes.delete(value.routeId);
+        rankValue[1] = -connectedRoutes.size;
+      }
+      candidate.sampleRank = rankValue;
+      candidate.sampleKey = `${value.providerId}\u0000${value.serviceDate}\u0000${value.tripId}\u0000${value.originStop.id}\u0000${value.destinationStop.id}\u0000${value.departureAt.getTime()}\u0000${value.arrivalAt.getTime()}`;
+      return rankValue;
+    };
+    const leftRank = rank(left);
+    const rightRank = rank(right);
+    for (let index = 0; index < leftRank.length; index++) {
+      if (leftRank[index] !== rightRank[index]) return leftRank[index] - rightRank[index];
+    }
+    return compareStableId(left.sampleKey ?? '', right.sampleKey ?? '');
+  };
   for (const [tripId, trip] of feed.trips) {
     tripsConsidered++;
     const route = feed.routes.get(trip.routeId);
@@ -1453,8 +1501,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const eligibleContexts = eligibleIndexes.map((index) => stopContext(stops[index]));
     for (const serviceDate of serviceDates) {
       if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
-      const tripCandidates: RetainedGtfsSegment[] = [];
-      let tripCandidatesExceededLimit = false;
+      let tripCandidates: RetainedGtfsSegment[] = [];
+      let boundedTripCandidates: BoundedBestK<RetainedGtfsSegment> | undefined;
       // Duplicate stop IDs can occur in loop routes; deduplicate only within
       // this trip instance so a citywide set of every candidate key is not
       // retained alongside the graph.
@@ -1470,7 +1518,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         departureAt: serviceTimeToUtc(serviceDate, stops[index].departureSeconds),
         arrivalAt: serviceTimeToUtc(serviceDate, stops[index].arrivalSeconds),
       }));
-      candidatePairLoop: for (let fromCursor = 0; fromCursor < eligibleIndexes.length - 1; fromCursor++) {
+      for (let fromCursor = 0; fromCursor < eligibleIndexes.length - 1; fromCursor++) {
         const fromIndex = eligibleIndexes[fromCursor];
         const from = stops[fromIndex];
         const fromContext = eligibleContexts[fromCursor];
@@ -1498,10 +1546,6 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
           const key = `${from.stopId}:${to.stopId}:${departureAt.getTime()}`;
           if (seenTripSegments.has(key)) continue;
           seenTripSegments.add(key);
-          if (tripCandidates.length >= graphSegmentLimitPerRoute) {
-            tripCandidatesExceededLimit = true;
-            break candidatePairLoop;
-          }
           const segment: GtfsDirectJourney = {
             providerId: provider?.id ?? input.providerId, providerName: provider?.name ?? input.providerName,
             providerCity: providerCity ?? input.providerCity, mode: route.mode,
@@ -1522,16 +1566,30 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
             // need their complete list for fare calculation.
             traveledZoneIds: emptyTraveledZoneIds,
           };
-          shapeIndexesBySegment.set(segment, { fromIndex, toIndex, serviceDate });
-          if (dated?.update?.stops.length) segment.stops = stopCallsForTrip(feed, tripId, fromIndex, toIndex, serviceDate, dated.stops);
-          tripCandidates.push({ segment });
+          const candidate = { segment, fromIndex, toIndex };
+          if (!boundedTripCandidates && tripCandidates.length < graphSegmentLimitPerRoute) {
+            tripCandidates.push(candidate);
+            continue;
+          }
+          if (!boundedTripCandidates) {
+            boundedTripCandidates = new BoundedBestK(graphSegmentLimitPerRoute, compareTripSegments);
+            for (const retained of tripCandidates) boundedTripCandidates.consider(retained);
+            tripCandidates = [];
+          }
+          boundedTripCandidates.consider(candidate);
         }
       }
-      if (tripCandidatesExceededLimit) {
+      if (boundedTripCandidates) {
+        tripCandidates = boundedTripCandidates.toSortedArray();
         segmentGraphTruncated = true;
-        continue;
       }
       if (tripCandidates.length) {
+        for (const { segment, fromIndex, toIndex } of tripCandidates) {
+          shapeIndexesBySegment.set(segment, { fromIndex, toIndex, serviceDate });
+          if (dated?.update?.stops.length) {
+            segment.stops = stopCallsForTrip(feed, tripId, fromIndex, toIndex, serviceDate, dated.stops);
+          }
+        }
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
         const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
         const canBoardFromOrigin = tripCandidates.some(({ segment }) => originStopIds.has(segment.originStop.id)
