@@ -1651,6 +1651,13 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     selectedSegmentsByRoute.set(routeId, [...selected, ...fill]);
   }
   const segments = [...selectedSegmentsByRoute.values()].flatMap((routeSegments) => routeSegments.map(({ segment }) => segment));
+  const perRouteBudgetUsage = [...graphSegmentBudgetByRoute].map(([routeId, budget]) => ({
+    budget,
+    retained: selectedSegmentsByRoute.get(routeId)?.length ?? 0,
+  }));
+  const graphRoutesUnderfilled = perRouteBudgetUsage.filter(({ budget, retained }) => retained < budget).length;
+  const graphRouteBudgetMaxUnused = Math.max(0, ...perRouteBudgetUsage.map(({ budget, retained }) => budget - retained));
+  const overflowReservoirSizes = [...overflowSegmentsByRoute.values()].map((reservoir) => reservoir.toSortedArray().length);
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
     serviceDates: serviceDates.size, corridorStops: corridorStops.size,
     candidateRouteCount, graphRoutesWithCandidates: segmentsByRoute.size,
@@ -1658,6 +1665,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     graphSegmentBudgetTotal: [...graphSegmentBudgetByRoute.values()].reduce((sum, value) => sum + value, 0),
     graphSegmentBudgetUnused: Math.max(0, [...graphSegmentBudgetByRoute.values()].reduce((sum, value) => sum + value, 0) - segments.length),
     graphSegmentBudgetMax: Math.max(0, ...graphSegmentBudgetByRoute.values()),
+    graphRoutesUnderfilled, graphRouteBudgetMaxUnused,
+    overflowReservoirRetained: overflowReservoirSizes.reduce((sum, size) => sum + size, 0),
+    overflowReservoirsAtCap: overflowReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_SEGMENTS).length,
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
     globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
     segmentGraphTruncated: Number(segmentGraphTruncated) });

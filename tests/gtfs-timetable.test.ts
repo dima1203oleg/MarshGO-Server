@@ -216,6 +216,10 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.equal(typeof graph.graphRoutesBudgetLimited, 'number');
   assert.equal(typeof graph.globalGraphBudgetBinding, 'number');
   assert.equal(typeof graph.graphSegmentBudgetUnused, 'number');
+  assert.equal(typeof graph.graphRoutesUnderfilled, 'number');
+  assert.equal(typeof graph.graphRouteBudgetMaxUnused, 'number');
+  assert.equal(typeof graph.overflowReservoirRetained, 'number');
+  assert.equal(typeof graph.overflowReservoirsAtCap, 'number');
   assert.equal(typeof ranked.searchStepLimit, 'number');
   assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
 });
