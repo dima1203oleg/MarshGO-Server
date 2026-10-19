@@ -194,7 +194,7 @@ function gtfsSegmentRetentionPriority(key: string): number {
 
 function compareGtfsSegmentRetention(a: Pick<RetainedGtfsSegment, 'key' | 'priority'>,
   b: Pick<RetainedGtfsSegment, 'key' | 'priority'>): number {
-  return a.priority - b.priority || a.key.localeCompare(b.key);
+  return a.priority-b.priority|| +(a.key>b.key)-+(a.key<b.key);
 }
 
 // A max-heap retains the lowest-priority-hash K candidates. The root is the
