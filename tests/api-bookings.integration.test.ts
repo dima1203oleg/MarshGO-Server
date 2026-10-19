@@ -328,18 +328,19 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
           .filter((journey) => Number.isInteger(journey.strategyRanks?.[strategy]))
           .sort((left, right) => left.strategyRanks![strategy]! - right.strategyRanks![strategy]!);
         assert.ok(ranked.length > 0, `${strategy} returns ranked route alternatives`);
-        assert.equal(ranked[0]!.strategyRanks![strategy], 1, `${strategy} exposes its winner at rank 1`);
+        assert.deepEqual(ranked.map((journey) => journey.strategyRanks![strategy]),
+          ranked.map((_, index) => index + 1), `${strategy} ranks are unique and contiguous`);
         if (strategy === 'FASTEST') {
-          assert.equal(ranked[0]!.totalDurationSeconds,
-            Math.min(...ranked.map((journey) => journey.totalDurationSeconds)),
-            'FASTEST rank 1 is the shortest returned route');
+          assert.ok(ranked.every((journey, index) => index === 0
+            || ranked[index - 1]!.totalDurationSeconds <= journey.totalDurationSeconds),
+          'FASTEST rank order never places a longer returned route ahead of a shorter one');
         }
         if (strategy === 'CHEAPEST') {
           assert.ok(ranked.every((journey) => journey.totalPriceMinor !== null),
             'CHEAPEST never ranks a route whose fare is unknown');
-          assert.equal(ranked[0]!.totalPriceMinor,
-            Math.min(...ranked.map((journey) => journey.totalPriceMinor!)),
-            'CHEAPEST rank 1 is the lowest known returned fare');
+          assert.ok(ranked.every((journey, index) => index === 0
+            || ranked[index - 1]!.totalPriceMinor! <= journey.totalPriceMinor!),
+          'CHEAPEST rank order never places a higher known fare ahead of a lower one');
         }
       }
       const realBusTramChain = multiData.journeys.find((journey) => {
