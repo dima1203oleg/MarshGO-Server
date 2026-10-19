@@ -580,6 +580,27 @@ test('route-chain sample preserves both FASTEST and CHEAPEST extremes', () => {
   assert.ok(selected.some((journey) => journey.id === cheapest.id), 'the cheapest known-fare option survives route-chain sampling');
 });
 
+test('route-chain sample tie-break is locale-independent and stable across input order', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const ids = ['Z', 'a', 'Б', 'А', '10', '2', 'z', 'A', 'а', 'б'];
+  const equalCandidates = ids.map((id) => ({
+    ...base,
+    id,
+    durationSeconds: 3_600,
+    transfers: 0,
+    walkingMeters: 100,
+    fare: { priceMinor: 500, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  }));
+
+  const forward = sampleGtfsRouteChainCandidates(equalCandidates, 4).map((journey) => journey.id);
+  const reversed = sampleGtfsRouteChainCandidates([...equalCandidates].reverse(), 4).map((journey) => journey.id);
+  assert.deepEqual(forward, ['10', '2', 'A', 'Z']);
+  assert.deepEqual(reversed, forward, 'equal-score sample does not depend on feed/input insertion order');
+});
+
 test('round-robins transfer search so a late cheapest line survives a dense candidate list', () => {
   const timetable = connectingFeed();
   const products = new Map<string, { id: string; priceMinor: number; currency: string; transfers: number; transferDurationSeconds: null }>();

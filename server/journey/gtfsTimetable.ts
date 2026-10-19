@@ -194,6 +194,11 @@ function gtfsSegmentRetentionPriority(key: string): number {
   return hash >>> 0;
 }
 
+/** Compare opaque GTFS identifiers with a locale-independent, reproducible order. */
+function compareStableId(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
  * Keep a balanced sample of GTFS candidates for the cross-provider scorer.
  * When comparable fares exist, an unknown fare must not receive the same
@@ -224,7 +229,7 @@ export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly Gt
       + 0.20 * (itinerary.transfers > 0 ? 0.3 : 0);
   };
   return [...itineraries].sort((a, b) => score(a) - score(b)
-    || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
 }
 
 /** Keep route-chain samples useful to the FASTEST, CHEAPEST, and balanced views. */
@@ -243,11 +248,11 @@ export function sampleGtfsRouteChainCandidates(
       count--;
     }
   };
-  const byDuration = [...itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+  const byDuration = [...itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const byFare = itineraries.filter((item) => item.fare?.currency === 'UAH')
-    .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
-  const byTransfers = [...itineraries].sort((a, b) => a.transfers - b.transfers || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
-  const byWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+    .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const byTransfers = [...itineraries].sort((a, b) => a.transfers - b.transfers || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const byWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const balanced = rankGtfsItinerariesForCandidateSampling(itineraries);
 
   take(byDuration, 2);
@@ -458,7 +463,7 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
  */
 function buildMergedGtfsTimetables(sources: readonly GtfsTimetableSource[]): GtfsTimetableFeed | null {
   if (sources.length === 0) return null;
-  const ordered = [...sources].sort((a, b) => a.providerId.localeCompare(b.providerId));
+  const ordered = [...sources].sort((a, b) => compareStableId(a.providerId, b.providerId));
   const timezone = ordered[0].feed.timezone;
   if (ordered.some((source) => source.feed.timezone !== timezone)) throw new TypeError('GTFS feeds with different timezones cannot be combined');
 
@@ -772,7 +777,7 @@ export function findGtfsStopArrivals(
     }
   }
   return arrivals.sort((a, b) => a.predictedArrivalAt.getTime() - b.predictedArrivalAt.getTime()
-    || a.routeId.localeCompare(b.routeId) || a.tripId.localeCompare(b.tripId)).slice(0, limit);
+    || compareStableId(a.routeId, b.routeId) || compareStableId(a.tripId, b.tripId)).slice(0, limit);
 }
 
 function distanceMeters(a: [number, number], b: [number, number]): number {
@@ -1606,7 +1611,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const queue: Array<{ node: string; seconds: number }> = [{ node: fromStopId, seconds: 0 }];
     const visited = new Set<string>();
     while (queue.length) {
-      queue.sort((a, b) => a.seconds - b.seconds || a.node.localeCompare(b.node));
+      queue.sort((a, b) => a.seconds - b.seconds || compareStableId(a.node, b.node));
       const current = queue.shift()!;
       if (visited.has(current.node)) continue;
       visited.add(current.node);
@@ -1991,8 +1996,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         || a.departureAt.getTime() - b.departureAt.getTime()
         || a.distanceToOriginStopMeters - b.distanceToOriginStopMeters
         || a.arrivalAt.getTime() - b.arrivalAt.getTime()
-        || a.tripId.localeCompare(b.tripId)
-        || a.destinationStop.id.localeCompare(b.destinationStop.id);
+        || compareStableId(a.tripId, b.tripId)
+        || compareStableId(a.destinationStop.id, b.destinationStop.id);
     });
 
   type PathWork = { kind: 'path'; path: GtfsDirectJourney[] };
@@ -2129,16 +2134,16 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   }
 
   const rankedResults = [...results.values()]
-    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || a.id.localeCompare(b.id));
+    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byDuration = [...rankedResults].sort((a, b) => a.durationSeconds - b.durationSeconds
-    || a.transfers - b.transfers || a.id.localeCompare(b.id));
+    || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byComparableFare = rankedResults.filter((itinerary) => itinerary.fare?.currency === 'UAH')
     .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor
-      || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const byTransfers = [...rankedResults].sort((a, b) => a.transfers - b.transfers
-    || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const byWalking = [...rankedResults].sort((a, b) => a.walkingMeters - b.walkingMeters
-    || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const balanced = rankGtfsItinerariesForCandidateSampling(rankedResults);
 
   // Preserve objective extremes before filling the remaining response with
@@ -2158,7 +2163,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     selected.set(itinerary.id, itinerary);
   }
   const itineraries = [...selected.values()]
-    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || a.id.localeCompare(b.id));
+    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
   for (const itinerary of itineraries) {
     for (const segment of itinerary.segments) {
       const indexes = shapeIndexesBySegment.get(segment);
