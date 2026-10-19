@@ -312,7 +312,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       }),
     });
     assert.equal(multiResponse.status, 200);
-    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; legs: Array<{
+    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; totalDurationSeconds: number; totalPriceMinor: number | null; legs: Array<{
       mode: string; transportType?: string; routeGeometry?: [number, number][];
       origin?: { coordinates: [number, number] }; destination?: { coordinates: [number, number] };
       stops?: Array<{ coordinates: [number, number]; arrivalAt: string }>;
@@ -322,6 +322,26 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.ok(multiData.availableStrategies.includes('BALANCED'));
       assert.ok(multiData.journeys.some((journey) => typeof journey.strategyRanks?.BALANCED === 'number'),
         'each returned result exposes its place in the selected strategy ranking');
+      for (const strategy of ['BALANCED', 'FASTEST', 'CHEAPEST']) {
+        if (!multiData.availableStrategies.includes(strategy)) continue;
+        const ranked = multiData.journeys
+          .filter((journey) => Number.isInteger(journey.strategyRanks?.[strategy]))
+          .sort((left, right) => left.strategyRanks![strategy]! - right.strategyRanks![strategy]!);
+        assert.ok(ranked.length > 0, `${strategy} returns ranked route alternatives`);
+        assert.equal(ranked[0]!.strategyRanks![strategy], 1, `${strategy} exposes its winner at rank 1`);
+        if (strategy === 'FASTEST') {
+          assert.equal(ranked[0]!.totalDurationSeconds,
+            Math.min(...ranked.map((journey) => journey.totalDurationSeconds)),
+            'FASTEST rank 1 is the shortest returned route');
+        }
+        if (strategy === 'CHEAPEST') {
+          assert.ok(ranked.every((journey) => journey.totalPriceMinor !== null),
+            'CHEAPEST never ranks a route whose fare is unknown');
+          assert.equal(ranked[0]!.totalPriceMinor,
+            Math.min(...ranked.map((journey) => journey.totalPriceMinor!)),
+            'CHEAPEST rank 1 is the lowest known returned fare');
+        }
+      }
       const realBusTramChain = multiData.journeys.find((journey) => {
         const modes = new Set(journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.transportType));
         return modes.has('bus') && modes.has('tram');
