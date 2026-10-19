@@ -1,5 +1,7 @@
 import { unzipSync, strFromU8 } from 'fflate';
 import bindings from 'gtfs-realtime-bindings';
+import { z } from 'zod';
+import { smartCache } from '../cache/cacheService';
 import { fetchBinary, fetchJson } from './safeFetch';
 import { parseCsvLine, routeTypeLabel } from './gtfs';
 import { extractVehicleList, vehicleTransportLabel } from './jsonVehicles';
@@ -16,6 +18,11 @@ export const isLineType = (value: string): value is LineType => LINE_TYPES.has(v
 export interface NetworkStop { id: string; name: string; lon: number; lat: number; types: LineType[]; routes: string[] }
 export interface NetworkRoute { id: string; name: string; type: LineType; direction: string; stopCount: number; coordinates: Array<[number, number]> }
 export interface TransportNetwork { stops: NetworkStop[]; routes: NetworkRoute[]; bbox: Bbox | null }
+const networkSchema = z.object({
+  stops: z.array(z.object({ id: z.string(), name: z.string(), lon: z.number().finite().min(-180).max(180), lat: z.number().finite().min(-90).max(90), types: z.array(z.enum(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular'])), routes: z.array(z.string()) })),
+  routes: z.array(z.object({ id: z.string(), name: z.string(), type: z.enum(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular']), direction: z.string(), stopCount: z.number().int().nonnegative(), coordinates: z.array(z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)])).min(2).max(250_000) })),
+  bbox: z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90), z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)]).nullable(),
+});
 
 function rows(text: string | undefined): Array<Record<string, string>> {
   if (!text) return [];
@@ -120,7 +127,6 @@ export function buildNetwork(files: Record<string, string>): TransportNetwork {
 }
 
 const NETWORK_TTL_MS = 6 * 60 * 60_000;
-const networks = new Map<string, { at: number; promise: Promise<TransportNetwork> }>();
 const WANTED = /(^|\/)(stops|routes|trips|stop_times|shapes)\.txt$/;
 
 /** Normalize an official Kyiv GeoJSON route/station feed into the same network shape as GTFS. */
@@ -177,30 +183,34 @@ export function buildGeoJsonNetwork(body: unknown, mode: LineType): TransportNet
   return { stops, routes, bbox: points.length ? bboxOf(points) ?? null : routes.length ? bboxOf(routes.flatMap((route) => route.coordinates)) ?? null : null };
 }
 
-/** Static feeds are parsed once and shared for six hours; a failed load is not cached. */
-export function cachedNetwork(providerId: string, url: string): Promise<TransportNetwork> {
-  const hit = networks.get(providerId);
-  if (hit && Date.now() - hit.at < NETWORK_TTL_MS) return hit.promise;
-  const promise = (async () => {
+/** Static networks use shared L2 only when a source sync version is known; unknown versions get a short process-local cache. */
+export function cachedNetwork(providerId: string, url: string, sourceVersion?: string | null): Promise<TransportNetwork> {
+  const version = sourceVersion?.trim() || null;
+  return smartCache.getOrLoad('gtfs_network', { providerId, url, sourceVersion: version }, networkSchema, {
+    ttlMs: NETWORK_TTL_MS,
+    l1TtlMs: version ? 10 * 60_000 : 60_000,
+    maxL2Bytes: 8 * 1024 * 1024,
+    shared: Boolean(version),
+  }, async () => {
     const { data } = await fetchBinary(url, 60 * 1024 * 1024);
     const unzipped = unzipSync(data, { filter: (file) => WANTED.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
     const files: Record<string, string> = {};
     for (const [name, content] of Object.entries(unzipped)) files[name.split('/').pop() as string] = strFromU8(content);
     return buildNetwork(files);
-  })();
-  networks.set(providerId, { at: Date.now(), promise });
-  promise.catch(() => networks.delete(providerId));
-  return promise;
+  });
 }
 
-export function cachedGeoJsonNetwork(providerId: string, url: string, mode: LineType): Promise<TransportNetwork> {
-  const key = `geojson:${providerId}`;
-  const hit = networks.get(key);
-  if (hit && Date.now() - hit.at < NETWORK_TTL_MS) return hit.promise;
-  const promise = fetchJson(url, 15000).then(({ data }) => buildGeoJsonNetwork(data, mode));
-  networks.set(key, { at: Date.now(), promise });
-  promise.catch(() => networks.delete(key));
-  return promise;
+export function cachedGeoJsonNetwork(providerId: string, url: string, mode: LineType, sourceVersion?: string | null): Promise<TransportNetwork> {
+  const version = sourceVersion?.trim() || null;
+  return smartCache.getOrLoad('gtfs_network', { providerId, url, mode, sourceVersion: version }, networkSchema, {
+    ttlMs: NETWORK_TTL_MS,
+    l1TtlMs: version ? 10 * 60_000 : 60_000,
+    maxL2Bytes: 8 * 1024 * 1024,
+    shared: Boolean(version),
+  }, async () => {
+    const { data } = await fetchJson(url, 15000);
+    return buildGeoJsonNetwork(data, mode);
+  });
 }
 
 export function geoJsonMode(name: string): LineType | null {

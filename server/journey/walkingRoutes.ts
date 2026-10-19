@@ -1,5 +1,5 @@
 import type { GtfsItinerary } from './gtfsTimetable';
-import { fetchOsrmRoute } from '../routing/providers/osrmTransport';
+import { requestOsrmRoute } from '../routing/osrmGateway';
 
 export interface WalkingRoutePath {
   distanceMeters: number;
@@ -20,14 +20,11 @@ const WALKING_ROUTE_TIMEOUT_MS = 1500;
 const WALKING_ROUTE_CACHE_TTL_MS = 5 * 60_000;
 const WALKING_ROUTE_FAILURE_TTL_MS = 15_000;
 const MAX_WALKING_ROUTE_CACHE_ENTRIES = 20_000;
-const MAX_CONCURRENT_WALKING_ROUTES = 12;
-const MAX_QUEUED_WALKING_ROUTES = 24;
 export const MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH = 32;
 
 type CachedRoute = { expiresAt: number; value: Promise<WalkingRoutePath | null> };
 const routeCache = new Map<string, CachedRoute>();
-let activeRouteRequests = 0;
-const waitingRouteRequests: Array<() => void> = [];
+const inFlightRouteRequests = new Map<string, Promise<WalkingRoutePath | null>>();
 
 export interface WalkingRouteBudget {
   readonly limit: number;
@@ -41,21 +38,9 @@ export function createWalkingRouteBudget(limit = MAX_WALKING_ROUTE_REQUESTS_PER_
 }
 
 function coordinateKey(point: [number, number]): string {
-  return `${point[0].toFixed(6)},${point[1].toFixed(6)}`;
-}
-
-async function withWalkingRouteSlot<T>(operation: () => Promise<T>): Promise<{ acquired: boolean; value: T | null }> {
-  if (activeRouteRequests >= MAX_CONCURRENT_WALKING_ROUTES) {
-    if (waitingRouteRequests.length >= MAX_QUEUED_WALKING_ROUTES) return { acquired: false, value: null };
-    await new Promise<void>((resolve) => waitingRouteRequests.push(resolve));
-  }
-  activeRouteRequests++;
-  try {
-    return { acquired: true, value: await operation() };
-  } finally {
-    activeRouteRequests--;
-    waitingRouteRequests.shift()?.();
-  }
+  const longitude = Object.is(point[0], -0) ? 0 : point[0];
+  const latitude = Object.is(point[1], -0) ? 0 : point[1];
+  return `${longitude},${latitude}`;
 }
 
 /**
@@ -70,11 +55,14 @@ export async function routePedestrianPath(
   budget?: WalkingRouteBudget,
 ): Promise<WalkingRoutePath | null> {
   if (!endpoint) return null;
-  const key = `${endpoint}\u0000${coordinateKey(from)}\u0000${coordinateKey(to)}`;
+  const graphVersion = process.env.WALKING_GRAPH_VERSION || process.env.OSRM_GRAPH_VERSION;
+  const key = `${endpoint}\u0000${graphVersion ?? 'no-graph-cache-disabled'}\u0000${coordinateKey(from)}\u0000${coordinateKey(to)}`;
   const now = Date.now();
-  const cached = routeCache.get(key);
-  if (cached && cached.expiresAt > now) return cached.value;
+  const cached = graphVersion ? routeCache.get(key) : undefined;
+  if (cached && cached.expiresAt > now) { routeCache.delete(key); routeCache.set(key, cached); return cached.value; }
   if (cached) routeCache.delete(key);
+  const pending = inFlightRouteRequests.get(key);
+  if (pending) return pending;
   if (budget) {
     if (budget.remaining <= 0) {
       budget.exhausted = true;
@@ -83,33 +71,21 @@ export async function routePedestrianPath(
     budget.remaining--;
   }
 
-  const attempt = withWalkingRouteSlot(async () => {
-    try {
-      const route = await fetchOsrmRoute([from, to], endpoint, WALKING_ROUTE_TIMEOUT_MS);
-      return {
-        distanceMeters: Math.ceil(route.distanceMeters),
-        durationSeconds: Math.ceil(route.durationSeconds),
-        geometry: route.geometry,
-      };
-    } catch {
-      return null;
-    }
-  });
-  const value = attempt.then((result) => result.acquired ? result.value : null);
-  routeCache.set(key, { expiresAt: now + WALKING_ROUTE_CACHE_TTL_MS, value });
-  if (routeCache.size > MAX_WALKING_ROUTE_CACHE_ENTRIES) {
+  const value = requestOsrmRoute([from, to], endpoint, { timeoutMs: WALKING_ROUTE_TIMEOUT_MS, profile: 'FOOT', priority: 'background' })
+    .then((route) => ({ distanceMeters: Math.ceil(route.distanceMeters), durationSeconds: Math.ceil(route.durationSeconds), geometry: route.geometry }))
+    .catch(() => null);
+  inFlightRouteRequests.set(key, value);
+  if (graphVersion) routeCache.set(key, { expiresAt: now + WALKING_ROUTE_CACHE_TTL_MS, value });
+  if (graphVersion && routeCache.size > MAX_WALKING_ROUTE_CACHE_ENTRIES) {
     for (const [oldKey, entry] of routeCache) {
       if (entry.expiresAt <= now || routeCache.size > MAX_WALKING_ROUTE_CACHE_ENTRIES) routeCache.delete(oldKey);
       else break;
     }
   }
-  const result = await attempt;
-  if (!result.acquired) {
-    if (routeCache.get(key)?.value === value) routeCache.delete(key);
-    return null;
-  }
-  if (!result.value) routeCache.set(key, { expiresAt: Date.now() + WALKING_ROUTE_FAILURE_TTL_MS, value: Promise.resolve(null) });
-  return result.value;
+  const result = await value;
+  if (inFlightRouteRequests.get(key) === value) inFlightRouteRequests.delete(key);
+  if (graphVersion && !result) routeCache.set(key, { expiresAt: Date.now() + WALKING_ROUTE_FAILURE_TTL_MS, value: Promise.resolve(null) });
+  return result;
 }
 
 /**
