@@ -1830,6 +1830,36 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   }
 
   const results = new Map<string, GtfsItinerary>();
+  const MAX_SEARCH_RESULTS = limit * 25;
+  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 10_000;
+  let candidatePoolReachedAtStep: number | null = null;
+  const objectiveCandidateSamples = new Map<string, GtfsItinerary[]>();
+  const objectiveSampleLimit = Math.max(1, Math.floor(limit / 5));
+  const retainObjectiveCandidate = (key: string, candidate: GtfsItinerary,
+    compare: (left: GtfsItinerary, right: GtfsItinerary) => number) => {
+    const sample = objectiveCandidateSamples.get(key) ?? [];
+    if (sample.some((item) => item.id === candidate.id)) return;
+    let low = 0, high = sample.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (compare(sample[middle], candidate) <= 0) low = middle + 1;
+      else high = middle;
+    }
+    if (low >= objectiveSampleLimit) return;
+    sample.splice(low, 0, candidate);
+    if (sample.length > objectiveSampleLimit) sample.pop();
+    objectiveCandidateSamples.set(key, sample);
+  };
+  const retainCandidateObjectives = (candidate: GtfsItinerary) => {
+    retainObjectiveCandidate('duration', candidate, (a, b) => a.durationSeconds - b.durationSeconds
+      || a.transfers - b.transfers || compareStableId(a.id, b.id));
+    if (candidate.fare?.currency === 'UAH') retainObjectiveCandidate('fare', candidate, (a, b) => a.fare!.priceMinor - b.fare!.priceMinor
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+    retainObjectiveCandidate('transfers', candidate, (a, b) => a.transfers - b.transfers
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+    retainObjectiveCandidate('walking', candidate, (a, b) => a.walkingMeters - b.walkingMeters
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  };
   const resultCountByRouteChain = new Map<string, number>();
   const resultIdsByRouteChain = new Map<string, Set<string>>();
   const resultIdsByTripChain = new Map<string, Set<string>>();
@@ -1922,12 +1952,6 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const isKnownTripChain = tripChainIds.size > 0;
     const legCount = resultCountByLegCount.get(path.length) ?? 0;
     const canReplaceRouteChainCandidate = routeChainIds.size >= MAX_RESULTS_PER_ROUTE_CHAIN;
-    if ((!isKnownTripChain && !canReplaceRouteChainCandidate
-      && (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || results.size >= MAX_SEARCH_RESULTS))) {
-      candidateSamplingTruncated = true;
-      return;
-    }
-
     const candidate: GtfsItinerary = {
       id, providerId: first.providerId,
       providerName: [...new Set(path.map((segment) => segment.providerName))].join(' + '),
@@ -1960,6 +1984,16 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         arrivalAt: segment.arrivalAt,
       }))),
     };
+    if ((!isKnownTripChain && !canReplaceRouteChainCandidate
+      && (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || results.size >= MAX_SEARCH_RESULTS))) {
+      // Keep a small per-objective reservoir after the bounded general pool
+      // fills. A late known-cheapest option must remain available to the
+      // CHEAPEST response even though the complete search is still flagged as
+      // sampled/truncated.
+      retainCandidateObjectives(candidate);
+      candidateSamplingTruncated = true;
+      return;
+    }
     const existingVariants = [...tripChainIds].flatMap((existingId) => {
       const existing = results.get(existingId);
       return existing ? [existing] : [];
@@ -1989,6 +2023,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const removedIds = new Set([...replacedTripVariants.map((variant) => variant.id),
       ...tripVariantsForRouteSample.filter((variant) => !selectedRouteIds.has(variant.id)).map((variant) => variant.id)]);
     if (results.size - removedIds.size + 1 > MAX_SEARCH_RESULTS) {
+      retainCandidateObjectives(candidate);
       candidateSamplingTruncated = true;
       return;
     }
@@ -2013,6 +2048,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     resultIdsByRouteChain.set(routeChain, routeChainIds);
     resultCountByRouteChain.set(routeChain, (resultCountByRouteChain.get(routeChain) ?? 0) + 1);
     resultCountByLegCount.set(path.length, (resultCountByLegCount.get(path.length) ?? 0) + 1);
+    if (results.size >= MAX_SEARCH_RESULTS && candidatePoolReachedAtStep === null) candidatePoolReachedAtStep = searchSteps;
     if (removedIds.size > 0) candidateSamplingTruncated = true;
   };
 
@@ -2024,10 +2060,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
   // but do not cut off ordinary city results at the first-route frontier.
   const MAX_SEARCH_STEPS = 1_000_000;
-  const MAX_SEARCH_RESULTS = limit * 25;
   let searchBudgetTruncated = false;
   let maximumQueuedSearchWork = 0;
-  let activeDepthLimitReached = false;
 
   // Feed/trip insertion order is not a routing priority. In a dense city feed,
   // the bounded DFS could spend its entire budget on late or poorly connected
@@ -2076,6 +2110,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     queuesPendingWork++;
   };
   let queuesPendingWork = 0;
+  const canContinueCandidateSearch = () => results.size < MAX_SEARCH_RESULTS
+    || candidatePoolReachedAtStep === null
+    || searchSteps - candidatePoolReachedAtStep < MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
   const takeNextWork = (queue: RouteSearchQueue): SearchWork | undefined => {
     if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length) {
       queue.preferFirstLeg = false;
@@ -2104,13 +2141,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const last = path.at(-1)!;
     if (destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
       addPath(path, maximumLegsForPass);
-      if ((resultCountByLegCount.get(maximumLegsForPass) ?? 0) >= MAX_CANDIDATES_PER_LEG_COUNT) {
-        activeDepthLimitReached = true;
-        candidateSamplingTruncated = true;
-      }
     }
     const remainingLegs = maximumLegsForPass - path.length;
-    if (activeDepthLimitReached || remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return;
+    if (remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return;
     const previousIds = new Set(path.map((segment) => segment.tripId));
     const visitedStops = new Set(path.map((segment) => segment.originStop.id));
     visitedStops.add(last.destinationStop.id);
@@ -2153,7 +2186,6 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       ? MAX_SEARCH_STEPS
       : Math.min(MAX_SEARCH_STEPS, searchSteps + Math.max(1,
         Math.floor((MAX_SEARCH_STEPS - searchSteps) * depthWeights[depthIndex] / remainingWeight)));
-    activeDepthLimitReached = false;
     const firstLegGroups = new Map<string, GtfsDirectJourney[]>();
     for (const segment of firstLegs) {
       const key = `${segment.providerId}:${segment.routeId}`;
@@ -2165,12 +2197,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true,
     }));
-    while (!activeDepthLimitReached && searchSteps < stepLimit
-      && searchSteps < MAX_SEARCH_STEPS && results.size < MAX_SEARCH_RESULTS) {
+    while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS && canContinueCandidateSearch()) {
       let processed = false;
       for (const queue of queues) {
-        if (activeDepthLimitReached || searchSteps >= stepLimit
-          || searchSteps >= MAX_SEARCH_STEPS || results.size >= MAX_SEARCH_RESULTS) break;
+        if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS || !canContinueCandidateSearch()) break;
         const work = takeNextWork(queue);
         if (!work) continue;
         processed = true;
@@ -2180,10 +2210,19 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       if (!processed) break;
     }
     if (searchSteps >= stepLimit && hasQueuedWork(queues)) searchBudgetTruncated = true;
+    if (!canContinueCandidateSearch() && hasQueuedWork(queues)) searchBudgetTruncated = true;
   }
 
-  const rankedResults = [...results.values()]
-    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
+  const allCandidateIds = new Set(results.keys());
+  const rankedResults = [...results.values()];
+  for (const sample of objectiveCandidateSamples.values()) {
+    for (const candidate of sample) {
+      if (allCandidateIds.has(candidate.id)) continue;
+      allCandidateIds.add(candidate.id);
+      rankedResults.push(candidate);
+    }
+  }
+  rankedResults.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byDuration = [...rankedResults].sort((a, b) => a.durationSeconds - b.durationSeconds
     || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byComparableFare = rankedResults.filter((itinerary) => itinerary.fare?.currency === 'UAH')
