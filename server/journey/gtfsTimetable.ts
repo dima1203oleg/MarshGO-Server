@@ -950,7 +950,9 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const debugStartedAt = Date.now();
   const debugStage = (stage: string, details: Record<string, number> = {}) => {
     if (process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1') {
-      console.info(JSON.stringify({ event: 'gtfs.search.debug', stage, elapsedMs: Date.now() - debugStartedAt, ...details }));
+      const memory = process.memoryUsage();
+      console.info(JSON.stringify({ event: 'gtfs.search.debug', stage, elapsedMs: Date.now() - debugStartedAt,
+        heapUsedBytes: memory.heapUsed, rssBytes: memory.rss, ...details }));
     }
   };
   const now = input.now ?? new Date();
@@ -1292,6 +1294,13 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       if (realtimeUpdate?.relationship === 'CANCELED' || realtimeUpdate?.relationship === 'DELETED') continue;
       const dated = realtimeUpdate?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
       if (dated && dated.stops.length !== stops.length) continue;
+      // The same arrival stop-time participates in many upstream stop-pair
+      // segments. Resolve its service-date timestamps once instead of creating
+      // duplicate Date objects inside every boarding/alighting pair.
+      const scheduledTimes = eligibleIndexes.map((index) => ({
+        departureAt: serviceTimeToUtc(serviceDate, stops[index].departureSeconds),
+        arrivalAt: serviceTimeToUtc(serviceDate, stops[index].arrivalSeconds),
+      }));
       for (let fromCursor = 0; fromCursor < eligibleIndexes.length - 1; fromCursor++) {
         const fromIndex = eligibleIndexes[fromCursor];
         const from = stops[fromIndex];
@@ -1299,7 +1308,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         if (!fromContext) continue;
         const datedFrom = dated?.stops[fromIndex];
         if (from.pickupType !== 0 || datedFrom?.skipped) continue;
-        const scheduledDepartureAt = serviceTimeToUtc(serviceDate, from.departureSeconds);
+        const scheduledDepartureAt = scheduledTimes[fromCursor].departureAt;
         const departureAt = datedFrom?.departureAt ?? scheduledDepartureAt;
         if (!scheduledDepartureAt || !departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
         for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length && toCursor <= fromCursor + 20; toCursor++) {
@@ -1309,7 +1318,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
           if (!toContext) continue;
           const datedTo = dated?.stops[toIndex];
           if (to.dropOffType !== 0 || datedTo?.skipped || to.arrivalSeconds < from.departureSeconds) continue;
-          const scheduledArrivalAt = serviceTimeToUtc(serviceDate, to.arrivalSeconds);
+          const scheduledArrivalAt = scheduledTimes[toCursor].arrivalAt;
           const arrivalAt = datedTo?.arrivalAt ?? scheduledArrivalAt;
           if (!scheduledArrivalAt || !arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
             || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
