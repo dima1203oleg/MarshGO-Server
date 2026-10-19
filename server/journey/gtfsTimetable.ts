@@ -2120,7 +2120,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       const readyAt = path[index].arrivalAt.getTime() + transferWalkSeconds * 1000;
       return total + Math.max(0, Math.ceil((segment.departureAt.getTime() - readyAt) / 1000));
     }, 0);
-    const id = path.map((segment) => `${segment.providerId}:${segment.tripId}:${segment.originStop.id}:${segment.destinationStop.id}`).join('|');
+    const id = path.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}:${segment.destinationStop.id}:${segment.departureAt.getTime()}:${segment.arrivalAt.getTime()}`).join('|');
     if (results.has(id)) return;
     const routeChain = path.map((segment, index) => index === 0 || path[index - 1].providerId !== segment.providerId
       || path[index - 1].routeId !== segment.routeId ? `${segment.providerId}:${segment.routeId}` : '')
