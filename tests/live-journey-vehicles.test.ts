@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { LiveVehicle } from '../server/mobility/transportLayers';
-import { matchLiveVehicleForJourneyLeg } from '../server/journey/liveVehicles';
+import { approachingBoardingStop, freshVehiclesForRoute, matchLiveVehicleForJourneyLeg, selectBoardingApproachVehicleIds } from '../server/journey/liveVehicles';
 
 const now = Date.parse('2026-10-12T10:00:00.000Z');
 const leg = {
@@ -36,4 +36,61 @@ test('a fresh vehicle without an explicit GTFS start date is matched only inside
   const match = vehicle({ startDate: undefined });
   assert.equal(matchLiveVehicleForJourneyLeg(leg, [match], now), match);
   assert.equal(matchLiveVehicleForJourneyLeg({ ...leg, scheduledDepartureAt: new Date(now - 2 * 86_400_000), scheduledArrivalAt: new Date(now - 2 * 86_400_000 + 20 * 60_000) }, [match], now), null);
+});
+
+test('merged provider-scoped Journey IDs match raw IDs from the provider GTFS-Realtime feed', () => {
+  const scopedLeg = {
+    ...leg,
+    tripId: 'provider-1:trip-42',
+    routeId: 'provider-1:route-7',
+  };
+  assert.equal(matchLiveVehicleForJourneyLeg(scopedLeg, [vehicle()], now)?.id, 'provider-1:vehicle-1');
+  assert.equal(matchLiveVehicleForJourneyLeg({ ...scopedLeg, providerId: 'other-provider' }, [vehicle()], now), null);
+});
+
+test('boarding emphasis requires exact GTFS trip progress and only highlights vehicles before the boarding stop', () => {
+  const stops = [
+    { stopId: 'provider-1:stop-a', sequence: 1 },
+    { stopId: 'provider-1:stop-b', sequence: 4 },
+    { stopId: 'provider-1:stop-c', sequence: 7 },
+  ];
+  assert.deepEqual(approachingBoardingStop('provider-1', { currentStopSequence: 1 }, 'provider-1:stop-b', stops), {
+    approaching: true, remainingStops: 3,
+  });
+  assert.deepEqual(approachingBoardingStop('provider-1', { currentStopId: 'stop-b' }, 'provider-1:stop-b', stops), {
+    approaching: true, remainingStops: 0,
+  });
+  assert.deepEqual(approachingBoardingStop('provider-1', { currentStopSequence: 7 }, 'provider-1:stop-b', stops), {
+    approaching: false, remainingStops: 0,
+  });
+  assert.equal(approachingBoardingStop('provider-1', {}, 'provider-1:stop-b', stops), null);
+  assert.equal(approachingBoardingStop('provider-1', { currentStopSequence: 1 }, 'other:stop-b', stops), null);
+});
+
+test('selected line fleet includes every fresh exact provider and route match, deduplicates vehicles, and excludes stale or unrelated positions', () => {
+  const candidates = [
+    vehicle({ id: 'vehicle-a' }),
+    vehicle({ id: 'vehicle-b', tripId: 'different-trip' }),
+    vehicle({ id: 'vehicle-stale', timestamp: new Date(now - 90_001) }),
+    vehicle({ id: 'vehicle-other-route', routeId: 'another-route' }),
+    vehicle({ id: 'vehicle-other-provider', providerId: 'another-provider' }),
+    vehicle({ id: 'vehicle-b', timestamp: new Date(now - 10_000) }),
+  ];
+  assert.deepEqual(freshVehiclesForRoute('provider-1', 'provider-1:route-7', candidates, now).map((item) => item.id), ['vehicle-a', 'vehicle-b']);
+});
+
+test('boarding highlight selects no more than three exact approaches and leaves unknown/opposite-direction vehicles muted', () => {
+  const highlighted = selectBoardingApproachVehicleIds([
+    { vehicleId: 'farther', progress: { approaching: true, remainingStops: 5 } },
+    { vehicleId: 'near', progress: { approaching: true, remainingStops: 1 } },
+    { vehicleId: 'middle', progress: { approaching: true, remainingStops: 3 } },
+    { vehicleId: 'at-stop', progress: { approaching: true, remainingStops: 0 } },
+    { vehicleId: 'passed-stop', progress: { approaching: false, remainingStops: 0 } },
+    { vehicleId: 'unknown', progress: null },
+  ]);
+  assert.deepEqual([...highlighted], ['at-stop', 'near', 'middle']);
+  assert.equal(selectBoardingApproachVehicleIds([
+    { vehicleId: 'one', progress: { approaching: true, remainingStops: 0 } },
+    { vehicleId: 'two', progress: { approaching: true, remainingStops: 1 } },
+  ], 50).size, 2);
 });

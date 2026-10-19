@@ -114,10 +114,14 @@ describe('Journey strategy scoring', () => {
     assert.ok(scoreJourneys([chain, cheapestSlow, fastestExpensive, unknownFare], 'CHEAPEST').at(-1)?.journey.priceMinor === null);
   });
 
-  it('does not label a route CHEAPEST while any compared provider fare is unknown', () => {
+  it('keeps CHEAPEST available for comparable fares and excludes candidates with unknown fares', () => {
     const unknownFare: JourneyOption = { ...candidates[0], id: 'unknown-fare', priceMinor: null };
     assert.ok(strategiesWithComparablePrices(candidates, ['CHEAPEST', 'FASTEST']).includes('CHEAPEST'));
-    assert.deepEqual(strategiesWithComparablePrices([...candidates, unknownFare], ['CHEAPEST', 'FASTEST']), ['FASTEST']);
+    assert.deepEqual(strategiesWithComparablePrices([...candidates, unknownFare], ['CHEAPEST', 'FASTEST']), ['CHEAPEST', 'FASTEST']);
+    assert.deepEqual(strategiesWithComparablePrices([unknownFare], ['CHEAPEST', 'FASTEST']), ['FASTEST']);
+    const selected = selectStrategyAlternatives([candidates[0]!, unknownFare], ['CHEAPEST'], 12);
+    assert.ok(selected.length > 0);
+    assert.ok(selected.every(({ journey }) => journey.priceMinor !== null));
   });
 
   it('selects representative alternatives and suppresses near-identical routes', () => {

@@ -20,6 +20,7 @@
     "test:integration:rate-limit": "tsx --test tests/redis-rate-limit.integration.test.ts",
     "test:integration:restart": "tsx --test tests/booking-restart.integration.test.ts",
     "test:integration:journey": "tsx --test tests/journey-schema.integration.test.ts",
+    "test:integration:live-journey": "tsx --test tests/live-journey.integration.test.ts",
     "test:integration": "bash scripts/run-integration-tests.sh",
     "benchmark:routing-cache": "tsx scripts/benchmark-routing-cache.ts",
     "test:load:routing": "k6 run tests/load/routing.k6.js",

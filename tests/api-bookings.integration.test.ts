@@ -357,7 +357,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA }, body: JSON.stringify(body),
     });
     assert.equal(response.status, 200);
-    const result = await response.json() as { data: { partial: boolean; partialReasons: string[]; blockedProviders: string[]; unsupportedPreferences: string[]; journeys: Array<{ id: string; offerId: string | null; strategy: string; confirmedPriceMinor: number | null; totalPriceMinor: number | null; source?: string; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
+    const result = await response.json() as { data: { partial: boolean; partialReasons: string[]; blockedProviders: string[]; unsupportedPreferences: string[]; availableStrategies: string[]; journeys: Array<{ id: string; offerId: string | null; strategy: string; strategyRanks?: Record<string, number>; confirmedPriceMinor: number | null; totalPriceMinor: number | null; source?: string; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
     assert.equal(result.data.partial, true);
     assert.ok(result.data.partialReasons.length > 0);
     assert.ok(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:taxi:')));
@@ -372,9 +372,15 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(journey.legs[0].driver?.averageRating, 5);
     assert.equal(typeof journey.legs[0].driver?.averageRating, 'number');
     assert.deepEqual(journey.legs.map((leg) => [leg.mode, leg.priceStatus, leg.availabilityStatus]), [['COMMUNITY', 'ESTIMATED', 'AVAILABLE']]);
-    if (result.data.unsupportedPreferences.includes('CHEAPEST:public-transit-fares-unavailable')) {
-      assert.equal(result.data.journeys.some((item) => item.strategy === 'CHEAPEST'), false,
-        'an unknown transit fare prevents the API from claiming a cheapest overall route');
+    assert.ok(result.data.availableStrategies.includes('CHEAPEST'),
+      'a known UAH community fare keeps CHEAPEST available even when a different provider has unknown pricing');
+    assert.ok(result.data.journeys.filter((item) => typeof item.strategyRanks?.CHEAPEST === 'number')
+      .every((item) => item.totalPriceMinor !== null),
+    'the API never labels an unknown-fare journey as part of CHEAPEST');
+    if (result.data.availableStrategies.includes('CHEAPEST')) {
+      assert.ok(result.data.journeys.filter((item) => typeof item.strategyRanks?.CHEAPEST === 'number')
+        .every((item) => item.totalPriceMinor !== null),
+      'the cheapest ranking only includes routes with a known comparable fare');
     }
     if (result.data.unsupportedPreferences.includes('maxPriceMinor:public-transit-fare-unavailable')) {
       assert.equal(result.data.journeys.some((item) => item.source === 'gtfs-static'), false,
@@ -552,12 +558,32 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: passengerHeaders,
       body: JSON.stringify({ longitude: 24, latitude: 49, accuracyMeters: 5, capturedAt: new Date().toISOString() }),
     });
-    assert.equal(prematureLocation.status, 409);
+    assert.equal(prematureLocation.status, 403);
 
     const activate = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous/activate`, { method: 'POST', headers: driverHeaders });
     assert.equal(activate.status, 200);
     const active = await activate.json() as { data: { state: string; locationSharingEnabled: boolean } };
-    assert.deepEqual({ state: active.data.state, sharing: active.data.locationSharingEnabled }, { state: 'ACTIVE', sharing: true });
+    assert.deepEqual({ state: active.data.state, sharing: active.data.locationSharingEnabled }, { state: 'ACTIVE', sharing: false });
+
+    const passengerConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: passengerHeaders, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(passengerConsent.status, 200);
+    const passengerConsented = await passengerConsent.json() as { data: { currentParticipantConsent: boolean; locationSharingEnabled: boolean } };
+    assert.deepEqual({ consent: passengerConsented.data.currentParticipantConsent, sharing: passengerConsented.data.locationSharingEnabled }, { consent: true, sharing: false });
+
+    const driverBeforeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: driverHeaders,
+      body: JSON.stringify({ longitude: 24.0001, latitude: 49, accuracyMeters: 8, capturedAt: new Date().toISOString() }),
+    });
+    assert.equal(driverBeforeConsent.status, 403, 'one participant cannot transmit location before their own consent');
+
+    const driverConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: driverHeaders, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(driverConsent.status, 200);
+    const driverConsented = await driverConsent.json() as { data: { currentParticipantConsent: boolean; otherParticipantConsent: boolean; locationSharingEnabled: boolean } };
+    assert.deepEqual({ own: driverConsented.data.currentParticipantConsent, other: driverConsented.data.otherParticipantConsent, sharing: driverConsented.data.locationSharingEnabled }, { own: true, other: true, sharing: true });
 
     const capturedAt = new Date().toISOString();
     const location = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
@@ -577,6 +603,33 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const driverState = await driverView.json() as { data: { locations: { passenger: { freshness: string; coordinates: number[] } | null } } };
     assert.deepEqual(driverState.data.locations.passenger?.coordinates, [24, 49]);
     assert.equal(driverState.data.locations.passenger?.freshness, 'LIVE');
+
+    const driverCapturedAt = new Date(Date.parse(capturedAt) + 1_000).toISOString();
+    const driverLocation = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: driverHeaders,
+      body: JSON.stringify({ longitude: 24.0001, latitude: 49, accuracyMeters: 8, capturedAt: driverCapturedAt }),
+    });
+    assert.equal(driverLocation.status, 200);
+    const passengerView = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous`, { headers: passengerHeaders });
+    const passengerState = await passengerView.json() as { data: { locations: { driver: { freshness: string; coordinates: number[] } | null } } };
+    assert.deepEqual(passengerState.data.locations.driver?.coordinates, [24.0001, 49]);
+    assert.equal(passengerState.data.locations.driver?.freshness, 'LIVE');
+
+    const revokeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: passengerHeaders, body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(revokeConsent.status, 200);
+    const revoked = await revokeConsent.json() as { data: { locationSharingEnabled: boolean; locations: { driver: unknown; passenger: unknown } } };
+    assert.deepEqual({ sharing: revoked.data.locationSharingEnabled, driver: revoked.data.locations.driver, passenger: revoked.data.locations.passenger }, { sharing: false, driver: null, passenger: null });
+    const renewConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: passengerHeaders, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(renewConsent.status, 200);
+    const oldDriverSample = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: driverHeaders,
+      body: JSON.stringify({ longitude: 24.0001, latitude: 49, accuracyMeters: 8, capturedAt }),
+    });
+    assert.equal(oldDriverSample.status, 409, 'a sample from before the renewed mutual-consent period cannot reappear');
 
     const driverArrived = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/status`, {
       method: 'POST', headers: driverHeaders, body: JSON.stringify({ action: 'arrived' }),

@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGeoJsonNetwork, buildNetwork, decimate, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, parseBbox, parseVehicleTimestamp, routeInBbox } from '../server/mobility/transportLayers';
+import { buildGeoJsonNetwork, buildNetwork, decimate, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, networkRoutesForRoute, parseBbox, parseVehicleTimestamp, routeInBbox } from '../server/mobility/transportLayers';
+import { isFreshMobilityTimestamp, parseMobilityTimestamp } from '../server/mobility/timestamps';
 
 const files = {
   'routes.txt': 'route_id,route_short_name,route_type\nR1,47,3\nR2,2,0\nR3,M1,1\nR4,X,1700\n',
@@ -23,6 +24,12 @@ describe('transport layer network', () => {
     const tram = network.routes.find((route) => route.name === '2')!;
     assert.equal(tram.type, 'tram'); assert.equal(tram.coordinates.length, 3);
     assert.equal(network.routes.find((route) => route.name === 'M1')?.type, 'metro');
+  });
+  it('selects all actual directions for one exact GTFS route without prefix collisions', () => {
+    const route = (id: string, geometrySource: 'gtfs_shape' | 'stop_sequence') => ({ id, name: '47', type: 'bus' as const, direction: id, geometrySource, stopCount: 2, coordinates: [[24, 49], [24.1, 49.1]] as [number, number][] });
+    const candidateNetwork = { routes: [route('R1|0', 'gtfs_shape'), route('R1|1', 'gtfs_shape'), route('R1|2', 'stop_sequence'), route('R10|0', 'gtfs_shape')], stops: [], bbox: null };
+    assert.deepEqual(networkRoutesForRoute(candidateNetwork, 'R1', 'gtfs_shape').map((item) => item.id), ['R1|0', 'R1|1']);
+    assert.deepEqual(networkRoutesForRoute(candidateNetwork, 'R1').map((item) => item.id), ['R1|0', 'R1|1', 'R1|2']);
   });
   it('classifies GTFS routes named as marshrutkas consistently with journey search', () => {
     const network = buildNetwork({
@@ -87,8 +94,25 @@ describe('realtime vehicle freshness', () => {
     assert.equal(parseVehicleTimestamp('1700000000')?.getTime(), 1_700_000_000_000);
     assert.equal(parseVehicleTimestamp('1700000000000')?.getTime(), 1_700_000_000_000);
     assert.equal(parseVehicleTimestamp('2026-10-08T12:00:00.000Z')?.toISOString(), '2026-10-08T12:00:00.000Z');
+    assert.equal(parseVehicleTimestamp('2026-10-19 12:00:00')?.toISOString(), '2026-10-19T09:00:00.000Z');
     assert.equal(parseVehicleTimestamp({ toNumber: () => 1_700_000_000 })?.getTime(), 1_700_000_000_000);
     assert.equal(parseVehicleTimestamp('not a timestamp'), null);
+  });
+  it('parses Ukraine wall time across DST and rejects nonexistent local times', () => {
+    assert.equal(parseVehicleTimestamp('2026-01-15 12:00:00')?.toISOString(), '2026-01-15T10:00:00.000Z');
+    assert.equal(parseVehicleTimestamp('2026-03-29 03:30:00'), null);
+    const beforeFold = Date.parse('2026-10-25T00:31:00.000Z');
+    const afterFold = Date.parse('2026-10-25T01:31:00.000Z');
+    assert.equal(parseMobilityTimestamp('2026-10-25 03:30:00', 'Europe/Kyiv', beforeFold)?.toISOString(), '2026-10-25T00:30:00.000Z');
+    assert.equal(parseMobilityTimestamp('2026-10-25 03:30:00', 'Europe/Kyiv', afterFold)?.toISOString(), '2026-10-25T01:30:00.000Z');
+  });
+  it('uses the same 90-second freshness gate for every live mobility source', () => {
+    const now = Date.parse('2026-10-08T12:00:00Z');
+    assert.equal(isFreshMobilityTimestamp(new Date(now - 90_000), now), true);
+    assert.equal(isFreshMobilityTimestamp(new Date(now - 90_001), now), false);
+    assert.equal(isFreshMobilityTimestamp(new Date(now + 30_000), now), true);
+    assert.equal(isFreshMobilityTimestamp(new Date(now + 30_001), now), false);
+    assert.equal(isFreshMobilityTimestamp(null, now), false);
   });
   it('hides missing, stale, or implausibly future timestamps', () => {
     const now = Date.parse('2026-10-08T12:00:00.000Z');

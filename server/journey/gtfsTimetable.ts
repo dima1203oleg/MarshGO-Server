@@ -32,7 +32,7 @@ export interface GtfsTimetableFeed {
   timezone: string;
   routes: Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType; agencyId?: string; scheduleSemantics?: 'published_departures' | 'frequency_estimate' }>;
   stops: Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string; parentStation?: string; locationType?: number }>;
-  trips: Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string }>;
+  trips: Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string; directionId?: string }>;
   /** Actual GTFS shape coordinates, keyed by the feed's shape_id. */
   shapes?: Map<string, Array<[number, number]>>;
   stopTimes: Map<string, Array<{ stopId: string; sequence: number; arrivalSeconds: number; departureSeconds: number; pickupType: number; dropOffType: number; sourceStopId?: string; sourceParentStationId?: string; sourceStopName?: string; sourceStopCoordinates?: [number, number]; sourceZoneId?: string }>>;
@@ -255,11 +255,12 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
       ...(locationType !== 0 ? { locationType } : {}) });
   }
 
-  const trips = new Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string }>();
+  const trips = new Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string; directionId?: string }>();
   for (const row of csvRows(text('trips.txt'))) {
     if (!row.trip_id || !row.service_id || !routes.has(row.route_id)) continue;
     trips.set(row.trip_id, { routeId: row.route_id, serviceId: row.service_id, headsign: row.trip_headsign?.trim() || '',
-      ...(row.shape_id?.trim() ? { shapeId: row.shape_id.trim() } : {}) });
+      ...(row.shape_id?.trim() ? { shapeId: row.shape_id.trim() } : {}),
+      ...(row.direction_id?.trim() ? { directionId: row.direction_id.trim() } : {}) });
   }
 
   const referencedShapes = new Set([...trips.values()].flatMap((trip) => trip.shapeId ? [trip.shapeId] : []));

@@ -77,6 +77,7 @@ start_secondary_api() {
 }
 
 start_api
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" npm run test:integration:live-journey
 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:bookings
 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \

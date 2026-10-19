@@ -24,13 +24,13 @@ export interface ScoredJourney<T extends JourneyOption = JourneyOption> {
   strategy: JourneyStrategy;
 }
 
-/** CHEAPEST is a global promise, so suppress its label if any candidate lacks a fare. */
+/** CHEAPEST compares only candidates with a known, comparable fare. */
 export function strategiesWithComparablePrices<T extends JourneyOption>(
   journeys: readonly T[],
   strategies: readonly JourneyStrategy[],
 ): JourneyStrategy[] {
-  const hasUnknownFare = journeys.some((journey) => journey.priceMinor === null);
-  return hasUnknownFare ? strategies.filter((strategy) => strategy !== 'CHEAPEST') : [...strategies];
+  const hasComparableFare = journeys.some((journey) => journey.priceMinor !== null);
+  return hasComparableFare ? [...strategies] : strategies.filter((strategy) => strategy !== 'CHEAPEST');
 }
 
 type Metric = 'durationSeconds' | 'priceMinor' | 'transfers' | 'walkingMeters' | 'risk' | 'comfortPenalty';
@@ -78,9 +78,14 @@ export function selectStrategyAlternatives<T extends JourneyOption>(
   const frontier = paretoFrontier(journeys);
   const alternatives = new Map<string, StrategyRecommendation<T>>();
   for (const strategy of strategies) {
+    // An unknown fare is not a zero or a comparable amount. Keep such routes
+    // available to other strategies, but never include them in CHEAPEST.
+    const strategyCandidates = strategy === 'CHEAPEST'
+      ? frontier.filter((journey) => journey.priceMinor !== null)
+      : frontier;
     const chainCounts = new Map<string, number>();
     let rank = 0;
-    for (const { journey, score } of scoreJourneys(frontier, strategy)) {
+    for (const { journey, score } of scoreJourneys(strategyCandidates, strategy)) {
       const modeChain = journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.mode).join('>') || 'WALK';
       const diversityKey = journey.diversityKey ?? modeChain;
       const count = chainCounts.get(diversityKey) ?? 0;
