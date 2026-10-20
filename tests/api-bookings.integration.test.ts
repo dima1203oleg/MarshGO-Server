@@ -43,6 +43,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     transitCompositionOffer: crypto.randomUUID(),
     rendezvousOffer: crypto.randomUUID(),
     expiredOffer: crypto.randomUUID(),
+    gtfsFixtureProvider: crypto.randomUUID(),
   };
   const keys = Array.from({ length: 20 }, () => `api-test-${crypto.randomUUID()}`);
   const passengerA = ids.passengers[0];
@@ -60,6 +61,14 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       `SELECT now() + interval '10 days' AS departure_at`,
     );
     journeyOfferDepartureAt = scheduledJourney.rows[0]!.departure_at;
+    if (process.env.API_TEST_GTFS_FIXTURE === '1') {
+      await pool.query(`DELETE FROM mobility_providers WHERE name='MARSHGO HTTP GTFS integration fixture'
+        AND city='Львів' AND feed_url='https://gtfs-api-fixture.invalid/lviv.zip'`);
+      await pool.query(`INSERT INTO mobility_providers(id,name,city,provider_type,source_type,feed_url,status,health,last_report)
+        VALUES ($1,'MARSHGO HTTP GTFS integration fixture','Львів','public_transit','gtfs',
+          'https://gtfs-api-fixture.invalid/lviv.zip','enabled','healthy',
+          '{"bbox":[23.9,49.7,24.15,49.95],"counts":{"routes_bus":1,"routes_tram":1}}'::jsonb)`, [ids.gtfsFixtureProvider]);
+    }
     const lvivProvider = await pool.query<{ enabled: boolean }>(
       `SELECT EXISTS (SELECT 1 FROM mobility_providers
         WHERE city='Львів' AND source_type='gtfs' AND status='enabled' AND health='healthy') AS enabled`,
@@ -109,6 +118,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
   });
 
   after(async () => {
+    await pool.query('DELETE FROM mobility_providers WHERE id=$1', [ids.gtfsFixtureProvider]);
     if (otpUserId) await pool.query('DELETE FROM audit_events WHERE actor_id=$1', [otpUserId]);
     await pool.query('DELETE FROM vehicles WHERE owner_id IN (SELECT id FROM users WHERE phone_e164 LIKE $1)', [`+38099${process.pid}%`]);
     await pool.query('DELETE FROM users WHERE phone_e164 LIKE $1', [`+38099${process.pid}%`]);
@@ -340,13 +350,23 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       }),
     });
     assert.equal(multiResponse.status, 200);
-    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; totalDurationSeconds: number; totalPriceMinor: number | null; legs: Array<{
-      mode: string; transportType?: string; routeGeometry?: [number, number][];
+    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; source?: string; strategyRanks?: Record<string, number>; totalDurationSeconds: number; totalPriceMinor: number | null; legs: Array<{
+      mode: string; source?: string; providerId?: string; transportType?: string; routeGeometry?: [number, number][];
       departureAt?: string; arrivalAt?: string;
       origin?: { coordinates: [number, number] }; destination?: { coordinates: [number, number] };
       stops?: Array<{ coordinates: [number, number]; arrivalAt: string }>;
     }> }> } }).data;
     assert.equal(multiData.returnedCount, multiData.journeys.length, 'response metadata matches persisted alternatives');
+    if (process.env.API_TEST_GTFS_FIXTURE === '1') {
+      const fixtureJourney = multiData.journeys.find((candidate) => candidate.source === 'gtfs-static'
+        && candidate.legs.some((leg) => leg.providerId === ids.gtfsFixtureProvider));
+      assert.ok(fixtureJourney, 'the authenticated HTTP search returns a journey parsed from the exact local GTFS fixture provider');
+      const fixtureTransitLegs = fixtureJourney.legs.filter((leg) => leg.providerId === ids.gtfsFixtureProvider);
+      assert.ok(fixtureTransitLegs.some((leg) => leg.transportType === 'bus'));
+      assert.ok(fixtureTransitLegs.some((leg) => leg.transportType === 'tram'));
+      assert.ok(fixtureTransitLegs.every((leg) => leg.source === 'gtfs-static'
+        && (leg.routeGeometry?.length ?? 0) >= 2), 'fixture bus/tram legs expose scheduled source and renderable GTFS shape geometry');
+    }
     if (healthyLvivGtfsEnabled) {
       assert.ok(multiData.availableStrategies.includes('BALANCED'));
       assert.ok(multiData.journeys.some((journey) => typeof journey.strategyRanks?.BALANCED === 'number'),

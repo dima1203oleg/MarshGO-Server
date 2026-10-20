@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { fileURLToPath } from 'node:url';
 import { GtfsSearchWorkerClient } from '../server/journey/gtfsSearchWorkerClient';
 import { findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
 import { buildGtfsSearchGroups, GtfsSearchGroupCache, searchGtfsGroup, selectGtfsStopArrivals, selectGtfsTripMetadata } from '../server/journey/gtfsSearchWorkerCore';
@@ -46,6 +47,32 @@ test('GTFS search worker starts and returns an empty snapshot without configured
     assert.ok(diagnostics.heapUsedBytes > 0);
     assert.deepEqual(diagnostics.feedCache, { entries: 0, estimatedBytes: 0 });
     assert.equal(diagnostics.groupCacheEntries, 0);
+  } finally {
+    await client.close();
+  }
+});
+
+test('test-only GTFS URL loads the checked-in fixture through the worker and composes bus to tram', async () => {
+  const fixtureDirectory = fileURLToPath(new URL('./fixtures/gtfs-http/', import.meta.url));
+  const client = new GtfsSearchWorkerClient(fixtureDirectory);
+  const departure = new Date('2026-10-21T05:00:00.000Z');
+  try {
+    const result = await client.search({
+      providerId: 'fixture-provider', providerName: 'fixture',
+      origin: [24.0029933, 49.8681678], destination: [24.057585, 49.794117],
+      earliestDeparture: departure, latestDeparture: new Date(departure.getTime() + 30 * 60_000), limit: 20,
+      maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 2, maximumWaitSeconds: 45 * 60,
+      minimumTransferBufferSeconds: 5 * 60, maximumAccessWalkingMeters: 300,
+      maximumEgressWalkingMeters: 300, maximumTransferWalkingMeters: 400,
+      allowedModes: ['BUS', 'TRAM'], allowedTransportTypes: ['bus', 'tram'],
+    }, [{ id: 'fixture-provider', name: 'Fixture Lviv', city: 'Львів', feedUrl: 'https://gtfs-api-fixture.invalid/lviv.zip' }]);
+    assert.deepEqual(result.errors, []);
+    const composed = result.searches.flatMap((search) => search.itineraries)
+      .find((itinerary) => itinerary.segments.some((segment) => segment.transportType === 'bus')
+        && itinerary.segments.some((segment) => segment.transportType === 'tram'));
+    assert.ok(composed, 'the worker and planner compose scheduled bus and tram legs from the local fixture');
+    assert.deepEqual(composed.segments.map((segment) => segment.transportType), ['bus', 'tram']);
+    assert.ok(composed.segments.every((segment) => (segment.routeGeometry?.length ?? 0) >= 2));
   } finally {
     await client.close();
   }

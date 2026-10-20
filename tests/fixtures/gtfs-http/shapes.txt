@@ -1,0 +1,6 @@
+shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence
+bus-shape,49.8681678,24.0029933,1
+bus-shape,49.8300000,24.0300000,2
+tram-shape,49.8301000,24.0304000,1
+tram-shape,49.8120000,24.0430000,2
+tram-shape,49.7941170,24.0575850,3

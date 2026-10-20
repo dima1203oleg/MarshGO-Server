@@ -1,0 +1,3 @@
+route_id,service_id,trip_id,trip_headsign,direction_id,shape_id
+fixture-bus,weekday,bus-trip,Сихів,0,bus-shape
+fixture-tram,weekday,tram-trip,Сихів,0,tram-shape
