@@ -2698,6 +2698,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     if (!counts) return true;
     return allowedTransitModes.some((mode) => typeKeysByMode[mode].some((type) => Number(counts[`routes_${type}`] ?? 0) > 0));
   });
+  if (process.env.MARSHGO_API_TEST_FIXTURE_MODE === '1' && process.env.NODE_ENV !== 'production') {
+    console.info(JSON.stringify({ event: 'test.gtfs.provider_selection', origin: search.origin.coordinates,
+      destination: search.destination.coordinates, discovered: gtfsProviders.map(({ id, last_report }) => ({ id, bbox: last_report?.bbox })),
+      spatiallyEligible: spatiallyEligibleGtfsProviders.map(({ id }) => id), eligible: eligibleGtfsProviders.map(({ id }) => id) }));
+  }
   const providerMetadata = new Map<string, { name: string; last_sync_at: Date | null; routeGeometrySource?: 'gtfs_shape' | 'official_geojson' }>(
     eligibleGtfsProviders.map((provider) => [provider.id, { name: provider.name, last_sync_at: provider.last_sync_at }]),
   );
@@ -2754,6 +2759,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     providerErrors.push(`GTFS-пошук тимчасово недоступний${error instanceof Error && error.message.includes('capacity') ? ': черга заповнена' : ''}; інші типи маршрутів перевіряються окремо`);
   }
   const mergedFeedGroups: GtfsWorkerGroup[] = gtfsWorkerSearch.descriptors;
+  if (process.env.MARSHGO_API_TEST_FIXTURE_MODE === '1' && process.env.NODE_ENV !== 'production') {
+    console.info(JSON.stringify({ event: 'test.gtfs.worker_groups', groups: mergedFeedGroups.map(({ id, sources, routeTypes }) => ({ id, providerIds: sources.map(({ providerId }) => providerId), routeTypes })) }));
+  }
   for (const error of gtfsWorkerSearch.errors) {
     if (error.kind === 'realtime') providerErrors.push(`${error.name}: GTFS-Realtime відхилено (${error.detail ?? 'дані неповні'}); використовується розклад`);
     else if (error.providerId && providerMetadata.has(error.providerId)) providerErrors.push(`${error.name}: розклад тимчасово недоступний`);
