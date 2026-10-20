@@ -2761,6 +2761,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const mergedFeedGroups: GtfsWorkerGroup[] = gtfsWorkerSearch.descriptors;
   if (process.env.MARSHGO_API_TEST_FIXTURE_MODE === '1' && process.env.NODE_ENV !== 'production') {
     console.info(JSON.stringify({ event: 'test.gtfs.worker_groups', groups: mergedFeedGroups.map(({ id, sources, routeTypes }) => ({ id, providerIds: sources.map(({ providerId }) => providerId), routeTypes })) }));
+    console.info(JSON.stringify({ event: 'test.gtfs.worker_search', departureAt: search.departureAt.toISOString(),
+      maximumJourneySeconds: maximumSearchDurationSeconds, maximumWaitSeconds: maximumGtfsWaitWithinJourney(maximumSearchDurationSeconds),
+      results: gtfsWorkerSearch.searches.map(({ groupId, itineraries, searchTruncated, resultLimitReached }) => ({
+        groupId, itineraryCount: itineraries.length, searchTruncated, resultLimitReached,
+      })) }));
   }
   for (const error of gtfsWorkerSearch.errors) {
     if (error.kind === 'realtime') providerErrors.push(`${error.name}: GTFS-Realtime відхилено (${error.detail ?? 'дані неповні'}); використовується розклад`);
