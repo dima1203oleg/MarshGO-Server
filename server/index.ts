@@ -15,14 +15,14 @@ import { parseBearerToken } from './auth/bearer';
 import type { Duplex } from 'node:stream';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
-import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
+import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, getWalkingRoute, RoutingUnavailableError } from './routing';
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, type GtfsItinerary, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
@@ -2741,7 +2741,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         earliestDeparture: search.departureAt, latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 100,
         maximumJourneySeconds: maximumSearchDurationSeconds,
         maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
-        maximumWaitSeconds: 4 * 60 * 60, minimumTransferBufferSeconds: configuredTransferBufferSeconds,
+        maximumWaitSeconds: maximumGtfsWaitWithinJourney(maximumSearchDurationSeconds),
+        minimumTransferBufferSeconds: configuredTransferBufferSeconds,
         maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
         maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
         maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
@@ -3000,7 +3001,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         providerId, providerName, origin, destination, earliestDeparture,
         latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 18,
         maximumJourneySeconds: Math.max(60, maximumSearchDurationSeconds - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000))),
-        maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS), maximumWaitSeconds: 4 * 60 * 60,
+        maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
+        maximumWaitSeconds: maximumGtfsWaitWithinJourney(Math.max(60,
+          maximumSearchDurationSeconds - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000)))),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
         maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS, maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
         maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS, allowedModes: ['METRO'],
@@ -3102,9 +3105,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         providerId: source.providerId, providerName: source.providerName, origin: origin.coordinates,
         destination: destination.coordinates, earliestDeparture, latestDeparture,
         limit: MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE,
-        maximumJourneySeconds: maximumSearchDurationSeconds,
+        maximumJourneySeconds: Math.max(60, maximumSearchDurationSeconds
+          - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000))),
         maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
-        maximumWaitSeconds: 4 * 60 * 60,
+        maximumWaitSeconds: maximumGtfsWaitWithinJourney(Math.max(60, maximumSearchDurationSeconds
+          - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000)))),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
         maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
         maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
@@ -4845,6 +4850,73 @@ app.get('/api/v1/bookings/:bookingId/rendezvous', requireAuth, asyncHandler(asyn
   if (!/^[0-9a-f-]{36}$/i.test(req.params.bookingId)) throw new ApiError(400, 'invalid booking ID');
   const rendezvous = await getOrCreateRendezvous(req.params.bookingId, req.userId!);
   res.json({ data: await rendezvousResponse(rendezvous, req.userId!) });
+}));
+
+app.get('/api/v1/rendezvous/:id/approaches', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid rendezvous ID');
+  const { rows } = await pool.query<{
+    id: string; booking_id: string; driver_id: string; passenger_id: string; pickup_lon: number; pickup_lat: number;
+    pickup_label: string; state: RendezvousState; location_sharing_enabled: boolean; booking_status: string;
+    driver_location_consent_at: Date | null; passenger_location_consent_at: Date | null;
+  }>(
+    `SELECT r.id,r.booking_id,o.driver_id,b.passenger_id,
+       ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
+       r.pickup_label,r.state,r.location_sharing_enabled,b.status AS booking_status,
+       r.driver_location_consent_at,r.passenger_location_consent_at
+      FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+     WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2)`, [req.params.id, req.userId],
+  );
+  const session = rows[0];
+  if (!session) throw new ApiError(404, 'rendezvous unavailable');
+  if (!session.location_sharing_enabled || !session.driver_location_consent_at || !session.passenger_location_consent_at
+      || !['confirmed','boarding','in_progress'].includes(session.booking_status)
+      || ['CANCELLED','EXPIRED','COMPLETED','BOARDING'].includes(session.state)) {
+    throw new ApiError(409, 'both participants must consent to active rendezvous sharing', 'rendezvous_consent_required');
+  }
+  if (!realtimeRedis?.isReady) throw new ApiError(503, 'ephemeral location service is unavailable', 'location_service_unavailable');
+  const [driverRaw, passengerRaw] = await Promise.all([
+    realtimeRedis.get(rendezvousLocationKey(session.id, 'driver')),
+    realtimeRedis.get(rendezvousLocationKey(session.id, 'passenger')),
+  ]);
+  const now = Date.now();
+  const sharingStartedAt = Math.max(session.driver_location_consent_at.getTime(), session.passenger_location_consent_at.getTime());
+  const parseFresh = (raw: string | null) => {
+    if (!raw) return null;
+    try {
+      const sample = JSON.parse(raw) as { coordinates?: unknown; capturedAt?: unknown; accuracyMeters?: unknown };
+      const capturedAt = typeof sample.capturedAt === 'string' ? Date.parse(sample.capturedAt) : NaN;
+      if (!Array.isArray(sample.coordinates) || sample.coordinates.length !== 2
+          || !sample.coordinates.every((n) => typeof n === 'number' && Number.isFinite(n))
+          || Math.abs(sample.coordinates[0] as number) > 180 || Math.abs(sample.coordinates[1] as number) > 90
+          || !Number.isFinite(capturedAt) || capturedAt < sharingStartedAt || now - capturedAt < -30_000 || now - capturedAt > 90_000
+          || typeof sample.accuracyMeters !== 'number' || !Number.isFinite(sample.accuracyMeters)) return null;
+      return { coordinates: sample.coordinates as [number, number], accuracyMeters: sample.accuracyMeters,
+        capturedAt: new Date(capturedAt).toISOString(), freshness: 'LIVE' as const };
+    } catch { return null; }
+  };
+  const driverLocation = parseFresh(driverRaw);
+  const passengerLocation = parseFresh(passengerRaw);
+  const pickup: [number, number] = [Number(session.pickup_lon), Number(session.pickup_lat)];
+  const calculate = async (origin: [number, number] | null, mode: 'CAR' | 'FOOT') => {
+    if (!origin) return { status: 'LOCATION_UNAVAILABLE' as const, geometry: null, distanceMeters: null, durationSeconds: null };
+    try {
+      const route = mode === 'CAR' ? await getRoadRoute(origin, pickup) : await getWalkingRoute(origin, pickup);
+      return { status: 'ROUTED' as const, geometry: route.geometry, distanceMeters: route.distanceMeters,
+        durationSeconds: route.durationSeconds, calculatedAt: new Date().toISOString() };
+    } catch {
+      return { status: 'ROUTING_UNAVAILABLE' as const, geometry: null, distanceMeters: null, durationSeconds: null };
+    }
+  };
+  const [driverApproach, passengerApproach] = await Promise.all([
+    calculate(driverLocation?.coordinates ?? null, 'CAR'),
+    calculate(passengerLocation?.coordinates ?? null, 'FOOT'),
+  ]);
+  res.json({ data: {
+    rendezvousId: session.id, pickup: { label: session.pickup_label, coordinates: pickup },
+    driver: { location: driverLocation, approach: driverApproach },
+    passenger: { location: passengerLocation, approach: passengerApproach },
+    updatedAt: new Date().toISOString(),
+  } });
 }));
 
 app.post('/api/v1/bookings/:bookingId/rendezvous/activate', requireAuth, asyncHandler(async (req, res) => {

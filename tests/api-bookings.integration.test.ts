@@ -238,6 +238,31 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       strategy: 'CHEAPEST',
       preferences: { allowCommunity: true, maxPriceMinor: 20000 },
     };
+    for (const maximumDurationMinutes of [30, 60, 120]) {
+      const maximumDurationSeconds = maximumDurationMinutes * 60;
+      const boundedTransitSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
+        body: JSON.stringify({
+          ...body,
+          origin: { name: 'Малоголосківська, Львів', coordinates: [24.0029933, 49.8681678] },
+          destination: { name: 'Сихів, Львів', coordinates: [24.057585, 49.794117] },
+          departureAt: nextKyivMorningDeparture(),
+          strategy: 'FASTEST',
+          preferences: { allowCommunity: false, allowedTransportTypes: ['bus', 'tram'], maxTotalDurationSeconds: maximumDurationSeconds },
+        }),
+      });
+      assert.equal(boundedTransitSearch.status, 200, `${maximumDurationMinutes}-minute transit search must remain valid at the API boundary`);
+      const boundedData = (await boundedTransitSearch.json() as { data: {
+        journeys: Array<{ totalDurationSeconds: number }>;
+        providerErrors: string[];
+      } }).data;
+      assert.ok(boundedData.journeys.every((journey) => journey.totalDurationSeconds <= maximumDurationSeconds),
+        `${maximumDurationMinutes}-minute search must not return an over-horizon journey`);
+      if (healthyLvivGtfsEnabled) {
+        assert.equal(boundedData.providerErrors.some((message) => message.startsWith('GTFS-пошук тимчасово недоступний')), false,
+          `${maximumDurationMinutes}-minute search must not silently discard a healthy GTFS search because transfer wait exceeds the journey horizon`);
+      }
+    }
     const modeMatrix: Array<{ type: string; journeys: number; blocked: boolean; walkingLegs: number }> = [];
     for (const transportType of ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer']) {
       const modeSearch = ['bus','marshrutka','tram'].includes(transportType) ? {
@@ -676,6 +701,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const initial = await sessionResponse.json() as { data: { id: string; state: string; locationSharingEnabled: boolean } };
     assert.equal(initial.data.state, 'SCHEDULED');
     assert.equal(initial.data.locationSharingEnabled, false);
+    const approachesBeforeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: passengerHeaders });
+    assert.equal(approachesBeforeConsent.status, 409);
     const prematureLocation = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
       method: 'POST', headers: passengerHeaders,
       body: JSON.stringify({ longitude: 24, latitude: 49, accuracyMeters: 5, capturedAt: new Date().toISOString() }),
@@ -736,6 +763,19 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const passengerState = await passengerView.json() as { data: { locations: { driver: { freshness: string; coordinates: number[] } | null } } };
     assert.deepEqual(passengerState.data.locations.driver?.coordinates, [24.0001, 49]);
     assert.equal(passengerState.data.locations.driver?.freshness, 'LIVE');
+    const approaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: passengerHeaders });
+    assert.equal(approaches.status, 200);
+    const approachData = await approaches.json() as { data: {
+      driver: { approach: { status: string; geometry: unknown; distanceMeters: number | null } };
+      passenger: { approach: { status: string; geometry: unknown; distanceMeters: number | null } };
+    } };
+    assert.equal(approachData.data.driver.approach.status, 'ROUTING_UNAVAILABLE');
+    assert.equal(approachData.data.driver.approach.geometry, null);
+    assert.equal(approachData.data.driver.approach.distanceMeters, null);
+    assert.equal(approachData.data.passenger.approach.status, 'ROUTING_UNAVAILABLE');
+    assert.equal(approachData.data.passenger.approach.geometry, null);
+    const outsiderApproaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: { 'x-dev-user-id': passengerB } });
+    assert.equal(outsiderApproaches.status, 404);
 
     const revokeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
       method: 'POST', headers: passengerHeaders, body: JSON.stringify({ enabled: false }),
