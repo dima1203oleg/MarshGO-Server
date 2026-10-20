@@ -705,6 +705,31 @@ test('query-time retention keeps a feasible multi-leg chain under an injected gr
     'skipped boarding stops are excluded from temporal retention and returned itineraries');
 });
 
+test('query-time retention does not let a temporally matched but forbidden trip crowd out a feasible chain', () => {
+  const { timetable, targetTripId, decoyTripId } = timeFeasibleChainWithHashCompetingTrips();
+  const decoyTimes = timetable.stopTimes.get(decoyTripId)!;
+  decoyTimes[0]!.arrivalSeconds = 8 * 3600 + 18 * 60;
+  decoyTimes[0]!.departureSeconds = 8 * 3600 + 18 * 60;
+  decoyTimes[1]!.arrivalSeconds = 8 * 3600 + 25 * 60;
+  decoyTimes[1]!.departureSeconds = 8 * 3600 + 25 * 60;
+  timetable.transfers = [{
+    fromStopId: 'hub-a', toStopId: 'hub-a', transferType: 3,
+    fromTripId: 'access-trip', toTripId: decoyTripId,
+  }];
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400], destination: [24.0300, 49.8500],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+  }, { totalSegments: 3, segmentsPerRoute: 1 });
+
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `access-trip,${targetTripId},egress-trip`),
+  'the hash-preferred middle trip is explicitly forbidden, so retention must preserve the feasible alternative');
+  assert.ok(!result.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === decoyTripId)),
+    'the final itinerary must never use the explicitly forbidden connection');
+});
+
 test('oversized single trips retain a useful exact direct segment inside the bounded sample', () => {
   const timetable = feed();
   timetable.trips.clear();
