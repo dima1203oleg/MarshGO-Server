@@ -64,10 +64,17 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     if (process.env.API_TEST_GTFS_FIXTURE === '1') {
       await pool.query(`DELETE FROM mobility_providers WHERE name='MARSHGO HTTP GTFS integration fixture'
         AND city='Львів' AND feed_url='https://gtfs-api-fixture.invalid/lviv.zip'`);
-      await pool.query(`INSERT INTO mobility_providers(id,name,city,provider_type,source_type,feed_url,priority,status,health,last_report)
+      await pool.query(`INSERT INTO mobility_providers(id,name,city,provider_type,source_type,feed_url,priority,status,health,access,last_report)
         VALUES ($1,'MARSHGO HTTP GTFS integration fixture','Львів','public_transit','gtfs',
-          'https://gtfs-api-fixture.invalid/lviv.zip',1,'enabled','healthy',
+          'https://gtfs-api-fixture.invalid/lviv.zip',1,'enabled','healthy','open',
           '{"bbox":[23.9,49.7,24.15,49.95],"counts":{"routes_bus":1,"routes_tram":1}}'::jsonb)`, [ids.gtfsFixtureProvider]);
+      const fixtureCandidate = await pool.query<{ id: string }>(`SELECT id FROM (
+        SELECT id FROM mobility_providers
+         WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
+           AND status='enabled' AND health IN ('healthy','degraded')
+         ORDER BY priority,name LIMIT 101
+      ) AS bounded_candidates WHERE id=$1`, [ids.gtfsFixtureProvider]);
+      assert.equal(fixtureCandidate.rowCount, 1, 'the fixture provider must survive the same bounded registry selection used by the API');
     }
     const lvivProvider = await pool.query<{ enabled: boolean }>(
       `SELECT EXISTS (SELECT 1 FROM mobility_providers
