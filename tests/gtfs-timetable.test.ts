@@ -755,6 +755,37 @@ test('query-time retention applies trip-specific minimum transfer time before pr
     'the final itinerary must never use a connection that misses its explicit minimum transfer time');
 });
 
+test('query-time retention does not treat a shared parent station as proof of a feasible platform transfer', () => {
+  const { timetable, targetTripId, decoyTripId } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.stops.set('hub-a-platform-decoy', {
+    id: 'hub-a-platform-decoy', name: 'Hub A alternate platform', lon: 24.025, lat: 49.845,
+    parentStation: 'shared-hub-a',
+  });
+  timetable.stops.set('hub-a', { ...timetable.stops.get('hub-a')!, parentStation: 'shared-hub-a' });
+  const accessTimes = timetable.stopTimes.get('access-trip')!;
+  const decoyTimes = timetable.stopTimes.get(decoyTripId)!;
+  accessTimes[1]!.sourceParentStationId = 'shared-hub-a';
+  decoyTimes[0]!.stopId = 'hub-a-platform-decoy';
+  decoyTimes[0]!.sourceStopId = 'hub-a-platform-decoy';
+  decoyTimes[0]!.sourceParentStationId = 'shared-hub-a';
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, entries] of timetable.stopTimes) entries.forEach((entry, index) => {
+    const atStop = timetable.stopTimesByStop.get(entry.stopId) ?? [];
+    atStop.push({ tripId, index });
+    timetable.stopTimesByStop.set(entry.stopId, atStop);
+  });
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400], destination: [24.0300, 49.8500],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+  }, { totalSegments: 3, segmentsPerRoute: 1 });
+
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `access-trip,${targetTripId},egress-trip`),
+  'a shared parent alone must not make the platform-shifted decoy crowd out the exact-stop chain');
+});
+
 test('oversized single trips retain a useful exact direct segment inside the bounded sample', () => {
   const timetable = feed();
   timetable.trips.clear();

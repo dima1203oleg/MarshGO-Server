@@ -1504,6 +1504,10 @@ export function findGtfsItinerariesWithStats(
       const { rule, ambiguous } = retentionRuleFor(eventNodes, segmentNodes,
         event.tripId, segment.tripId, event.routeId, segment.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
+      // A shared parent station is not proof that a platform-to-platform
+      // transfer is walkable. Unless GTFS marks an in-seat continuation, only
+      // exact stop identity can promote the trip in this bounded hint.
+      if (event.stopId !== segment.originStop.id && rule?.transferType !== 4) return null;
       if (rule?.transferType === 4) return 0;
       return Math.max(minimumGapSeconds,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
@@ -1535,6 +1539,7 @@ export function findGtfsItinerariesWithStats(
       const { rule, ambiguous } = retentionRuleFor(segmentNodes, eventNodes,
         segment.tripId, event.tripId, segment.routeId, event.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
+      if (event.stopId !== segment.destinationStop.id && rule?.transferType !== 4) return null;
       if (rule?.transferType === 4) return 0;
       return Math.max(minimumGapSeconds,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
