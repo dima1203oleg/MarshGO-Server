@@ -350,7 +350,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       }),
     });
     assert.equal(multiResponse.status, 200);
-    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; source?: string; strategyRanks?: Record<string, number>; totalDurationSeconds: number; totalPriceMinor: number | null; legs: Array<{
+    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; providerErrors?: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; source?: string; strategyRanks?: Record<string, number>; totalDurationSeconds: number; totalPriceMinor: number | null; legs: Array<{
       mode: string; source?: string; providerId?: string; transportType?: string; routeGeometry?: [number, number][];
       departureAt?: string; arrivalAt?: string;
       origin?: { coordinates: [number, number] }; destination?: { coordinates: [number, number] };
@@ -360,7 +360,10 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     if (process.env.API_TEST_GTFS_FIXTURE === '1') {
       const fixtureJourney = multiData.journeys.find((candidate) => candidate.source === 'gtfs-static'
         && candidate.legs.some((leg) => leg.providerId === ids.gtfsFixtureProvider));
-      assert.ok(fixtureJourney, 'the authenticated HTTP search returns a journey parsed from the exact local GTFS fixture provider');
+      assert.ok(fixtureJourney, `the authenticated HTTP search returns a journey parsed from the exact local GTFS fixture provider; diagnostics=${JSON.stringify({
+        providerErrors: multiData.providerErrors, blockedProviders: multiData.blockedProviders,
+        journeys: multiData.journeys.map((candidate) => ({ source: candidate.source, legs: candidate.legs.map((leg) => ({ source: leg.source, providerId: leg.providerId, transportType: leg.transportType })) })),
+      })}`);
       const fixtureTransitLegs = fixtureJourney.legs.filter((leg) => leg.providerId === ids.gtfsFixtureProvider);
       assert.ok(fixtureTransitLegs.some((leg) => leg.transportType === 'bus'));
       assert.ok(fixtureTransitLegs.some((leg) => leg.transportType === 'tram'));
