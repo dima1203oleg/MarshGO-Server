@@ -78,7 +78,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     }
     const lvivProvider = await pool.query<{ enabled: boolean }>(
       `SELECT EXISTS (SELECT 1 FROM mobility_providers
-        WHERE city='Львів' AND source_type='gtfs' AND status='enabled' AND health='healthy') AS enabled`,
+        WHERE city='Львів' AND source_type='gtfs' AND status='enabled' AND health='healthy'
+          AND feed_url <> 'https://gtfs-api-fixture.invalid/lviv.zip') AS enabled`,
     );
     healthyLvivGtfsEnabled = lvivProvider.rows[0]?.enabled === true;
     await pool.query(`INSERT INTO users(id,display_name,roles) VALUES
