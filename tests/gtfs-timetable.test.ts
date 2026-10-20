@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
@@ -927,6 +927,30 @@ test('route-chain sample preserves both FASTEST and CHEAPEST extremes', () => {
   assert.equal(selected.length, 8);
   assert.ok(selected.some((journey) => journey.id === fastest.id), 'the fastest option survives route-chain sampling');
   assert.ok(selected.some((journey) => journey.id === cheapest.id), 'the cheapest known-fare option survives route-chain sampling');
+});
+
+test('cross-provider GTFS cap preserves slow cheapest routes before filling by arrival', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const candidates = Array.from({ length: 130 }, (_, index) => ({
+    ...base,
+    id: `route-${String(index).padStart(3, '0')}`,
+    durationSeconds: 1_800 + index * 10,
+    arrivalAt: new Date(base.arrivalAt.getTime() + index * 10_000),
+    fare: { priceMinor: index === 129 ? 100 : 1_000 + index, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  }));
+  const selected = selectGtfsCandidatesForCrossProviderSearch(candidates, 100);
+
+  assert.equal(selected.length, 100);
+  assert.ok(selected.some((journey) => journey.id === 'route-000'), 'the fastest candidate survives');
+  assert.ok(selected.some((journey) => journey.id === 'route-129'), 'the slowest known-cheapest candidate survives');
+  assert.deepEqual(
+    selectGtfsCandidatesForCrossProviderSearch([...candidates].reverse(), 100).map(({ id }) => id),
+    selected.map(({ id }) => id),
+    'objective retention is deterministic and independent of provider insertion order',
+  );
 });
 
 test('route-chain sample tie-break is locale-independent and stable across input order', () => {

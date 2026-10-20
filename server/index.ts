@@ -22,7 +22,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, type GtfsItinerary, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
@@ -3208,9 +3208,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerErrors.push(`Пішохідний маршрутизатор обмежив перевірку комбінацій ${communityWalkingBudget.limit} шляхами; частину варіантів не перевірено.`);
     }
   }
-  scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
   if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
-  scheduledCandidates.splice(100);
+  scheduledCandidates = selectGtfsCandidatesForCrossProviderSearch(scheduledCandidates, 100);
   const transitRouteChainKey = (itinerary: GtfsItinerary) => {
     const routes: string[] = [];
     for (const segment of itinerary.segments) {
