@@ -1499,11 +1499,14 @@ export function findGtfsItinerariesWithStats(
   const hasPriorEvent = (segment: GtfsDirectJourney, minimumGapSeconds: number) => {
     const latestAllowed = segment.departureAt.getTime() - minimumGapSeconds * 1000;
     const segmentNodes = retentionNodesForSegment(segment.originTransferNodeIds, segment.originStop.id);
-    const isFeasibleRule = (event: QueryReachabilityEvent) => {
+    const minimumGapForEvent = (event: QueryReachabilityEvent) => {
       const eventNodes = retentionNodesForSegment(event.nodeIds, event.stopId);
       const { rule, ambiguous } = retentionRuleFor(eventNodes, segmentNodes,
         event.tripId, segment.tripId, event.routeId, segment.routeId);
-      return !ambiguous && rule?.transferType !== 3;
+      if (ambiguous || rule?.transferType === 3) return null;
+      if (rule?.transferType === 4) return 0;
+      return Math.max(minimumGapSeconds,
+        rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
     };
     for (const nodeId of segmentNodes) {
       const events = originRetentionEvents.get(nodeId);
@@ -1518,7 +1521,8 @@ export function findGtfsItinerariesWithStats(
         const event = events[index]!;
         const availableSeconds = (segment.departureAt.getTime() - event.at) / 1000;
         if (availableSeconds > maximumWaitSeconds) break;
-        if (isFeasibleRule(event)) return true;
+        const requiredSeconds = minimumGapForEvent(event);
+        if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
       }
     }
     return false;
@@ -1526,11 +1530,14 @@ export function findGtfsItinerariesWithStats(
   const hasNextEvent = (segment: GtfsDirectJourney, minimumGapSeconds: number) => {
     const earliestAllowed = segment.arrivalAt.getTime() + minimumGapSeconds * 1000;
     const segmentNodes = retentionNodesForSegment(segment.destinationTransferNodeIds, segment.destinationStop.id);
-    const isFeasibleRule = (event: QueryReachabilityEvent) => {
+    const minimumGapForEvent = (event: QueryReachabilityEvent) => {
       const eventNodes = retentionNodesForSegment(event.nodeIds, event.stopId);
       const { rule, ambiguous } = retentionRuleFor(segmentNodes, eventNodes,
         segment.tripId, event.tripId, segment.routeId, event.routeId);
-      return !ambiguous && rule?.transferType !== 3;
+      if (ambiguous || rule?.transferType === 3) return null;
+      if (rule?.transferType === 4) return 0;
+      return Math.max(minimumGapSeconds,
+        rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
     };
     for (const nodeId of segmentNodes) {
       const events = destinationRetentionEvents.get(nodeId);
@@ -1545,7 +1552,8 @@ export function findGtfsItinerariesWithStats(
         const event = events[index]!;
         const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
         if (availableSeconds > maximumWaitSeconds) break;
-        if (isFeasibleRule(event)) return true;
+        const requiredSeconds = minimumGapForEvent(event);
+        if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
       }
     }
     return false;

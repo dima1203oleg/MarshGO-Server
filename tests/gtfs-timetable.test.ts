@@ -730,6 +730,31 @@ test('query-time retention does not let a temporally matched but forbidden trip 
     'the final itinerary must never use the explicitly forbidden connection');
 });
 
+test('query-time retention applies trip-specific minimum transfer time before prioritizing a connection', () => {
+  const { timetable, targetTripId, decoyTripId } = timeFeasibleChainWithHashCompetingTrips();
+  const decoyTimes = timetable.stopTimes.get(decoyTripId)!;
+  decoyTimes[0]!.arrivalSeconds = 8 * 3600 + 18 * 60;
+  decoyTimes[0]!.departureSeconds = 8 * 3600 + 18 * 60;
+  decoyTimes[1]!.arrivalSeconds = 8 * 3600 + 25 * 60;
+  decoyTimes[1]!.departureSeconds = 8 * 3600 + 25 * 60;
+  timetable.transfers = [{
+    fromStopId: 'hub-a', toStopId: 'hub-a', transferType: 2,
+    minTransferTimeSeconds: 900, fromTripId: 'access-trip', toTripId: decoyTripId,
+  }];
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400], destination: [24.0300, 49.8500],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+  }, { totalSegments: 3, segmentsPerRoute: 1 });
+
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `access-trip,${targetTripId},egress-trip`),
+  'the trip-specific 15-minute minimum makes the decoy infeasible, so retention must preserve the feasible chain');
+  assert.ok(!result.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === decoyTripId)),
+    'the final itinerary must never use a connection that misses its explicit minimum transfer time');
+});
+
 test('oversized single trips retain a useful exact direct segment inside the bounded sample', () => {
   const timetable = feed();
   timetable.trips.clear();
