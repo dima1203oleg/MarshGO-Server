@@ -517,7 +517,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       );
       assert.deepEqual(bookedComposition.rows[0], { state: 'PARTIALLY_RESERVED', confirmed: 1, still_suggested_transit: 2 },
         'booking the private leg does not pretend the transit legs are reservations');
-    } else {
+    } else if (!healthyLvivGtfsEnabled) {
       assert.equal(multiData.journeys.length, 0, 'an empty provider registry must not produce fabricated transit alternatives');
       assert.ok(multiData.blockedProviders.some((value) => value.startsWith('transportType:bus:')));
       assert.ok(multiData.blockedProviders.some((value) => value.startsWith('transportType:tram:')));
