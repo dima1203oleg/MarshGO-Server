@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
@@ -289,6 +289,18 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.ok(Array.isArray(JSON.parse(String(graph.routeBudgetUnderfillSample))));
   assert.equal(typeof ranked.searchStepLimit, 'number');
   assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
+});
+
+test('GTFS maximum transfer wait never exceeds the total journey horizon', () => {
+  assert.equal(maximumGtfsWaitWithinJourney(30 * 60), 30 * 60,
+    'a short user journey limit must produce valid shorter transfer bounds');
+  assert.equal(maximumGtfsWaitWithinJourney(2 * 60 * 60), 2 * 60 * 60,
+    'the transfer wait cannot exceed a two-hour total journey limit');
+  assert.equal(maximumGtfsWaitWithinJourney(6 * 60 * 60), 4 * 60 * 60,
+    'long journeys keep the four-hour transfer-wait ceiling');
+  assert.equal(maximumGtfsWaitWithinJourney(60, 0), 0,
+    'an explicitly zero wait remains valid');
+  assert.throws(() => maximumGtfsWaitWithinJourney(0), /bounds must be valid integer seconds/);
 });
 
 test('returns every source stop and its scheduled times for expandable route details', () => {

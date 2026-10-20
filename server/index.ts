@@ -22,7 +22,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, type GtfsItinerary, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
@@ -2741,7 +2741,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         earliestDeparture: search.departureAt, latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 100,
         maximumJourneySeconds: maximumSearchDurationSeconds,
         maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
-        maximumWaitSeconds: 4 * 60 * 60, minimumTransferBufferSeconds: configuredTransferBufferSeconds,
+        maximumWaitSeconds: maximumGtfsWaitWithinJourney(maximumSearchDurationSeconds),
+        minimumTransferBufferSeconds: configuredTransferBufferSeconds,
         maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
         maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
         maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
@@ -3000,7 +3001,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         providerId, providerName, origin, destination, earliestDeparture,
         latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 18,
         maximumJourneySeconds: Math.max(60, maximumSearchDurationSeconds - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000))),
-        maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS), maximumWaitSeconds: 4 * 60 * 60,
+        maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
+        maximumWaitSeconds: maximumGtfsWaitWithinJourney(Math.max(60,
+          maximumSearchDurationSeconds - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000)))),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
         maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS, maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
         maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS, allowedModes: ['METRO'],
@@ -3102,9 +3105,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         providerId: source.providerId, providerName: source.providerName, origin: origin.coordinates,
         destination: destination.coordinates, earliestDeparture, latestDeparture,
         limit: MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE,
-        maximumJourneySeconds: maximumSearchDurationSeconds,
+        maximumJourneySeconds: Math.max(60, maximumSearchDurationSeconds
+          - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000))),
         maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
-        maximumWaitSeconds: 4 * 60 * 60,
+        maximumWaitSeconds: maximumGtfsWaitWithinJourney(Math.max(60, maximumSearchDurationSeconds
+          - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000)))),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
         maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
         maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,

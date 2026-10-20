@@ -31,6 +31,7 @@ const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 export const MAX_GTFS_TRANSFERS = 4;
 export const DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS = 180;
+export const DEFAULT_MAXIMUM_WAIT_SECONDS = 4 * 60 * 60;
 export const DEFAULT_MAX_ACCESS_WALKING_METERS = 900;
 export const DEFAULT_MAX_EGRESS_WALKING_METERS = 1000;
 export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
@@ -40,6 +41,16 @@ const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
 type CsvRow = Record<string, string>;
 export type TransitJourneyMode = 'BUS' | 'MINIBUS' | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'FERRY' | 'FUNICULAR';
 export type GtfsTransportType = 'bus' | 'marshrutka' | 'intercity_bus' | 'train' | 'suburban_train' | 'city_train' | 'tram' | 'trolleybus' | 'metro' | 'ferry' | 'funicular';
+
+/** Keep a per-transfer wait bound within the total search horizon accepted by the planner. */
+export function maximumGtfsWaitWithinJourney(maximumJourneySeconds: number,
+  configuredMaximumWaitSeconds = DEFAULT_MAXIMUM_WAIT_SECONDS): number {
+  if (!Number.isSafeInteger(maximumJourneySeconds) || maximumJourneySeconds < 1
+    || !Number.isSafeInteger(configuredMaximumWaitSeconds) || configuredMaximumWaitSeconds < 0) {
+    throw new TypeError('GTFS wait and journey bounds must be valid integer seconds');
+  }
+  return Math.min(maximumJourneySeconds, configuredMaximumWaitSeconds);
+}
 
 export interface GtfsTimetableFeed {
   fetchedAt: Date;
