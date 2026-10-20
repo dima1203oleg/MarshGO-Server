@@ -238,6 +238,31 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       strategy: 'CHEAPEST',
       preferences: { allowCommunity: true, maxPriceMinor: 20000 },
     };
+    for (const maximumDurationMinutes of [30, 60, 120]) {
+      const maximumDurationSeconds = maximumDurationMinutes * 60;
+      const boundedTransitSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
+        body: JSON.stringify({
+          ...body,
+          origin: { name: 'Малоголосківська, Львів', coordinates: [24.0029933, 49.8681678] },
+          destination: { name: 'Сихів, Львів', coordinates: [24.057585, 49.794117] },
+          departureAt: nextKyivMorningDeparture(),
+          strategy: 'FASTEST',
+          preferences: { allowCommunity: false, allowedTransportTypes: ['bus', 'tram'], maxTotalDurationSeconds: maximumDurationSeconds },
+        }),
+      });
+      assert.equal(boundedTransitSearch.status, 200, `${maximumDurationMinutes}-minute transit search must remain valid at the API boundary`);
+      const boundedData = (await boundedTransitSearch.json() as { data: {
+        journeys: Array<{ totalDurationSeconds: number }>;
+        providerErrors: string[];
+      } }).data;
+      assert.ok(boundedData.journeys.every((journey) => journey.totalDurationSeconds <= maximumDurationSeconds),
+        `${maximumDurationMinutes}-minute search must not return an over-horizon journey`);
+      if (healthyLvivGtfsEnabled) {
+        assert.equal(boundedData.providerErrors.some((message) => message.startsWith('GTFS-пошук тимчасово недоступний')), false,
+          `${maximumDurationMinutes}-minute search must not silently discard a healthy GTFS search because transfer wait exceeds the journey horizon`);
+      }
+    }
     const modeMatrix: Array<{ type: string; journeys: number; blocked: boolean; walkingLegs: number }> = [];
     for (const transportType of ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer']) {
       const modeSearch = ['bus','marshrutka','tram'].includes(transportType) ? {
