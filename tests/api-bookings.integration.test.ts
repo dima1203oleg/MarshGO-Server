@@ -33,6 +33,7 @@ function nextKyivMorningDeparture(now = new Date()): string {
 describe('API booking transaction (opt-in local integration test)', { skip: !enabled }, () => {
   const pool = new Pool({ connectionString: databaseUrl });
   let healthyLvivGtfsEnabled = false;
+  let healthyLvivRealGtfsEnabled = false;
   const ids = {
     driver: crypto.randomUUID(),
     passengers: Array.from({ length: 20 }, () => crypto.randomUUID()),
@@ -76,12 +77,15 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       ) AS bounded_candidates WHERE id=$1`, [ids.gtfsFixtureProvider]);
       assert.equal(fixtureCandidate.rowCount, 1, 'the fixture provider must survive the same bounded registry selection used by the API');
     }
-    const lvivProvider = await pool.query<{ enabled: boolean }>(
+    const lvivProvider = await pool.query<{ enabled: boolean; real_feed_enabled: boolean }>(
       `SELECT EXISTS (SELECT 1 FROM mobility_providers
+        WHERE city='Львів' AND source_type='gtfs' AND status='enabled' AND health='healthy') AS enabled,
+        EXISTS (SELECT 1 FROM mobility_providers
         WHERE city='Львів' AND source_type='gtfs' AND status='enabled' AND health='healthy'
-          AND feed_url <> 'https://gtfs-api-fixture.invalid/lviv.zip') AS enabled`,
+          AND feed_url <> 'https://gtfs-api-fixture.invalid/lviv.zip') AS real_feed_enabled`,
     );
     healthyLvivGtfsEnabled = lvivProvider.rows[0]?.enabled === true;
+    healthyLvivRealGtfsEnabled = lvivProvider.rows[0]?.real_feed_enabled === true;
     await pool.query(`INSERT INTO users(id,display_name,roles) VALUES
       ($1,'API test driver',ARRAY['driver']),($2,'API test administrator',ARRAY['admin'])`,
     [ids.driver, ids.admin]);
@@ -378,7 +382,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.ok(fixtureTransitLegs.every((leg) => leg.source === 'gtfs-static'
         && (leg.routeGeometry?.length ?? 0) >= 2), 'fixture bus/tram legs expose scheduled source and renderable GTFS shape geometry');
     }
-    if (healthyLvivGtfsEnabled) {
+    if (healthyLvivRealGtfsEnabled) {
       assert.ok(multiData.availableStrategies.includes('BALANCED'));
       assert.ok(multiData.journeys.some((journey) => typeof journey.strategyRanks?.BALANCED === 'number'),
         'each returned result exposes its place in the selected strategy ranking');
