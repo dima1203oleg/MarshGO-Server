@@ -1,4 +1,5 @@
 import { Worker } from 'node:worker_threads';
+import { isAbsolute } from 'node:path';
 import type { GtfsItinerarySearchInput, GtfsItinerarySearchResult, GtfsStopArrival } from './gtfsTimetable';
 
 export interface GtfsWorkerProvider {
@@ -76,6 +77,12 @@ export class GtfsSearchWorkerClient {
   private closed = false;
   private readonly maxQueuedRequests = 8;
 
+  constructor(private readonly testFixtureDirectory?: string) {
+    if (testFixtureDirectory && !isAbsolute(testFixtureDirectory)) {
+      throw new TypeError('GTFS test fixture directory must be absolute');
+    }
+  }
+
   async search(input: GtfsItinerarySearchInput, providers: GtfsWorkerProvider[], metro?: GtfsWorkerMetroSources): Promise<SearchResult> {
     return this.enqueue<SearchResult>({ type: 'search', input, providers, ...(metro ? { metro } : {}) });
   }
@@ -120,7 +127,9 @@ export class GtfsSearchWorkerClient {
 
   private async ensureWorker(): Promise<void> {
     if (this.ready) return this.ready;
-    const worker = new Worker(new URL('./gtfsSearchWorker.mjs', import.meta.url));
+    const worker = new Worker(new URL('./gtfsSearchWorker.mjs', import.meta.url), {
+      workerData: { testFixtureDirectory: this.testFixtureDirectory },
+    });
     this.worker = worker;
     this.ready = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('GTFS search worker startup timed out')), 10_000);
@@ -190,4 +199,12 @@ export class GtfsSearchWorkerClient {
   }
 }
 
-export const gtfsSearchWorker = new GtfsSearchWorkerClient();
+const testFixtureMode = process.env.MARSHGO_API_TEST_FIXTURE_MODE === '1';
+if (testFixtureMode && process.env.NODE_ENV === 'production') {
+  throw new Error('GTFS API test fixtures cannot be enabled in production');
+}
+const testFixtureDirectory = testFixtureMode ? process.env.MARSHGO_GTFS_TEST_FIXTURE_DIR : undefined;
+if (testFixtureMode && (!testFixtureDirectory || !isAbsolute(testFixtureDirectory))) {
+  throw new Error('GTFS API test fixture mode requires an absolute fixture directory');
+}
+export const gtfsSearchWorker = new GtfsSearchWorkerClient(testFixtureDirectory);

@@ -161,7 +161,7 @@ describe('editing and cancelling a published trip (opt-in local integration test
     const { rows } = await pool.query<{ id: string }>(`INSERT INTO mobility_providers(name,city,provider_type,source_type,feed_url,status,health,access,country,last_checked_at)
       VALUES($1,'Тест','public_transit','gtfs','https://unreachable.invalid/gtfs.zip','enabled','healthy','open','UA',now()-interval '10 years') RETURNING id`, [`Health monitor ${crypto.randomUUID()}`]);
     try {
-      await refreshProviderHealth(pool);
+      await refreshProviderHealth(pool, undefined, [rows[0]!.id]);
       const after = await pool.query<{ status: string; health: string; last_error: string | null }>('SELECT status,health,last_error FROM mobility_providers WHERE id=$1', [rows[0].id]);
       assert.equal(after.rows[0].status, 'enabled');
       assert.equal(after.rows[0].health, 'offline');

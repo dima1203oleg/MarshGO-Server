@@ -1,15 +1,35 @@
-import { parentPort } from 'node:worker_threads';
+import { parentPort, workerData } from 'node:worker_threads';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { tsImport } from 'tsx/esm/api';
 
 if (!parentPort) throw new Error('GTFS search worker requires a parent port');
 
-const [{ cachedGtfsTimetable, mergeGtfsTimetables, getCachedGtfsTimetableStats }, { cachedGtfsRealtimeTripUpdates },
+const [{ cachedGtfsTimetable, mergeGtfsTimetables, getCachedGtfsTimetableStats, parseGtfsTimetable }, { cachedGtfsRealtimeTripUpdates },
   { cachedKyivMetroTimetable }, { GtfsSearchGroupCache, buildGtfsSearchGroups, searchGtfsGroup, selectGtfsTripMetadata, selectGtfsStopArrivals }] = await Promise.all([
   tsImport('./gtfsTimetable.ts', import.meta.url),
   tsImport('./gtfsRealtime.ts', import.meta.url),
   tsImport('../mobility/kyivMetroTimetable.ts', import.meta.url),
   tsImport('./gtfsSearchWorkerCore.ts', import.meta.url),
 ]);
+
+// An opt-in, exact-URL test seam lets API integration tests exercise the real
+// worker/parser/planner without a public feed or any relaxation of safeFetch.
+// Production never receives the directory, and no other URL can use the seam.
+const GTFS_TEST_FIXTURE_URL = 'https://gtfs-api-fixture.invalid/lviv.zip';
+const GTFS_TEST_FILES = ['agency.txt', 'routes.txt', 'stops.txt', 'trips.txt', 'stop_times.txt', 'calendar.txt', 'shapes.txt'];
+const testFixtureDirectory = typeof workerData?.testFixtureDirectory === 'string'
+  ? workerData.testFixtureDirectory : undefined;
+
+async function loadProviderTimetable(provider) {
+  if (testFixtureDirectory && provider.feedUrl === GTFS_TEST_FIXTURE_URL) {
+    const entries = await Promise.all(GTFS_TEST_FILES.map(async (name) => [name,
+      new Uint8Array(await readFile(join(testFixtureDirectory, name)))
+    ]));
+    return parseGtfsTimetable(Object.fromEntries(entries));
+  }
+  return cachedGtfsTimetable(provider.id, provider.feedUrl);
+}
 
 // A group retains parsed feed maps for follow-up searches within the same API
 // request. Keep that memory bounded and discard snapshots after short-term use.
@@ -18,7 +38,7 @@ let activeSearchId = null;
 
 async function buildGroups(providers, metro) {
   const loaded = await Promise.allSettled(providers.map(async (provider) => {
-    const feed = await cachedGtfsTimetable(provider.id, provider.feedUrl);
+    const feed = await loadProviderTimetable(provider);
     let realtime = null;
     let realtimeError = null;
     if (provider.realtimeUrl) {
@@ -88,7 +108,7 @@ parentPort.on('message', async (message) => {
     }
     if (type === 'stop-arrivals') {
       const provider = message.provider;
-      const feed = await cachedGtfsTimetable(provider.id, provider.feedUrl);
+      const feed = await loadProviderTimetable(provider);
       let realtime = null;
       if (provider.realtimeUrl) {
         try {
@@ -103,7 +123,7 @@ parentPort.on('message', async (message) => {
       return;
     }
     if (type === 'trip-metadata') {
-      const feed = await cachedGtfsTimetable(message.provider.id, message.provider.feedUrl);
+      const feed = await loadProviderTimetable(message.provider);
       parentPort.postMessage({ id, ok: true, value: selectGtfsTripMetadata(feed, message.tripIds) });
       return;
     }
