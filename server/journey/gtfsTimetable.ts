@@ -257,6 +257,48 @@ export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly Gt
     || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
 }
 
+/**
+ * Keep objective extremes when several provider searches are combined into
+ * the cross-provider candidate pool. Arrival-only truncation can otherwise
+ * remove every slow, low-fare route before CHEAPEST ranking gets a chance.
+ */
+export function selectGtfsCandidatesForCrossProviderSearch(
+  itineraries: readonly GtfsItinerary[], maximum = 100,
+): GtfsItinerary[] {
+  if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('candidate maximum must be positive');
+  if (itineraries.length <= maximum) return [...itineraries];
+
+  const selected = new Map<string, GtfsItinerary>();
+  const take = (ranked: readonly GtfsItinerary[], count: number) => {
+    for (const item of ranked) {
+      if (selected.size >= maximum || count <= 0) break;
+      if (selected.has(item.id)) continue;
+      selected.set(item.id, item);
+      count--;
+    }
+  };
+  const byArrival = [...itineraries].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
+    || a.departureAt.getTime() - b.departureAt.getTime() || compareStableId(a.id, b.id));
+  const byDuration = [...itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds
+    || compareStableId(a.id, b.id));
+  const byFare = itineraries.filter((item) => item.fare?.currency === 'UAH')
+    .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor
+      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const byTransfers = [...itineraries].sort((a, b) => a.transfers - b.transfers
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const byWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters
+    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  const perObjective = Math.max(1, Math.floor(maximum / 5));
+  take(byDuration, perObjective);
+  take(byFare, perObjective);
+  take(byTransfers, perObjective);
+  take(byWalking, perObjective);
+  take(rankGtfsItinerariesForCandidateSampling(itineraries), perObjective);
+  take(byArrival, maximum - selected.size);
+  return [...selected.values()].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
+    || a.departureAt.getTime() - b.departureAt.getTime() || compareStableId(a.id, b.id));
+}
+
 /** Keep useful boarding/alighting choices for the same scheduled vehicle chain. */
 export function sampleGtfsTripChainCandidates(
   itineraries: readonly GtfsItinerary[], maximum = 2,
