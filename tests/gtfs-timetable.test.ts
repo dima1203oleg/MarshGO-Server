@@ -448,6 +448,8 @@ test('limits duplicate stop-pair alternatives for the same scheduled trip chain'
     'a bounded number of stop-pair choices should share the same scheduled vehicle chain');
   assert.equal(result.resultLimitReached, true,
     'suppressing additional stop-pair variants must be visible as candidate sampling');
+  assert.equal(result.searchTruncated, true,
+    'omitting sampled stop-pair candidates must report that the search was incomplete');
 });
 
 test('same-trip sampling preserves a genuinely cheaper stop-pair option under the two-variant cap', () => {
