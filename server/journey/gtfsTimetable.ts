@@ -255,6 +255,20 @@ export function rankGtfsItinerariesForCandidateSampling(
     .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
 }
 
+/** Keep a bounded rolling sample for the shared BALANCED ranking objective. */
+export function retainGtfsBalancedObjectiveSample(
+  existing: readonly GtfsItinerary[], candidate: GtfsItinerary, maximum: number,
+): GtfsItinerary[] {
+  if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('objective sample maximum must be positive');
+  if (existing.some((item) => item.id === candidate.id)) return [...existing].slice(0, maximum);
+  // Evaluate the candidate against the retained sample with the same scorer
+  // used by the cross-provider BALANCED tab. This is a bounded approximation
+  // because normalization changes as new candidates arrive; truncation remains
+  // explicit to callers, and the sample is only a backstop after the main pool
+  // reaches its cap.
+  return rankGtfsItinerariesForCandidateSampling([...existing, candidate]).slice(0, maximum);
+}
+
 /**
  * Keep objective extremes when several provider searches are combined into
  * the cross-provider candidate pool. Arrival-only truncation can otherwise
@@ -2287,7 +2301,7 @@ export function findGtfsItinerariesWithStats(
   // Once a leg-count pool is full, keep searching a bounded window so late
   // objective improvements can enter the reservoirs without scanning the
   // entire dense feed. Any remaining work is still reported as truncated.
-  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 100_000;
+  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 25_000;
   let candidatePoolReachedAtStep: number | null = null;
   const objectiveCandidateSamples = new Map<string, GtfsItinerary[]>();
   const objectiveSampleLimit = Math.max(1, Math.floor(limit / 5));
@@ -2315,6 +2329,8 @@ export function findGtfsItinerariesWithStats(
       || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
     retainObjectiveCandidate('walking', candidate, (a, b) => a.walkingMeters - b.walkingMeters
       || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+    objectiveCandidateSamples.set('balanced', retainGtfsBalancedObjectiveSample(
+      objectiveCandidateSamples.get('balanced') ?? [], candidate, objectiveSampleLimit));
   };
   const resultCountByRouteChain = new Map<string, number>();
   const resultIdsByRouteChain = new Map<string, Set<string>>();
@@ -2443,6 +2459,9 @@ export function findGtfsItinerariesWithStats(
     };
     if ((!isKnownTripChain && !canReplaceRouteChainCandidate
       && (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || results.size >= MAX_SEARCH_RESULTS))) {
+      if (!candidatePoolReachedAtStepByLegCount.has(path.length)) {
+        candidatePoolReachedAtStepByLegCount.set(path.length, searchSteps);
+      }
       // Keep a small per-objective reservoir after the bounded general pool
       // fills. A late known-cheapest option must remain available to the
       // CHEAPEST response even though the complete search is still flagged as
@@ -2571,14 +2590,12 @@ export function findGtfsItinerariesWithStats(
   };
   let queuesPendingWork = 0;
   const canContinueCandidateSearch = (legCount: number) => {
-    const candidatePoolHasRoom = (resultCountByLegCount.get(legCount) ?? 0) < MAX_CANDIDATES_PER_LEG_COUNT;
+    const candidatePoolHasRoom = results.size < MAX_SEARCH_RESULTS
+      && (resultCountByLegCount.get(legCount) ?? 0) < MAX_CANDIDATES_PER_LEG_COUNT;
     const legReservoirReachedAt = candidatePoolReachedAtStepByLegCount.get(legCount);
     const withinLegObjectiveReservoir = legReservoirReachedAt === undefined
       || searchSteps - legReservoirReachedAt < MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
-    const withinGlobalObjectiveReservoir = results.size < MAX_SEARCH_RESULTS
-      || candidatePoolReachedAtStep === null
-      || searchSteps - candidatePoolReachedAtStep < MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
-    return (candidatePoolHasRoom || withinLegObjectiveReservoir) && withinGlobalObjectiveReservoir;
+    return candidatePoolHasRoom || withinLegObjectiveReservoir;
   };
   const takeNextWork = (queue: RouteSearchQueue): SearchWork | undefined => {
     if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length) {
@@ -2648,6 +2665,10 @@ export function findGtfsItinerariesWithStats(
     const maximumLegsForPass = depthIndex + 1;
     if ((resultCountByLegCount.get(maximumLegsForPass) ?? 0) >= limit) continue;
     if (searchSteps >= MAX_SEARCH_STEPS) { searchBudgetTruncated = true; break; }
+    if (results.size >= MAX_SEARCH_RESULTS
+      && !candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass)) {
+      candidatePoolReachedAtStepByLegCount.set(maximumLegsForPass, searchSteps);
+    }
     const remainingWeight = depthWeights.slice(depthIndex).reduce((sum, weight) => sum + weight, 0);
     const stepLimit = depthIndex === maxTransitLegs - 1
       ? MAX_SEARCH_STEPS
