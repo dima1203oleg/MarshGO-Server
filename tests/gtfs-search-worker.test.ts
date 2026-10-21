@@ -65,6 +65,7 @@ test('test-only GTFS URL loads the checked-in fixture through the worker and com
     const result = await client.search({
       providerId: 'fixture-provider', providerName: 'fixture',
       origin: [24.0029933, 49.8681678], destination: [24.057585, 49.794117],
+      now: new Date(departure.getTime() - 5 * 60_000),
       earliestDeparture: departure, latestDeparture: new Date(departure.getTime() + 4 * 60 * 60_000), limit: 20,
       maximumJourneySeconds: 4 * 60 * 60, maximumTransfers: 2, maximumWaitSeconds: 45 * 60,
       minimumTransferBufferSeconds: 5 * 60, maximumAccessWalkingMeters: 300,
