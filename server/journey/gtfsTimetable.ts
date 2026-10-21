@@ -255,6 +255,20 @@ export function rankGtfsItinerariesForCandidateSampling(
     .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
 }
 
+/** Keep a bounded rolling sample for the shared BALANCED ranking objective. */
+export function retainGtfsBalancedObjectiveSample(
+  existing: readonly GtfsItinerary[], candidate: GtfsItinerary, maximum: number,
+): GtfsItinerary[] {
+  if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('objective sample maximum must be positive');
+  if (existing.some((item) => item.id === candidate.id)) return [...existing].slice(0, maximum);
+  // Evaluate the candidate against the retained sample with the same scorer
+  // used by the cross-provider BALANCED tab. This is a bounded approximation
+  // because normalization changes as new candidates arrive; truncation remains
+  // explicit to callers, and the sample is only a backstop after the main pool
+  // reaches its cap.
+  return rankGtfsItinerariesForCandidateSampling([...existing, candidate]).slice(0, maximum);
+}
+
 /**
  * Keep objective extremes when several provider searches are combined into
  * the cross-provider candidate pool. Arrival-only truncation can otherwise
@@ -2315,6 +2329,8 @@ export function findGtfsItinerariesWithStats(
       || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
     retainObjectiveCandidate('walking', candidate, (a, b) => a.walkingMeters - b.walkingMeters
       || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+    objectiveCandidateSamples.set('balanced', retainGtfsBalancedObjectiveSample(
+      objectiveCandidateSamples.get('balanced') ?? [], candidate, objectiveSampleLimit));
   };
   const resultCountByRouteChain = new Map<string, number>();
   const resultIdsByRouteChain = new Map<string, Set<string>>();

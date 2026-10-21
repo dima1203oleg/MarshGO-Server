@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
+import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
 
 function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
   const routeRows = [
@@ -1058,6 +1059,33 @@ test('route-chain sample preserves the full FASTEST, CHEAPEST, and BALANCED winn
   const sampled = sampleGtfsRouteChainCandidates(candidates, 8);
   for (const winner of winners) assert.ok(sampled.some((itinerary) => itinerary.id === winner),
     `route-chain sampling must retain strategy winner ${winner}`);
+});
+
+test('bounded objective overflow sample retains the shared BALANCED winner', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const candidates = [
+    ...Array.from({ length: 18 }, (_, index) => ({
+      ...base, id: `ordinary-${index}`, durationSeconds: 4_400 + index * 17,
+      walkingMeters: 800 + index * 5, transfers: index % 3 === 0 ? 1 : 0,
+      fare: { priceMinor: 800 + index * 13, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+    })),
+    { ...base, id: 'fastest-extreme', durationSeconds: 1_800, walkingMeters: 1_200, transfers: 1,
+      fare: { priceMinor: 1_800, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'cheapest-extreme', durationSeconds: 7_200, walkingMeters: 500, transfers: 0,
+      fare: { priceMinor: 100, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'balanced-winner', durationSeconds: 3_900, walkingMeters: 100, transfers: 0,
+      fare: { priceMinor: 700, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+  ];
+  const fullWinner = rankGtfsItinerariesForCandidateSampling(candidates)[0];
+  assert.equal(fullWinner?.id, 'balanced-winner', 'fixture has a distinct BALANCED winner');
+
+  let retained: GtfsItinerary[] = [];
+  for (const candidate of candidates) retained = retainGtfsBalancedObjectiveSample(retained, candidate, 4);
+  assert.ok(retained.some((item) => item.id === fullWinner.id),
+    'the bounded overflow backstop keeps the shared BALANCED winner instead of only retaining single-metric extremes');
 });
 
 test('cross-provider GTFS cap preserves slow cheapest routes before filling by arrival', () => {
