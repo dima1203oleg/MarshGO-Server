@@ -495,6 +495,24 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.deepEqual(composedJourney.legs.map((leg) => leg.mode), ['BUS','COMMUNITY','TRAM']);
       assert.equal(composedJourney.legs[1]!.offerId, ids.transitCompositionOffer);
       assert.equal(composedJourney.legs[1]!.availabilityStatus, 'AVAILABLE');
+
+      const transferLimitedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
+        body: JSON.stringify({
+          origin: { name: 'API bus departure stop', coordinates: compositionPair.bus.origin!.coordinates },
+          destination: { name: 'API tram arrival stop', coordinates: compositionPair.tram.destination!.coordinates },
+          departureAt: multiSearchDeparture, passengers: 1, strategy: 'FASTEST',
+          preferences: { allowCommunity: true, allowedTransportTypes: ['bus','tram','carpool'], maxTransfers: 1 },
+        }),
+      });
+      assert.equal(transferLimitedSearch.status, 200);
+      const transferLimitedData = (await transferLimitedSearch.json() as { data: { journeys: Array<{
+        offerId: string | null; source?: string;
+      }> } }).data;
+      assert.equal(transferLimitedData.journeys.some((candidate) => candidate.source === 'community-transit'
+        && candidate.offerId === ids.transitCompositionOffer), false,
+      'a BUS → COMMUNITY → TRAM journey has two vehicle changes and must not appear under maxTransfers=1');
+
       const storedComposition = await pool.query<{ state: string; modes: string[]; leg_states: string[] }>(
         `SELECT j.state,array_agg(l.mode ORDER BY l.ordinal) AS modes,array_agg(l.state ORDER BY l.ordinal) AS leg_states
            FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 AND j.user_id=$2 GROUP BY j.id`,
