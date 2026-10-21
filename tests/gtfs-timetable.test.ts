@@ -911,6 +911,45 @@ test('does not treat an unknown fare as free in balanced GTFS candidate sampling
   assert.equal(unknown.fare, null, 'unknown fare remains unknown in the candidate data');
 });
 
+test('balanced GTFS candidate sampling agrees with the final scorer on transfer effort', () => {
+  const base = findGtfsItineraries(connectingFeed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+  })[0];
+  assert.ok(base);
+  const connecting = {
+    ...base,
+    id: 'connecting-two-transfers',
+    durationSeconds: 3_600,
+    transfers: 2,
+    fare: { priceMinor: 1_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  };
+  const direct = {
+    ...base,
+    id: 'direct-no-transfer',
+    durationSeconds: 4_000,
+    transfers: 0,
+    fare: { priceMinor: 1_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  };
+  const asScorable = (itinerary: typeof base) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+  });
+  const finalRanking = scoreJourneys([asScorable(connecting), asScorable(direct)], 'BALANCED').map(({ journey }) => journey.id);
+  const sampledRanking = rankGtfsItinerariesForCandidateSampling([connecting, direct]).map(({ id }) => id);
+
+  assert.deepEqual(sampledRanking, finalRanking);
+  assert.equal(sampledRanking[0], 'direct-no-transfer');
+});
+
 test('route-chain sample preserves both FASTEST and CHEAPEST extremes', () => {
   const base = findGtfsItineraries(feed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,

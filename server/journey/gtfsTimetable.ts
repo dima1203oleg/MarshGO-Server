@@ -2,11 +2,13 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
 import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
+import type { JourneyOption } from './types';
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
 import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
 import { BoundedBestK, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
+import { scoreJourneys } from './scoring';
 import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
 import { BoundedPromiseCache } from './boundedPromiseCache';
 
@@ -232,29 +234,22 @@ function gtfsSegmentRetentionPriority(key: string): number {
  */
 export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly GtfsItinerary[]): GtfsItinerary[] {
   if (!itineraries.length) return [];
-  const comparableFares = itineraries.filter((itinerary) => itinerary.fare?.currency === 'UAH');
-  const minDuration = Math.min(...itineraries.map((itinerary) => itinerary.durationSeconds));
-  const maxDuration = Math.max(...itineraries.map((itinerary) => itinerary.durationSeconds));
-  const minFare = comparableFares.length ? Math.min(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
-  const maxFare = comparableFares.length ? Math.max(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
-  const minTransfers = Math.min(...itineraries.map((itinerary) => itinerary.transfers));
-  const maxTransfers = Math.max(...itineraries.map((itinerary) => itinerary.transfers));
-  const minWalking = Math.min(...itineraries.map((itinerary) => itinerary.walkingMeters));
-  const maxWalking = Math.max(...itineraries.map((itinerary) => itinerary.walkingMeters));
-  const normalize = (value: number, min: number, max: number) => max === min ? 0 : (value - min) / (max - min);
-  const score = (itinerary: GtfsItinerary) => {
-    const hasComparableFare = itinerary.fare?.currency === 'UAH';
-    const fareCost = comparableFares.length
-      ? hasComparableFare ? normalize(itinerary.fare!.priceMinor, minFare, maxFare) : 1
-      : 0;
-    return 0.35 * normalize(itinerary.durationSeconds, minDuration, maxDuration)
-      + 0.25 * fareCost
-      + 0.10 * normalize(itinerary.transfers, minTransfers, maxTransfers)
-      + 0.10 * normalize(itinerary.walkingMeters, minWalking, maxWalking)
-      + 0.20 * (itinerary.transfers > 0 ? 0.3 : 0);
-  };
-  return [...itineraries].sort((a, b) => score(a) - score(b)
-    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  // Use the same scorer as the final cross-provider BALANCED ranking. A
+  // separate proxy can discard the route that the user would ultimately see
+  // as optimal (for example, a slightly slower direct service vs a transfer).
+  const candidates = itineraries.map((itinerary) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+    itinerary,
+  } satisfies JourneyOption & { itinerary: GtfsItinerary }));
+  return scoreJourneys(candidates, 'BALANCED').map(({ journey }) => journey.itinerary);
 }
 
 /**
