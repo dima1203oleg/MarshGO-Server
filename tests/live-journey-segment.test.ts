@@ -161,6 +161,19 @@ describe('live journey segment assembly', () => {
     assert.deepEqual(result.vehicles, []);
   });
 
+  it('keeps a schedule-only line when a fresh realtime snapshot is valid but empty', () => {
+    const timetable = feed();
+    timetable.realtimeTripUpdates = new Map();
+    const result = buildLiveJourneySegment(leg, { vehicles: [], network: network(), timetable }, now);
+
+    assert.equal(result.status, 'SCHEDULED');
+    assert.equal(result.vehiclePositionStatus, 'UNAVAILABLE');
+    assert.equal(result.boardingStopArrival.status, 'SCHEDULED');
+    assert.equal(result.boardingStopArrival.predictedAt, undefined);
+    assert.deepEqual(result.lineRoutes.map(({ directionId }) => directionId), ['0', '1']);
+    assert.deepEqual(result.vehicles, [], 'an empty snapshot must not create live vehicle markers');
+  });
+
   it('links a fresh exact vehicle trip instance to its boarding-stop TripUpdate as a prediction, not an observation', () => {
     const timetable = feed();
     timetable.realtimeTripUpdates = new Map([[gtfsRealtimeTripUpdateKey('trip-selected', serviceDate), tripUpdate()]]);
