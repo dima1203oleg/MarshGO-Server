@@ -3209,7 +3209,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
   }
   if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
-  scheduledCandidates = selectGtfsCandidatesForCrossProviderSearch(scheduledCandidates, 100);
+  const crossProviderRankingContext: JourneyOption[] = [
+    ...candidates,
+    ...communityTransitCandidates,
+    ...micromobilityCandidates,
+  ];
+  scheduledCandidates = selectGtfsCandidatesForCrossProviderSearch(scheduledCandidates, 100, crossProviderRankingContext);
   const transitRouteChainKey = (itinerary: GtfsItinerary) => {
     const routes: string[] = [];
     for (const segment of itinerary.segments) {

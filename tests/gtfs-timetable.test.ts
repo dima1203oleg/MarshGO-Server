@@ -994,6 +994,46 @@ test('cross-provider GTFS cap preserves slow cheapest routes before filling by a
   );
 });
 
+test('cross-provider GTFS cap uses the shared candidate pool when preserving its balanced winner', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const withFare = (id: string, durationSeconds: number, priceMinor: number) => ({
+    ...base,
+    id,
+    durationSeconds,
+    fare: { priceMinor, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  });
+  const candidates = [
+    withFare('fast-expensive', 1_000, 10_000),
+    withFare('balanced-winner', 6_000, 5_100),
+    withFare('cheapest-slower', 6_800, 5_000),
+    withFare('alternative-d', 2_000, 9_000),
+    withFare('alternative-e', 3_000, 8_000),
+    withFare('alternative-f', 4_000, 7_000),
+  ];
+  const communityCandidate = {
+    id: 'long-community-option',
+    durationSeconds: 30_000,
+    priceMinor: 10_000,
+    transfers: 0,
+    walkingMeters: 0,
+    reliability: null,
+    transferRisk: 0,
+    comfort: null,
+    legs: [{ mode: 'COMMUNITY' as const }],
+  };
+
+  const transitOnlySample = selectGtfsCandidatesForCrossProviderSearch(candidates, 5);
+  assert.ok(!transitOnlySample.some(({ id }) => id === 'balanced-winner'),
+    'without mixed-mode score ranges, the transit-only balanced sample omits the later winner');
+
+  const mixedModeSample = selectGtfsCandidatesForCrossProviderSearch(candidates, 5, [communityCandidate]);
+  assert.ok(mixedModeSample.some(({ id }) => id === 'balanced-winner'),
+    'the route that wins in the full mixed-mode score pool survives bounded GTFS pruning');
+});
+
 test('route-chain sample tie-break is locale-independent and stable across input order', () => {
   const base = findGtfsItineraries(feed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,

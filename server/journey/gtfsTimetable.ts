@@ -232,7 +232,9 @@ function gtfsSegmentRetentionPriority(key: string): number {
  * zero-cost score as the cheapest known fare. It remains eligible for the
  * other sampling objectives (time, transfers, and walking).
  */
-export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly GtfsItinerary[]): GtfsItinerary[] {
+export function rankGtfsItinerariesForCandidateSampling(
+  itineraries: readonly GtfsItinerary[], rankingContext: readonly JourneyOption[] = [],
+): GtfsItinerary[] {
   if (!itineraries.length) return [];
   // Use the same scorer as the final cross-provider BALANCED ranking. A
   // separate proxy can discard the route that the user would ultimately see
@@ -249,7 +251,8 @@ export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly Gt
     legs: [],
     itinerary,
   } satisfies JourneyOption & { itinerary: GtfsItinerary }));
-  return scoreJourneys(candidates, 'BALANCED').map(({ journey }) => journey.itinerary);
+  return scoreJourneys([...candidates, ...rankingContext], 'BALANCED')
+    .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
 }
 
 /**
@@ -258,7 +261,7 @@ export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly Gt
  * remove every slow, low-fare route before CHEAPEST ranking gets a chance.
  */
 export function selectGtfsCandidatesForCrossProviderSearch(
-  itineraries: readonly GtfsItinerary[], maximum = 100,
+  itineraries: readonly GtfsItinerary[], maximum = 100, rankingContext: readonly JourneyOption[] = [],
 ): GtfsItinerary[] {
   if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('candidate maximum must be positive');
   if (itineraries.length <= maximum) return [...itineraries];
@@ -288,7 +291,7 @@ export function selectGtfsCandidatesForCrossProviderSearch(
   take(byFare, perObjective);
   take(byTransfers, perObjective);
   take(byWalking, perObjective);
-  take(rankGtfsItinerariesForCandidateSampling(itineraries), perObjective);
+  take(rankGtfsItinerariesForCandidateSampling(itineraries, rankingContext), perObjective);
   take(byArrival, maximum - selected.size);
   return [...selected.values()].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
     || a.departureAt.getTime() - b.departureAt.getTime() || compareStableId(a.id, b.id));
