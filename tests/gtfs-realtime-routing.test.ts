@@ -8,7 +8,7 @@ const { transit_realtime } = bindings;
 const localTripDate = '20261012';
 const now = new Date('2026-10-12T04:55:00Z');
 
-function realtimeBytes(options: { timestamp?: number; incrementality?: number; relationship?: number; arrivalDelay?: number; stopSequence?: number; startDate?: string } = {}) {
+function realtimeBytes(options: { timestamp?: number; updateTimestamp?: number; incrementality?: number; relationship?: number; arrivalDelay?: number; stopSequence?: number; startDate?: string } = {}) {
   return transit_realtime.FeedMessage.encode({
     header: {
       gtfsRealtimeVersion: '2.0',
@@ -18,6 +18,7 @@ function realtimeBytes(options: { timestamp?: number; incrementality?: number; r
     entity: [{ id: 'trip-update-1', tripUpdate: {
       trip: { tripId: 't1', routeId: 'r', startDate: options.startDate ?? localTripDate,
         ...(options.relationship !== undefined ? { scheduleRelationship: options.relationship } : {}) },
+      ...(options.updateTimestamp !== undefined ? { timestamp: options.updateTimestamp } : {}),
       stopTimeUpdate: [{ stopSequence: options.stopSequence ?? 1, arrival: { delay: options.arrivalDelay ?? 900 }, departure: { delay: options.arrivalDelay ?? 900 } }],
     } }],
   }).finish();
@@ -58,16 +59,28 @@ function search(feed: ReturnType<typeof timetable>, realtime?: ReturnType<typeof
   });
 }
 
-test('accepts only fresh, timestamped, full-snapshot GTFS-Realtime trip updates', () => {
+test('accepts only trip updates no older than 90s from a timestamped full snapshot', () => {
   const parsed = parseGtfsRealtimeTripUpdates(realtimeBytes(), now);
   assert.equal(parsed.fresh, true);
   assert.equal(parsed.updates.get(gtfsRealtimeTripUpdateKey('t1', '2026-10-12'))?.stops[0]?.arrival?.delaySeconds, 900);
 
-  const staleTimestamp = new Date(now.getTime() - 6 * 60_000);
+  const atFreshnessBoundary = parseGtfsRealtimeTripUpdates(realtimeBytes({
+    timestamp: Math.floor((now.getTime() - 90_000) / 1000),
+  }), now);
+  assert.equal(atFreshnessBoundary.fresh, true);
+  assert.equal(atFreshnessBoundary.updates.size, 1);
+
+  const staleTimestamp = new Date(now.getTime() - 91_000);
   const stale = parseGtfsRealtimeTripUpdates(realtimeBytes({ timestamp: Math.floor(staleTimestamp.getTime() / 1000) }), now);
   assert.equal(stale.reason, 'STALE');
   assert.equal(stale.feedTimestamp.toISOString(), staleTimestamp.toISOString(), 'retain the source time so the API can explain why it fell back to schedule data');
   assert.equal(stale.updates.size, 0);
+
+  const staleEntity = parseGtfsRealtimeTripUpdates(realtimeBytes({
+    updateTimestamp: Math.floor((now.getTime() - 91_000) / 1000),
+  }), now);
+  assert.equal(staleEntity.fresh, true, 'the snapshot can be fresh while an individual TripUpdate is stale');
+  assert.equal(staleEntity.updates.size, 0);
 
   const differential = parseGtfsRealtimeTripUpdates(realtimeBytes({
     incrementality: transit_realtime.FeedHeader.Incrementality.DIFFERENTIAL,
