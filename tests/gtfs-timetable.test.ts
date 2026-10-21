@@ -1024,6 +1024,22 @@ test('cross-provider GTFS cap uses the shared candidate pool when preserving its
     comfort: null,
     legs: [{ mode: 'COMMUNITY' as const }],
   };
+  const toScorable = (itinerary: typeof base) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+  });
+  const completeMixedPoolWinner = scoreJourneys(
+    [...candidates.map(toScorable), communityCandidate], 'BALANCED',
+  )[0]?.journey.id;
+  assert.equal(completeMixedPoolWinner, 'balanced-winner',
+    'the fixture proves that shared mode ranges change the winning GTFS candidate');
 
   const transitOnlySample = selectGtfsCandidatesForCrossProviderSearch(candidates, 5);
   assert.ok(!transitOnlySample.some(({ id }) => id === 'balanced-winner'),
