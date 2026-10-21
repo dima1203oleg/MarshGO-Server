@@ -1225,6 +1225,61 @@ test('retains the late cheapest transfer after the bounded candidate pool fills'
   assert.equal(cheapestLateLine.fare?.priceMinor, 1100);
 });
 
+test('keeps the cheapest three-leg option after a dense two-leg candidate pool fills', () => {
+  const { timetable } = timeFeasibleChainWithHashCompetingTrips();
+  const products = new Map<string, { id: string; priceMinor: number; currency: string; transfers: number; transferDurationSeconds: null }>();
+  const rules = new Map<string, Array<{ fareId: string; routeId: string }>>();
+  for (const routeId of ['access', 'middle', 'egress']) {
+    const fareId = `${routeId}-fare`;
+    products.set(fareId, { id: fareId, priceMinor: 100, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
+    rules.set(fareId, [{ fareId, routeId }]);
+  }
+
+  // Saturate the global result sample with many feasible two-leg options. The
+  // three-leg chain is slower but strictly cheaper and must remain available
+  // through its own bounded objective window.
+  for (let index = 0; index < 13_000; index++) {
+    const suffix = String(index).padStart(5, '0');
+    const routeId = `alt-${suffix}`;
+    const tripId = `alt-trip-${suffix}`;
+    const fareId = `fare-${suffix}`;
+    timetable.routes.set(routeId, { name: `Alternative ${suffix}`, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    const entries = [
+      { stopId: 'hub-a', sequence: 1, arrivalSeconds: 8 * 3600 + 30 * 60, departureSeconds: 8 * 3600 + 30 * 60, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: 8 * 3600 + 40 * 60, departureSeconds: 8 * 3600 + 40 * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, entryIndex) => {
+      let atStop = timetable.stopTimesByStop.get(entry.stopId);
+      if (!atStop) {
+        atStop = [];
+        timetable.stopTimesByStop.set(entry.stopId, atStop);
+      }
+      atStop.push({ tripId, index: entryIndex });
+    });
+    products.set(fareId, { id: fareId, priceMinor: 1_000, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
+    rules.set(fareId, [{ fareId, routeId }]);
+  }
+  timetable.fareProducts = products;
+  timetable.fareRules = rules;
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400], destination: [24.0300, 49.8500],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 100, maximumTransfers: 2, limit: 5,
+  });
+
+  const cheapest = result.itineraries.filter((itinerary) => itinerary.fare?.currency === 'UAH')
+    .sort((left, right) => left.fare!.priceMinor - right.fare!.priceMinor
+      || left.durationSeconds - right.durationSeconds)[0];
+  assert.ok(cheapest);
+  assert.deepEqual(cheapest.segments.map((segment) => segment.routeId), ['access', 'middle', 'egress']);
+  assert.equal(cheapest.fare?.priceMinor, 300);
+  assert.equal(result.searchTruncated, true, 'the bounded dense-feed search must continue to disclose truncation');
+});
+
 test('keeps a globally cheapest direct route discovered after the bounded candidate pool fills', () => {
   const timetable = connectingFeed();
   timetable.routes.clear();

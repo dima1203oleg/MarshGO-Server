@@ -2301,7 +2301,7 @@ export function findGtfsItinerariesWithStats(
   // Once a leg-count pool is full, keep searching a bounded window so late
   // objective improvements can enter the reservoirs without scanning the
   // entire dense feed. Any remaining work is still reported as truncated.
-  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 100_000;
+  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 25_000;
   let candidatePoolReachedAtStep: number | null = null;
   const objectiveCandidateSamples = new Map<string, GtfsItinerary[]>();
   const objectiveSampleLimit = Math.max(1, Math.floor(limit / 5));
@@ -2459,6 +2459,9 @@ export function findGtfsItinerariesWithStats(
     };
     if ((!isKnownTripChain && !canReplaceRouteChainCandidate
       && (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || results.size >= MAX_SEARCH_RESULTS))) {
+      if (!candidatePoolReachedAtStepByLegCount.has(path.length)) {
+        candidatePoolReachedAtStepByLegCount.set(path.length, searchSteps);
+      }
       // Keep a small per-objective reservoir after the bounded general pool
       // fills. A late known-cheapest option must remain available to the
       // CHEAPEST response even though the complete search is still flagged as
@@ -2587,14 +2590,12 @@ export function findGtfsItinerariesWithStats(
   };
   let queuesPendingWork = 0;
   const canContinueCandidateSearch = (legCount: number) => {
-    const candidatePoolHasRoom = (resultCountByLegCount.get(legCount) ?? 0) < MAX_CANDIDATES_PER_LEG_COUNT;
+    const candidatePoolHasRoom = results.size < MAX_SEARCH_RESULTS
+      && (resultCountByLegCount.get(legCount) ?? 0) < MAX_CANDIDATES_PER_LEG_COUNT;
     const legReservoirReachedAt = candidatePoolReachedAtStepByLegCount.get(legCount);
     const withinLegObjectiveReservoir = legReservoirReachedAt === undefined
       || searchSteps - legReservoirReachedAt < MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
-    const withinGlobalObjectiveReservoir = results.size < MAX_SEARCH_RESULTS
-      || candidatePoolReachedAtStep === null
-      || searchSteps - candidatePoolReachedAtStep < MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
-    return (candidatePoolHasRoom || withinLegObjectiveReservoir) && withinGlobalObjectiveReservoir;
+    return candidatePoolHasRoom || withinLegObjectiveReservoir;
   };
   const takeNextWork = (queue: RouteSearchQueue): SearchWork | undefined => {
     if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length) {
@@ -2664,6 +2665,10 @@ export function findGtfsItinerariesWithStats(
     const maximumLegsForPass = depthIndex + 1;
     if ((resultCountByLegCount.get(maximumLegsForPass) ?? 0) >= limit) continue;
     if (searchSteps >= MAX_SEARCH_STEPS) { searchBudgetTruncated = true; break; }
+    if (results.size >= MAX_SEARCH_RESULTS
+      && !candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass)) {
+      candidatePoolReachedAtStepByLegCount.set(maximumLegsForPass, searchSteps);
+    }
     const remainingWeight = depthWeights.slice(depthIndex).reduce((sum, weight) => sum + weight, 0);
     const stepLimit = depthIndex === maxTransitLegs - 1
       ? MAX_SEARCH_STEPS
