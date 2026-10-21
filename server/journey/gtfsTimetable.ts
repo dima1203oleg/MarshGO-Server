@@ -991,6 +991,59 @@ function datedTripStops(feed: GtfsTimetableFeed, tripId: string, serviceDate: st
   return { stops, ...(update ? { update } : {}) };
 }
 
+/** Return one exact trip-instance stop arrival without inferring from another trip or service day. */
+export function getGtfsTripStopArrival(feed: GtfsTimetableFeed, tripId: string, routeId: string, serviceDate: string, stopId: string, now = new Date()): {
+  status: 'PREDICTED' | 'SCHEDULED' | 'UNAVAILABLE';
+  /** Explicit contradictory realtime data must suppress approach highlighting. */
+  approachBlocked?: boolean;
+  scheduledArrivalAt?: Date;
+  predictedArrivalAt?: Date;
+  realtimeUpdatedAt?: Date;
+} {
+  if (!/^\d{8}$/.test(serviceDate) || !tripId || !routeId || !stopId) return { status: 'UNAVAILABLE' };
+  const trip = feed.trips.get(tripId);
+  if (!trip || trip.routeId !== routeId || !serviceRuns(feed, trip.serviceId, serviceDate)) return { status: 'UNAVAILABLE' };
+  const calls = feed.stopTimes.get(tripId) ?? [];
+  const callIndex = calls.findIndex((call) => (call.sourceStopId ?? call.stopId) === stopId || call.stopId === stopId);
+  if (callIndex < 0) return { status: 'UNAVAILABLE' };
+  const call = calls[callIndex];
+  const scheduledArrivalAt = createServiceTimeConverter(feed.timezone)(serviceDate, call.arrivalSeconds);
+  if (!scheduledArrivalAt) return { status: 'UNAVAILABLE' };
+
+  const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
+  if (update && (update.tripId !== tripId || update.startDate !== serviceDate)) return { status: 'SCHEDULED', scheduledArrivalAt };
+  if (update?.relationship === 'CANCELED' || update?.relationship === 'DELETED') return { status: 'UNAVAILABLE', approachBlocked: true };
+  if (update) {
+    const age = now.getTime() - update.updatedAt.getTime();
+    const snapshotAge = now.getTime() - update.feedTimestamp.getTime();
+    if (!Number.isFinite(now.getTime()) || !Number.isFinite(age) || !Number.isFinite(snapshotAge)
+      || age > 90_000 || snapshotAge > 90_000 || age < -30_000 || snapshotAge < -30_000) {
+      return { status: 'SCHEDULED', scheduledArrivalAt };
+    }
+  }
+  if (update && update.relationship !== 'SCHEDULED') return { status: 'SCHEDULED', scheduledArrivalAt, approachBlocked: true };
+  if (update?.routeId && update.routeId !== routeId) return { status: 'SCHEDULED', scheduledArrivalAt };
+  const staticStopId = call.sourceStopId ?? call.stopId;
+  const exactStopSequenceUpdates = update?.stops.filter((item) => item.stopSequence === call.sequence) ?? [];
+  const stopUpdate = exactStopSequenceUpdates.find((item) => !item.stopId || item.stopId === staticStopId || item.stopId === call.stopId);
+  if (!update || !stopUpdate || stopUpdate.relationship !== 'SCHEDULED') {
+    return { status: 'SCHEDULED', scheduledArrivalAt,
+      ...(stopUpdate?.relationship !== undefined && stopUpdate.relationship !== 'SCHEDULED' ? { approachBlocked: true } : {}) };
+  }
+  const scheduledDepartureAt = createServiceTimeConverter(feed.timezone)(serviceDate, call.departureSeconds);
+  const arrivalDelay = stopUpdate.arrival?.delaySeconds
+    ?? (stopUpdate.arrival?.time ? Math.round((stopUpdate.arrival.time.getTime() - scheduledArrivalAt.getTime()) / 1000) : undefined);
+  const departureDelay = stopUpdate.departure?.delaySeconds
+    ?? (stopUpdate.departure?.time && scheduledDepartureAt
+      ? Math.round((stopUpdate.departure.time.getTime() - scheduledDepartureAt.getTime()) / 1000) : undefined);
+  const predictedArrivalAt = stopUpdate.arrival?.time
+    ?? (arrivalDelay !== undefined ? new Date(scheduledArrivalAt.getTime() + arrivalDelay * 1000)
+      : departureDelay !== undefined ? new Date(scheduledArrivalAt.getTime() + departureDelay * 1000) : undefined);
+  return predictedArrivalAt
+    ? { status: 'PREDICTED', scheduledArrivalAt, predictedArrivalAt, realtimeUpdatedAt: update.updatedAt }
+    : { status: 'SCHEDULED', scheduledArrivalAt };
+}
+
 export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInput): GtfsDirectJourney[] {
   const now = input.now ?? new Date();
   if (!Number.isFinite(input.earliestDeparture.getTime()) || !Number.isFinite(input.latestDeparture.getTime())

@@ -26,6 +26,7 @@ import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGR
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
+import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
@@ -2528,12 +2529,13 @@ app.get('/api/v1/journeys/:id/live', requireAuth, asyncHandler(async (req, res) 
   }
   const { rows } = await pool.query<{
     journey_id: string; leg_id: string; mode: string; provider_id: string | null; vehicle_position_url: string | null;
-    provider_feed_url: string | null; provider_source_type: string | null;
+    provider_feed_url: string | null; provider_realtime_url: string | null; provider_source_type: string | null;
     metadata: Record<string, unknown>; scheduled_departure_at: Date | null; scheduled_arrival_at: Date | null;
   }>(
     `SELECT j.id AS journey_id,l.id AS leg_id,l.mode,l.provider_id,
        CASE WHEN p.status='enabled' AND p.health IN ('healthy','degraded') THEN p.vehicle_position_url ELSE NULL END AS vehicle_position_url,
        CASE WHEN p.status='enabled' AND p.health IN ('healthy','degraded') AND p.source_type='gtfs' THEN p.feed_url ELSE NULL END AS provider_feed_url,
+       CASE WHEN p.status='enabled' AND p.health IN ('healthy','degraded') AND p.source_type='gtfs' THEN p.realtime_url ELSE NULL END AS provider_realtime_url,
        p.source_type AS provider_source_type,
        l.metadata,l.scheduled_departure_at,l.scheduled_arrival_at
      FROM journeys j JOIN journey_legs l ON l.journey_id=j.id
@@ -2567,8 +2569,12 @@ app.get('/api/v1/journeys/:id/live', requireAuth, asyncHandler(async (req, res) 
     const timetable = leg.provider_feed_url
       ? cachedGtfsTimetable(leg.provider_id, leg.provider_feed_url).catch(() => null)
       : Promise.resolve(null);
-    providerFeeds.set(leg.provider_id, Promise.all([vehicles, network, timetable]).then(([liveVehicles, routeNetwork, staticFeed]) => ({
-      vehicles: liveVehicles, network: routeNetwork, timetable: staticFeed,
+    const tripUpdates = leg.provider_realtime_url
+      ? cachedGtfsRealtimeTripUpdates(leg.provider_id, leg.provider_realtime_url).catch(() => null)
+      : Promise.resolve(null);
+    providerFeeds.set(leg.provider_id, Promise.all([vehicles, network, timetable, tripUpdates]).then(([liveVehicles, routeNetwork, staticFeed, realtime]) => ({
+      vehicles: liveVehicles, network: routeNetwork,
+      timetable: staticFeed ? { ...staticFeed, ...(realtime?.fresh ? { realtimeTripUpdates: realtime.updates } : {}) } : null,
     })));
   }
 

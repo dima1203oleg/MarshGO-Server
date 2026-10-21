@@ -1,5 +1,5 @@
 import { networkRoutesForRoute, type LiveVehicle, type TransportNetwork } from '../mobility/transportLayers';
-import type { GtfsTimetableFeed } from './gtfsTimetable';
+import { getGtfsTripStopArrival, type GtfsTimetableFeed } from './gtfsTimetable';
 import { approachingBoardingStop, freshVehiclesForRoute, matchLiveVehicleForJourneyLeg, selectBoardingApproachVehicleIds, unscopeGtfsId } from './liveVehicles';
 
 export interface LiveJourneyLegInput {
@@ -20,6 +20,14 @@ export interface LiveJourneySegment {
   legId: string;
   status: 'LIVE' | 'SCHEDULED' | 'UNVERIFIED';
   reason?: 'provider_unavailable' | 'no_fresh_matching_vehicle';
+  /** GPS is an observation; a TripUpdate ETA is a separate prediction. */
+  vehiclePositionStatus: 'OBSERVED' | 'UNAVAILABLE';
+  boardingStopArrival: {
+    status: 'PREDICTED' | 'SCHEDULED' | 'UNAVAILABLE';
+    scheduledAt?: string;
+    predictedAt?: string;
+    realtimeUpdatedAt?: string;
+  };
   vehicle?: {
     coordinates: [number, number];
     bearing: number | null;
@@ -50,6 +58,15 @@ export interface LiveJourneySegment {
     approachingBoarding: boolean;
     remainingStops: number | null;
     emphasized: boolean;
+    approachEvidence: null | {
+      source: 'OBSERVED_PROGRESS' | 'TRIP_UPDATE_PREDICTION';
+      predictedArrivalAt?: string;
+      realtimeUpdatedAt?: string;
+      remainingStops?: number;
+      currentStopSequence?: number;
+      currentStopId?: string;
+    };
+    etaSeconds: number | null;
   }>;
 }
 
@@ -61,7 +78,9 @@ export function buildLiveJourneySegment(
 ): LiveJourneySegment {
   const emptyFleet: LiveJourneySegment['vehicles'] = [];
   const emptyRoutes: LiveJourneySegment['lineRoutes'] = [];
-  if (!leg.providerId) return { legId: leg.id, status: 'SCHEDULED', lineRoutes: emptyRoutes, vehicles: emptyFleet };
+  const unavailableArrival: LiveJourneySegment['boardingStopArrival'] = { status: 'UNAVAILABLE' };
+  if (!leg.providerId) return { legId: leg.id, status: 'SCHEDULED', vehiclePositionStatus: 'UNAVAILABLE',
+    boardingStopArrival: unavailableArrival, lineRoutes: emptyRoutes, vehicles: emptyFleet };
   const routeId = typeof leg.metadata.routeId === 'string' ? leg.metadata.routeId : null;
   const geometrySource = leg.metadata.routeGeometrySource === 'official_geojson' || leg.metadata.routeGeometrySource === 'gtfs_shape'
     ? leg.metadata.routeGeometrySource : null;
@@ -72,7 +91,8 @@ export function buildLiveJourneySegment(
   }) : [];
   const hasTrustedStoredGeometry = Boolean(routeId && geometrySource && storedGeometry.length >= 2);
   if (!feed.vehicles && !feed.network && !hasTrustedStoredGeometry) {
-    return { legId: leg.id, status: 'UNVERIFIED', reason: 'provider_unavailable', lineRoutes: emptyRoutes, vehicles: emptyFleet };
+    return { legId: leg.id, status: 'UNVERIFIED', reason: 'provider_unavailable', vehiclePositionStatus: 'UNAVAILABLE',
+      boardingStopArrival: unavailableArrival, lineRoutes: emptyRoutes, vehicles: emptyFleet };
   }
 
   const identity = {
@@ -85,6 +105,26 @@ export function buildLiveJourneySegment(
   };
   const selectedVehicle = feed.vehicles ? matchLiveVehicleForJourneyLeg(identity, feed.vehicles, now) : null;
   const rawRouteId = unscopeGtfsId(leg.providerId, identity.routeId);
+  const rawTripId = unscopeGtfsId(leg.providerId, identity.tripId);
+  const rawServiceDate = identity.serviceDate?.replaceAll('-', '') ?? null;
+  const rawBoardingStopId = unscopeGtfsId(leg.providerId, typeof leg.metadata.fromStopFeedId === 'string'
+    ? leg.metadata.fromStopFeedId : null);
+  let boardingStopArrival: LiveJourneySegment['boardingStopArrival'] = unavailableArrival;
+  if (feed.timetable && rawTripId && rawServiceDate && rawBoardingStopId) {
+    const arrival = getGtfsTripStopArrival(feed.timetable, rawTripId, rawRouteId ?? '', rawServiceDate, rawBoardingStopId, new Date(now));
+    if (arrival.status === 'SCHEDULED' || arrival.status === 'PREDICTED') {
+      boardingStopArrival = { status: 'SCHEDULED', ...(arrival.scheduledArrivalAt ? { scheduledAt: arrival.scheduledArrivalAt.toISOString() } : {}) };
+    }
+    if (arrival.status === 'PREDICTED' && arrival.predictedArrivalAt && arrival.predictedArrivalAt.getTime() > now
+      && selectedVehicle?.tripId === rawTripId
+      && selectedVehicle.routeId === rawRouteId && selectedVehicle.startDate === rawServiceDate) {
+      if (arrival.scheduledArrivalAt && arrival.predictedArrivalAt) {
+        boardingStopArrival = { status: 'PREDICTED', scheduledAt: arrival.scheduledArrivalAt.toISOString(),
+          predictedAt: arrival.predictedArrivalAt.toISOString(),
+          ...(arrival.realtimeUpdatedAt ? { realtimeUpdatedAt: arrival.realtimeUpdatedAt.toISOString() } : {}) };
+      }
+    }
+  }
   const fleet = rawRouteId && feed.vehicles
     ? freshVehiclesForRoute(leg.providerId, rawRouteId, feed.vehicles, now)
     : [];
@@ -115,21 +155,59 @@ export function buildLiveJourneySegment(
   const boardingStopId = typeof leg.metadata.fromStopFeedId === 'string' ? leg.metadata.fromStopFeedId : null;
   const vehicleProgress = fleet.map((item) => {
     const rawTripId = unscopeGtfsId(leg.providerId!, item.tripId);
+    const rawVehicleRouteId = unscopeGtfsId(leg.providerId!, item.routeId);
+    const rawVehicleServiceDate = item.startDate?.replaceAll('-', '') ?? null;
     const trip = rawTripId ? feed.timetable?.trips.get(rawTripId) : undefined;
-    const tripMatchesRoute = Boolean(trip && rawRouteId && trip.routeId === rawRouteId);
+    const tripMatchesRoute = Boolean(item.tripId && item.routeId && rawVehicleServiceDate
+      && rawTripId && rawRouteId && rawVehicleRouteId === rawRouteId && trip && trip.routeId === rawRouteId
+      && rawVehicleServiceDate === rawServiceDate);
     const tripStops = rawTripId ? feed.timetable?.stopTimes.get(rawTripId) ?? [] : [];
-    const serviceDateMatches = !item.startDate || !identity.serviceDate || item.startDate === identity.serviceDate;
-    const progress = tripMatchesRoute && serviceDateMatches
+    const progress = tripMatchesRoute
       ? approachingBoardingStop(leg.providerId!, item, boardingStopId,
         tripStops.map((stop) => ({ stopId: stop.sourceStopId ?? stop.stopId, sequence: stop.sequence })))
       : null;
-    return { item, progress, directionId: tripMatchesRoute ? trip?.directionId ?? null : null };
+    const stopArrival = tripMatchesRoute && feed.timetable && rawTripId && rawRouteId && rawVehicleServiceDate && rawBoardingStopId
+      ? getGtfsTripStopArrival(feed.timetable, rawTripId, rawRouteId, rawVehicleServiceDate, rawBoardingStopId, new Date(now))
+      : { status: 'UNAVAILABLE' as const };
+    const etaSeconds = stopArrival.status === 'PREDICTED' && stopArrival.predictedArrivalAt
+      && stopArrival.predictedArrivalAt.getTime() > now
+      ? Math.ceil((stopArrival.predictedArrivalAt.getTime() - now) / 1000) : null;
+    // Exact fresh stop progress is sufficient observed evidence. A prediction
+    // without observed progress needs a fresh exact dated future stop update.
+    const progressApproaches = progress?.approaching === true;
+    const predictedApproach = etaSeconds !== null && progress?.approaching !== false
+      && stopArrival.status === 'PREDICTED';
+    const approachEvidence: LiveJourneySegment['vehicles'][number]['approachEvidence'] = progressApproaches && progress
+      && !stopArrival.approachBlocked
+      ? {
+        source: 'OBSERVED_PROGRESS',
+        ...(stopArrival.predictedArrivalAt && etaSeconds !== null ? { predictedArrivalAt: stopArrival.predictedArrivalAt.toISOString() } : {}),
+        ...(stopArrival.realtimeUpdatedAt ? { realtimeUpdatedAt: stopArrival.realtimeUpdatedAt.toISOString() } : {}),
+        remainingStops: progress.remainingStops,
+        ...(Number.isInteger(item.currentStopSequence) ? { currentStopSequence: item.currentStopSequence } : {}),
+        ...(item.currentStopId ? { currentStopId: item.currentStopId } : {}),
+      }
+      : predictedApproach && stopArrival.predictedArrivalAt && stopArrival.realtimeUpdatedAt
+        ? {
+          source: 'TRIP_UPDATE_PREDICTION',
+          predictedArrivalAt: stopArrival.predictedArrivalAt.toISOString(),
+          realtimeUpdatedAt: stopArrival.realtimeUpdatedAt.toISOString(),
+        }
+        : null;
+    const approaching = Boolean(approachEvidence);
+    return { item, progress, approaching, approachEvidence,
+      etaSeconds: approachEvidence ? etaSeconds : null,
+      directionId: tripMatchesRoute ? trip?.directionId ?? null : null };
   });
-  const emphasizedIds = selectBoardingApproachVehicleIds(vehicleProgress.map(({ item, progress }) => ({
+  const emphasizedIds = selectBoardingApproachVehicleIds(vehicleProgress.map(({ item, progress, approaching, approachEvidence, etaSeconds }) => ({
     vehicleId: item.id,
-    progress,
+    approaching,
+    evidence: approachEvidence?.source ?? null,
+    etaSeconds,
+    remainingStops: progress?.approaching ? progress.remainingStops : null,
   })));
-  const vehicles: LiveJourneySegment['vehicles'] = vehicleProgress.flatMap(({ item, progress, directionId }) => {
+  const vehicles: LiveJourneySegment['vehicles'] = vehicleProgress.flatMap(({ item, progress, directionId,
+    approaching, approachEvidence, etaSeconds }) => {
     if (!item.timestamp) return [];
     return [{
       id: item.id,
@@ -141,9 +219,11 @@ export function buildLiveJourneySegment(
       tripId: item.tripId ?? null,
       routeId: item.routeId ?? null,
       directionId,
-      approachingBoarding: progress?.approaching === true,
-      remainingStops: progress?.approaching ? progress.remainingStops : null,
+      approachingBoarding: approaching,
+      remainingStops: approaching && progress?.approaching ? progress.remainingStops : null,
       emphasized: emphasizedIds.has(item.id),
+      approachEvidence,
+      etaSeconds,
     }];
   });
 
@@ -151,6 +231,8 @@ export function buildLiveJourneySegment(
     return {
       legId: leg.id,
       status: lineRoutes.length > 0 ? 'SCHEDULED' : 'UNVERIFIED',
+      vehiclePositionStatus: 'UNAVAILABLE',
+      boardingStopArrival,
       ...(lineRoutes.length > 0 ? {} : { reason: feed.vehicles ? 'no_fresh_matching_vehicle' : 'provider_unavailable' }),
       lineRoutes,
       vehicles,
@@ -159,6 +241,8 @@ export function buildLiveJourneySegment(
   return {
     legId: leg.id,
     status: 'LIVE',
+    vehiclePositionStatus: selectedVehicle?.timestamp ? 'OBSERVED' : 'UNAVAILABLE',
+    boardingStopArrival,
     ...(selectedVehicle?.timestamp ? { vehicle: {
       coordinates: [selectedVehicle.lon, selectedVehicle.lat],
       bearing: selectedVehicle.bearing,

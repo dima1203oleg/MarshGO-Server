@@ -89,13 +89,26 @@ export function approachingBoardingStop(
   return { approaching: remainingStops >= 0, remainingStops: Math.max(0, remainingStops) };
 }
 
-/** Choose at most three vehicles with exact live trip progress toward the selected boarding stop. */
+/** Choose up to three verified approaches, prioritizing observed stop progress over prediction-only evidence. */
 export function selectBoardingApproachVehicleIds(
-  candidates: ReadonlyArray<{ vehicleId: string; progress: { approaching: boolean; remainingStops: number } | null }>,
+  candidates: ReadonlyArray<{ vehicleId: string; approaching: boolean; evidence: 'OBSERVED_PROGRESS' | 'TRIP_UPDATE_PREDICTION' | null;
+    etaSeconds: number | null; remainingStops: number | null }>,
   limit = 3,
 ): Set<string> {
   const safeLimit = Number.isInteger(limit) ? Math.max(0, Math.min(3, limit)) : 3;
-  return new Set(candidates.filter((candidate) => candidate.progress?.approaching)
-    .sort((a, b) => a.progress!.remainingStops - b.progress!.remainingStops || a.vehicleId.localeCompare(b.vehicleId))
+  return new Set(candidates.filter((candidate) => candidate.approaching && (candidate.evidence === 'OBSERVED_PROGRESS'
+    || (candidate.evidence === 'TRIP_UPDATE_PREDICTION' && candidate.etaSeconds !== null
+      && Number.isFinite(candidate.etaSeconds) && candidate.etaSeconds > 0)))
+    .sort((a, b) => {
+      // Observed stop progression is the stronger signal: rank it by remaining
+      // stops. Prediction-only candidates follow, ranked by ETA. Stable IDs
+      // break ties in both groups.
+      const aObserved = a.evidence === 'OBSERVED_PROGRESS';
+      const bObserved = b.evidence === 'OBSERVED_PROGRESS';
+      if (aObserved !== bObserved) return aObserved ? -1 : 1;
+      if (aObserved) return (a.remainingStops ?? Number.MAX_SAFE_INTEGER) - (b.remainingStops ?? Number.MAX_SAFE_INTEGER)
+        || a.vehicleId.localeCompare(b.vehicleId);
+      return a.etaSeconds! - b.etaSeconds! || a.vehicleId.localeCompare(b.vehicleId);
+    })
     .slice(0, safeLimit).map((candidate) => candidate.vehicleId));
 }

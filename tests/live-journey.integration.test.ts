@@ -62,13 +62,16 @@ describe('live journey API (opt-in local integration test)', { skip: !enabled },
     });
     assert.equal(response.status, 200);
     const body = await response.json() as {
-      data: { journeyId: string; segments: Array<{ legId: string; status: string; reason?: string; lineRoutes: unknown[]; vehicles: unknown[] }> };
+      data: { journeyId: string; segments: Array<{ legId: string; status: string; reason?: string;
+        vehiclePositionStatus: string; boardingStopArrival: { status: string }; lineRoutes: unknown[]; vehicles: unknown[] }> };
     };
     assert.equal(body.data.journeyId, journeyId);
     assert.deepEqual(body.data.segments, [{
       legId,
       status: 'UNVERIFIED',
       reason: 'provider_unavailable',
+      vehiclePositionStatus: 'UNAVAILABLE',
+      boardingStopArrival: { status: 'UNAVAILABLE' },
       lineRoutes: [],
       vehicles: [],
     }]);
