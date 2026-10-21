@@ -1022,6 +1022,44 @@ test('route-chain sample preserves both FASTEST and CHEAPEST extremes', () => {
   assert.ok(selected.some((journey) => journey.id === cheapest.id), 'the cheapest known-fare option survives route-chain sampling');
 });
 
+test('route-chain sample preserves the full FASTEST, CHEAPEST, and BALANCED winner set', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const candidates = [
+    ...Array.from({ length: 18 }, (_, index) => ({
+      ...base, id: `ordinary-${index}`, durationSeconds: 4_400 + index * 17,
+      walkingMeters: 800 + index * 5, transfers: index % 3 === 0 ? 1 : 0,
+      fare: { priceMinor: 800 + index * 13, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+    })),
+    { ...base, id: 'fastest-extreme', durationSeconds: 1_800, walkingMeters: 1_200, transfers: 1,
+      fare: { priceMinor: 1_800, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'cheapest-extreme', durationSeconds: 7_200, walkingMeters: 500, transfers: 0,
+      fare: { priceMinor: 100, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'balanced-extreme', durationSeconds: 3_900, walkingMeters: 100, transfers: 0,
+      fare: { priceMinor: 700, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+  ];
+  const scored = candidates.map((itinerary) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+  }));
+  const winners = new Set(['FASTEST', 'CHEAPEST', 'BALANCED'].map((strategy) =>
+    scoreJourneys(scored, strategy as 'FASTEST' | 'CHEAPEST' | 'BALANCED')[0].journey.id));
+  assert.equal(winners.size, 3, 'the fixture must exercise three distinct strategy winners');
+
+  const sampled = sampleGtfsRouteChainCandidates(candidates, 8);
+  for (const winner of winners) assert.ok(sampled.some((itinerary) => itinerary.id === winner),
+    `route-chain sampling must retain strategy winner ${winner}`);
+});
+
 test('cross-provider GTFS cap preserves slow cheapest routes before filling by arrival', () => {
   const base = findGtfsItineraries(feed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
