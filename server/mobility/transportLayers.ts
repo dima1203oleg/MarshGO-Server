@@ -260,30 +260,41 @@ const VEHICLE_TTL_MS = 10_000;
 const vehicleCache = new Map<string, { at: number; promise: Promise<LiveVehicle[]> }>();
 const { transit_realtime } = bindings;
 
+/** Decode GTFS-RT positions without treating protobuf's default numeric value as a reported stop sequence. */
+export function parseGtfsRealtimeVehicles(
+  providerId: string,
+  data: Uint8Array,
+  routeNames: Map<string, { name: string; type: LineType }> = new Map(),
+): LiveVehicle[] {
+  const message = transit_realtime.FeedMessage.decode(data);
+  const out: LiveVehicle[] = [];
+  for (const entity of message.entity) {
+    const vehiclePosition = entity.vehicle;
+    const position = vehiclePosition?.position;
+    if (!vehiclePosition || !position || !Number.isFinite(position.latitude) || !Number.isFinite(position.longitude)) continue;
+    if (Math.abs(position.latitude) > 90 || Math.abs(position.longitude) > 180 || (position.latitude === 0 && position.longitude === 0)) continue;
+    const routeId = vehiclePosition.trip?.routeId ?? '';
+    const tripId = vehiclePosition.trip?.tripId?.trim();
+    const startDate = vehiclePosition.trip?.startDate;
+    const hasCurrentStopSequence = Object.prototype.hasOwnProperty.call(vehiclePosition, 'currentStopSequence');
+    const currentStopSequence = hasCurrentStopSequence ? Number(vehiclePosition.currentStopSequence) : Number.NaN;
+    const currentStopId = vehiclePosition.stopId?.trim();
+    const known = routeNames.get(routeId);
+    const speed = Number(position.speed);
+    out.push({ id: `${providerId}:${entity.id}`, lon: position.longitude, lat: position.latitude, type: known?.type ?? 'other', route: known?.name ?? routeId,
+      bearing: Number.isFinite(position.bearing) ? Number(position.bearing) : null, speed: Number.isFinite(speed) && speed >= 0 ? speed : null,
+      timestamp: parseVehicleTimestamp(vehiclePosition.timestamp), providerId,
+      ...(tripId ? { tripId } : {}), ...(routeId ? { routeId } : {}), ...(startDate && /^\d{8}$/.test(startDate) ? { startDate } : {}),
+      ...(hasCurrentStopSequence && Number.isInteger(currentStopSequence) && currentStopSequence >= 0 ? { currentStopSequence } : {}),
+      ...(currentStopId ? { currentStopId } : {}) });
+  }
+  return out;
+}
+
 async function loadVehicles(providerId: string, sourceType: string, url: string, routeNames: Map<string, { name: string; type: LineType }>): Promise<LiveVehicle[]> {
   if (sourceType === 'gtfs_rt') {
     const { data } = await fetchBinary(url, 10 * 1024 * 1024);
-    const message = transit_realtime.FeedMessage.decode(data);
-    const out: LiveVehicle[] = [];
-    for (const entity of message.entity) {
-      const position = entity.vehicle?.position;
-      if (!position || !Number.isFinite(position.latitude) || !Number.isFinite(position.longitude)) continue;
-      if (Math.abs(position.latitude) > 90 || Math.abs(position.longitude) > 180 || (position.latitude === 0 && position.longitude === 0)) continue;
-      const routeId = entity.vehicle?.trip?.routeId ?? '';
-      const tripId = entity.vehicle?.trip?.tripId?.trim();
-      const startDate = entity.vehicle?.trip?.startDate;
-      const currentStopSequence = Number(entity.vehicle?.currentStopSequence);
-      const currentStopId = entity.vehicle?.stopId?.trim();
-      const known = routeNames.get(routeId);
-      const speed = Number(position.speed);
-      out.push({ id: `${providerId}:${entity.id}`, lon: position.longitude, lat: position.latitude, type: known?.type ?? 'other', route: known?.name ?? routeId,
-        bearing: Number.isFinite(position.bearing) ? Number(position.bearing) : null, speed: Number.isFinite(speed) && speed >= 0 ? speed : null,
-        timestamp: parseVehicleTimestamp(entity.vehicle?.timestamp), providerId,
-        ...(tripId ? { tripId } : {}), ...(routeId ? { routeId } : {}), ...(startDate && /^\d{8}$/.test(startDate) ? { startDate } : {}),
-        ...(Number.isInteger(currentStopSequence) && currentStopSequence >= 0 ? { currentStopSequence } : {}),
-        ...(currentStopId ? { currentStopId } : {}) });
-    }
-    return out;
+    return parseGtfsRealtimeVehicles(providerId, data, routeNames);
   }
   const body = (await fetchJson(url, 12000)).data;
   const out: LiveVehicle[] = [];

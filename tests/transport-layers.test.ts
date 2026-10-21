@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGeoJsonNetwork, buildNetwork, decimate, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, networkRoutesForRoute, NETWORK_CACHE_SCHEMA_VERSION, parseBbox, parseVehicleTimestamp, routeInBbox } from '../server/mobility/transportLayers';
+import bindings from 'gtfs-realtime-bindings';
+import { buildGeoJsonNetwork, buildNetwork, decimate, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, networkRoutesForRoute, NETWORK_CACHE_SCHEMA_VERSION, parseBbox, parseGtfsRealtimeVehicles, parseVehicleTimestamp, routeInBbox } from '../server/mobility/transportLayers';
 import { cacheKey } from '../server/cache/cacheService';
 import { isFreshMobilityTimestamp, parseMobilityTimestamp } from '../server/mobility/timestamps';
 
@@ -97,6 +98,24 @@ describe('official GeoJSON network normalization', () => {
 });
 
 describe('realtime vehicle freshness', () => {
+  it('does not interpret an omitted GTFS-RT current stop sequence as stop sequence zero', () => {
+    const { transit_realtime } = bindings;
+    const data = transit_realtime.FeedMessage.encode({
+      header: { gtfsRealtimeVersion: '2.0', timestamp: 1_797_000_000 },
+      entity: [
+        { id: 'missing-sequence', vehicle: { trip: { tripId: 'trip-a', routeId: 'route-a' }, position: { latitude: 49.8, longitude: 24.0 }, timestamp: 1_797_000_000 } },
+        { id: 'explicit-zero-sequence', vehicle: { trip: { tripId: 'trip-b', routeId: 'route-a' }, position: { latitude: 49.81, longitude: 24.01 }, timestamp: 1_797_000_000, currentStopSequence: 0 } },
+        { id: 'reported-sequence', vehicle: { trip: { tripId: 'trip-c', routeId: 'route-a' }, position: { latitude: 49.82, longitude: 24.02 }, timestamp: 1_797_000_000, currentStopSequence: 12 } },
+      ],
+    }).finish();
+
+    const vehicles = parseGtfsRealtimeVehicles('provider-a', data);
+    assert.equal(vehicles.length, 3);
+    assert.equal(vehicles[0]?.currentStopSequence, undefined);
+    assert.equal(vehicles[1]?.currentStopSequence, 0);
+    assert.equal(vehicles[2]?.currentStopSequence, 12);
+  });
+
   it('accepts Unix seconds, milliseconds and ISO timestamps', () => {
     assert.equal(parseVehicleTimestamp('1700000000')?.getTime(), 1_700_000_000_000);
     assert.equal(parseVehicleTimestamp('1700000000000')?.getTime(), 1_700_000_000_000);
