@@ -1482,6 +1482,69 @@ test('uses a short urban transfer buffer and a longer buffer when boarding inter
   assert.ok(railTenMinutes.some((journey) => journey.transfers === 1));
 });
 
+test('matches an exhaustive small-feed oracle for every feasible one-transfer trip pair', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set('start', { id: 'start', name: 'Start', lon: 24.0201, lat: 49.8401 });
+  timetable.stops.set('hub', { id: 'hub', name: 'Transfer hub', lon: 24.025, lat: 49.845 });
+  timetable.stops.set('finish', { id: 'finish', name: 'Finish', lon: 24.0301, lat: 49.8501 });
+  timetable.routes.set('bus', { name: '7', mode: 'BUS', transportType: 'bus' });
+  timetable.routes.set('tram', { name: '2', mode: 'TRAM', transportType: 'tram' });
+  const addTrip = (tripId: string, routeId: 'bus' | 'tram', from: string, to: string, departure: number, arrival: number) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [from, to].map((stopId, index) => ({
+      stopId, sequence: index + 1, arrivalSeconds: index === 0 ? departure : arrival,
+      departureSeconds: index === 0 ? departure : arrival, pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+  const seconds = (time: string) => {
+    const [hours, minutes] = time.split(':').map(Number);
+    return hours * 3600 + minutes * 60;
+  };
+  for (const [tripId, departure, arrival] of [
+    ['bus-1', '08:00', '08:15'], ['bus-2', '08:05', '08:20'], ['bus-3', '08:10', '08:25'],
+  ]) addTrip(tripId, 'bus', 'start', 'hub', seconds(departure), seconds(arrival));
+  for (const [tripId, departure, arrival] of [
+    ['tram-1', '08:20', '08:45'], ['tram-2', '08:27', '08:50'], ['tram-3', '08:30', '08:55'],
+  ]) addTrip(tripId, 'tram', 'hub', 'finish', seconds(departure), seconds(arrival));
+
+  // Independent exhaustive oracle for this deliberately tiny, single-stop
+  // transfer feed: every bus trip is paired with every tram trip, applying
+  // the three-minute urban connection buffer and the query's departure window.
+  const expected = new Set<string>();
+  const latestFirstDeparture = seconds('08:12');
+  const transferBuffer = DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS;
+  for (const [busTripId, busTimes] of timetable.stopTimes) {
+    if (timetable.trips.get(busTripId)?.routeId !== 'bus' || busTimes[0].departureSeconds > latestFirstDeparture) continue;
+    for (const [tramTripId, tramTimes] of timetable.stopTimes) {
+      if (timetable.trips.get(tramTripId)?.routeId !== 'tram') continue;
+      if (tramTimes[0].departureSeconds >= busTimes[1].arrivalSeconds + transferBuffer) {
+        expected.add(`${busTripId}>${tramTripId}`);
+      }
+    }
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    maximumAccessWalkingMeters: 300, maximumEgressWalkingMeters: 300,
+    maximumTransferWalkingMeters: 100, maximumTransfers: 1,
+  });
+  const actual = new Set(result.itineraries
+    .filter((journey) => journey.segments.length === 2)
+    .map((journey) => journey.segments.map((segment) => segment.tripId).join('>')));
+
+  assert.deepEqual([...actual].sort(), [...expected].sort());
+  assert.equal(result.searchTruncated, false, 'a feed below all sampling and graph caps must be complete');
+  assert.equal(expected.size, 6, 'oracle fixture covers early, marginal, and missed-buffer connections');
+});
+
 test('honors GTFS forbidden and minimum-time transfer rules', () => {
   const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumStopDistanceMeters: 300, maximumTransfers: 1 };
   const forbiddenFeed = connectingFeed({ secondRouteType: '3', secondDeparture: '08:40:00', transferType: '3' });
