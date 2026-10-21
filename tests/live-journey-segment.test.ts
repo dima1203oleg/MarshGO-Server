@@ -216,6 +216,18 @@ describe('live journey segment assembly', () => {
     assert.equal(result.boardingStopArrival.status, 'SCHEDULED');
   });
 
+  it('does not infer a boarding-stop arrival time from a departure-only update', () => {
+    const timetable = feed();
+    timetable.realtimeTripUpdates = new Map([[gtfsRealtimeTripUpdateKey('trip-selected', serviceDate), tripUpdate({
+      stops: [{ stopSequence: 4, stopId: 'stop-4', departure: { delaySeconds: 300 }, relationship: 'SCHEDULED' }],
+    })]]);
+    const result = buildLiveJourneySegment(leg, { vehicles: [vehicle('selected', 'trip-selected', 1)], network: network(), timetable }, now);
+    assert.equal(result.boardingStopArrival.status, 'SCHEDULED');
+    assert.equal(result.boardingStopArrival.predictedAt, undefined);
+    assert.equal(result.vehicles[0]?.approachEvidence?.source, 'OBSERVED_PROGRESS');
+    assert.equal(result.vehicles[0]?.etaSeconds, null);
+  });
+
   it('emphasizes prediction-only vehicles only for an exact fresh future dated stop update', () => {
     const makeResult = (update: GtfsRealtimeTripUpdate) => {
       const timetable = feed();

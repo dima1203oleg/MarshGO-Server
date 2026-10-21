@@ -1030,15 +1030,10 @@ export function getGtfsTripStopArrival(feed: GtfsTimetableFeed, tripId: string, 
     return { status: 'SCHEDULED', scheduledArrivalAt,
       ...(stopUpdate?.relationship !== undefined && stopUpdate.relationship !== 'SCHEDULED' ? { approachBlocked: true } : {}) };
   }
-  const scheduledDepartureAt = createServiceTimeConverter(feed.timezone)(serviceDate, call.departureSeconds);
   const arrivalDelay = stopUpdate.arrival?.delaySeconds
     ?? (stopUpdate.arrival?.time ? Math.round((stopUpdate.arrival.time.getTime() - scheduledArrivalAt.getTime()) / 1000) : undefined);
-  const departureDelay = stopUpdate.departure?.delaySeconds
-    ?? (stopUpdate.departure?.time && scheduledDepartureAt
-      ? Math.round((stopUpdate.departure.time.getTime() - scheduledDepartureAt.getTime()) / 1000) : undefined);
   const predictedArrivalAt = stopUpdate.arrival?.time
-    ?? (arrivalDelay !== undefined ? new Date(scheduledArrivalAt.getTime() + arrivalDelay * 1000)
-      : departureDelay !== undefined ? new Date(scheduledArrivalAt.getTime() + departureDelay * 1000) : undefined);
+    ?? (arrivalDelay !== undefined ? new Date(scheduledArrivalAt.getTime() + arrivalDelay * 1000) : undefined);
   return predictedArrivalAt
     ? { status: 'PREDICTED', scheduledArrivalAt, predictedArrivalAt, realtimeUpdatedAt: update.updatedAt }
     : { status: 'SCHEDULED', scheduledArrivalAt };
