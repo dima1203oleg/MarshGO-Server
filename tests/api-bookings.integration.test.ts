@@ -381,6 +381,19 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.ok(fixtureTransitLegs.some((leg) => leg.transportType === 'tram'));
       assert.ok(fixtureTransitLegs.every((leg) => leg.source === 'gtfs-static'
         && (leg.routeGeometry?.length ?? 0) >= 2), 'fixture bus/tram legs expose scheduled source and renderable GTFS shape geometry');
+      for (const strategy of ['BALANCED', 'FASTEST'] as const) {
+        assert.ok(multiData.availableStrategies.includes(strategy), `GTFS fixture participates in ${strategy} API ranking`);
+        assert.ok(Number.isInteger(fixtureJourney.strategyRanks?.[strategy]),
+          `the authenticated API response includes the GTFS fixture's ${strategy} rank`);
+      }
+      if (fixtureJourney.totalPriceMinor !== null) {
+        assert.ok(multiData.availableStrategies.includes('CHEAPEST'), 'a fixture journey with a known fare keeps CHEAPEST available');
+        assert.ok(Number.isInteger(fixtureJourney.strategyRanks?.CHEAPEST),
+          'the authenticated API response includes the known-fare GTFS fixture in CHEAPEST ranking');
+      } else {
+        assert.equal(fixtureJourney.strategyRanks?.CHEAPEST, undefined,
+          'an unknown transit fare is never represented as a CHEAPEST ranking');
+      }
       for (const leg of fixtureTransitLegs) {
         assert.ok((leg.stops?.length ?? 0) >= 2, `${leg.transportType} HTTP response preserves scheduled boarding and alighting calls`);
         assert.ok(leg.stops!.every((stop, index) => index === 0
