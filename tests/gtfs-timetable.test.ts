@@ -1628,6 +1628,123 @@ test('matches an exhaustive small-feed oracle for every feasible one-transfer tr
   assert.equal(expected.size, 6, 'oracle fixture covers early, marginal, and missed-buffer connections');
 });
 
+test('matches an exhaustive two-transfer oracle and all three ranking winners', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set('start', { id: 'start', name: 'Start', lon: 24.0201, lat: 49.8401 });
+  timetable.stops.set('hub-a', { id: 'hub-a', name: 'Transfer A', lon: 24.025, lat: 49.845 });
+  timetable.stops.set('hub-b', { id: 'hub-b', name: 'Transfer B', lon: 24.0275, lat: 49.8475 });
+  timetable.stops.set('finish', { id: 'finish', name: 'Finish', lon: 24.0301, lat: 49.8501 });
+  const fares = [
+    [800, 200, 300],
+    [1_000, 50, 300],
+    [1_000, 50, 300],
+  ];
+  timetable.fareProducts = new Map();
+  timetable.fareRules = new Map();
+  const addTrip = (prefix: 'bus' | 'tram' | 'train', index: number, from: string, to: string,
+    departure: string, arrival: string, fareMinor: number) => {
+    const routeId = `${prefix}-${index}`;
+    const tripId = `${routeId}-trip`;
+    const fareId = `${routeId}-fare`;
+    const route = prefix === 'bus' ? { name: `Bus ${index}`, mode: 'BUS' as const, transportType: 'bus' as const }
+      : prefix === 'tram' ? { name: `Tram ${index}`, mode: 'TRAM' as const, transportType: 'tram' as const }
+        : { name: `Train ${index}`, mode: 'RAIL' as const, transportType: 'train' as const };
+    timetable.routes.set(routeId, route);
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const seconds = (value: string) => {
+      const [hours, minutes] = value.split(':').map(Number);
+      return hours * 3600 + minutes * 60;
+    };
+    const entries = [
+      { stopId: from, sequence: 1, arrivalSeconds: seconds(departure), departureSeconds: seconds(departure), pickupType: 0, dropOffType: 0 },
+      { stopId: to, sequence: 2, arrivalSeconds: seconds(arrival), departureSeconds: seconds(arrival), pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, stopIndex) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index: stopIndex }]));
+    timetable.fareProducts!.set(fareId, { id: fareId, priceMinor: fareMinor, currency: 'UAH', transfers: null,
+      transferDurationSeconds: null });
+    timetable.fareRules!.set(fareId, [{ fareId, routeId }]);
+    return { tripId, departure, arrival, fareMinor };
+  };
+  const buses = ['08:00', '08:05', '08:10'].map((departure, index) =>
+    addTrip('bus', index, 'start', 'hub-a', departure,
+      ['08:10', '08:15', '08:20'][index], fares[0][index]));
+  const direct = addTrip('bus', 3, 'start', 'finish', '08:05', '08:51', 800);
+  const trams = ['08:15', '08:20', '08:25'].map((departure, index) =>
+    addTrip('tram', index, 'hub-a', 'hub-b', departure,
+      ['08:25', '08:30', '08:35'][index], fares[1][index]));
+  const trains = ['08:35', '08:40', '08:45'].map((departure, index) =>
+    addTrip('train', index, 'hub-b', 'finish', departure,
+      ['08:45', '08:50', '08:55'][index], fares[2][index]));
+  const bufferSeconds = DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS;
+  const intercityTransferBufferSeconds = 10 * 60;
+  const latestFirstDepartureSeconds = 8 * 3600 + 12 * 60;
+  const expected = new Map<string, {
+    id: string; durationSeconds: number; priceMinor: number; transfers: number; walkingMeters: number;
+    reliability: null; transferRisk: number; comfort: null; legs: Array<{ mode: 'BUS' | 'TRAM' | 'RAIL' }>;
+  }>();
+  expected.set(direct.tripId, {
+    id: direct.tripId,
+    durationSeconds: (Date.UTC(2026, 9, 12, 5, 51) - Date.parse('2026-10-12T04:55:00Z')) / 1000,
+    priceMinor: direct.fareMinor, transfers: 0, walkingMeters: 0, reliability: null,
+    transferRisk: 0, comfort: null, legs: [{ mode: 'BUS' }],
+  });
+  const seconds = (value: string) => {
+    const [hours, minutes] = value.split(':').map(Number);
+    return hours * 3600 + minutes * 60;
+  };
+  for (const bus of buses) for (const tram of trams) for (const train of trains) {
+    if (seconds(bus.departure) > latestFirstDepartureSeconds
+      || seconds(tram.departure) < seconds(bus.arrival) + bufferSeconds
+      || seconds(train.departure) < seconds(tram.arrival) + intercityTransferBufferSeconds) continue;
+    const id = [bus.tripId, tram.tripId, train.tripId].join('>');
+    const [hours, minutes] = train.arrival.split(':').map(Number);
+    // The fixture date is before the Europe/Kyiv DST transition (UTC+3).
+    const arrivalAt = Date.UTC(2026, 9, 12, hours - 3, minutes);
+    expected.set(id, {
+      id,
+      durationSeconds: (arrivalAt - Date.parse('2026-10-12T04:55:00Z')) / 1000,
+      priceMinor: bus.fareMinor + tram.fareMinor + train.fareMinor,
+      transfers: 2, walkingMeters: 0, reliability: null, transferRisk: 0.25, comfort: null,
+      legs: [{ mode: 'BUS' }, { mode: 'TRAM' }, { mode: 'RAIL' }],
+    });
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 100, maximumTransfers: 2,
+  });
+  const actualById = new Map(result.itineraries.map((journey) => [journey.segments.map((segment) => segment.tripId).join('>'), journey]));
+  assert.deepEqual([...actualById.keys()].sort(), [...expected.keys()].sort(),
+    'the bounded search returns the direct trip and every and only time-feasible three-leg chain');
+  assert.equal(expected.size, 11, 'the oracle covers a direct trip and ten early, marginal, or missed-buffer three-leg chains');
+  assert.equal(result.searchTruncated, false, 'the complete small graph is searched without sampling loss');
+
+  const actualScoringOptions = [...actualById].map(([id, journey]) => ({
+    id, durationSeconds: journey.durationSeconds,
+    priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+    transfers: journey.transfers, walkingMeters: journey.walkingMeters,
+    reliability: null, transferRisk: journey.transfers > 0 ? 0.25 : 0, comfort: null,
+    legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+  }));
+  const expectedScoringOptions = [...expected.values()];
+  const winnerIds: string[] = [];
+  for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+    const expectedWinner = scoreJourneys(expectedScoringOptions, strategy)[0]?.journey.id;
+    const actualWinner = scoreJourneys(actualScoringOptions, strategy)[0]?.journey.id;
+    assert.equal(actualWinner, expectedWinner, `${strategy} winner matches exhaustive oracle`);
+    if (expectedWinner) winnerIds.push(expectedWinner);
+  }
+  assert.equal(new Set(winnerIds).size, 3, `the fixture exercises distinct strategy winners: ${JSON.stringify(winnerIds)}`);
+});
+
 test('honors GTFS forbidden and minimum-time transfer rules', () => {
   const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumStopDistanceMeters: 300, maximumTransfers: 1 };
   const forbiddenFeed = connectingFeed({ secondRouteType: '3', secondDeparture: '08:40:00', transferType: '3' });
