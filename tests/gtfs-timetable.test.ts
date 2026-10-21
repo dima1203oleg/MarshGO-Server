@@ -601,6 +601,58 @@ test('preserves stops for the reverse direction when nearby stops crowd the same
   assert.equal(result.searchTruncated, false, 'all in-radius route patterns fit within the bounded stop set');
 });
 
+test('retains additional same-direction boarding stops within the bounded pattern cap', () => {
+  const timetable = feed();
+  const route = timetable.routes.get('r');
+  assert.ok(route);
+  timetable.routes.set('r2', { ...route, name: '8' });
+  timetable.trips.set('t1', { ...timetable.trips.get('t1')!, directionId: '0' });
+  const terminal = { id: 'pattern-terminal', name: 'Pattern terminal', lon: 24.07, lat: 49.87 };
+  timetable.stops.set(terminal.id, terminal);
+
+  // The first 20 access stops are already selected. Two of them expose the
+  // same second route pattern, while a useful stop on that pattern ranks 21st.
+  for (let index = 1; index <= 19; index++) {
+    const stopId = `pattern-near-${index}`;
+    const tripId = `pattern-near-trip-${index}`;
+    timetable.stops.set(stopId, { id: stopId, name: `Pattern near ${index}`, lon: 24.0201 + index * 0.0001, lat: 49.8401 });
+    timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Central station', directionId: '0' });
+    timetable.stopTimes.set(tripId, [
+      { stopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: terminal.id, sequence: 2, arrivalSeconds: 9 * 3600, departureSeconds: 9 * 3600, pickupType: 0, dropOffType: 0 },
+    ]);
+    timetable.stopTimesByStop.set(stopId, [{ tripId, index: 0 }]);
+    timetable.stopTimesByStop.set(terminal.id, [
+      ...(timetable.stopTimesByStop.get(terminal.id) ?? []), { tripId, index: 1 },
+    ]);
+  }
+
+  const addPatternTrip = (tripId: string, fromStopId: string, toStopId: string, departure: number, arrival: number) => {
+    timetable.trips.set(tripId, { routeId: 'r2', serviceId: 'weekday', headsign: 'South terminal', directionId: '1' });
+    const stops = [
+      { stopId: fromStopId, sequence: 1, arrivalSeconds: departure, departureSeconds: departure, pickupType: 0, dropOffType: 0 },
+      { stopId: toStopId, sequence: 2, arrivalSeconds: arrival, departureSeconds: arrival, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, stops);
+    stops.forEach((stop, index) => timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId, index },
+    ]));
+  };
+  addPatternTrip('pattern-cover-1', 'origin', terminal.id, 8 * 3600, 9 * 3600);
+  addPatternTrip('pattern-cover-2', 'pattern-near-1', terminal.id, 8 * 3600, 9 * 3600);
+
+  const usefulStop = 'pattern-useful-boarding';
+  timetable.stops.set(usefulStop, { id: usefulStop, name: 'Useful boarding', lon: 24.025, lat: 49.8401 });
+  addPatternTrip('pattern-useful-trip', usefulStop, 'destination', 8 * 3600 + 5 * 60, 8 * 3600 + 25 * 60);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+  assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === 'pattern-useful-trip'),
+    'bounded selection must keep a useful third stop on a covered route pattern');
+  assert.equal(result.searchTruncated, false, 'all relevant stops fit below the per-side bound for this fixture');
+});
+
 test('bounds a dense route graph and reports omitted GTFS segment candidates', () => {
   const timetable = feed();
   // Routes elsewhere in a national feed must not dilute this corridor's
