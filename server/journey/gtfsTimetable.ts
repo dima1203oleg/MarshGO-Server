@@ -2,11 +2,13 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
 import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
+import type { JourneyOption } from './types';
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
 import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
 import { BoundedBestK, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
+import { scoreJourneys } from './scoring';
 import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
 import { BoundedPromiseCache } from './boundedPromiseCache';
 
@@ -20,7 +22,7 @@ const MAX_MERGED_FEED_CACHE_ENTRIES = 2;
 const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
 const MAX_STOPS_PER_SIDE = 48;
-const MAX_STOPS_PER_ROUTE_PATTERN = 2;
+const MAX_STOPS_PER_ROUTE_PATTERN = 8;
 const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
 // Bound the per-request materialized GTFS graph. A dense city feed can create
@@ -230,31 +232,27 @@ function gtfsSegmentRetentionPriority(key: string): number {
  * zero-cost score as the cheapest known fare. It remains eligible for the
  * other sampling objectives (time, transfers, and walking).
  */
-export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly GtfsItinerary[]): GtfsItinerary[] {
+export function rankGtfsItinerariesForCandidateSampling(
+  itineraries: readonly GtfsItinerary[], rankingContext: readonly JourneyOption[] = [],
+): GtfsItinerary[] {
   if (!itineraries.length) return [];
-  const comparableFares = itineraries.filter((itinerary) => itinerary.fare?.currency === 'UAH');
-  const minDuration = Math.min(...itineraries.map((itinerary) => itinerary.durationSeconds));
-  const maxDuration = Math.max(...itineraries.map((itinerary) => itinerary.durationSeconds));
-  const minFare = comparableFares.length ? Math.min(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
-  const maxFare = comparableFares.length ? Math.max(...comparableFares.map((itinerary) => itinerary.fare!.priceMinor)) : 0;
-  const minTransfers = Math.min(...itineraries.map((itinerary) => itinerary.transfers));
-  const maxTransfers = Math.max(...itineraries.map((itinerary) => itinerary.transfers));
-  const minWalking = Math.min(...itineraries.map((itinerary) => itinerary.walkingMeters));
-  const maxWalking = Math.max(...itineraries.map((itinerary) => itinerary.walkingMeters));
-  const normalize = (value: number, min: number, max: number) => max === min ? 0 : (value - min) / (max - min);
-  const score = (itinerary: GtfsItinerary) => {
-    const hasComparableFare = itinerary.fare?.currency === 'UAH';
-    const fareCost = comparableFares.length
-      ? hasComparableFare ? normalize(itinerary.fare!.priceMinor, minFare, maxFare) : 1
-      : 0;
-    return 0.35 * normalize(itinerary.durationSeconds, minDuration, maxDuration)
-      + 0.25 * fareCost
-      + 0.10 * normalize(itinerary.transfers, minTransfers, maxTransfers)
-      + 0.10 * normalize(itinerary.walkingMeters, minWalking, maxWalking)
-      + 0.20 * (itinerary.transfers > 0 ? 0.3 : 0);
-  };
-  return [...itineraries].sort((a, b) => score(a) - score(b)
-    || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
+  // Use the same scorer as the final cross-provider BALANCED ranking. A
+  // separate proxy can discard the route that the user would ultimately see
+  // as optimal (for example, a slightly slower direct service vs a transfer).
+  const candidates = itineraries.map((itinerary) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+    itinerary,
+  } satisfies JourneyOption & { itinerary: GtfsItinerary }));
+  return scoreJourneys([...candidates, ...rankingContext], 'BALANCED')
+    .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
 }
 
 /**
@@ -263,7 +261,7 @@ export function rankGtfsItinerariesForCandidateSampling(itineraries: readonly Gt
  * remove every slow, low-fare route before CHEAPEST ranking gets a chance.
  */
 export function selectGtfsCandidatesForCrossProviderSearch(
-  itineraries: readonly GtfsItinerary[], maximum = 100,
+  itineraries: readonly GtfsItinerary[], maximum = 100, rankingContext: readonly JourneyOption[] = [],
 ): GtfsItinerary[] {
   if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('candidate maximum must be positive');
   if (itineraries.length <= maximum) return [...itineraries];
@@ -293,7 +291,7 @@ export function selectGtfsCandidatesForCrossProviderSearch(
   take(byFare, perObjective);
   take(byTransfers, perObjective);
   take(byWalking, perObjective);
-  take(rankGtfsItinerariesForCandidateSampling(itineraries), perObjective);
+  take(rankGtfsItinerariesForCandidateSampling(itineraries, rankingContext), perObjective);
   take(byArrival, maximum - selected.size);
   return [...selected.values()].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
     || a.departureAt.getTime() - b.departureAt.getTime() || compareStableId(a.id, b.id));
@@ -991,6 +989,54 @@ function datedTripStops(feed: GtfsTimetableFeed, tripId: string, serviceDate: st
       updated: skipped || arrivalAt.getTime() !== scheduledArrival.getTime() || departureAt.getTime() !== scheduledDeparture.getTime() }];
   });
   return { stops, ...(update ? { update } : {}) };
+}
+
+/** Return one exact trip-instance stop arrival without inferring from another trip or service day. */
+export function getGtfsTripStopArrival(feed: GtfsTimetableFeed, tripId: string, routeId: string, serviceDate: string, stopId: string, now = new Date()): {
+  status: 'PREDICTED' | 'SCHEDULED' | 'UNAVAILABLE';
+  /** Explicit contradictory realtime data must suppress approach highlighting. */
+  approachBlocked?: boolean;
+  scheduledArrivalAt?: Date;
+  predictedArrivalAt?: Date;
+  realtimeUpdatedAt?: Date;
+} {
+  if (!/^\d{8}$/.test(serviceDate) || !tripId || !routeId || !stopId) return { status: 'UNAVAILABLE' };
+  const trip = feed.trips.get(tripId);
+  if (!trip || trip.routeId !== routeId || !serviceRuns(feed, trip.serviceId, serviceDate)) return { status: 'UNAVAILABLE' };
+  const calls = feed.stopTimes.get(tripId) ?? [];
+  const callIndex = calls.findIndex((call) => (call.sourceStopId ?? call.stopId) === stopId || call.stopId === stopId);
+  if (callIndex < 0) return { status: 'UNAVAILABLE' };
+  const call = calls[callIndex];
+  const scheduledArrivalAt = createServiceTimeConverter(feed.timezone)(serviceDate, call.arrivalSeconds);
+  if (!scheduledArrivalAt) return { status: 'UNAVAILABLE' };
+
+  const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
+  if (update && (update.tripId !== tripId || update.startDate !== serviceDate)) return { status: 'SCHEDULED', scheduledArrivalAt };
+  if (update?.relationship === 'CANCELED' || update?.relationship === 'DELETED') return { status: 'UNAVAILABLE', approachBlocked: true };
+  if (update) {
+    const age = now.getTime() - update.updatedAt.getTime();
+    const snapshotAge = now.getTime() - update.feedTimestamp.getTime();
+    if (!Number.isFinite(now.getTime()) || !Number.isFinite(age) || !Number.isFinite(snapshotAge)
+      || age > 90_000 || snapshotAge > 90_000 || age < -30_000 || snapshotAge < -30_000) {
+      return { status: 'SCHEDULED', scheduledArrivalAt };
+    }
+  }
+  if (update && update.relationship !== 'SCHEDULED') return { status: 'SCHEDULED', scheduledArrivalAt, approachBlocked: true };
+  if (update?.routeId && update.routeId !== routeId) return { status: 'SCHEDULED', scheduledArrivalAt };
+  const staticStopId = call.sourceStopId ?? call.stopId;
+  const exactStopSequenceUpdates = update?.stops.filter((item) => item.stopSequence === call.sequence) ?? [];
+  const stopUpdate = exactStopSequenceUpdates.find((item) => !item.stopId || item.stopId === staticStopId || item.stopId === call.stopId);
+  if (!update || !stopUpdate || stopUpdate.relationship !== 'SCHEDULED') {
+    return { status: 'SCHEDULED', scheduledArrivalAt,
+      ...(stopUpdate?.relationship !== undefined && stopUpdate.relationship !== 'SCHEDULED' ? { approachBlocked: true } : {}) };
+  }
+  const arrivalDelay = stopUpdate.arrival?.delaySeconds
+    ?? (stopUpdate.arrival?.time ? Math.round((stopUpdate.arrival.time.getTime() - scheduledArrivalAt.getTime()) / 1000) : undefined);
+  const predictedArrivalAt = stopUpdate.arrival?.time
+    ?? (arrivalDelay !== undefined ? new Date(scheduledArrivalAt.getTime() + arrivalDelay * 1000) : undefined);
+  return predictedArrivalAt
+    ? { status: 'PREDICTED', scheduledArrivalAt, predictedArrivalAt, realtimeUpdatedAt: update.updatedAt }
+    : { status: 'SCHEDULED', scheduledArrivalAt };
 }
 
 export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInput): GtfsDirectJourney[] {
@@ -2695,12 +2741,12 @@ export function findGtfsItinerariesWithStats(
     candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
     maxQueuedSearchWork: maximumQueuedSearchWork,
     searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
-      || results.size >= MAX_SEARCH_RESULTS),
+      || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
   return {
     itineraries,
     searchTruncated: stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
-      || results.size >= MAX_SEARCH_RESULTS,
+      || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated,
     resultLimitReached: rankedResults.length > itineraries.length || candidateSamplingTruncated,
     candidateGraphTruncated: segmentGraphTruncated,
   };

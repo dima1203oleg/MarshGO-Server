@@ -55,14 +55,19 @@ test('GTFS search worker starts and returns an empty snapshot without configured
 test('test-only GTFS URL loads the checked-in fixture through the worker and composes bus to tram', async () => {
   const fixtureDirectory = fileURLToPath(new URL('./fixtures/gtfs-http/', import.meta.url));
   const client = new GtfsSearchWorkerClient(fixtureDirectory);
-  const departure = new Date('2026-10-21T05:00:00.000Z');
+  const departure = new Date();
+  departure.setUTCDate(departure.getUTCDate() + 1);
+  while (departure.getUTCDay() === 0 || departure.getUTCDay() === 6) {
+    departure.setUTCDate(departure.getUTCDate() + 1);
+  }
+  departure.setUTCHours(4, 0, 0, 0);
   try {
     const result = await client.search({
       providerId: 'fixture-provider', providerName: 'fixture',
       origin: [24.0029933, 49.8681678], destination: [24.057585, 49.794117],
-      now: new Date('2026-10-21T04:55:00.000Z'),
-      earliestDeparture: departure, latestDeparture: new Date(departure.getTime() + 30 * 60_000), limit: 20,
-      maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 2, maximumWaitSeconds: 45 * 60,
+      now: new Date(departure.getTime() - 5 * 60_000),
+      earliestDeparture: departure, latestDeparture: new Date(departure.getTime() + 4 * 60 * 60_000), limit: 20,
+      maximumJourneySeconds: 4 * 60 * 60, maximumTransfers: 2, maximumWaitSeconds: 45 * 60,
       minimumTransferBufferSeconds: 5 * 60, maximumAccessWalkingMeters: 300,
       maximumEgressWalkingMeters: 300, maximumTransferWalkingMeters: 400,
       allowedModes: ['BUS', 'TRAM'], allowedTransportTypes: ['bus', 'tram'],

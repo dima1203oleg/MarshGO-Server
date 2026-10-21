@@ -10,6 +10,9 @@ export interface ScoreWeights {
   comfort: number;
 }
 
+/** Generalized-cost penalty for the effort and uncertainty of each transfer. */
+export const TRANSFER_TIME_PENALTY_SECONDS = 8 * 60;
+
 export const JOURNEY_SCORE_WEIGHTS: Record<JourneyStrategy, ScoreWeights> = {
   FASTEST:  { time: 0.62, price: 0.08, transfers: 0.08, walking: 0.04, risk: 0.12, comfort: 0.06 },
   CHEAPEST: { time: 0.10, price: 0.62, transfers: 0.09, walking: 0.04, risk: 0.10, comfort: 0.05 },
@@ -157,7 +160,11 @@ export function scoreJourneys<T extends JourneyOption>(
   }
 
   const metrics: Record<Metric, (journey: T) => number> = {
-    durationSeconds: (journey) => journey.durationSeconds,
+    // Composite strategies compare perceived time, while the FASTEST promise
+    // below continues to sort by the actual door-to-door duration. This makes
+    // transfer effort a stable 8-minute generalized-cost penalty instead of a
+    // data-set-dependent normalized count alone.
+    durationSeconds: (journey) => journey.durationSeconds + journey.transfers * TRANSFER_TIME_PENALTY_SECONDS,
     priceMinor: (journey) => journey.priceMinor ?? Number.MAX_SAFE_INTEGER,
     transfers: (journey) => journey.transfers,
     walkingMeters: (journey) => journey.walkingMeters,
@@ -172,7 +179,7 @@ export function scoreJourneys<T extends JourneyOption>(
 
   const scored = journeys.map((journey) => {
     const values: Record<Metric, number> = {
-      durationSeconds: journey.durationSeconds,
+      durationSeconds: metrics.durationSeconds(journey),
       priceMinor: metrics.priceMinor(journey),
       transfers: journey.transfers,
       walkingMeters: journey.walkingMeters,

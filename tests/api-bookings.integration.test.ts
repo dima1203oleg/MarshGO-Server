@@ -495,6 +495,24 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.deepEqual(composedJourney.legs.map((leg) => leg.mode), ['BUS','COMMUNITY','TRAM']);
       assert.equal(composedJourney.legs[1]!.offerId, ids.transitCompositionOffer);
       assert.equal(composedJourney.legs[1]!.availabilityStatus, 'AVAILABLE');
+
+      const transferLimitedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
+        body: JSON.stringify({
+          origin: { name: 'API bus departure stop', coordinates: compositionPair.bus.origin!.coordinates },
+          destination: { name: 'API tram arrival stop', coordinates: compositionPair.tram.destination!.coordinates },
+          departureAt: multiSearchDeparture, passengers: 1, strategy: 'FASTEST',
+          preferences: { allowCommunity: true, allowedTransportTypes: ['bus','tram','carpool'], maxTransfers: 1 },
+        }),
+      });
+      assert.equal(transferLimitedSearch.status, 200);
+      const transferLimitedData = (await transferLimitedSearch.json() as { data: { journeys: Array<{
+        offerId: string | null; source?: string;
+      }> } }).data;
+      assert.equal(transferLimitedData.journeys.some((candidate) => candidate.source === 'community-transit'
+        && candidate.offerId === ids.transitCompositionOffer), false,
+      'a BUS → COMMUNITY → TRAM journey has two vehicle changes and must not appear under maxTransfers=1');
+
       const storedComposition = await pool.query<{ state: string; modes: string[]; leg_states: string[] }>(
         `SELECT j.state,array_agg(l.mode ORDER BY l.ordinal) AS modes,array_agg(l.state ORDER BY l.ordinal) AS leg_states
            FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 AND j.user_id=$2 GROUP BY j.id`,
@@ -539,7 +557,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA }, body: JSON.stringify(body),
     });
     assert.equal(response.status, 200);
-    const result = await response.json() as { data: { partial: boolean; partialReasons: string[]; blockedProviders: string[]; unsupportedPreferences: string[]; availableStrategies: string[]; journeys: Array<{ id: string; offerId: string | null; strategy: string; strategyRanks?: Record<string, number>; confirmedPriceMinor: number | null; totalPriceMinor: number | null; source?: string; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
+    const result = await response.json() as { data: { partial: boolean; partialReasons: string[]; blockedProviders: string[]; unsupportedPreferences: string[]; availableStrategies: string[]; journeys: Array<{ id: string; offerId: string | null; strategy: string; recommendedStrategies?: string[]; strategyRanks?: Record<string, number>; confirmedPriceMinor: number | null; totalPriceMinor: number | null; source?: string; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
     assert.equal(result.data.partial, true);
     assert.ok(result.data.partialReasons.length > 0);
     assert.ok(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:taxi:')));
@@ -549,6 +567,14 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(communityJourneys.length, 1);
     const journey = communityJourneys[0];
     assert.ok(journey);
+    for (const strategy of ['BALANCED', 'FASTEST', 'CHEAPEST']) {
+      assert.ok(result.data.availableStrategies.includes(strategy),
+        `a known-price community offer keeps ${strategy} available at the authenticated API boundary`);
+      assert.equal(journey.strategyRanks?.[strategy], 1,
+        `the persisted community result has a rank for ${strategy}`);
+      assert.ok(journey.recommendedStrategies?.includes(strategy),
+        `the API recommendation labels the community result for ${strategy}`);
+    }
     assert.equal(journey.confirmedPriceMinor, null);
     assert.equal(journey.totalPriceMinor, 15000);
     assert.equal(journey.legs[0].driver?.averageRating, 5);

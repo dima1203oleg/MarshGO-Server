@@ -81,16 +81,18 @@ test('selected line fleet includes every fresh exact provider and route match, d
 
 test('boarding highlight selects no more than three exact approaches and leaves unknown/opposite-direction vehicles muted', () => {
   const highlighted = selectBoardingApproachVehicleIds([
-    { vehicleId: 'farther', progress: { approaching: true, remainingStops: 5 } },
-    { vehicleId: 'near', progress: { approaching: true, remainingStops: 1 } },
-    { vehicleId: 'middle', progress: { approaching: true, remainingStops: 3 } },
-    { vehicleId: 'at-stop', progress: { approaching: true, remainingStops: 0 } },
-    { vehicleId: 'passed-stop', progress: { approaching: false, remainingStops: 0 } },
-    { vehicleId: 'unknown', progress: null },
+    { vehicleId: 'farther', approaching: true, evidence: 'OBSERVED_PROGRESS', etaSeconds: 500, remainingStops: 5 },
+    { vehicleId: 'near', approaching: true, evidence: 'OBSERVED_PROGRESS', etaSeconds: 100, remainingStops: 1 },
+    { vehicleId: 'middle', approaching: true, evidence: 'OBSERVED_PROGRESS', etaSeconds: 250, remainingStops: 3 },
+    { vehicleId: 'at-stop', approaching: true, evidence: 'OBSERVED_PROGRESS', etaSeconds: 100, remainingStops: 0 },
+    { vehicleId: 'prediction', approaching: true, evidence: 'TRIP_UPDATE_PREDICTION', etaSeconds: 10, remainingStops: null },
+    { vehicleId: 'passed-stop', approaching: false, evidence: 'OBSERVED_PROGRESS', etaSeconds: 50, remainingStops: 0 },
+    { vehicleId: 'unknown', approaching: true, evidence: null, etaSeconds: null, remainingStops: null },
+    { vehicleId: 'expired', approaching: true, evidence: 'TRIP_UPDATE_PREDICTION', etaSeconds: 0, remainingStops: null },
   ]);
   assert.deepEqual([...highlighted], ['at-stop', 'near', 'middle']);
   assert.equal(selectBoardingApproachVehicleIds([
-    { vehicleId: 'one', progress: { approaching: true, remainingStops: 0 } },
-    { vehicleId: 'two', progress: { approaching: true, remainingStops: 1 } },
+    { vehicleId: 'one', approaching: true, evidence: 'OBSERVED_PROGRESS', etaSeconds: null, remainingStops: 0 },
+    { vehicleId: 'two', approaching: true, evidence: 'TRIP_UPDATE_PREDICTION', etaSeconds: 60, remainingStops: null },
   ], 50).size, 2);
 });

@@ -448,6 +448,8 @@ test('limits duplicate stop-pair alternatives for the same scheduled trip chain'
     'a bounded number of stop-pair choices should share the same scheduled vehicle chain');
   assert.equal(result.resultLimitReached, true,
     'suppressing additional stop-pair variants must be visible as candidate sampling');
+  assert.equal(result.searchTruncated, true,
+    'omitting sampled stop-pair candidates must report that the search was incomplete');
 });
 
 test('same-trip sampling preserves a genuinely cheaper stop-pair option under the two-variant cap', () => {
@@ -597,6 +599,58 @@ test('preserves stops for the reverse direction when nearby stops crowd the same
 
   assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === 'reverse-trip'));
   assert.equal(result.searchTruncated, false, 'all in-radius route patterns fit within the bounded stop set');
+});
+
+test('retains additional same-direction boarding stops within the bounded pattern cap', () => {
+  const timetable = feed();
+  const route = timetable.routes.get('r');
+  assert.ok(route);
+  timetable.routes.set('r2', { ...route, name: '8' });
+  timetable.trips.set('t1', { ...timetable.trips.get('t1')!, directionId: '0' });
+  const terminal = { id: 'pattern-terminal', name: 'Pattern terminal', lon: 24.07, lat: 49.87 };
+  timetable.stops.set(terminal.id, terminal);
+
+  // The first 20 access stops are already selected. Two of them expose the
+  // same second route pattern, while a useful stop on that pattern ranks 21st.
+  for (let index = 1; index <= 19; index++) {
+    const stopId = `pattern-near-${index}`;
+    const tripId = `pattern-near-trip-${index}`;
+    timetable.stops.set(stopId, { id: stopId, name: `Pattern near ${index}`, lon: 24.0201 + index * 0.0001, lat: 49.8401 });
+    timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Central station', directionId: '0' });
+    timetable.stopTimes.set(tripId, [
+      { stopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: terminal.id, sequence: 2, arrivalSeconds: 9 * 3600, departureSeconds: 9 * 3600, pickupType: 0, dropOffType: 0 },
+    ]);
+    timetable.stopTimesByStop.set(stopId, [{ tripId, index: 0 }]);
+    timetable.stopTimesByStop.set(terminal.id, [
+      ...(timetable.stopTimesByStop.get(terminal.id) ?? []), { tripId, index: 1 },
+    ]);
+  }
+
+  const addPatternTrip = (tripId: string, fromStopId: string, toStopId: string, departure: number, arrival: number) => {
+    timetable.trips.set(tripId, { routeId: 'r2', serviceId: 'weekday', headsign: 'South terminal', directionId: '1' });
+    const stops = [
+      { stopId: fromStopId, sequence: 1, arrivalSeconds: departure, departureSeconds: departure, pickupType: 0, dropOffType: 0 },
+      { stopId: toStopId, sequence: 2, arrivalSeconds: arrival, departureSeconds: arrival, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, stops);
+    stops.forEach((stop, index) => timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId, index },
+    ]));
+  };
+  addPatternTrip('pattern-cover-1', 'origin', terminal.id, 8 * 3600, 9 * 3600);
+  addPatternTrip('pattern-cover-2', 'pattern-near-1', terminal.id, 8 * 3600, 9 * 3600);
+
+  const usefulStop = 'pattern-useful-boarding';
+  timetable.stops.set(usefulStop, { id: usefulStop, name: 'Useful boarding', lon: 24.025, lat: 49.8401 });
+  addPatternTrip('pattern-useful-trip', usefulStop, 'destination', 8 * 3600 + 5 * 60, 8 * 3600 + 25 * 60);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  });
+  assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === 'pattern-useful-trip'),
+    'bounded selection must keep a useful third stop on a covered route pattern');
+  assert.equal(result.searchTruncated, false, 'all relevant stops fit below the per-side bound for this fixture');
 });
 
 test('bounds a dense route graph and reports omitted GTFS segment candidates', () => {
@@ -909,6 +963,45 @@ test('does not treat an unknown fare as free in balanced GTFS candidate sampling
   assert.equal(unknown.fare, null, 'unknown fare remains unknown in the candidate data');
 });
 
+test('balanced GTFS candidate sampling agrees with the final scorer on transfer effort', () => {
+  const base = findGtfsItineraries(connectingFeed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+  })[0];
+  assert.ok(base);
+  const connecting = {
+    ...base,
+    id: 'connecting-two-transfers',
+    durationSeconds: 3_600,
+    transfers: 2,
+    fare: { priceMinor: 1_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  };
+  const direct = {
+    ...base,
+    id: 'direct-no-transfer',
+    durationSeconds: 4_000,
+    transfers: 0,
+    fare: { priceMinor: 1_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  };
+  const asScorable = (itinerary: typeof base) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+  });
+  const finalRanking = scoreJourneys([asScorable(connecting), asScorable(direct)], 'BALANCED').map(({ journey }) => journey.id);
+  const sampledRanking = rankGtfsItinerariesForCandidateSampling([connecting, direct]).map(({ id }) => id);
+
+  assert.deepEqual(sampledRanking, finalRanking);
+  assert.equal(sampledRanking[0], 'direct-no-transfer');
+});
+
 test('route-chain sample preserves both FASTEST and CHEAPEST extremes', () => {
   const base = findGtfsItineraries(feed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
@@ -951,6 +1044,62 @@ test('cross-provider GTFS cap preserves slow cheapest routes before filling by a
     selected.map(({ id }) => id),
     'objective retention is deterministic and independent of provider insertion order',
   );
+});
+
+test('cross-provider GTFS cap uses the shared candidate pool when preserving its balanced winner', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const withFare = (id: string, durationSeconds: number, priceMinor: number) => ({
+    ...base,
+    id,
+    durationSeconds,
+    fare: { priceMinor, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  });
+  const candidates = [
+    withFare('fast-expensive', 1_000, 10_000),
+    withFare('balanced-winner', 6_000, 5_100),
+    withFare('cheapest-slower', 6_800, 5_000),
+    withFare('alternative-d', 2_000, 9_000),
+    withFare('alternative-e', 3_000, 8_000),
+    withFare('alternative-f', 4_000, 7_000),
+  ];
+  const communityCandidate = {
+    id: 'long-community-option',
+    durationSeconds: 30_000,
+    priceMinor: 10_000,
+    transfers: 0,
+    walkingMeters: 0,
+    reliability: null,
+    transferRisk: 0,
+    comfort: null,
+    legs: [{ mode: 'COMMUNITY' as const }],
+  };
+  const toScorable = (itinerary: typeof base) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+  });
+  const completeMixedPoolWinner = scoreJourneys(
+    [...candidates.map(toScorable), communityCandidate], 'BALANCED',
+  )[0]?.journey.id;
+  assert.equal(completeMixedPoolWinner, 'balanced-winner',
+    'the fixture proves that shared mode ranges change the winning GTFS candidate');
+
+  const transitOnlySample = selectGtfsCandidatesForCrossProviderSearch(candidates, 5);
+  assert.ok(!transitOnlySample.some(({ id }) => id === 'balanced-winner'),
+    'without mixed-mode score ranges, the transit-only balanced sample omits the later winner');
+
+  const mixedModeSample = selectGtfsCandidatesForCrossProviderSearch(candidates, 5, [communityCandidate]);
+  assert.ok(mixedModeSample.some(({ id }) => id === 'balanced-winner'),
+    'the route that wins in the full mixed-mode score pool survives bounded GTFS pruning');
 });
 
 test('route-chain sample tie-break is locale-independent and stable across input order', () => {
