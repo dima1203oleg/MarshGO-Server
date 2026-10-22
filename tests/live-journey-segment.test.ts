@@ -185,25 +185,47 @@ describe('live journey segment assembly', () => {
     assert.equal(result.boardingStopArrival.realtimeUpdatedAt, new Date(now - 10_000).toISOString());
   });
 
-  it('does not link a TripUpdate to a vehicle when the vehicle service date is absent or mismatched', () => {
+  it('uses the selected leg date to bind a date-less vehicle only when a fresh exact TripUpdate predicts its boarding stop', () => {
     const timetable = feed();
     timetable.realtimeTripUpdates = new Map([[gtfsRealtimeTripUpdateKey('trip-selected', serviceDate), tripUpdate()]]);
     const withoutDate = buildLiveJourneySegment(leg, {
-      vehicles: [vehicle('selected', 'trip-selected', 1, { startDate: undefined })], network: network(), timetable,
+      vehicles: [vehicle('selected', 'trip-selected', 1, { startDate: undefined, currentStopSequence: undefined })], network: network(), timetable,
     }, now);
     const wrongDate = buildLiveJourneySegment(leg, {
       vehicles: [vehicle('selected', 'trip-selected', 1, { startDate: '20261017' })], network: network(), timetable,
     }, now);
 
-    assert.equal(withoutDate.boardingStopArrival.status, 'SCHEDULED');
+    assert.equal(withoutDate.boardingStopArrival.status, 'PREDICTED');
     assert.equal(wrongDate.boardingStopArrival.status, 'SCHEDULED');
     assert.equal(withoutDate.vehiclePositionStatus, 'OBSERVED');
     assert.equal(wrongDate.vehiclePositionStatus, 'UNAVAILABLE');
-    assert.equal(withoutDate.vehicles[0]?.approachingBoarding, false);
-    assert.equal(withoutDate.vehicles[0]?.emphasized, false);
-    assert.equal(withoutDate.vehicles[0]?.approachEvidence, null);
+    assert.equal(withoutDate.vehicles[0]?.approachingBoarding, true);
+    assert.equal(withoutDate.vehicles[0]?.emphasized, true);
+    assert.equal(withoutDate.vehicles[0]?.approachEvidence?.source, 'TRIP_UPDATE_PREDICTION');
+    assert.equal(withoutDate.vehicles[0]?.etaSeconds, 1_200);
     assert.equal(wrongDate.vehicles[0]?.approachingBoarding, false);
     assert.equal(wrongDate.vehicles[0]?.emphasized, false);
+
+    const noPredictionFeed = feed();
+    noPredictionFeed.realtimeTripUpdates = new Map();
+    const noPrediction = buildLiveJourneySegment(leg, {
+      vehicles: [vehicle('selected', 'trip-selected', 1, { startDate: undefined, currentStopSequence: undefined })], network: network(), timetable: noPredictionFeed,
+    }, now);
+    assert.equal(noPrediction.vehicles[0]?.approachingBoarding, false);
+    assert.equal(noPrediction.vehicles[0]?.emphasized, false);
+
+    const outsideWindow = buildLiveJourneySegment({
+      ...leg,
+      scheduledDepartureAt: new Date(now - 2 * 60 * 60_000),
+      scheduledArrivalAt: new Date(now - 60 * 60_000),
+    }, {
+      vehicles: [vehicle('outside-selected-window', 'trip-selected', 1, {
+        startDate: undefined, currentStopSequence: undefined,
+      })],
+      network: network(), timetable,
+    }, now);
+    assert.equal(outsideWindow.vehicles[0]?.approachingBoarding, false);
+    assert.equal(outsideWindow.vehicles[0]?.emphasized, false);
   });
 
   it('does not apply a TripUpdate with a mismatched route or boarding stop identity', () => {
