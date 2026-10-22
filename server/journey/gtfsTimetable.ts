@@ -2410,7 +2410,7 @@ export function findGtfsItinerariesWithStats(
   // Keep the per-leg sampling cap independent of the caller's response-page
   // size so later cross-provider ranking receives a consistent diverse pool.
   // The separate global result cap below still bounds retained path objects.
-  const MAX_CANDIDATES_PER_LEG_COUNT = 500;
+  const MAX_CANDIDATES_PER_LEG_COUNT = 750;
   // Most city-feed stops cannot lead to this destination. Exclude those dead
   // ends before enumerating timed transfer combinations.
   const reachableWithin = [destinationStopIds];
