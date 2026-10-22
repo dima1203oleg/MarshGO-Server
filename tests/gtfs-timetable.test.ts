@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
 
@@ -242,6 +242,74 @@ test('finds a scheduled direct bus, preserves route/stops, and converts agency l
   assert.equal(journeys[0].routeGeometry, undefined, 'a missing source shape must not be replaced with a straight line');
   assert.equal(journeys[0].departureAt.toISOString(), '2026-10-12T05:00:00.000Z');
   assert.equal(journeys[0].arrivalAt.toISOString(), '2026-10-12T05:40:00.000Z');
+});
+
+test('eligible trip-instance events preserve scheduled stop order, UTC conversion, and pickup/drop-off semantics', () => {
+  const scheduled = feed({ withIntermediate: true });
+  const scheduledEvents = eligibleTripInstanceStopEvents(scheduled, 't1', '20261012', [0, 1, 2]);
+  assert.ok(scheduledEvents);
+  assert.deepEqual(scheduledEvents.events.map(({ stopIndex }) => stopIndex), [0, 1, 2],
+    'the event vector stays aligned with the caller-provided stop cursor order');
+  assert.deepEqual(scheduledEvents.events.map((event) => ({
+    stopIndex: event.stopIndex,
+    stopId: event.stopTime.stopId,
+    scheduledArrivalAt: event.scheduledArrivalAt?.toISOString(),
+    scheduledDepartureAt: event.scheduledDepartureAt?.toISOString(),
+    arrivalAt: event.arrivalAt?.toISOString(),
+    departureAt: event.departureAt?.toISOString(),
+    canBoard: event.canBoard,
+    canAlight: event.canAlight,
+  })), [
+    { stopIndex: 0, stopId: 'origin', scheduledArrivalAt: '2026-10-12T05:00:00.000Z', scheduledDepartureAt: '2026-10-12T05:00:00.000Z', arrivalAt: '2026-10-12T05:00:00.000Z', departureAt: '2026-10-12T05:00:00.000Z', canBoard: true, canAlight: true },
+    { stopIndex: 1, stopId: 'middle', scheduledArrivalAt: '2026-10-12T05:20:00.000Z', scheduledDepartureAt: '2026-10-12T05:20:00.000Z', arrivalAt: '2026-10-12T05:20:00.000Z', departureAt: '2026-10-12T05:20:00.000Z', canBoard: true, canAlight: true },
+    { stopIndex: 2, stopId: 'destination', scheduledArrivalAt: '2026-10-12T05:40:00.000Z', scheduledDepartureAt: '2026-10-12T05:40:00.000Z', arrivalAt: '2026-10-12T05:40:00.000Z', departureAt: '2026-10-12T05:40:00.000Z', canBoard: true, canAlight: true },
+  ], 'event projection matches the previous scheduledTimes + raw pickup/drop-off preparation');
+
+  const restricted = feed({ withIntermediate: true, pickup: '1', dropoff: '3' });
+  const restrictedEvents = eligibleTripInstanceStopEvents(restricted, 't1', '20261012', [0, 1, 2]);
+  assert.deepEqual(restrictedEvents?.events.map(({ canBoard, canAlight }) => ({ canBoard, canAlight })), [
+    { canBoard: false, canAlight: true },
+    { canBoard: true, canAlight: true },
+    { canBoard: true, canAlight: false },
+  ], 'pickup and drop-off restrictions are exposed as event-level feasibility flags');
+  assert.throws(() => eligibleTripInstanceStopEvents(scheduled, 't1', '20261012', [0, 99]), RangeError,
+    'an invalid stop cursor fails explicitly instead of compacting the event vector out of alignment');
+});
+
+test('eligible trip-instance events overlay realtime times and skipped stops without changing service-date gating', () => {
+  const timetable = feed({ withIntermediate: true });
+  timetable.realtimeTripUpdates = new Map([['t1\u000020261012', {
+    tripId: 't1', startDate: '20261012', relationship: 'SCHEDULED',
+    stops: [
+      { stopSequence: 1, relationship: 'SCHEDULED', arrival: { delaySeconds: 60 }, departure: { delaySeconds: 120 } },
+      { stopSequence: 2, relationship: 'SKIPPED' },
+      { stopSequence: 3, relationship: 'SCHEDULED', arrival: { delaySeconds: 300 }, departure: { delaySeconds: 360 } },
+    ],
+    updatedAt: new Date('2026-10-12T04:59:00Z'), feedTimestamp: new Date('2026-10-12T04:59:00Z'),
+  }]]);
+  const events = eligibleTripInstanceStopEvents(timetable, 't1', '20261012', [0, 1, 2]);
+  assert.ok(events);
+  assert.equal(events.events[0]?.scheduledDepartureAt?.toISOString(), '2026-10-12T05:00:00.000Z');
+  assert.equal(events.events[0]?.departureAt?.toISOString(), '2026-10-12T05:02:00.000Z');
+  assert.equal(events.events[0]?.updated, true);
+  assert.equal(events.events[1]?.skipped, true);
+  assert.equal(events.events[1]?.canBoard, false);
+  assert.equal(events.events[1]?.canAlight, false);
+  assert.equal(events.events[2]?.scheduledArrivalAt?.toISOString(), '2026-10-12T05:40:00.000Z');
+  assert.equal(events.events[2]?.arrivalAt?.toISOString(), '2026-10-12T05:45:00.000Z');
+  assert.equal(events.events[2]?.departureAt?.toISOString(), '2026-10-12T05:46:00.000Z');
+  assert.equal(events.datedStops?.length, 3, 'full trip-date overlay remains available for segment update attribution');
+  assert.equal(events.realtimeUpdate?.updatedAt.toISOString(), '2026-10-12T04:59:00.000Z');
+
+  const inactive = eligibleTripInstanceStopEvents(timetable, 't1', '20261011', [0, 1, 2]);
+  assert.equal(inactive, null, 'the same calendar service is excluded on a non-running service date');
+  const canceled = structuredClone(timetable);
+  canceled.realtimeTripUpdates!.set('t1\u000020261012', {
+    tripId: 't1', startDate: '20261012', relationship: 'CANCELED', stops: [],
+    updatedAt: new Date('2026-10-12T04:59:00Z'), feedTimestamp: new Date('2026-10-12T04:59:00Z'),
+  });
+  assert.equal(eligibleTripInstanceStopEvents(canceled, 't1', '20261012', [0, 1, 2]), null,
+    'canceled trip instances produce no eligible stop events');
 });
 
 test('keeps the same GTFS trip as distinct scheduled instances on different service dates', () => {

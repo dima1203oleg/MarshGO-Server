@@ -996,6 +996,77 @@ function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex
 
 type DatedTripStop = { arrivalAt: Date; departureAt: Date; skipped: boolean; updated: boolean };
 
+type EligibleTripInstanceStopEvent = {
+  stopIndex: number;
+  stopTime: NonNullable<GtfsTimetableFeed['stopTimes'] extends Map<string, (infer T)[]> ? T : never>;
+  scheduledArrivalAt: Date | null;
+  scheduledDepartureAt: Date | null;
+  arrivalAt: Date | null;
+  departureAt: Date | null;
+  skipped: boolean;
+  updated: boolean;
+  canBoard: boolean;
+  canAlight: boolean;
+};
+
+type EligibleTripInstanceEvents = {
+  events: EligibleTripInstanceStopEvent[];
+  /** Full trip-stop realtime vector is kept for exact segment-level update attribution. */
+  datedStops?: DatedTripStop[];
+  realtimeUpdate?: GtfsRealtimeTripUpdate;
+};
+
+/**
+ * Resolve the service-date schedule and realtime overlay for only the selected
+ * stop indexes of one trip instance. This is deliberately a pure projection:
+ * it does not mutate the feed or apply graph/search sampling policy.
+ */
+export function eligibleTripInstanceStopEvents(
+  feed: GtfsTimetableFeed,
+  tripId: string,
+  serviceDate: string,
+  eligibleStopIndexes: readonly number[],
+): EligibleTripInstanceEvents | null {
+  const trip = feed.trips.get(tripId);
+  const stopTimes = feed.stopTimes.get(tripId);
+  if (!trip || !stopTimes || !serviceRuns(feed, trip.serviceId, serviceDate)) return null;
+
+  const realtimeUpdate = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
+  if (realtimeUpdate?.relationship === 'CANCELED' || realtimeUpdate?.relationship === 'DELETED') return null;
+  const dated = realtimeUpdate?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
+  if (dated && dated.stops.length !== stopTimes.length) return null;
+
+  const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
+  const events = eligibleStopIndexes.map((stopIndex): EligibleTripInstanceStopEvent => {
+    const stopTime = stopTimes[stopIndex];
+    // The graph caller derives these indexes from `stopTimes.flatMap`, so an
+    // invalid index indicates a broken caller invariant. Do not compact the
+    // event vector: cursor alignment with `eligibleContexts` depends on it.
+    if (!stopTime) throw new RangeError(`eligible stop index ${stopIndex} is outside trip ${tripId}`);
+    const scheduledArrivalAt = serviceTimeToUtc(serviceDate, stopTime.arrivalSeconds);
+    const scheduledDepartureAt = serviceTimeToUtc(serviceDate, stopTime.departureSeconds);
+    const datedStop = dated?.stops[stopIndex];
+    const skipped = datedStop?.skipped ?? false;
+    return {
+      stopIndex,
+      stopTime,
+      scheduledArrivalAt,
+      scheduledDepartureAt,
+      arrivalAt: datedStop?.arrivalAt ?? scheduledArrivalAt,
+      departureAt: datedStop?.departureAt ?? scheduledDepartureAt,
+      skipped,
+      updated: datedStop?.updated ?? false,
+      canBoard: stopTime.pickupType === 0 && !skipped,
+      canAlight: stopTime.dropOffType === 0 && !skipped,
+    };
+  });
+  return {
+    events,
+    ...(dated ? { datedStops: dated.stops } : {}),
+    ...(dated?.update ? { realtimeUpdate: dated.update } : {}),
+  };
+}
+
 function stopCallsForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number, serviceDate: string, datedStops?: DatedTripStop[]) {
   const calls = feed.stopTimes.get(tripId)?.slice(fromIndex, toIndex + 1) ?? [];
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
@@ -1843,43 +1914,33 @@ export function findGtfsItinerariesWithStats(
     // calculations for every edge.
     const eligibleContexts = eligibleIndexes.map((index) => stopContext(stops[index]));
     for (const serviceDate of serviceDates) {
-      if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
+      const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes);
+      if (!tripEvents) continue;
       let tripCandidates: RetainedGtfsSegment[] = [];
       let boundedTripCandidates: BoundedBestK<RetainedGtfsSegment> | undefined;
       // Duplicate stop IDs can occur in loop routes; deduplicate only within
       // this trip instance so a citywide set of every candidate key is not
       // retained alongside the graph.
       const seenTripSegments = new Set<string>();
-      const realtimeUpdate = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
-      if (realtimeUpdate?.relationship === 'CANCELED' || realtimeUpdate?.relationship === 'DELETED') continue;
-      const dated = realtimeUpdate?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
-      if (dated && dated.stops.length !== stops.length) continue;
-      // The same arrival stop-time participates in many upstream stop-pair
-      // segments. Resolve its service-date timestamps once instead of creating
-      // duplicate Date objects inside every boarding/alighting pair.
-      const scheduledTimes = eligibleIndexes.map((index) => ({
-        departureAt: serviceTimeToUtc(serviceDate, stops[index].departureSeconds),
-        arrivalAt: serviceTimeToUtc(serviceDate, stops[index].arrivalSeconds),
-      }));
-      for (let fromCursor = 0; fromCursor < eligibleIndexes.length - 1; fromCursor++) {
-        const fromIndex = eligibleIndexes[fromCursor];
-        const from = stops[fromIndex];
+      for (let fromCursor = 0; fromCursor < tripEvents.events.length - 1; fromCursor++) {
+        const fromEvent = tripEvents.events[fromCursor];
+        const fromIndex = fromEvent.stopIndex;
+        const from = fromEvent.stopTime;
         const fromContext = eligibleContexts[fromCursor];
         if (!fromContext) continue;
-        const datedFrom = dated?.stops[fromIndex];
-        if (from.pickupType !== 0 || datedFrom?.skipped) continue;
-        const scheduledDepartureAt = scheduledTimes[fromCursor].departureAt;
-        const departureAt = datedFrom?.departureAt ?? scheduledDepartureAt;
+        if (!fromEvent.canBoard) continue;
+        const scheduledDepartureAt = fromEvent.scheduledDepartureAt;
+        const departureAt = fromEvent.departureAt;
         if (!scheduledDepartureAt || !departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
-        for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length; toCursor++) {
-          const toIndex = eligibleIndexes[toCursor];
-          const to = stops[toIndex];
+        for (let toCursor = fromCursor + 1; toCursor < tripEvents.events.length; toCursor++) {
+          const toEvent = tripEvents.events[toCursor];
+          const toIndex = toEvent.stopIndex;
+          const to = toEvent.stopTime;
           const toContext = eligibleContexts[toCursor];
           if (!toContext) continue;
-          const datedTo = dated?.stops[toIndex];
           if (maximumTransfers > 0 && toCursor > fromCursor + 20 && !destinationStopIds.has(to.stopId)) {
-            const omittedArrivalAt = scheduledTimes[toCursor].arrivalAt;
-            if (to.dropOffType === 0 && !datedTo?.skipped && to.arrivalSeconds >= from.departureSeconds
+            const omittedArrivalAt = toEvent.scheduledArrivalAt;
+            if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
               && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= journeyEnd
               && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
               // The bounded segment graph omitted a schedule-valid, potentially
@@ -1889,9 +1950,9 @@ export function findGtfsItinerariesWithStats(
             }
             continue;
           }
-          if (to.dropOffType !== 0 || datedTo?.skipped || to.arrivalSeconds < from.departureSeconds) continue;
-          const scheduledArrivalAt = scheduledTimes[toCursor].arrivalAt;
-          const arrivalAt = datedTo?.arrivalAt ?? scheduledArrivalAt;
+          if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds) continue;
+          const scheduledArrivalAt = toEvent.scheduledArrivalAt;
+          const arrivalAt = toEvent.arrivalAt;
           if (!scheduledArrivalAt || !arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
             || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
           if (!canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
@@ -1915,8 +1976,8 @@ export function findGtfsItinerariesWithStats(
             scheduledArrivalAt,
             departureAt,
             arrivalAt,
-            ...(dated?.update && dated.stops.slice(fromIndex, toIndex + 1).some((stop) => stop.updated)
-              ? { realtimeUpdatedAt: dated.update.updatedAt } : {}),
+            ...(tripEvents.realtimeUpdate && tripEvents.datedStops?.slice(fromIndex, toIndex + 1).some((stop) => stop.updated)
+              ? { realtimeUpdatedAt: tripEvents.realtimeUpdate.updatedAt } : {}),
             ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
             ...(to.sourceZoneId ? { destinationZoneId: to.sourceZoneId } : {}),
           };
