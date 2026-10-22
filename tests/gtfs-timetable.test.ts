@@ -894,7 +894,8 @@ test('oversized single trips retain a useful exact direct segment inside the bou
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
   });
 
-  assert.ok(result.candidateGraphTruncated, 'a bounded sample must report omitted candidate graph segments');
+  assert.equal(result.candidateGraphTruncated, false,
+    'a direct-only query must not spend graph capacity on segments that cannot connect its selected origin and destination stops');
   assert.ok(result.itineraries.some((journey) => journey.segments.some((segment) =>
     segment.tripId === 'oversized-trip' && segment.originStop.id === 'origin'
       && segment.destinationStop.id === 'dense-destination')),

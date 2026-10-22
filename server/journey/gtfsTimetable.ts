@@ -1361,6 +1361,12 @@ export function findGtfsItinerariesWithStats(
 
   const originStopIds = new Set(originStops.map(({ stop }) => stop.id));
   const destinationStopIds = new Set(destinationStops.map(({ stop }) => stop.id));
+  // With zero transfers, every returned itinerary must be one scheduled
+  // segment between these selected access and egress stops. Exclude other
+  // pairs before graph budgeting so impossible alternatives cannot mark this
+  // complete direct-only query as truncated.
+  const canBelongToDirectOnlyJourney = (fromStopId: string, toStopId: string) => maximumTransfers !== 0
+    || (originStopIds.has(fromStopId) && destinationStopIds.has(toStopId));
   const transferNodeIds = new Set<string>([
     ...(feed.transfers ?? []).flatMap((rule) => [rule.fromStopId, rule.toStopId]),
     ...(feed.pathways ?? []).flatMap((pathway) => [pathway.fromStopId, pathway.toStopId]),
@@ -1574,6 +1580,7 @@ export function findGtfsItinerariesWithStats(
           const arrivalAt = scheduledTimes[toCursor].arrivalAt;
           if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
             || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
+          if (!canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
           if (originStopIds.has(from.stopId) && interchangeStopIds.has(to.stopId)) {
             const fromStop = feed.stops.get(from.stopId);
             const coordinates = from.sourceStopCoordinates ?? (fromStop ? [fromStop.lon, fromStop.lat] as [number, number] : null);
@@ -1834,6 +1841,7 @@ export function findGtfsItinerariesWithStats(
           const arrivalAt = datedTo?.arrivalAt ?? scheduledArrivalAt;
           if (!scheduledArrivalAt || !arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
             || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
+          if (!canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
           // A duplicate loop-route segment is defined by the same stops and
           // departure instant. Avoid formatting an ISO timestamp for every
           // candidate edge; the numeric epoch value is an identical key with
