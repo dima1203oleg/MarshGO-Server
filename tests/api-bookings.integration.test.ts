@@ -443,7 +443,12 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
           || Date.parse(leg.stops![index - 1]!.arrivalAt) <= Date.parse(stop.arrivalAt)), 'GTFS stop calls remain in time order');
       }
 
-      const transitLegs = multiData.journeys.flatMap((candidate) => candidate.legs.filter((leg) => leg.mode !== 'WALK'));
+      // Use the checked-in fixture for the transactional composition scenario.
+      // The live Lviv timetable is still verified above, but its next-day
+      // service and stop pairs are upstream data and cannot be a stable test
+      // prerequisite for creating a synthetic Community handoff offer.
+      const transitLegs = multiData.journeys.flatMap((candidate) => candidate.legs
+        .filter((leg) => leg.mode !== 'WALK' && leg.providerId === ids.gtfsFixtureProvider));
       const buses = transitLegs.filter((leg) => leg.transportType === 'bus' && leg.origin && leg.destination && leg.arrivalAt);
       const trams = transitLegs.filter((leg) => leg.transportType === 'tram' && leg.origin && leg.destination);
       const compositionPair = buses.flatMap((bus) => trams.flatMap((tram) => {
@@ -456,7 +461,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         if (busArrival - requestAt < 60_000 || busArrival - requestAt > 100 * 60_000 || gapMeters < 250 || gapMeters > 10_000) return [];
         return [{ bus, tram, gapMeters }];
       }))[0];
-      assert.ok(compositionPair, 'the current Lviv timetable exposes nearby bus and tram stops for the integration scenario');
+      assert.ok(compositionPair, 'the deterministic Lviv fixture exposes a feasible bus-to-tram handoff for the integration scenario');
       const suffixProbeDeparture = new Date(Date.parse(compositionPair.bus.arrivalAt!) + 25 * 60_000);
       const suffixProbeResponse = await fetch(`${apiUrl}/api/v1/journeys/search`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },

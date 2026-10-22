@@ -41,3 +41,21 @@ jobs:
       - run: npm test
       - run: DATABASE_URL="$API_TEST_DATABASE_URL" npm run db:migrate
       - run: npm run test:integration
+      - name: Build production API image
+        run: docker build --tag marshgo-server:ci .
+      - name: Smoke-test API image with local PostGIS and Redis
+        env:
+          DATABASE_URL: ${{ env.API_TEST_DATABASE_URL }}
+          IMAGE_SMOKE_SESSION_SECRET: local-container-smoke-session-secret-32chars
+        run: |
+          docker run --detach --name marshgo-api-image-smoke --network host \
+            --env NODE_ENV=development --env API_HOST=0.0.0.0 --env API_PORT=3002 \
+            --env TRUST_PROXY_HOPS=0 --env AUTH_DEV_BYPASS=true --env AUTH_DEV_OTP=true \
+            --env SESSION_SECRET="$IMAGE_SMOKE_SESSION_SECRET" --env DATABASE_URL="$DATABASE_URL" \
+            --env REDIS_URL="$REDIS_URL" --env MOBILITY_HEALTH_DISABLED=true marshgo-server:ci
+          trap 'docker rm --force marshgo-api-image-smoke >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3002/readyz >/dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:3002/readyz
