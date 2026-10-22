@@ -43,10 +43,11 @@ function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: st
   return parseGtfsTimetable(files);
 }
 
-function connectingFeed(options: { secondRouteType?: string; secondDeparture?: string; transferType?: string; minimumTransferTime?: string; inSeat?: boolean; withPathway?: boolean } = {}) {
+function connectingFeed(options: { secondRouteType?: string; secondDeparture?: string; transferType?: string; minimumTransferTime?: string; inSeat?: boolean; withPathway?: boolean; sameRoute?: boolean } = {}) {
+  const onwardRouteId = options.sameRoute ? 'bus' : 'rail';
   const files: Record<string, Uint8Array> = {
     'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv'),
-    'routes.txt': new TextEncoder().encode(`route_id,agency_id,route_short_name,route_long_name,route_type\nbus,a,7,City bus,3\nrail,a,IC 743,${options.secondRouteType === '3' ? 'Next city bus' : 'Train'},${options.secondRouteType ?? '2'}`),
+    'routes.txt': new TextEncoder().encode(`route_id,agency_id,route_short_name,route_long_name,route_type\nbus,a,7,City bus,3${options.sameRoute ? '' : `\nrail,a,IC 743,${options.secondRouteType === '3' ? 'Next city bus' : 'Train'},${options.secondRouteType ?? '2'}`}`),
     'stops.txt': new TextEncoder().encode([
       'stop_id,stop_name,stop_lat,stop_lon',
       'start,Start,49.8400,24.0200',
@@ -54,7 +55,7 @@ function connectingFeed(options: { secondRouteType?: string; secondDeparture?: s
       ...(options.withPathway ? ['walkway,Station walkway,49.8451,24.0251'] : []),
       'finish,Finish,49.8500,24.0300',
     ].join('\n')),
-    'trips.txt': new TextEncoder().encode('route_id,service_id,trip_id,trip_headsign\nbus,weekday,b1,Transfer hub\nrail,weekday,r1,Finish'),
+    'trips.txt': new TextEncoder().encode(`route_id,service_id,trip_id,trip_headsign\nbus,weekday,b1,Transfer hub\n${onwardRouteId},weekday,r1,Finish`),
     'stop_times.txt': new TextEncoder().encode([
       'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
       'b1,08:00:00,08:00:00,start,1,0,0',
@@ -1786,6 +1787,12 @@ test('applies parent-station transfer rules and preserves explicit in-seat trans
   assert.equal(inSeatJourney.transfers, 0);
   assert.deepEqual(inSeatJourney.transferWalkingMeters, [0]);
   assert.deepEqual(inSeatJourney.transferWalkingSeconds, [0]);
+
+  const sameRouteInSeat = connectingFeed({ secondDeparture: '08:21:00', transferType: '4', inSeat: true, sameRoute: true });
+  const sameRouteJourney = findGtfsItineraries(sameRouteInSeat, query).find((journey) => journey.segments.length === 2);
+  assert.ok(sameRouteJourney, 'an explicit in-seat continuation may use the same GTFS route');
+  assert.equal(sameRouteJourney.transfers, 0);
+  assert.deepEqual(sameRouteJourney.transferWalkingMeters, [0]);
 });
 
 test('parses optional GTFS station pathways and their authoritative time and distance', () => {

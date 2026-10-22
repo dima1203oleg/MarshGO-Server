@@ -2286,7 +2286,14 @@ export function findGtfsItinerariesWithStats(
     const view = transferCandidateViewCache.get(viewKey);
     if (view) return view;
     const sorted = transferCandidatePool(previous);
-    const eligible = sorted.filter((candidate) => candidate.routeId !== previous.routeId);
+    const eligible = sorted.filter((candidate) => {
+      if (candidate.routeId !== previous.routeId) return true;
+      // A GTFS type-4 transfer explicitly continues in the same vehicle. It
+      // can legitimately connect two trips on the same route, so do not let
+      // the generic same-route de-duplication hide it from feasibility checks.
+      const { rule, ambiguous } = transferRuleFor(previous, candidate);
+      return !ambiguous && rule?.transferType === 4;
+    });
     transferCandidateViewCache.set(viewKey, eligible);
     return eligible;
   };
@@ -2363,8 +2370,14 @@ export function findGtfsItinerariesWithStats(
       const previous = previousByRoute.values().next().value as GtfsDirectJourney | undefined;
       if (!previous) continue;
       const reachableCandidateRoutes = new Set<string>();
+      let sameRouteInSeatReachable = false;
       for (const next of transferCandidatePool(previous)) {
-        if (reachable.has(next.destinationStop.id)) reachableCandidateRoutes.add(next.routeId);
+        if (!reachable.has(next.destinationStop.id)) continue;
+        reachableCandidateRoutes.add(next.routeId);
+        if (next.routeId === previous.routeId) {
+          const { rule, ambiguous } = transferRuleFor(previous, next);
+          if (!ambiguous && rule?.transferType === 4) sameRouteInSeatReachable = true;
+        }
         // Two distinct onward routes provide a feasible choice for every
         // previous line, so stop scanning this broad candidate pool early.
         if (reachableCandidateRoutes.size > 1) break;
@@ -2377,7 +2390,7 @@ export function findGtfsItinerariesWithStats(
       else if (reachableCandidateRoutes.size === 1) {
         const onlyCandidateRoute = reachableCandidateRoutes.values().next().value as string;
         for (const [previousRoute, routeState] of previousByRoute) {
-          if (previousRoute !== onlyCandidateRoute) reachable.add(routeState.destinationStop.id);
+          if (previousRoute !== onlyCandidateRoute || sameRouteInSeatReachable) reachable.add(routeState.destinationStop.id);
         }
       }
     }
