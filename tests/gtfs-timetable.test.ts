@@ -410,6 +410,67 @@ test('reports when the itinerary result limit hides additional route chains', ()
   assert.equal(result.searchTruncated, false);
 });
 
+test('keeps a direct GTFS segment whose destination lies beyond twenty interchange stops', () => {
+  const timetable = feed();
+  const routeStops = Array.from({ length: 26 }, (_, index) => {
+    const stopId = `corridor-${index}`;
+    const stop = { id: stopId, name: `Corridor stop ${index}`, lon: 24.02 + index * 0.0052, lat: 49.84 };
+    timetable.stops.set(stopId, stop);
+    return { stopId, sequence: index + 1, seconds: 8 * 3600 + index * 2 * 60 };
+  });
+
+  // Every intermediate stop is an interchange, but each alternate route
+  // continues outside the search corridor. This recreates a dense corridor
+  // without adding another feasible through-service.
+  for (let index = 1; index < routeStops.length - 1; index += 1) {
+    const routeId = `branch-route-${index}`;
+    const tripId = `branch-trip-${index}`;
+    const terminalId = `branch-terminal-${index}`;
+    timetable.routes.set(routeId, { name: `Branch ${index}`, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Remote terminal' });
+    timetable.stops.set(terminalId, { id: terminalId, name: terminalId, lon: 24.02 + index * 0.0052, lat: 50.1 });
+    const branchTimes = [
+      { stopId: routeStops[index].stopId, sequence: 1, arrivalSeconds: routeStops[index].seconds, departureSeconds: routeStops[index].seconds, pickupType: 0, dropOffType: 0 },
+      { stopId: terminalId, sequence: 2, arrivalSeconds: routeStops[index].seconds + 20 * 60, departureSeconds: routeStops[index].seconds + 20 * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, branchTimes);
+    for (const [timeIndex, stopTime] of branchTimes.entries()) {
+      timetable.stopTimesByStop.set(stopTime.stopId, [
+        ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index: timeIndex },
+      ]);
+    }
+  }
+
+  const mainTripId = 't1';
+  timetable.stopTimes.set(mainTripId, routeStops.map((stop) => ({
+    stopId: stop.stopId, sequence: stop.sequence, arrivalSeconds: stop.seconds, departureSeconds: stop.seconds,
+    pickupType: 0, dropOffType: 0,
+  })));
+  for (const [index, stop] of routeStops.entries()) {
+    timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: mainTripId, index },
+    ]);
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    providerId: 'test', providerName: 'Test Transit', providerCity: 'Львів',
+    origin: [24.02, 49.84],
+    destination: [24.02 + 25 * 0.0052, 49.84],
+    earliestDeparture: new Date('2026-10-12T04:55:00Z'),
+    latestDeparture: new Date('2026-10-12T05:30:00Z'),
+    now: new Date('2026-10-12T04:00:00Z'),
+    limit: 20, maximumTransfers: 1, maximumStopDistanceMeters: 100,
+  });
+
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.length === 1
+    && itinerary.segments[0]?.tripId === mainTripId
+    && itinerary.segments[0]?.originStop.id === routeStops[0].stopId
+    && itinerary.segments[0]?.destinationStop.id === routeStops[25].stopId),
+  'the full ride must remain available when many intermediate stops are transfer-capable');
+  assert.equal(result.searchTruncated, true,
+    'the long direct segment is preserved, while omitted beyond-window transfer alternatives remain disclosed');
+});
+
 test('limits duplicate stop-pair alternatives for the same scheduled trip chain', () => {
   const timetable = feed({ withIntermediate: true });
   const stops = [

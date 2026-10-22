@@ -1613,11 +1613,14 @@ export function findGtfsItinerariesWithStats(
         if (from.pickupType !== 0 || scheduledTimes[fromCursor].skipped) continue;
         const departureAt = scheduledTimes[fromCursor].departureAt;
         if (!departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
-        // Mirror the graph's bounded forward stop-pair and schedule window
-        // without materializing candidate segment objects in this demand pass.
-        const toEnd = Math.min(eligibleStopTimes.length, fromCursor + 21);
-        for (let toCursor = fromCursor + 1; toCursor < toEnd; toCursor++) {
+        // Mirror the graph's bounded forward stop-pair policy without
+        // materializing candidate segment objects. Always retain a query
+        // destination beyond the local transfer window; otherwise a long
+        // direct ride can disappear merely because its line passes many
+        // interchange-capable stops.
+        for (let toCursor = fromCursor + 1; toCursor < eligibleStopTimes.length; toCursor++) {
           const to = eligibleStopTimes[toCursor];
+          if (toCursor > fromCursor + 20 && !destinationStopIds.has(to.stopId)) continue;
           if (to.dropOffType !== 0 || scheduledTimes[toCursor].skipped || to.arrivalSeconds < from.departureSeconds) continue;
           const arrivalAt = scheduledTimes[toCursor].arrivalAt;
           if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
@@ -1868,12 +1871,24 @@ export function findGtfsItinerariesWithStats(
         const scheduledDepartureAt = scheduledTimes[fromCursor].departureAt;
         const departureAt = datedFrom?.departureAt ?? scheduledDepartureAt;
         if (!scheduledDepartureAt || !departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
-        for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length && toCursor <= fromCursor + 20; toCursor++) {
+        for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length; toCursor++) {
           const toIndex = eligibleIndexes[toCursor];
           const to = stops[toIndex];
           const toContext = eligibleContexts[toCursor];
           if (!toContext) continue;
           const datedTo = dated?.stops[toIndex];
+          if (maximumTransfers > 0 && toCursor > fromCursor + 20 && !destinationStopIds.has(to.stopId)) {
+            const omittedArrivalAt = scheduledTimes[toCursor].arrivalAt;
+            if (to.dropOffType === 0 && !datedTo?.skipped && to.arrivalSeconds >= from.departureSeconds
+              && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= journeyEnd
+              && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
+              // The bounded segment graph omitted a schedule-valid, potentially
+              // connectable transfer segment. Keep the partial-search signal
+              // honest even if no sampled itinerary later happens to use it.
+              segmentGraphTruncated = true;
+            }
+            continue;
+          }
           if (to.dropOffType !== 0 || datedTo?.skipped || to.arrivalSeconds < from.departureSeconds) continue;
           const scheduledArrivalAt = scheduledTimes[toCursor].arrivalAt;
           const arrivalAt = datedTo?.arrivalAt ?? scheduledArrivalAt;
