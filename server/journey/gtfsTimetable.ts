@@ -1464,7 +1464,6 @@ export function findGtfsItinerariesWithStats(
   const journeyEnd = new Date(input.earliestDeparture.getTime() + maximumJourneySeconds * 1000);
   const firstServiceDate = localDate(input.earliestDeparture, feed.timezone);
   const lastServiceDate = localDate(journeyEnd, feed.timezone);
-  const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
   const serviceDates = new Set<string>();
   const dayCount = Math.ceil((journeyEnd.getTime() - input.earliestDeparture.getTime()) / 86_400_000) + 2;
   for (let day = -1; day <= dayCount; day++) {
@@ -1665,35 +1664,28 @@ export function findGtfsItinerariesWithStats(
       ? localCityCatchmentStops : corridorStops;
     const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
       && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
-    const eligibleStopTimes = eligibleIndexes.map((index) => stops[index]);
-    if (eligibleStopTimes.length < 2) continue;
+    if (eligibleIndexes.length < 2) continue;
     let pairOpportunities = 0;
     for (const serviceDate of serviceDates) {
-      if (!serviceRuns(feed, trip.serviceId, serviceDate)) continue;
-      const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate));
-      if (update?.relationship === 'CANCELED' || update?.relationship === 'DELETED') continue;
-      const dated = update?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
-      if (dated && dated.stops.length !== stops.length) continue;
-      const scheduledTimes = eligibleIndexes.map((index) => dated?.stops[index] ?? {
-        departureAt: serviceTimeToUtc(serviceDate, stops[index].departureSeconds),
-        arrivalAt: serviceTimeToUtc(serviceDate, stops[index].arrivalSeconds),
-        skipped: false,
-      });
-      for (let fromCursor = 0; fromCursor < eligibleStopTimes.length - 1; fromCursor++) {
-        const from = eligibleStopTimes[fromCursor];
-        if (from.pickupType !== 0 || scheduledTimes[fromCursor].skipped) continue;
-        const departureAt = scheduledTimes[fromCursor].departureAt;
+      const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes);
+      if (!tripEvents) continue;
+      for (let fromCursor = 0; fromCursor < tripEvents.events.length - 1; fromCursor++) {
+        const fromEvent = tripEvents.events[fromCursor];
+        const from = fromEvent.stopTime;
+        if (!fromEvent.canBoard) continue;
+        const departureAt = fromEvent.departureAt;
         if (!departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
         // Mirror the graph's bounded forward stop-pair policy without
         // materializing candidate segment objects. Always retain a query
         // destination beyond the local transfer window; otherwise a long
         // direct ride can disappear merely because its line passes many
         // interchange-capable stops.
-        for (let toCursor = fromCursor + 1; toCursor < eligibleStopTimes.length; toCursor++) {
-          const to = eligibleStopTimes[toCursor];
+        for (let toCursor = fromCursor + 1; toCursor < tripEvents.events.length; toCursor++) {
+          const toEvent = tripEvents.events[toCursor];
+          const to = toEvent.stopTime;
           if (toCursor > fromCursor + 20 && !destinationStopIds.has(to.stopId)) continue;
-          if (to.dropOffType !== 0 || scheduledTimes[toCursor].skipped || to.arrivalSeconds < from.departureSeconds) continue;
-          const arrivalAt = scheduledTimes[toCursor].arrivalAt;
+          if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds) continue;
+          const arrivalAt = toEvent.arrivalAt;
           if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
             || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
           if (!canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
