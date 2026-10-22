@@ -1160,6 +1160,9 @@ test('cross-provider GTFS cap uses the shared candidate pool when preserving its
   )[0]?.journey.id;
   assert.equal(completeMixedPoolWinner, 'balanced-winner',
     'the fixture proves that shared mode ranges change the winning GTFS candidate');
+  const completeStrategyWinners = ['FASTEST', 'CHEAPEST', 'BALANCED'].map((strategy) =>
+    scoreJourneys([...candidates.map(toScorable), communityCandidate], strategy as 'FASTEST' | 'CHEAPEST' | 'BALANCED')[0]?.journey.id,
+  );
 
   const transitOnlySample = selectGtfsCandidatesForCrossProviderSearch(candidates, 5);
   assert.ok(!transitOnlySample.some(({ id }) => id === 'balanced-winner'),
@@ -1168,6 +1171,12 @@ test('cross-provider GTFS cap uses the shared candidate pool when preserving its
   const mixedModeSample = selectGtfsCandidatesForCrossProviderSearch(candidates, 5, [communityCandidate]);
   assert.ok(mixedModeSample.some(({ id }) => id === 'balanced-winner'),
     'the route that wins in the full mixed-mode score pool survives bounded GTFS pruning');
+  for (const winnerId of completeStrategyWinners) {
+    if (winnerId && candidates.some(({ id }) => id === winnerId)) {
+      assert.ok(mixedModeSample.some(({ id }) => id === winnerId),
+        `the ${winnerId} winner from a complete mixed-provider strategy ranking survives the GTFS candidate cap`);
+    }
+  }
 });
 
 test('route-chain sample tie-break is locale-independent and stable across input order', () => {
