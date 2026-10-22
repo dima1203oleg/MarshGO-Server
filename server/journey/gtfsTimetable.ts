@@ -277,6 +277,27 @@ export function rankGtfsItinerariesForCandidateSampling(
     .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
 }
 
+function rankGtfsItinerariesForStrategySampling(
+  itineraries: readonly GtfsItinerary[],
+  strategy: 'FASTEST' | 'CHEAPEST' | 'BALANCED',
+  rankingContext: readonly JourneyOption[],
+): GtfsItinerary[] {
+  const candidates = itineraries.map((itinerary) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+    itinerary,
+  } satisfies JourneyOption & { itinerary: GtfsItinerary }));
+  return scoreJourneys([...candidates, ...rankingContext], strategy)
+    .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
+}
+
 /** Keep a bounded rolling sample for the shared BALANCED ranking objective. */
 export function retainGtfsBalancedObjectiveSample(
   existing: readonly GtfsItinerary[], candidate: GtfsItinerary, maximum: number,
@@ -313,21 +334,20 @@ export function selectGtfsCandidatesForCrossProviderSearch(
   };
   const byArrival = [...itineraries].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
     || a.departureAt.getTime() - b.departureAt.getTime() || compareStableId(a.id, b.id));
-  const byDuration = [...itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds
-    || compareStableId(a.id, b.id));
-  const byFare = itineraries.filter((item) => item.fare?.currency === 'UAH')
-    .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor
-      || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const byTransfers = [...itineraries].sort((a, b) => a.transfers - b.transfers
     || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const byWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters
     || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const perObjective = Math.max(1, Math.floor(maximum / 5));
-  take(byDuration, perObjective);
-  take(byFare, perObjective);
+  // Preserve top candidates under the same objective scorers used by the
+  // final mixed-provider ranking. Duration/fare-only proxy sorting can omit a
+  // strategy winner when equal fares or durations are broken by transfers,
+  // walking, reliability, or the shared normalization ranges.
+  take(rankGtfsItinerariesForStrategySampling(itineraries, 'FASTEST', rankingContext), perObjective);
+  take(rankGtfsItinerariesForStrategySampling(itineraries, 'CHEAPEST', rankingContext), perObjective);
   take(byTransfers, perObjective);
   take(byWalking, perObjective);
-  take(rankGtfsItinerariesForCandidateSampling(itineraries, rankingContext), perObjective);
+  take(rankGtfsItinerariesForStrategySampling(itineraries, 'BALANCED', rankingContext), perObjective);
   take(byArrival, maximum - selected.size);
   return [...selected.values()].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
     || a.departureAt.getTime() - b.departureAt.getTime() || compareStableId(a.id, b.id));
@@ -1593,11 +1613,14 @@ export function findGtfsItinerariesWithStats(
         if (from.pickupType !== 0 || scheduledTimes[fromCursor].skipped) continue;
         const departureAt = scheduledTimes[fromCursor].departureAt;
         if (!departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
-        // Mirror the graph's bounded forward stop-pair and schedule window
-        // without materializing candidate segment objects in this demand pass.
-        const toEnd = Math.min(eligibleStopTimes.length, fromCursor + 21);
-        for (let toCursor = fromCursor + 1; toCursor < toEnd; toCursor++) {
+        // Mirror the graph's bounded forward stop-pair policy without
+        // materializing candidate segment objects. Always retain a query
+        // destination beyond the local transfer window; otherwise a long
+        // direct ride can disappear merely because its line passes many
+        // interchange-capable stops.
+        for (let toCursor = fromCursor + 1; toCursor < eligibleStopTimes.length; toCursor++) {
           const to = eligibleStopTimes[toCursor];
+          if (toCursor > fromCursor + 20 && !destinationStopIds.has(to.stopId)) continue;
           if (to.dropOffType !== 0 || scheduledTimes[toCursor].skipped || to.arrivalSeconds < from.departureSeconds) continue;
           const arrivalAt = scheduledTimes[toCursor].arrivalAt;
           if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
@@ -1848,12 +1871,24 @@ export function findGtfsItinerariesWithStats(
         const scheduledDepartureAt = scheduledTimes[fromCursor].departureAt;
         const departureAt = datedFrom?.departureAt ?? scheduledDepartureAt;
         if (!scheduledDepartureAt || !departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
-        for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length && toCursor <= fromCursor + 20; toCursor++) {
+        for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length; toCursor++) {
           const toIndex = eligibleIndexes[toCursor];
           const to = stops[toIndex];
           const toContext = eligibleContexts[toCursor];
           if (!toContext) continue;
           const datedTo = dated?.stops[toIndex];
+          if (maximumTransfers > 0 && toCursor > fromCursor + 20 && !destinationStopIds.has(to.stopId)) {
+            const omittedArrivalAt = scheduledTimes[toCursor].arrivalAt;
+            if (to.dropOffType === 0 && !datedTo?.skipped && to.arrivalSeconds >= from.departureSeconds
+              && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= journeyEnd
+              && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
+              // The bounded segment graph omitted a schedule-valid, potentially
+              // connectable transfer segment. Keep the partial-search signal
+              // honest even if no sampled itinerary later happens to use it.
+              segmentGraphTruncated = true;
+            }
+            continue;
+          }
           if (to.dropOffType !== 0 || datedTo?.skipped || to.arrivalSeconds < from.departureSeconds) continue;
           const scheduledArrivalAt = scheduledTimes[toCursor].arrivalAt;
           const arrivalAt = datedTo?.arrivalAt ?? scheduledArrivalAt;
@@ -2410,7 +2445,7 @@ export function findGtfsItinerariesWithStats(
   // Keep the per-leg sampling cap independent of the caller's response-page
   // size so later cross-provider ranking receives a consistent diverse pool.
   // The separate global result cap below still bounds retained path objects.
-  const MAX_CANDIDATES_PER_LEG_COUNT = 500;
+  const MAX_CANDIDATES_PER_LEG_COUNT = 750;
   // Most city-feed stops cannot lead to this destination. Exclude those dead
   // ends before enumerating timed transfer combinations.
   const reachableWithin = [destinationStopIds];
