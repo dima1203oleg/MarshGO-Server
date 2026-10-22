@@ -377,6 +377,153 @@ function exhaustiveOneTransferOracle(feed: GtfsTimetableFeed, options: {
   return expected;
 }
 
+type IndexedPrototypeLeg = {
+  tripId: string;
+  routeId: string;
+  fromStopId: string;
+  toStopId: string;
+  fromIndex: number;
+  toIndex: number;
+  departureAt: number;
+  arrivalAt: number;
+};
+
+/**
+ * Test-only query-directed event index prototype. It indexes boarding events
+ * by stop, then creates stop-pair legs only when search asks for a boarding
+ * stop. It deliberately over-selects transfer candidates (radius, pathways,
+ * station parent, and explicit transfer targets); the production search remains
+ * the final transferDecision authority in the test below.
+ */
+function queryDirectedEventIndexPrototype(feed: GtfsTimetableFeed, options: {
+  originStopId: string; destinationStopId: string; earliestDeparture: Date; latestDeparture: Date;
+  maximumTransferWalkingMeters: number; maximumTransfers: number;
+}) {
+  const serviceDate = '20261012';
+  const journeyEnd = options.latestDeparture.getTime() + 6 * 60 * 60_000;
+  const eventsByTrip = new Map<string, ReturnType<typeof eligibleTripInstanceStopEvents>>();
+  const departuresByStop = new Map<string, Array<{ tripId: string; stopIndex: number; departureAt: number }>>();
+  let indexedBoardingEvents = 0;
+  for (const [tripId] of feed.trips) {
+    const stopTimes = feed.stopTimes.get(tripId);
+    if (!stopTimes) continue;
+    const events = eligibleTripInstanceStopEvents(feed, tripId, serviceDate,
+      stopTimes.map((_, index) => index));
+    eventsByTrip.set(tripId, events);
+    if (!events) continue;
+    for (const event of events.events) {
+      if (!event.canBoard || !event.departureAt || event.departureAt.getTime() > journeyEnd) continue;
+      const choices = departuresByStop.get(event.stopTime.stopId) ?? [];
+      choices.push({ tripId, stopIndex: event.stopIndex, departureAt: event.departureAt.getTime() });
+      departuresByStop.set(event.stopTime.stopId, choices);
+      indexedBoardingEvents++;
+    }
+  }
+  for (const choices of departuresByStop.values()) choices.sort((a, b) => a.departureAt - b.departureAt
+    || a.tripId.localeCompare(b.tripId) || a.stopIndex - b.stopIndex);
+
+  const distanceMeters = (a: [number, number], b: [number, number]) => {
+    const rad = Math.PI / 180;
+    const dLat = (b[1] - a[1]) * rad;
+    const dLon = (b[0] - a[0]) * rad;
+    const lat1 = a[1] * rad, lat2 = b[1] * rad;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+    return 6_371_000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  };
+  const stopCoordinates = (stopId: string): [number, number] | undefined => {
+    const stop = feed.stops.get(stopId);
+    return stop ? [stop.lon, stop.lat] : undefined;
+  };
+  let materializedLegs = 0;
+  const legsByOrigin = new Map<string, IndexedPrototypeLeg[]>();
+  const legsFrom = (stopId: string): IndexedPrototypeLeg[] => {
+    const cached = legsByOrigin.get(stopId);
+    if (cached) return cached;
+    const legs: IndexedPrototypeLeg[] = [];
+    for (const boarding of departuresByStop.get(stopId) ?? []) {
+      const instance = eventsByTrip.get(boarding.tripId);
+      const trip = feed.trips.get(boarding.tripId);
+      if (!instance || !trip) continue;
+      const fromEvent = instance.events[boarding.stopIndex];
+      if (!fromEvent?.canBoard || !fromEvent.departureAt) continue;
+      for (const toEvent of instance.events) {
+        if (toEvent.stopIndex <= boarding.stopIndex || !toEvent.canAlight || !toEvent.arrivalAt) continue;
+        const departureAt = fromEvent.departureAt.getTime();
+        const arrivalAt = toEvent.arrivalAt.getTime();
+        if (arrivalAt < departureAt || arrivalAt > journeyEnd) continue;
+        legs.push({ tripId: boarding.tripId, routeId: trip.routeId,
+          fromStopId: stopId, toStopId: toEvent.stopTime.stopId,
+          fromIndex: boarding.stopIndex, toIndex: toEvent.stopIndex,
+          departureAt, arrivalAt });
+        materializedLegs++;
+      }
+    }
+    legs.sort((a, b) => a.departureAt - b.departureAt || a.arrivalAt - b.arrivalAt
+      || a.tripId.localeCompare(b.tripId) || a.toIndex - b.toIndex);
+    legsByOrigin.set(stopId, legs);
+    return legs;
+  };
+
+  const pathwayAdjacency = new Map<string, string[]>();
+  for (const pathway of feed.pathways ?? []) {
+    pathwayAdjacency.set(pathway.fromStopId, [...(pathwayAdjacency.get(pathway.fromStopId) ?? []), pathway.toStopId]);
+    if (pathway.bidirectional) pathwayAdjacency.set(pathway.toStopId,
+      [...(pathwayAdjacency.get(pathway.toStopId) ?? []), pathway.fromStopId]);
+  }
+  const canonicalNodes = (tripId: string, stopId: string) => {
+    const stopTime = feed.stopTimes.get(tripId)?.find((entry) => entry.stopId === stopId);
+    return new Set([stopId, stopTime?.sourceStopId, stopTime?.sourceParentStationId,
+      feed.stops.get(stopId)?.parentStation].filter((value): value is string => Boolean(value)));
+  };
+  const successorStopIds = (leg: IndexedPrototypeLeg) => {
+    const sourceNodes = canonicalNodes(leg.tripId, leg.toStopId);
+    const pathwayReachable = new Set(sourceNodes);
+    const queue = [...sourceNodes];
+    for (let cursor = 0; cursor < queue.length; cursor++) for (const next of pathwayAdjacency.get(queue[cursor]!) ?? []) {
+      if (pathwayReachable.has(next)) continue;
+      pathwayReachable.add(next);
+      queue.push(next);
+    }
+    const center = stopCoordinates(leg.toStopId);
+    const transferTargets = new Set((feed.transfers ?? [])
+      .filter((rule) => sourceNodes.has(rule.fromStopId)
+        && (!rule.fromTripId || rule.fromTripId === leg.tripId))
+      .map((rule) => rule.toStopId));
+    return [...feed.stops.keys()].filter((stopId) => {
+      const targetNodes = canonicalNodes('', stopId);
+      if ([...targetNodes].some((id) => pathwayReachable.has(id) || transferTargets.has(id))) return true;
+      if ([...sourceNodes].some((id) => targetNodes.has(id))) return true;
+      const target = stopCoordinates(stopId);
+      return Boolean(center && target && distanceMeters(center, target) <= options.maximumTransferWalkingMeters);
+    });
+  };
+
+  const candidatePaths = new Set<string>();
+  const candidateTripIds = new Set<string>();
+  let candidateLegVisits = 0;
+  const signature = (leg: IndexedPrototypeLeg) =>
+    `${leg.tripId}:${leg.fromStopId}@${leg.departureAt}>${leg.toStopId}@${leg.arrivalAt}`;
+  const visit = (path: IndexedPrototypeLeg[], visitedStops: Set<string>, seenTrips: Set<string>) => {
+    const last = path.at(-1)!;
+    if (last.toStopId === options.destinationStopId) {
+      candidatePaths.add(path.map(signature).join('|'));
+      path.forEach((leg) => candidateTripIds.add(leg.tripId));
+      return;
+    }
+    if (path.length > options.maximumTransfers) return;
+    for (const nextStopId of successorStopIds(last)) for (const next of legsFrom(nextStopId)) {
+      candidateLegVisits++;
+      if (next.departureAt > journeyEnd || seenTrips.has(next.tripId) || visitedStops.has(next.toStopId)) continue;
+      visit([...path, next], new Set([...visitedStops, next.toStopId]), new Set([...seenTrips, next.tripId]));
+    }
+  };
+  for (const first of legsFrom(options.originStopId)) {
+    if (first.departureAt < options.earliestDeparture.getTime() || first.departureAt > options.latestDeparture.getTime()) continue;
+    visit([first], new Set([first.fromStopId, first.toStopId]), new Set([first.tripId]));
+  }
+  return { candidatePaths, candidateTripIds, indexedBoardingEvents, materializedLegs, candidateLegVisits };
+}
+
 test('finds a scheduled direct bus, preserves route/stops, and converts agency local time to UTC', () => {
   const journeys = findDirectGtfsJourneys(feed(), request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'));
   assert.equal(journeys.length, 1);
@@ -2044,10 +2191,43 @@ test('matches a deterministic exhaustive oracle for pathways, transfer rules, lo
       earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
       maximumTransferWalkingMeters: query.maximumTransferWalkingMeters,
     });
+    const prototype = queryDirectedEventIndexPrototype(timetable, {
+      originStopId: 'start', destinationStopId: 'finish',
+      earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
+      maximumTransferWalkingMeters: query.maximumTransferWalkingMeters, maximumTransfers: query.maximumTransfers,
+    });
+    assert.deepEqual([...expected].filter((identity) => !prototype.candidatePaths.has(identity)), [],
+      `${label}: lazy event index must retain every exhaustive feasible identity`);
+
+    // Give only the trip instances the query-directed index selected to the
+    // unchanged production router. Its exact transferDecision and lifecycle
+    // logic validates the candidates; this does not call a prototype validator.
+    const candidateFeed = structuredClone(timetable);
+    candidateFeed.trips = new Map([...candidateFeed.trips].filter(([tripId]) => prototype.candidateTripIds.has(tripId)));
+    const retainedRouteIds = new Set([...candidateFeed.trips.values()].map((trip) => trip.routeId));
+    candidateFeed.routes = new Map([...candidateFeed.routes].filter(([routeId]) => retainedRouteIds.has(routeId)));
+    candidateFeed.stopTimes = new Map([...candidateFeed.stopTimes].filter(([tripId]) => prototype.candidateTripIds.has(tripId)));
+    candidateFeed.stopTimesByStop = new Map();
+    for (const [tripId, stopTimes] of candidateFeed.stopTimes) stopTimes.forEach((stopTime, index) => {
+      candidateFeed.stopTimesByStop.set(stopTime.stopId, [
+        ...(candidateFeed.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+      ]);
+    });
+    if (candidateFeed.realtimeTripUpdates) candidateFeed.realtimeTripUpdates = new Map(
+      [...candidateFeed.realtimeTripUpdates].filter(([key]) => [...prototype.candidateTripIds]
+        .some((tripId) => key.startsWith(`${tripId}\u0000`))));
+
     const result = findGtfsItinerariesWithStats(timetable, query);
     assert.equal(result.searchTruncated, false, `${label}: tiny fixture must fit all production bounds`);
     const actual = new Set(result.itineraries.filter((journey) => journey.segments.length === 2).map(signature));
     assert.deepEqual([...actual].sort(), [...expected].sort(), `${label}: production result set equals full event-pair enumeration`);
+
+    const indexedResult = findGtfsItinerariesWithStats(candidateFeed, query);
+    assert.equal(indexedResult.searchTruncated, false, `${label}: indexed fixture must fit all production bounds`);
+    const indexedActual = new Set(indexedResult.itineraries.filter((journey) => journey.segments.length === 2)
+      .map(signature).filter((identity) => prototype.candidatePaths.has(identity)));
+    assert.deepEqual([...indexedActual].sort(), [...expected].sort(),
+      `${label}: unchanged production feasibility over index candidates equals exhaustive event oracle`);
     return expected;
   };
 
@@ -2113,6 +2293,57 @@ test('matches a deterministic exhaustive oracle for pathways, transfer rules, lo
     updatedAt: new Date('2026-10-12T04:59:00Z'), feedTimestamp: new Date('2026-10-12T04:59:00Z'),
   }]]);
   assert.equal(assertMatchesOracle(delayedConnection, 'realtime delay makes the transfer infeasible').size, 0);
+});
+
+test('test-only event index materializes legs only for query-relevant stops', () => {
+  const timetable = connectingFeed();
+  const route = timetable.routes.get('bus');
+  assert.ok(route);
+  timetable.routes.set('noise', { ...route, name: 'Remote service' });
+  let exhaustivePairCount = 0;
+  for (let tripIndex = 0; tripIndex < 100; tripIndex++) {
+    const tripId = `remote-trip-${tripIndex}`;
+    timetable.trips.set(tripId, { routeId: 'noise', serviceId: 'weekday', headsign: 'Remote terminal' });
+    const stopTimes = Array.from({ length: 10 }, (_, stopIndex) => {
+      const stopId = `${tripId}-stop-${stopIndex}`;
+      timetable.stops.set(stopId, { id: stopId, name: stopId, lon: 25 + tripIndex * 0.0001, lat: 49.84 + stopIndex * 0.0001 });
+      const seconds = 8 * 3600 + tripIndex * 60 + stopIndex * 60;
+      return { stopId, sequence: stopIndex + 1, arrivalSeconds: seconds, departureSeconds: seconds,
+        pickupType: 0, dropOffType: 0 };
+    });
+    timetable.stopTimes.set(tripId, stopTimes);
+    exhaustivePairCount += stopTimes.length * (stopTimes.length - 1) / 2;
+  }
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, stopTimes] of timetable.stopTimes) stopTimes.forEach((stopTime, index) => {
+    timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+    ]);
+  });
+
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    maximumAccessWalkingMeters: 300, maximumEgressWalkingMeters: 300,
+    maximumTransferWalkingMeters: 500, maximumTransfers: 1,
+  };
+  const prototype = queryDirectedEventIndexPrototype(timetable, {
+    originStopId: 'start', destinationStopId: 'finish',
+    earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
+    maximumTransferWalkingMeters: query.maximumTransferWalkingMeters, maximumTransfers: query.maximumTransfers,
+  });
+  const exhaustive = exhaustiveOneTransferOracle(timetable, {
+    originStopId: 'start', destinationStopId: 'finish',
+    earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
+    maximumTransferWalkingMeters: query.maximumTransferWalkingMeters,
+  });
+  assert.deepEqual([...exhaustive].filter((identity) => !prototype.candidatePaths.has(identity)), []);
+  assert.equal(exhaustive.size, 1);
+  assert.equal(prototype.indexedBoardingEvents, 1_004,
+    'the event index retains all 1,000 remote departures plus four local events');
+  assert.equal(prototype.materializedLegs, 2,
+    'only the two query-corridor legs are materialized');
+  assert.ok(prototype.materializedLegs < exhaustivePairCount / 100,
+    `lazy legs (${prototype.materializedLegs}) stay far below exhaustive pairs (${exhaustivePairCount})`);
 });
 
 test('honors GTFS forbidden and minimum-time transfer rules', () => {
