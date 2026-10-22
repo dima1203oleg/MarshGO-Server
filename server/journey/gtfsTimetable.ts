@@ -204,10 +204,32 @@ export interface GtfsGraphBudgetLimits {
   segmentsPerRoute?: number;
 }
 
+type GtfsStopContext = {
+  details: { id: string; name: string; coordinates: [number, number] };
+  transferNodeIds: string[];
+  distanceToOriginStopMeters: number;
+  distanceFromDestinationStopMeters: number;
+};
+
+// Keep stop-pair graph candidates compact. A dense feed may consider hundreds
+// of thousands of pairs, while only a bounded subset is ever searched or sent
+// to the client. Materialize the public journey shape after graph retention.
 type RetainedGtfsSegment = {
-  segment: GtfsDirectJourney;
+  providerId: string;
+  routeId: string;
+  tripId: string;
+  serviceDate: string;
   fromIndex: number;
   toIndex: number;
+  originContext: GtfsStopContext;
+  destinationContext: GtfsStopContext;
+  scheduledDepartureAt: Date;
+  scheduledArrivalAt: Date;
+  departureAt: Date;
+  arrivalAt: Date;
+  realtimeUpdatedAt?: Date;
+  originZoneId?: string;
+  destinationZoneId?: string;
   sampleRank?: [number, number, number, number, number];
   sampleKey?: string;
 };
@@ -1622,16 +1644,17 @@ export function findGtfsItinerariesWithStats(
   const originRetentionEvents = sortedRetentionEvents(originReachableArrivalsByNode);
   const destinationRetentionEvents = sortedRetentionEvents(destinationReachableDeparturesByNode);
   const retentionNodesForSegment = (stopId: string) => [stopId];
-  const hasPriorEvent = (segment: GtfsDirectJourney, minimumGapSeconds: number) => {
+  const hasPriorEvent = (segment: Pick<RetainedGtfsSegment,
+    'departureAt' | 'originContext' | 'tripId' | 'routeId'>, minimumGapSeconds: number) => {
     const latestAllowed = segment.departureAt.getTime() - minimumGapSeconds * 1000;
-    const segmentNodes = retentionNodesForSegment(segment.originStop.id);
+    const segmentNodes = retentionNodesForSegment(segment.originContext.details.id);
     const minimumGapForEvent = (event: QueryReachabilityEvent) => {
-      const { rule, ambiguous } = retentionRuleFor(event.nodeIds, segment.originTransferNodeIds,
+      const { rule, ambiguous } = retentionRuleFor(event.nodeIds, segment.originContext.transferNodeIds,
         event.tripId, segment.tripId, event.routeId, segment.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
       // A shared parent station is not proof that a platform-to-platform
       // transfer is walkable; only exact stop identity promotes this hint.
-      if (event.stopId !== segment.originStop.id) return null;
+      if (event.stopId !== segment.originContext.details.id) return null;
       if (rule?.transferType === 4) return 0;
       return Math.max(minimumGapSeconds,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
@@ -1655,14 +1678,15 @@ export function findGtfsItinerariesWithStats(
     }
     return false;
   };
-  const hasNextEvent = (segment: GtfsDirectJourney, minimumGapSeconds: number) => {
+  const hasNextEvent = (segment: Pick<RetainedGtfsSegment,
+    'arrivalAt' | 'destinationContext' | 'tripId' | 'routeId'>, minimumGapSeconds: number) => {
     const earliestAllowed = segment.arrivalAt.getTime() + minimumGapSeconds * 1000;
-    const segmentNodes = retentionNodesForSegment(segment.destinationStop.id);
+    const segmentNodes = retentionNodesForSegment(segment.destinationContext.details.id);
     const minimumGapForEvent = (event: QueryReachabilityEvent) => {
-      const { rule, ambiguous } = retentionRuleFor(segment.destinationTransferNodeIds, event.nodeIds,
+      const { rule, ambiguous } = retentionRuleFor(segment.destinationContext.transferNodeIds, event.nodeIds,
         segment.tripId, event.tripId, segment.routeId, event.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
-      if (event.stopId !== segment.destinationStop.id) return null;
+      if (event.stopId !== segment.destinationContext.details.id) return null;
       if (rule?.transferType === 4) return 0;
       return Math.max(minimumGapSeconds,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
@@ -1689,12 +1713,7 @@ export function findGtfsItinerariesWithStats(
   let tripsConsidered = 0;
   let tripsWithEligibleStops = 0;
   const stopDetailsCache = new Map<string, { id: string; name: string; coordinates: [number, number] }>();
-  const stopContextCache = new Map<string, {
-    details: { id: string; name: string; coordinates: [number, number] };
-    transferNodeIds: string[];
-    distanceToOriginStopMeters: number;
-    distanceFromDestinationStopMeters: number;
-  }>();
+  const stopContextCache = new Map<string, GtfsStopContext>();
   const transferNodeCache = new Map<string, string[]>();
   const stopDetails = (stopId: string, name: string, coordinates: [number, number]) => {
     const key = `${stopId}\u0000${name}\u0000${coordinates[0]}\u0000${coordinates[1]}`;
@@ -1714,7 +1733,7 @@ export function findGtfsItinerariesWithStats(
     transferNodeCache.set(key, value);
     return value;
   };
-  const stopContext = (entry: NonNullable<GtfsTimetableFeed['stopTimes'] extends Map<string, (infer T)[]> ? T : never>) => {
+  const stopContext = (entry: NonNullable<GtfsTimetableFeed['stopTimes'] extends Map<string, (infer T)[]> ? T : never>): GtfsStopContext | null => {
     const stop = feed.stops.get(entry.stopId);
     if (!stop) return null;
     const coordinates = entry.sourceStopCoordinates ?? [stop.lon, stop.lat] as [number, number];
@@ -1738,36 +1757,35 @@ export function findGtfsItinerariesWithStats(
   const compareTripSegments = (left: RetainedGtfsSegment, right: RetainedGtfsSegment) => {
     const rank = (candidate: RetainedGtfsSegment): [number, number, number, number, number] => {
       if (candidate.sampleRank) return candidate.sampleRank;
-      const value = candidate.segment;
-      const startsAtOrigin = originStopIds.has(value.originStop.id);
-      const endsAtDestination = destinationStopIds.has(value.destinationStop.id);
-      const accessSeconds = Math.ceil(value.distanceToOriginStopMeters / 1.25);
-      const canCatchOrigin = startsAtOrigin && value.departureAt.getTime()
+      const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
+      const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
+      const accessSeconds = Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25);
+      const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
         >= input.earliestDeparture.getTime() + accessSeconds * 1000;
-      const duration = value.arrivalAt.getTime() - value.departureAt.getTime();
+      const duration = candidate.arrivalAt.getTime() - candidate.departureAt.getTime();
       const rankValue: [number, number, number, number, number] = canCatchOrigin && endsAtDestination
-        ? [0, value.distanceToOriginStopMeters + value.distanceFromDestinationStopMeters,
-          duration, value.departureAt.getTime(), value.arrivalAt.getTime()]
+        ? [0, candidate.originContext.distanceToOriginStopMeters + candidate.destinationContext.distanceFromDestinationStopMeters,
+          duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
         : canCatchOrigin
-          ? [1, value.distanceToOriginStopMeters, value.departureAt.getTime(), duration, value.arrivalAt.getTime()]
+          ? [1, candidate.originContext.distanceToOriginStopMeters, candidate.departureAt.getTime(), duration, candidate.arrivalAt.getTime()]
           : endsAtDestination
-            ? [2, value.distanceFromDestinationStopMeters, value.arrivalAt.getTime(), duration, value.departureAt.getTime()]
-            : [3, 0, duration, value.departureAt.getTime(), value.arrivalAt.getTime()];
+            ? [2, candidate.destinationContext.distanceFromDestinationStopMeters, candidate.arrivalAt.getTime(), duration, candidate.departureAt.getTime()]
+            : [3, 0, duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()];
       if (rankValue[0] === 3) {
         const connectedRoutes = new Set<string>();
-        for (const stopId of [...value.originTransferNodeIds, value.destinationStop.id,
-          ...value.destinationTransferNodeIds]) {
+        for (const stopId of [...candidate.originContext.transferNodeIds, candidate.destinationContext.details.id,
+          ...candidate.destinationContext.transferNodeIds]) {
           for (const routeId of routesByStop.get(stopId) ?? []) connectedRoutes.add(routeId);
           const stop = feed.stops.get(stopId);
           if (stop?.parentStation) {
             for (const routeId of routesByParentStation.get(stop.parentStation) ?? []) connectedRoutes.add(routeId);
           }
         }
-        connectedRoutes.delete(value.routeId);
+        connectedRoutes.delete(candidate.routeId);
         rankValue[1] = -connectedRoutes.size;
       }
       candidate.sampleRank = rankValue;
-      candidate.sampleKey = `${value.providerId}\u0000${value.serviceDate}\u0000${value.tripId}\u0000${value.originStop.id}\u0000${value.destinationStop.id}\u0000${value.departureAt.getTime()}\u0000${value.arrivalAt.getTime()}`;
+      candidate.sampleKey = `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
       return rankValue;
     };
     const leftRank = rank(left);
@@ -1849,27 +1867,24 @@ export function findGtfsItinerariesWithStats(
           const key = `${from.stopId}:${to.stopId}:${departureAt.getTime()}`;
           if (seenTripSegments.has(key)) continue;
           seenTripSegments.add(key);
-          const segment: GtfsDirectJourney = {
-            providerId: provider?.id ?? input.providerId, providerName: provider?.name ?? input.providerName,
-            providerCity: providerCity ?? input.providerCity, mode: route.mode,
-            routeId: trip.routeId, routeName: route.name, headsign: trip.headsign, tripId,
-            originStop: fromContext.details,
-            destinationStop: toContext.details,
-            originTransferNodeIds: fromContext.transferNodeIds,
-            destinationTransferNodeIds: toContext.transferNodeIds,
-            transportType, scheduleSemantics: route.scheduleSemantics ?? 'published_departures', serviceDate, scheduledDepartureAt, scheduledArrivalAt,
-            departureAt, arrivalAt, sourceFreshAt: provider?.fetchedAt ?? feed.fetchedAt,
+          const candidate: RetainedGtfsSegment = {
+            providerId: provider?.id ?? input.providerId,
+            routeId: trip.routeId,
+            tripId,
+            serviceDate,
+            fromIndex,
+            toIndex,
+            originContext: fromContext,
+            destinationContext: toContext,
+            scheduledDepartureAt,
+            scheduledArrivalAt,
+            departureAt,
+            arrivalAt,
             ...(dated?.update && dated.stops.slice(fromIndex, toIndex + 1).some((stop) => stop.updated)
               ? { realtimeUpdatedAt: dated.update.updatedAt } : {}),
-            distanceToOriginStopMeters: fromContext.distanceToOriginStopMeters,
-            distanceFromDestinationStopMeters: toContext.distanceFromDestinationStopMeters,
             ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
             ...(to.sourceZoneId ? { destinationZoneId: to.sourceZoneId } : {}),
-            // Candidate segments share these zones lazily; only final results
-            // need their complete list for fare calculation.
-            traveledZoneIds: emptyTraveledZoneIds,
           };
-          const candidate = { segment, fromIndex, toIndex };
           if (!boundedTripCandidates && tripCandidates.length < graphSegmentLimitPerRoute) {
             tripCandidates.push(candidate);
             continue;
@@ -1891,35 +1906,29 @@ export function findGtfsItinerariesWithStats(
         const overflow = overflowSegmentsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
         for (const candidate of tripCandidates) {
-          const startsAtOrigin = originStopIds.has(candidate.segment.originStop.id);
-          const canCatchOrigin = startsAtOrigin && candidate.segment.departureAt.getTime()
+          const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
+          const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
             >= input.earliestDeparture.getTime()
-              + Math.ceil(candidate.segment.distanceToOriginStopMeters / 1.25) * 1000;
-          const endsAtDestination = destinationStopIds.has(candidate.segment.destinationStop.id);
+              + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
+          const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
           if (canCatchOrigin || endsAtDestination) overflow.consider(candidate);
         }
         overflowSegmentsByRoute.set(trip.routeId, overflow);
-        for (const { segment, fromIndex, toIndex } of tripCandidates) {
-          shapeIndexesBySegment.set(segment, { fromIndex, toIndex, serviceDate });
-          if (dated?.update?.stops.length) {
-            segment.stops = stopCallsForTrip(feed, tripId, fromIndex, toIndex, serviceDate, dated.stops);
-          }
-        }
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
         const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
-        const canBoardFromOrigin = tripCandidates.some(({ segment }) => originStopIds.has(segment.originStop.id)
-          && segment.departureAt.getTime() >= input.earliestDeparture.getTime()
-            + Math.ceil(segment.distanceToOriginStopMeters / 1.25) * 1000);
-        const canAlightAtDestination = tripCandidates.some(({ segment }) => destinationStopIds.has(segment.destinationStop.id));
+        const canBoardFromOrigin = tripCandidates.some((candidate) => originStopIds.has(candidate.originContext.details.id)
+          && candidate.departureAt.getTime() >= input.earliestDeparture.getTime()
+            + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000);
+        const canAlightAtDestination = tripCandidates.some((candidate) => destinationStopIds.has(candidate.destinationContext.details.id));
         // Reserve graph capacity for endpoint-serving trips before sampling
         // transfer-only lines. A uniformly hashed reservoir can otherwise
         // discard a useful first or last leg even when those exact stops are
         // already selected for the query.
         const retentionTier = canBoardFromOrigin && canAlightAtDestination ? 0
           : canBoardFromOrigin ? 1 : canAlightAtDestination ? 2 : 3;
-        const temporallyConnectsQueryEnds = tripCandidates.some(({ segment }) =>
-          hasPriorEvent(segment, minimumTransferBufferSeconds)
-          && hasNextEvent(segment, minimumTransferBufferSeconds));
+        const temporallyConnectsQueryEnds = tripCandidates.some((candidate) =>
+          hasPriorEvent(candidate, minimumTransferBufferSeconds)
+          && hasNextEvent(candidate, minimumTransferBufferSeconds));
         const routeCandidates = segmentsByRoute.get(trip.routeId) ?? [];
         const retained = retainBoundedTripGroup(routeCandidates, {
           key: tripKey,
@@ -1941,16 +1950,57 @@ export function findGtfsItinerariesWithStats(
   const selectedSegmentsByRoute = new Map<string, RetainedGtfsSegment[]>();
   for (const [routeId, trips] of segmentsByRoute) {
     const selected = trips.flatMap((trip) => trip.segments);
-    const selectedKeys = new Set(selected.map(({ segment }) =>
-      `${segment.providerId}\u0000${segment.serviceDate}\u0000${segment.tripId}\u0000${segment.originStop.id}\u0000${segment.destinationStop.id}\u0000${segment.departureAt.getTime()}\u0000${segment.arrivalAt.getTime()}`));
+    const candidateKey = (candidate: RetainedGtfsSegment) =>
+      `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
+    const selectedKeys = new Set(selected.map(candidateKey));
     const remaining = Math.max(0, (graphSegmentBudgetByRoute.get(routeId) ?? 0) - selected.length);
     const overflow = overflowSegmentsByRoute.get(routeId)?.toSortedArray() ?? [];
-    const fill = overflow.filter(({ segment }) => !selectedKeys.has(
-      `${segment.providerId}\u0000${segment.serviceDate}\u0000${segment.tripId}\u0000${segment.originStop.id}\u0000${segment.destinationStop.id}\u0000${segment.departureAt.getTime()}\u0000${segment.arrivalAt.getTime()}`))
+    const fill = overflow.filter((candidate) => !selectedKeys.has(candidateKey(candidate)))
       .slice(0, remaining);
     selectedSegmentsByRoute.set(routeId, [...selected, ...fill]);
   }
-  const segments = [...selectedSegmentsByRoute.values()].flatMap((routeSegments) => routeSegments.map(({ segment }) => segment));
+  const segments = [...selectedSegmentsByRoute.values()].flatMap((routeSegments) => routeSegments.map((candidate) => {
+    const route = feed.routes.get(candidate.routeId)!;
+    const trip = feed.trips.get(candidate.tripId)!;
+    const provider = feed.providersByRoute?.get(candidate.routeId);
+    const segment: GtfsDirectJourney = {
+      providerId: candidate.providerId,
+      providerName: provider?.name ?? input.providerName,
+      providerCity: provider?.city ?? input.providerCity,
+      mode: route.mode,
+      routeId: candidate.routeId,
+      routeName: route.name,
+      headsign: trip.headsign,
+      tripId: candidate.tripId,
+      originStop: candidate.originContext.details,
+      destinationStop: candidate.destinationContext.details,
+      originTransferNodeIds: candidate.originContext.transferNodeIds,
+      destinationTransferNodeIds: candidate.destinationContext.transferNodeIds,
+      transportType: route.transportType === 'bus' && (provider?.city ?? input.providerCity) === 'Україна'
+        ? 'intercity_bus' : route.transportType,
+      scheduleSemantics: route.scheduleSemantics ?? 'published_departures',
+      serviceDate: candidate.serviceDate,
+      scheduledDepartureAt: candidate.scheduledDepartureAt,
+      scheduledArrivalAt: candidate.scheduledArrivalAt,
+      departureAt: candidate.departureAt,
+      arrivalAt: candidate.arrivalAt,
+      sourceFreshAt: provider?.fetchedAt ?? feed.fetchedAt,
+      ...(candidate.realtimeUpdatedAt ? { realtimeUpdatedAt: candidate.realtimeUpdatedAt } : {}),
+      distanceToOriginStopMeters: candidate.originContext.distanceToOriginStopMeters,
+      distanceFromDestinationStopMeters: candidate.destinationContext.distanceFromDestinationStopMeters,
+      ...(candidate.originZoneId ? { originZoneId: candidate.originZoneId } : {}),
+      ...(candidate.destinationZoneId ? { destinationZoneId: candidate.destinationZoneId } : {}),
+      traveledZoneIds: emptyTraveledZoneIds,
+    };
+    shapeIndexesBySegment.set(segment, { fromIndex: candidate.fromIndex, toIndex: candidate.toIndex, serviceDate: candidate.serviceDate });
+    const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(candidate.tripId, candidate.serviceDate));
+    if (update?.stops.length) {
+      const dated = datedTripStops(feed, candidate.tripId, candidate.serviceDate);
+      segment.stops = stopCallsForTrip(feed, candidate.tripId, candidate.fromIndex, candidate.toIndex,
+        candidate.serviceDate, dated.stops);
+    }
+    return segment;
+  }));
   const perRouteBudgetUsage = [...graphSegmentBudgetByRoute].map(([routeId, budget]) => ({
     budget,
     retained: selectedSegmentsByRoute.get(routeId)?.length ?? 0,
