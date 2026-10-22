@@ -1,6 +1,6 @@
 import { networkRoutesForRoute, type LiveVehicle, type TransportNetwork } from '../mobility/transportLayers';
 import { getGtfsTripStopArrival, type GtfsTimetableFeed } from './gtfsTimetable';
-import { approachingBoardingStop, freshVehiclesForRoute, matchLiveVehicleForJourneyLeg, selectBoardingApproachVehicleIds, unscopeGtfsId } from './liveVehicles';
+import { approachingBoardingStop, freshVehiclesForRoute, isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg, selectBoardingApproachVehicleIds, unscopeGtfsId } from './liveVehicles';
 
 export interface LiveJourneyLegInput {
   id: string;
@@ -117,7 +117,12 @@ export function buildLiveJourneySegment(
     }
     if (arrival.status === 'PREDICTED' && arrival.predictedArrivalAt && arrival.predictedArrivalAt.getTime() > now
       && selectedVehicle?.tripId === rawTripId
-      && selectedVehicle.routeId === rawRouteId && selectedVehicle.startDate === rawServiceDate) {
+      && selectedVehicle.routeId === rawRouteId
+      // Some valid VehiclePositions feeds omit TripDescriptor.start_date.
+      // The selected leg already supplies the exact service date, trip and
+      // scheduled time window; bind that position to the date only when the
+      // fresh dated TripUpdate above independently confirms its stop prediction.
+      && (!selectedVehicle.startDate || selectedVehicle.startDate === rawServiceDate)) {
       if (arrival.scheduledArrivalAt && arrival.predictedArrivalAt) {
         boardingStopArrival = { status: 'PREDICTED', scheduledAt: arrival.scheduledArrivalAt.toISOString(),
           predictedAt: arrival.predictedArrivalAt.toISOString(),
@@ -158,24 +163,30 @@ export function buildLiveJourneySegment(
     const rawVehicleRouteId = unscopeGtfsId(leg.providerId!, item.routeId);
     const rawVehicleServiceDate = item.startDate?.replaceAll('-', '') ?? null;
     const trip = rawTripId ? feed.timetable?.trips.get(rawTripId) : undefined;
-    const tripMatchesRoute = Boolean(item.tripId && item.routeId && rawVehicleServiceDate
+    const tripMatchesRouteAndSelectedInstance = Boolean(item.tripId && item.routeId
       && rawTripId && rawRouteId && rawVehicleRouteId === rawRouteId && trip && trip.routeId === rawRouteId
-      && rawVehicleServiceDate === rawServiceDate);
+      && (!rawVehicleServiceDate || rawVehicleServiceDate === rawServiceDate));
     const tripStops = rawTripId ? feed.timetable?.stopTimes.get(rawTripId) ?? [] : [];
+    const stopArrival = tripMatchesRouteAndSelectedInstance && feed.timetable && rawTripId && rawRouteId && rawServiceDate && rawBoardingStopId
+      ? getGtfsTripStopArrival(feed.timetable, rawTripId, rawRouteId, rawServiceDate, rawBoardingStopId, new Date(now))
+      : { status: 'UNAVAILABLE' as const };
+    const positionIsInSelectedTripWindow = isJourneyLegGpsWindowOpen(
+      leg.scheduledDepartureAt, leg.scheduledArrivalAt, item.timestamp?.getTime() ?? Number.NaN,
+    );
+    const tripMatchesRoute = Boolean(tripMatchesRouteAndSelectedInstance
+      && (rawVehicleServiceDate === rawServiceDate
+        || (!rawVehicleServiceDate && positionIsInSelectedTripWindow && stopArrival.status === 'PREDICTED')));
     const progress = tripMatchesRoute
       ? approachingBoardingStop(leg.providerId!, item, boardingStopId,
         tripStops.map((stop) => ({ stopId: stop.sourceStopId ?? stop.stopId, sequence: stop.sequence })))
       : null;
-    const stopArrival = tripMatchesRoute && feed.timetable && rawTripId && rawRouteId && rawVehicleServiceDate && rawBoardingStopId
-      ? getGtfsTripStopArrival(feed.timetable, rawTripId, rawRouteId, rawVehicleServiceDate, rawBoardingStopId, new Date(now))
-      : { status: 'UNAVAILABLE' as const };
     const etaSeconds = stopArrival.status === 'PREDICTED' && stopArrival.predictedArrivalAt
       && stopArrival.predictedArrivalAt.getTime() > now
       ? Math.ceil((stopArrival.predictedArrivalAt.getTime() - now) / 1000) : null;
     // Exact fresh stop progress is sufficient observed evidence. A prediction
     // without observed progress needs a fresh exact dated future stop update.
     const progressApproaches = progress?.approaching === true;
-    const predictedApproach = etaSeconds !== null && progress?.approaching !== false
+    const predictedApproach = tripMatchesRoute && etaSeconds !== null && progress?.approaching !== false
       && stopArrival.status === 'PREDICTED';
     const approachEvidence: LiveJourneySegment['vehicles'][number]['approachEvidence'] = progressApproaches && progress
       && !stopArrival.approachBlocked
