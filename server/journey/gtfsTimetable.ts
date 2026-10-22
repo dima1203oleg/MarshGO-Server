@@ -1026,6 +1026,7 @@ export function eligibleTripInstanceStopEvents(
   tripId: string,
   serviceDate: string,
   eligibleStopIndexes: readonly number[],
+  serviceTimeToUtc: ReturnType<typeof createServiceTimeConverter> = createServiceTimeConverter(feed.timezone),
 ): EligibleTripInstanceEvents | null {
   const trip = feed.trips.get(tripId);
   const stopTimes = feed.stopTimes.get(tripId);
@@ -1036,7 +1037,6 @@ export function eligibleTripInstanceStopEvents(
   const dated = realtimeUpdate?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
   if (dated && dated.stops.length !== stopTimes.length) return null;
 
-  const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
   const events = eligibleStopIndexes.map((stopIndex): EligibleTripInstanceStopEvent => {
     const stopTime = stopTimes[stopIndex];
     // The graph caller derives these indexes from `stopTimes.flatMap`, so an
@@ -1464,6 +1464,7 @@ export function findGtfsItinerariesWithStats(
   const journeyEnd = new Date(input.earliestDeparture.getTime() + maximumJourneySeconds * 1000);
   const firstServiceDate = localDate(input.earliestDeparture, feed.timezone);
   const lastServiceDate = localDate(journeyEnd, feed.timezone);
+  const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
   const serviceDates = new Set<string>();
   const dayCount = Math.ceil((journeyEnd.getTime() - input.earliestDeparture.getTime()) / 86_400_000) + 2;
   for (let day = -1; day <= dayCount; day++) {
@@ -1667,7 +1668,7 @@ export function findGtfsItinerariesWithStats(
     if (eligibleIndexes.length < 2) continue;
     let pairOpportunities = 0;
     for (const serviceDate of serviceDates) {
-      const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes);
+      const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes, serviceTimeToUtc);
       if (!tripEvents) continue;
       for (let fromCursor = 0; fromCursor < tripEvents.events.length - 1; fromCursor++) {
         const fromEvent = tripEvents.events[fromCursor];
@@ -1906,7 +1907,7 @@ export function findGtfsItinerariesWithStats(
     // calculations for every edge.
     const eligibleContexts = eligibleIndexes.map((index) => stopContext(stops[index]));
     for (const serviceDate of serviceDates) {
-      const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes);
+      const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes, serviceTimeToUtc);
       if (!tripEvents) continue;
       let tripCandidates: RetainedGtfsSegment[] = [];
       let boundedTripCandidates: BoundedBestK<RetainedGtfsSegment> | undefined;
