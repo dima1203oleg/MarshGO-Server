@@ -13,6 +13,19 @@ export function getTrustedProxyHops(environment: RuntimeEnvironment): number {
   return Number(raw);
 }
 
+/** Keep the production OTP network limit fixed; permit larger limits only for isolated development OTP flows. */
+export function getOtpRequestNetworkLimit(environment: RuntimeEnvironment): number {
+  const raw = environment.AUTH_DEV_OTP_NETWORK_LIMIT?.trim();
+  if (!raw) return 20;
+  if (environment.NODE_ENV !== 'development' || environment.AUTH_DEV_OTP !== 'true') {
+    throw new Error('AUTH_DEV_OTP_NETWORK_LIMIT is only supported with development OTP authentication');
+  }
+  if (!/^\d+$/.test(raw) || Number(raw) < 20 || Number(raw) > 1000) {
+    throw new Error('AUTH_DEV_OTP_NETWORK_LIMIT must be an integer from 20 to 1000');
+  }
+  return Number(raw);
+}
+
 function requireValue(environment: RuntimeEnvironment, name: string): string {
   const value = environment[name]?.trim();
   if (!value) throw new Error(`${name} is required in production`);
@@ -52,6 +65,7 @@ function requireHttpsUrl(environment: RuntimeEnvironment, name: string): void {
 /** Fail closed before listening if production could silently use dev auth or default CORS. */
 export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   getTrustedProxyHops(environment);
+  getOtpRequestNetworkLimit(environment);
   if (environment.NODE_ENV !== 'production') return;
 
   const secret = requireValue(environment, 'SESSION_SECRET');

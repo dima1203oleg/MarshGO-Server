@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { getTrustedProxyHops, validateRuntimeConfig } from '../server/config';
+import { getOtpRequestNetworkLimit, getTrustedProxyHops, validateRuntimeConfig } from '../server/config';
 
 const validProductionConfig: NodeJS.ProcessEnv = {
   NODE_ENV: 'production',
@@ -29,6 +29,18 @@ describe('runtime production configuration', () => {
 
   it('does not apply production restrictions to development', () => {
     assert.doesNotThrow(() => validateRuntimeConfig({ NODE_ENV: 'development', AUTH_DEV_OTP: 'true' }));
+  });
+
+  it('keeps the OTP network limit fixed in production and bounds the dev-only override', () => {
+    assert.equal(getOtpRequestNetworkLimit(validProductionConfig), 20);
+    assert.equal(getOtpRequestNetworkLimit({ NODE_ENV: 'development', AUTH_DEV_OTP: 'true' }), 20);
+    assert.equal(getOtpRequestNetworkLimit({ NODE_ENV: 'development', AUTH_DEV_OTP: 'true', AUTH_DEV_OTP_NETWORK_LIMIT: '100' }), 100);
+    assert.throws(() => getOtpRequestNetworkLimit({ ...validProductionConfig, AUTH_DEV_OTP_NETWORK_LIMIT: '100' }), /only supported with development OTP/);
+    assert.throws(() => getOtpRequestNetworkLimit({ NODE_ENV: 'development', AUTH_DEV_OTP: 'false', AUTH_DEV_OTP_NETWORK_LIMIT: '100' }), /only supported with development OTP/);
+    for (const value of ['19', '1001', '1.5', 'nope']) {
+      assert.throws(() => getOtpRequestNetworkLimit({ NODE_ENV: 'development', AUTH_DEV_OTP: 'true', AUTH_DEV_OTP_NETWORK_LIMIT: value }), /integer from 20 to 1000/);
+    }
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, AUTH_DEV_OTP_NETWORK_LIMIT: '100' }), /only supported with development OTP/);
   });
 
   it('requires an explicit bounded reverse-proxy hop count in production', () => {
