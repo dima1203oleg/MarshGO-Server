@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
-import type { GtfsItinerary, GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
+import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
+import { queryDirectedEventIndexPrototype, validateEventIndexCandidatesWithProductionTransfers } from './helpers/gtfs-event-label-prototype';
+import { lazyEventLabelSearch, lazyEventLabelSearchForRequest } from './helpers/gtfs-lazy-event-label-search';
 
 function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
   const routeRows = [
@@ -377,152 +379,6 @@ function exhaustiveOneTransferOracle(feed: GtfsTimetableFeed, options: {
   return expected;
 }
 
-type IndexedPrototypeLeg = {
-  tripId: string;
-  routeId: string;
-  fromStopId: string;
-  toStopId: string;
-  fromIndex: number;
-  toIndex: number;
-  departureAt: number;
-  arrivalAt: number;
-};
-
-/**
- * Test-only query-directed event index prototype. It indexes boarding events
- * by stop, then creates stop-pair legs only when search asks for a boarding
- * stop. It deliberately over-selects transfer candidates (radius, pathways,
- * station parent, and explicit transfer targets); the production search remains
- * the final transferDecision authority in the test below.
- */
-function queryDirectedEventIndexPrototype(feed: GtfsTimetableFeed, options: {
-  originStopId: string; destinationStopId: string; earliestDeparture: Date; latestDeparture: Date;
-  maximumTransferWalkingMeters: number; maximumTransfers: number;
-}) {
-  const serviceDate = '20261012';
-  const journeyEnd = options.latestDeparture.getTime() + 6 * 60 * 60_000;
-  const eventsByTrip = new Map<string, ReturnType<typeof eligibleTripInstanceStopEvents>>();
-  const departuresByStop = new Map<string, Array<{ tripId: string; stopIndex: number; departureAt: number }>>();
-  let indexedBoardingEvents = 0;
-  for (const [tripId] of feed.trips) {
-    const stopTimes = feed.stopTimes.get(tripId);
-    if (!stopTimes) continue;
-    const events = eligibleTripInstanceStopEvents(feed, tripId, serviceDate,
-      stopTimes.map((_, index) => index));
-    eventsByTrip.set(tripId, events);
-    if (!events) continue;
-    for (const event of events.events) {
-      if (!event.canBoard || !event.departureAt || event.departureAt.getTime() > journeyEnd) continue;
-      const choices = departuresByStop.get(event.stopTime.stopId) ?? [];
-      choices.push({ tripId, stopIndex: event.stopIndex, departureAt: event.departureAt.getTime() });
-      departuresByStop.set(event.stopTime.stopId, choices);
-      indexedBoardingEvents++;
-    }
-  }
-  for (const choices of departuresByStop.values()) choices.sort((a, b) => a.departureAt - b.departureAt
-    || a.tripId.localeCompare(b.tripId) || a.stopIndex - b.stopIndex);
-
-  const distanceMeters = (a: [number, number], b: [number, number]) => {
-    const rad = Math.PI / 180;
-    const dLat = (b[1] - a[1]) * rad;
-    const dLon = (b[0] - a[0]) * rad;
-    const lat1 = a[1] * rad, lat2 = b[1] * rad;
-    const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-    return 6_371_000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
-  };
-  const stopCoordinates = (stopId: string): [number, number] | undefined => {
-    const stop = feed.stops.get(stopId);
-    return stop ? [stop.lon, stop.lat] : undefined;
-  };
-  let materializedLegs = 0;
-  const legsByOrigin = new Map<string, IndexedPrototypeLeg[]>();
-  const legsFrom = (stopId: string): IndexedPrototypeLeg[] => {
-    const cached = legsByOrigin.get(stopId);
-    if (cached) return cached;
-    const legs: IndexedPrototypeLeg[] = [];
-    for (const boarding of departuresByStop.get(stopId) ?? []) {
-      const instance = eventsByTrip.get(boarding.tripId);
-      const trip = feed.trips.get(boarding.tripId);
-      if (!instance || !trip) continue;
-      const fromEvent = instance.events[boarding.stopIndex];
-      if (!fromEvent?.canBoard || !fromEvent.departureAt) continue;
-      for (const toEvent of instance.events) {
-        if (toEvent.stopIndex <= boarding.stopIndex || !toEvent.canAlight || !toEvent.arrivalAt) continue;
-        const departureAt = fromEvent.departureAt.getTime();
-        const arrivalAt = toEvent.arrivalAt.getTime();
-        if (arrivalAt < departureAt || arrivalAt > journeyEnd) continue;
-        legs.push({ tripId: boarding.tripId, routeId: trip.routeId,
-          fromStopId: stopId, toStopId: toEvent.stopTime.stopId,
-          fromIndex: boarding.stopIndex, toIndex: toEvent.stopIndex,
-          departureAt, arrivalAt });
-        materializedLegs++;
-      }
-    }
-    legs.sort((a, b) => a.departureAt - b.departureAt || a.arrivalAt - b.arrivalAt
-      || a.tripId.localeCompare(b.tripId) || a.toIndex - b.toIndex);
-    legsByOrigin.set(stopId, legs);
-    return legs;
-  };
-
-  const pathwayAdjacency = new Map<string, string[]>();
-  for (const pathway of feed.pathways ?? []) {
-    pathwayAdjacency.set(pathway.fromStopId, [...(pathwayAdjacency.get(pathway.fromStopId) ?? []), pathway.toStopId]);
-    if (pathway.bidirectional) pathwayAdjacency.set(pathway.toStopId,
-      [...(pathwayAdjacency.get(pathway.toStopId) ?? []), pathway.fromStopId]);
-  }
-  const canonicalNodes = (tripId: string, stopId: string) => {
-    const stopTime = feed.stopTimes.get(tripId)?.find((entry) => entry.stopId === stopId);
-    return new Set([stopId, stopTime?.sourceStopId, stopTime?.sourceParentStationId,
-      feed.stops.get(stopId)?.parentStation].filter((value): value is string => Boolean(value)));
-  };
-  const successorStopIds = (leg: IndexedPrototypeLeg) => {
-    const sourceNodes = canonicalNodes(leg.tripId, leg.toStopId);
-    const pathwayReachable = new Set(sourceNodes);
-    const queue = [...sourceNodes];
-    for (let cursor = 0; cursor < queue.length; cursor++) for (const next of pathwayAdjacency.get(queue[cursor]!) ?? []) {
-      if (pathwayReachable.has(next)) continue;
-      pathwayReachable.add(next);
-      queue.push(next);
-    }
-    const center = stopCoordinates(leg.toStopId);
-    const transferTargets = new Set((feed.transfers ?? [])
-      .filter((rule) => sourceNodes.has(rule.fromStopId)
-        && (!rule.fromTripId || rule.fromTripId === leg.tripId))
-      .map((rule) => rule.toStopId));
-    return [...feed.stops.keys()].filter((stopId) => {
-      const targetNodes = canonicalNodes('', stopId);
-      if ([...targetNodes].some((id) => pathwayReachable.has(id) || transferTargets.has(id))) return true;
-      if ([...sourceNodes].some((id) => targetNodes.has(id))) return true;
-      const target = stopCoordinates(stopId);
-      return Boolean(center && target && distanceMeters(center, target) <= options.maximumTransferWalkingMeters);
-    });
-  };
-
-  const candidatePaths = new Set<string>();
-  const candidateTripIds = new Set<string>();
-  let candidateLegVisits = 0;
-  const signature = (leg: IndexedPrototypeLeg) =>
-    `${leg.tripId}:${leg.fromStopId}@${leg.departureAt}>${leg.toStopId}@${leg.arrivalAt}`;
-  const visit = (path: IndexedPrototypeLeg[], visitedStops: Set<string>, seenTrips: Set<string>) => {
-    const last = path.at(-1)!;
-    if (last.toStopId === options.destinationStopId) {
-      candidatePaths.add(path.map(signature).join('|'));
-      path.forEach((leg) => candidateTripIds.add(leg.tripId));
-      return;
-    }
-    if (path.length > options.maximumTransfers) return;
-    for (const nextStopId of successorStopIds(last)) for (const next of legsFrom(nextStopId)) {
-      candidateLegVisits++;
-      if (next.departureAt > journeyEnd || seenTrips.has(next.tripId) || visitedStops.has(next.toStopId)) continue;
-      visit([...path, next], new Set([...visitedStops, next.toStopId]), new Set([...seenTrips, next.tripId]));
-    }
-  };
-  for (const first of legsFrom(options.originStopId)) {
-    if (first.departureAt < options.earliestDeparture.getTime() || first.departureAt > options.latestDeparture.getTime()) continue;
-    visit([first], new Set([first.fromStopId, first.toStopId]), new Set([first.tripId]));
-  }
-  return { candidatePaths, candidateTripIds, indexedBoardingEvents, materializedLegs, candidateLegVisits };
-}
 
 test('finds a scheduled direct bus, preserves route/stops, and converts agency local time to UTC', () => {
   const journeys = findDirectGtfsJourneys(feed(), request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'));
@@ -605,17 +461,26 @@ test('eligible trip-instance events overlay realtime times and skipped stops wit
 });
 
 test('keeps the same GTFS trip as distinct scheduled instances on different service dates', () => {
-  const result = findGtfsItinerariesWithStats(feed({ tuesday: '1' }), {
+  const timetable = feed({ tuesday: '1' });
+  const query = {
     ...request('2026-10-12T04:55:00Z', '2026-10-13T05:30:00Z'),
     maximumJourneySeconds: 48 * 60 * 60,
     maximumWaitSeconds: 48 * 60 * 60,
     maximumTransfers: 0,
-  });
+  };
+  const result = findGtfsItinerariesWithStats(timetable, query);
 
   const serviceDates = result.itineraries.map((journey) => journey.segments[0].serviceDate).sort();
   assert.deepEqual(serviceDates, ['20261012', '20261013']);
   assert.equal(new Set(result.itineraries.map((journey) => journey.id)).size, 2,
     'the same trip_id on separate dates must not collapse to one itinerary');
+  const indexed = queryDirectedEventIndexPrototype(timetable, {
+    originStopId: 'origin', destinationStopId: 'destination',
+    serviceDates: ['20261012', '20261013'], earliestDeparture: query.earliestDeparture,
+    latestDeparture: query.latestDeparture, maximumTransferWalkingMeters: 0, maximumTransfers: 0,
+  });
+  assert.equal(indexed.candidatePaths.size, 2,
+    'event labels key the same trip and stop calls by distinct active service dates');
 });
 
 test('debug search diagnostics separate graph demand from bounded search saturation', () => {
@@ -1804,10 +1669,19 @@ test('applies separate conservative first-mile and last-mile walking limits', ()
 });
 
 test('finds service after midnight when GTFS uses a 24-hour stop time', () => {
-  const journeys = findDirectGtfsJourneys(feed({ departure: '24:15:00', arrival: '24:55:00' }), request('2026-10-12T21:10:00Z', '2026-10-12T21:30:00Z'));
+  const timetable = feed({ departure: '24:15:00', arrival: '24:55:00', monday: '0', exceptionDate: '20261012' });
+  const journeys = findDirectGtfsJourneys(timetable, request('2026-10-12T21:10:00Z', '2026-10-12T21:30:00Z'));
   assert.equal(journeys.length, 1);
   assert.equal(journeys[0].departureAt.toISOString(), '2026-10-12T21:15:00.000Z');
   assert.equal(journeys[0].arrivalAt.toISOString(), '2026-10-12T21:55:00.000Z');
+  const indexed = queryDirectedEventIndexPrototype(timetable, {
+    originStopId: 'origin', destinationStopId: 'destination', serviceDates: ['20261012'],
+    earliestDeparture: new Date('2026-10-12T21:10:00Z'), latestDeparture: new Date('2026-10-12T21:30:00Z'),
+    maximumTransferWalkingMeters: 100, maximumTransfers: 0,
+  });
+  assert.deepEqual([...indexed.candidatePaths], [
+    `t1:origin@${Date.parse('2026-10-12T21:15:00Z')}>destination@${Date.parse('2026-10-12T21:55:00Z')}`,
+  ], 'dated event labels honor a calendar exception, agency timezone, and GTFS 24:15 service time');
 });
 
 test('normalizes GTFS rail and ferry journeys into supported journey modes', () => {
@@ -2159,6 +2033,61 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
   assert.equal(expected.size, 11, 'the oracle covers a direct trip and ten early, marginal, or missed-buffer three-leg chains');
   assert.equal(result.searchTruncated, false, 'the complete small graph is searched without sampling loss');
 
+  const lazyOracle = lazyEventLabelSearch(timetable, {
+    originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    earliestDeparture: new Date('2026-10-12T04:55:00Z'), latestDeparture: new Date('2026-10-12T05:12:00Z'),
+    maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 2, maximumWaitSeconds: 2 * 60 * 60,
+    transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    providerId: 'p1', providerName: 'Test Transit',
+  });
+  const lazyByChain = new Map([...lazyOracle.identities.values()].map((entry) => [entry.tripIds.join('>'), entry]));
+  assert.equal(lazyOracle.searchTruncated, false, 'the exhaustive small-feed lazy search stays within its explicit label budget');
+  assert.deepEqual([...lazyByChain.keys()].sort(), [...expected.keys()].sort(),
+    'independent lazy label search enumerates every direct, one-transfer and two-transfer oracle identity');
+  for (const [chain, option] of expected) {
+    assert.equal(lazyByChain.get(chain)?.fareMinor, option.priceMinor, `${chain}: exact itinerary cost matches the brute-force fare oracle`);
+  }
+
+  const eventLabels = queryDirectedEventIndexPrototype(timetable, {
+    originStopId: 'start', destinationStopId: 'finish',
+    earliestDeparture: new Date('2026-10-12T04:55:00Z'), latestDeparture: new Date('2026-10-12T05:12:00Z'),
+    maximumTransferWalkingMeters: 100, maximumTransfers: 2,
+  });
+  const exactEventLabels = validateEventIndexCandidatesWithProductionTransfers(timetable, {
+    candidatePaths: eventLabels.candidatePaths, transferRadius: 100,
+    minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+  });
+  const indexedChainIds = new Set([...exactEventLabels.feasiblePaths].map((path) => path.split('|')
+    .map((leg) => leg.slice(0, leg.indexOf(':'))).join('>')));
+  assert.deepEqual([...expected.keys()].filter((chain) => !indexedChainIds.has(chain)), [],
+    'the event-label frontier keeps every direct, one-transfer, and two-transfer oracle chain');
+  const eventCandidateFeed = structuredClone(timetable);
+  eventCandidateFeed.trips = new Map([...eventCandidateFeed.trips].filter(([tripId]) => eventLabels.candidateTripIds.has(tripId)));
+  const eventRouteIds = new Set([...eventCandidateFeed.trips.values()].map((trip) => trip.routeId));
+  eventCandidateFeed.routes = new Map([...eventCandidateFeed.routes].filter(([routeId]) => eventRouteIds.has(routeId)));
+  eventCandidateFeed.stopTimes = new Map([...eventCandidateFeed.stopTimes]
+    .filter(([tripId]) => eventLabels.candidateTripIds.has(tripId)));
+  eventCandidateFeed.stopTimesByStop = new Map();
+  for (const [tripId, stopTimes] of eventCandidateFeed.stopTimes) stopTimes.forEach((stopTime, index) =>
+    eventCandidateFeed.stopTimesByStop.set(stopTime.stopId,
+      [...(eventCandidateFeed.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index }]));
+  const eventCandidateResult = findGtfsItinerariesWithStats(eventCandidateFeed, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 100, maximumTransfers: 2,
+  });
+  const eventCandidateById = new Map(eventCandidateResult.itineraries.map((journey) => [
+    journey.segments.map((segment) => segment.tripId).join('>'), journey,
+  ]));
+  assert.equal(eventCandidateResult.searchTruncated, false);
+  assert.deepEqual([...eventCandidateById.keys()].sort(), [...expected.keys()].sort(),
+    'production materialization over event-label candidates returns the exhaustive identity set');
+  assert.deepEqual([...eventCandidateById].map(([id, journey]) => [id, journey.fare])
+    .sort(([left], [right]) => String(left).localeCompare(String(right))),
+  [...actualById].map(([id, journey]) => [id, journey.fare])
+    .sort(([left], [right]) => String(left).localeCompare(String(right))),
+  'the label frontier preserves fare allocations for each full trip chain, not only a scalar journey price');
+
   const actualScoringOptions = [...actualById].map(([id, journey]) => ({
     id, durationSeconds: journey.durationSeconds,
     priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
@@ -2177,6 +2106,251 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
   assert.equal(new Set(winnerIds).size, 3, `the fixture exercises distinct strategy winners: ${JSON.stringify(winnerIds)}`);
 });
 
+test('keeps type-4 event labels and fare-v1 coverage/zones separate from passenger transfer counts', () => {
+  const timetable = connectingFeed({ secondDeparture: '08:21:00', transferType: '4', inSeat: true, sameRoute: true });
+  timetable.stopTimes.get('b1')![0]!.sourceZoneId = 'z1';
+  timetable.stopTimes.get('b1')![1]!.sourceZoneId = 'z2';
+  timetable.stopTimes.get('r1')![0]!.sourceZoneId = 'z2';
+  timetable.stopTimes.get('r1')![1]!.sourceZoneId = 'z3';
+  timetable.fareProducts = new Map([['through', {
+    id: 'through', priceMinor: 1850, currency: 'UAH', transfers: 1, transferDurationSeconds: 3600,
+  }]]);
+  timetable.fareRules = new Map([['through', [
+    { fareId: 'through', routeId: 'bus' },
+    { fareId: 'through', originZoneId: 'z1', destinationZoneId: 'z3' },
+    { fareId: 'through', originZoneId: 'z1', destinationZoneId: 'z3', containsZoneId: 'z2' },
+  ]]]);
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 100, maximumTransfers: 1,
+  };
+  const oracle = findGtfsItinerariesWithStats(timetable, query).itineraries.find((journey) => journey.segments.length === 2);
+  assert.ok(oracle);
+  assert.equal(oracle.transfers, 0, 'a GTFS type-4 continuation adds a segment but no passenger transfer');
+  assert.equal(oracle.fare?.priceMinor, 1850);
+  assert.deepEqual(oracle.fare?.allocations.map((part) => ({ product: part.fareProductId,
+    included: part.includedByPreviousFare, price: part.priceMinor })), [
+    { product: 'through', included: false, price: 1850 },
+    { product: 'through', included: true, price: 0 },
+  ], 'fare-v1 transfer coverage and zone constraints apply across both in-seat segments');
+
+  const lazyFareLabels = lazyEventLabelSearch(timetable, {
+    originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
+    maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 2 * 60 * 60,
+    transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    providerId: 'p1', providerName: 'Test Transit',
+  });
+  const lazyFareChain = [...lazyFareLabels.identities.values()].find((entry) => entry.tripIds.join('>') === 'b1>r1');
+  assert.equal(lazyFareLabels.searchTruncated, false);
+  assert.ok(lazyFareChain, 'independent lazy labels retain the type-4 continuation');
+  assert.equal(lazyFareChain.fareMinor, oracle.fare?.priceMinor);
+  assert.deepEqual(lazyFareChain.fareAllocations, oracle.fare?.allocations,
+    'the independent event label retains the exact fare-v1 allocation frontier result');
+
+  const labels = queryDirectedEventIndexPrototype(timetable, {
+    originStopId: 'start', destinationStopId: 'finish', earliestDeparture: query.earliestDeparture,
+    latestDeparture: query.latestDeparture, maximumTransferWalkingMeters: 100, maximumTransfers: 1,
+  });
+  const exactLabels = validateEventIndexCandidatesWithProductionTransfers(timetable, {
+    candidatePaths: labels.candidatePaths, transferRadius: 100,
+    minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+  });
+  assert.ok([...exactLabels.feasiblePaths].some((path) => path.split('|').length === 2),
+    'the exact transfer authority keeps both type-4 segments even though physical transfer count is zero');
+  const labelCandidateFeed = structuredClone(timetable);
+  labelCandidateFeed.trips = new Map([...labelCandidateFeed.trips]
+    .filter(([tripId]) => labels.candidateTripIds.has(tripId)));
+  const labelRouteIds = new Set([...labelCandidateFeed.trips.values()].map((trip) => trip.routeId));
+  labelCandidateFeed.routes = new Map([...labelCandidateFeed.routes]
+    .filter(([routeId]) => labelRouteIds.has(routeId)));
+  labelCandidateFeed.stopTimes = new Map([...labelCandidateFeed.stopTimes]
+    .filter(([tripId]) => labels.candidateTripIds.has(tripId)));
+  labelCandidateFeed.stopTimesByStop = new Map();
+  for (const [tripId, stopTimes] of labelCandidateFeed.stopTimes) stopTimes.forEach((stopTime, index) =>
+    labelCandidateFeed.stopTimesByStop.set(stopTime.stopId,
+      [...(labelCandidateFeed.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index }]));
+  const materialized = findGtfsItinerariesWithStats(labelCandidateFeed, query).itineraries
+    .find((journey) => journey.segments.length === 2);
+  assert.ok(materialized);
+  assert.deepEqual(materialized.fare, oracle.fare,
+    'the candidate labels preserve the exact fare allocation, not only its scalar total');
+
+  const unknownFareFeed = structuredClone(timetable);
+  unknownFareFeed.fareProducts = new Map();
+  unknownFareFeed.fareRules = new Map();
+  const unknownLabels = queryDirectedEventIndexPrototype(unknownFareFeed, {
+    originStopId: 'start', destinationStopId: 'finish', earliestDeparture: query.earliestDeparture,
+    latestDeparture: query.latestDeparture, maximumTransferWalkingMeters: 100, maximumTransfers: 1,
+  });
+  assert.ok([...unknownLabels.candidatePaths].some((path) => path.split('|').length === 2),
+    'unknown fare does not prune a feasible event-label chain');
+  const unknownLazyLabels = lazyEventLabelSearch(unknownFareFeed, {
+    originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
+    maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 2 * 60 * 60,
+    transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    providerId: 'p1', providerName: 'Test Transit',
+  });
+  assert.ok([...unknownLazyLabels.identities.values()].some((entry) => entry.tripIds.length === 2 && entry.fareMinor === null),
+    'unknown fare does not prune or become a zero-cost lazy label');
+  const unknown = findGtfsItineraries(unknownFareFeed, query).find((journey) => journey.segments.length === 2);
+  assert.ok(unknown);
+  assert.equal(unknown.fare, null, 'unknown fare remains unknown, never a zero-price dominance value');
+});
+
+test('graph-relative lazy search matches production itinerary materialization, costs, sampling and strategy winners', () => {
+  const timetable = feed({ withArrivalAlternatives: true });
+  timetable.fareProducts = new Map([
+    ['fare-r', { id: 'fare-r', priceMinor: 250, currency: 'UAH', transfers: null, transferDurationSeconds: null }],
+    ['fare-r2', { id: 'fare-r2', priceMinor: 90, currency: 'UAH', transfers: null, transferDurationSeconds: null }],
+  ]);
+  timetable.fareRules = new Map([
+    ['fare-r', [{ fareId: 'fare-r', routeId: 'r' }]],
+    ['fare-r2', [{ fareId: 'fare-r2', routeId: 'r2' }]],
+  ]);
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 0,
+    maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1000,
+    maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
+    maximumWaitSeconds: 2 * 60 * 60, limit: 100,
+  };
+  const production = findGtfsItinerariesWithStats(timetable, query);
+  let capturedGraph: GtfsCandidateGraphSnapshot | undefined;
+  const observedProduction = findGtfsItinerariesWithStats(timetable, query, {}, (snapshot) => { capturedGraph = snapshot; });
+  assert.deepEqual(observedProduction, production, 'the optional candidate graph observer does not alter production output');
+  assert.ok(capturedGraph);
+  assert.ok(Object.isFrozen(capturedGraph) && Object.isFrozen(capturedGraph.segments)
+    && Object.isFrozen(capturedGraph.firstLegIds), 'the observer exposes frozen graph collections');
+  const expectedFirstLegs = capturedGraph.segments.filter(({ journey }) => capturedGraph!.originStopIds.includes(journey.originStop.id)
+    && journey.departureAt.getTime() <= query.latestDeparture.getTime()
+    && journey.departureAt.getTime() >= query.earliestDeparture.getTime()
+      + Math.ceil(journey.distanceToOriginStopMeters / 1.25) * 1000).map(({ id }) => id);
+  assert.deepEqual([...capturedGraph.firstLegIds].sort(), [...expectedFirstLegs].sort(),
+    'the graph snapshot first legs match the production origin/time/access predicate');
+  const lazy = lazyEventLabelSearchForRequest(timetable, query);
+  assert.equal(lazy.searchTruncated, false, 'tiny lazy request remains complete');
+  assert.equal(production.searchTruncated, false, 'tiny production request remains complete');
+  const signature = (journey: GtfsItinerary) => journey.id;
+  const productionById = new Map(production.itineraries.map((journey) => [signature(journey), journey]));
+  const lazyById = new Map(lazy.itineraries.map((journey) => [signature(journey), journey]));
+  assert.deepEqual([...lazyById.keys()].sort(), [...productionById.keys()].sort(),
+    'graph-relative search traverses the exact production-selected access/egress graph and itinerary identity set');
+  for (const [id, expected] of productionById) {
+    const actual = lazyById.get(id)!;
+    assert.deepEqual({ departure: actual.departureAt.getTime(), arrival: actual.arrivalAt.getTime(),
+      duration: actual.durationSeconds, waiting: actual.waitingSeconds, transfers: actual.transfers,
+      walking: actual.walkingMeters, fare: actual.fare }, {
+      departure: expected.departureAt.getTime(), arrival: expected.arrivalAt.getTime(),
+      duration: expected.durationSeconds, waiting: expected.waitingSeconds, transfers: expected.transfers,
+      walking: expected.walkingMeters, fare: expected.fare,
+    }, `production public itinerary fields match for ${id}`);
+  }
+  for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+    const expected = scoreJourneys(production.itineraries.map((journey) => ({
+      id: journey.id, durationSeconds: journey.durationSeconds,
+      priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+      transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+      transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+      legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+    })), strategy)[0]?.journey.id ?? null;
+    assert.equal(lazy.winners[strategy], expected, `${strategy} winner agrees for the exact request shape`);
+  }
+
+  const transferFeed = connectingFeed({ secondDeparture: '08:35:00' });
+  transferFeed.fareProducts = new Map([
+    ['fare-bus', { id: 'fare-bus', priceMinor: 250, currency: 'UAH', transfers: 1, transferDurationSeconds: 3600 }],
+    ['fare-rail', { id: 'fare-rail', priceMinor: 180, currency: 'UAH', transfers: null, transferDurationSeconds: null }],
+  ]);
+  transferFeed.fareRules = new Map([
+    ['fare-bus', [{ fareId: 'fare-bus', routeId: 'bus' }]],
+    ['fare-rail', [{ fareId: 'fare-rail', routeId: 'rail' }]],
+  ]);
+  const transferQuery = { ...query, origin: [24.0201, 49.8401] as [number, number],
+    destination: [24.0301, 49.8501] as [number, number], maximumTransfers: 1 };
+  const transferProduction = findGtfsItinerariesWithStats(transferFeed, transferQuery);
+  const transferLazy = lazyEventLabelSearchForRequest(transferFeed, transferQuery);
+  const transferProductionById = new Map(transferProduction.itineraries.map((journey) => [journey.id, journey]));
+  const transferLazyById = new Map(transferLazy.itineraries.map((journey) => [journey.id, journey]));
+  assert.equal(transferProduction.searchTruncated, false);
+  assert.equal(transferLazy.searchTruncated, false);
+  assert.deepEqual([...transferLazyById.keys()].sort(), [...transferProductionById.keys()].sort(),
+    'graph-relative traversal preserves feasible transfer and response-sampling identities');
+  for (const [id, expected] of transferProductionById) {
+    const actual = transferLazyById.get(id)!;
+    assert.deepEqual({ arrival: actual.arrivalAt.getTime(), duration: actual.durationSeconds,
+      waiting: actual.waitingSeconds, transfers: actual.transfers, walking: actual.walkingMeters,
+      transferMeters: actual.transferWalkingMeters, transferSeconds: actual.transferWalkingSeconds,
+      inSeat: actual.transferInSeat, minimumBuffers: actual.transferMinimumBufferSeconds,
+      ruleMinimums: actual.transferRuleMinimumSeconds, fare: actual.fare }, {
+      arrival: expected.arrivalAt.getTime(), duration: expected.durationSeconds,
+      waiting: expected.waitingSeconds, transfers: expected.transfers, walking: expected.walkingMeters,
+      transferMeters: expected.transferWalkingMeters, transferSeconds: expected.transferWalkingSeconds,
+      inSeat: expected.transferInSeat, minimumBuffers: expected.transferMinimumBufferSeconds,
+      ruleMinimums: expected.transferRuleMinimumSeconds, fare: expected.fare,
+    }, `production transfer metadata and total costs match for ${id}`);
+  }
+  for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+    const expectedWinner = scoreJourneys(transferProduction.itineraries.map((journey) => ({
+      id: journey.id, durationSeconds: journey.durationSeconds,
+      priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+      transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+      transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+      legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+    })), strategy)[0]?.journey.id ?? null;
+    assert.equal(transferLazy.winners[strategy], expectedWinner, `${strategy} transfer winner agrees`);
+  }
+
+  let transferGraph: GtfsCandidateGraphSnapshot | undefined;
+  const observedTransferProduction = findGtfsItinerariesWithStats(transferFeed, transferQuery, {}, (snapshot) => { transferGraph = snapshot; });
+  assert.deepEqual(observedTransferProduction, transferProduction, 'capturing a transfer graph is observational');
+  assert.ok(transferGraph);
+  const segmentById = new Map(transferGraph.segments.map(({ id, journey }) => [id, journey] as const));
+  const busFirstLeg = transferGraph.firstLegIds.find((id) => segmentById.get(id)?.tripId === 'b1');
+  assert.ok(busFirstLeg, 'the captured graph contains the scheduled first bus leg');
+  const expectedOnwardLegs = transferGraph.segments.filter(({ journey }) => journey.tripId === 'r1'
+    && journey.originStop.id === 'hub' && journey.destinationStop.id === 'finish').map(({ id }) => id);
+  assert.deepEqual(transferGraph.successors(busFirstLeg, 1), expectedOnwardLegs,
+    'successor enumeration is the exact production transfer candidate view');
+  assert.ok(expectedOnwardLegs.length > 0);
+  assert.equal(transferGraph.transferDecision(busFirstLeg, expectedOnwardLegs[0]!).feasible, true,
+    'successor feasibility delegates to the production transfer authority');
+
+  const forbiddenFeed = connectingFeed({ transferType: '3', secondDeparture: '08:35:00' });
+  const forbiddenProduction = findGtfsItinerariesWithStats(forbiddenFeed, transferQuery);
+  const forbiddenLazy = lazyEventLabelSearchForRequest(forbiddenFeed, transferQuery);
+  assert.deepEqual(forbiddenLazy.itineraries.map(({ id }) => id).sort(), forbiddenProduction.itineraries.map(({ id }) => id).sort(),
+    'graph-relative traversal agrees for forbidden transfers');
+  assert.equal(forbiddenLazy.itineraries.some(({ segments }) => segments.length > 1), false,
+    'GTFS transfer_type=3 stays forbidden');
+  const forbiddenBoardingLabels = lazyEventLabelSearch(forbiddenFeed, {
+    originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    earliestDeparture: transferQuery.earliestDeparture, latestDeparture: transferQuery.latestDeparture,
+    maximumJourneySeconds: 6 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 4 * 60 * 60,
+    transferRadiusMeters: transferQuery.maximumTransferWalkingMeters!,
+    minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    providerId: 'p1', providerName: 'Test Transit',
+  });
+  assert.equal(forbiddenBoardingLabels.materializedBoardingExpansions, 1,
+    'a forbidden transfer is rejected from its boarding event before downstream stop-pair legs are materialized');
+
+  const inSeatFeed = connectingFeed({ sameRoute: true, transferType: '4', inSeat: true, secondDeparture: '08:35:00' });
+  const inSeatProduction = findGtfsItinerariesWithStats(inSeatFeed, transferQuery);
+  const inSeatLazy = lazyEventLabelSearchForRequest(inSeatFeed, transferQuery);
+  assert.deepEqual(inSeatLazy.itineraries.map(({ id }) => id).sort(), inSeatProduction.itineraries.map(({ id }) => id).sort(),
+    'graph-relative traversal agrees for explicit in-seat transfers');
+  assert.ok(inSeatLazy.itineraries.some(({ segments, transferInSeat }) => segments.length === 2 && transferInSeat[0] === true),
+    'GTFS transfer_type=4 remains traversable');
+
+  const shortWaitQuery = { ...transferQuery, maximumWaitSeconds: 5 * 60 };
+  const shortWaitProduction = findGtfsItinerariesWithStats(transferFeed, shortWaitQuery);
+  const shortWaitLazy = lazyEventLabelSearchForRequest(transferFeed, shortWaitQuery);
+  assert.deepEqual(shortWaitLazy.itineraries.map(({ id }) => id).sort(), shortWaitProduction.itineraries.map(({ id }) => id).sort(),
+    'graph-relative traversal applies the production maximum-wait rule');
+});
+
 test('matches a deterministic exhaustive oracle for pathways, transfer rules, loops, and realtime overlays', () => {
   const query = {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
@@ -2191,13 +2365,32 @@ test('matches a deterministic exhaustive oracle for pathways, transfer rules, lo
       earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
       maximumTransferWalkingMeters: query.maximumTransferWalkingMeters,
     });
+    const lazyLabels = lazyEventLabelSearch(timetable, {
+      originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+      earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
+      maximumJourneySeconds: 6 * 60 * 60, maximumTransfers: query.maximumTransfers,
+      maximumWaitSeconds: 4 * 60 * 60, transferRadiusMeters: query.maximumTransferWalkingMeters,
+      minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, providerId: 'p1', providerName: 'Test Transit',
+    });
+    assert.equal(lazyLabels.searchTruncated, false, `${label}: small-feed event-label budget remains complete`);
+    const lazySegmentIdentities = new Set([...lazyLabels.identities.values()].map((entry) => entry.segmentIdentities.join('|')));
+    assert.deepEqual([...lazySegmentIdentities].sort(), [...expected].sort(),
+      `${label}: independent lazy labels equal the brute-force trip-pair identity oracle`);
     const prototype = queryDirectedEventIndexPrototype(timetable, {
       originStopId: 'start', destinationStopId: 'finish',
       earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
       maximumTransferWalkingMeters: query.maximumTransferWalkingMeters, maximumTransfers: query.maximumTransfers,
     });
+    const exactTransferValidation = validateEventIndexCandidatesWithProductionTransfers(timetable, {
+      candidatePaths: prototype.candidatePaths, transferRadius: query.maximumTransferWalkingMeters,
+      minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    });
     assert.deepEqual([...expected].filter((identity) => !prototype.candidatePaths.has(identity)), [],
       `${label}: lazy event index must retain every exhaustive feasible identity`);
+    assert.deepEqual([...expected].filter((identity) => !exactTransferValidation.feasiblePaths.has(identity)), [],
+      `${label}: shared production transfer authority must accept every exhaustive feasible event chain`);
+    assert.deepEqual([...exactTransferValidation.feasiblePaths].filter((identity) => expected.has(identity)).sort(),
+      [...expected].sort(), `${label}: exact transfer validation preserves the exhaustive identity set`);
 
     // Give only the trip instances the query-directed index selected to the
     // unchanged production router. Its exact transferDecision and lifecycle
@@ -2372,6 +2565,143 @@ test('honors GTFS forbidden and minimum-time transfer rules', () => {
   assert.equal(findGtfsItineraries(tooShort, query).length, 0, 'min_transfer_time is a hard feasibility constraint');
 });
 
+test('the extracted transfer decision matches public router feasibility for type 2, 3, and 4 rules', () => {
+  const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumStopDistanceMeters: 300,
+    maximumTransferWalkingMeters: 500, maximumTransfers: 1 };
+  const compare = (timetable: GtfsTimetableFeed, expected: boolean, expectedInSeat = false) => {
+    const departureSeconds = timetable.stopTimes.get('r1')?.[0]?.departureSeconds ?? 8 * 3600;
+    const nextDeparture = new Date(Date.UTC(2026, 9, 12) + (departureSeconds - 3 * 3600) * 1000);
+    const previous = {
+      providerId: 'p1', routeId: 'bus', tripId: 'b1', transportType: 'bus',
+      destinationStop: { id: 'hub', name: 'Transfer hub', coordinates: [24.025, 49.845] as [number, number] },
+      destinationTransferNodeIds: ['hub'], arrivalAt: new Date('2026-10-12T05:20:00Z'),
+    } as unknown as GtfsDirectJourney;
+    const next = {
+      providerId: 'p1', routeId: timetable.trips.get('r1')?.routeId ?? 'rail', tripId: 'r1', transportType: 'bus',
+      originStop: { id: 'hub', name: 'Transfer hub', coordinates: [24.025, 49.845] as [number, number] },
+      originTransferNodeIds: ['hub'], departureAt: nextDeparture,
+    } as unknown as GtfsDirectJourney;
+    const context = createGtfsTransferDecisionContext({
+      feed: timetable,
+      transferRadius: query.maximumTransferWalkingMeters ?? DEFAULT_MAX_TRANSFER_WALKING_METERS,
+      minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    });
+    const decision = context.decide(previous, next);
+    assert.equal(decision.feasible, expected);
+    assert.equal(decision.measure.inSeat, expectedInSeat);
+    const publicChain = findGtfsItineraries(timetable, query).find((journey) => journey.segments.length === 2);
+    assert.equal(Boolean(publicChain), expected, 'production router agrees with the extracted authority');
+    if (publicChain) {
+      assert.equal(publicChain.transferInSeat[0], expectedInSeat);
+      assert.equal(publicChain.transferRuleMinimumSeconds[0], decision.ruleMinimumSeconds);
+      assert.equal(publicChain.transferWalkingSeconds[0], decision.measure.walkingSeconds);
+    }
+  };
+
+  compare(connectingFeed({ secondRouteType: '3', secondDeparture: '08:40:00', transferType: '2', minimumTransferTime: '900' }), true);
+  compare(connectingFeed({ secondRouteType: '3', secondDeparture: '08:30:00', transferType: '2', minimumTransferTime: '900' }), false);
+  compare(connectingFeed({ secondRouteType: '3', secondDeparture: '08:40:00', transferType: '3' }), false);
+  compare(connectingFeed({ secondRouteType: '3', secondDeparture: '08:21:00', transferType: '4', inSeat: true }), true, true);
+
+  const platformQuery = { ...query, maximumTransferWalkingMeters: 500 };
+  const platformFeed = mergeGtfsTimetables([{ providerId: 'city', providerName: 'City transit', providerCity: 'Львів',
+    feed: platformTransferFeed('08:40:00') }])!;
+  const platformContext = createGtfsTransferDecisionContext({ feed: platformFeed,
+    transferRadius: platformQuery.maximumTransferWalkingMeters, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS });
+  const platformPrevious = {
+    providerId: 'city', routeId: 'bus', tripId: 'b1', transportType: 'bus',
+    destinationStop: { id: 'city:bus-platform', name: 'Transfer station', coordinates: [24.025, 49.845] as [number, number] },
+    destinationTransferNodeIds: ['city:bus-platform'], arrivalAt: new Date('2026-10-12T05:20:00Z'),
+  } as unknown as GtfsDirectJourney;
+  const platformNext = {
+    providerId: 'city', routeId: 'rail', tripId: 'r1', transportType: 'bus',
+    originStop: { id: 'city:rail-platform', name: 'Transfer station', coordinates: [24.02505, 49.845] as [number, number] },
+    originTransferNodeIds: ['city:rail-platform'], departureAt: new Date('2026-10-12T05:40:00Z'),
+  } as unknown as GtfsDirectJourney;
+  const platformDecision = platformContext.decide(platformPrevious, platformNext);
+  const platformChain = findGtfsItineraries(platformFeed, platformQuery).find((journey) => journey.segments.length === 2);
+  assert.ok(platformDecision.feasible && platformChain, 'the extracted pathway context and public router accept the same platform connection');
+  assert.deepEqual(platformChain.transferWalkingMeters, [platformDecision.measure.walkingMeters]);
+  assert.deepEqual(platformChain.transferWalkingSeconds, [platformDecision.measure.walkingSeconds]);
+  assert.deepEqual(platformChain.transferWalkingGeometries[0], platformDecision.measure.geometry);
+});
+
+test('independent lazy event labels preserve service dates and repeated trip-call identity', () => {
+  const timetable = connectingFeed({ secondRouteType: '3', secondDeparture: '08:40:00' });
+  timetable.stops.set('loop-stop', { id: 'loop-stop', name: 'Loop stop', lon: 24.026, lat: 49.846 });
+  timetable.stopTimes.set('b1', [
+    { stopId: 'start', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+    { stopId: 'hub', sequence: 2, arrivalSeconds: 8 * 3600 + 10 * 60, departureSeconds: 8 * 3600 + 10 * 60, pickupType: 0, dropOffType: 1 },
+    { stopId: 'loop-stop', sequence: 3, arrivalSeconds: 8 * 3600 + 15 * 60, departureSeconds: 8 * 3600 + 15 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: 'hub', sequence: 4, arrivalSeconds: 8 * 3600 + 25 * 60, departureSeconds: 8 * 3600 + 25 * 60, pickupType: 0, dropOffType: 0 },
+  ]);
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, stopTimes] of timetable.stopTimes) stopTimes.forEach((stopTime, index) => {
+    timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+    ]);
+  });
+  const start = new Date('2026-10-12T04:55:00Z');
+  const end = new Date('2026-10-19T05:12:00Z');
+  const options = { originStopIds: ['start'], destinationStopIds: ['finish'],
+    serviceDates: ['20261012', '20261019'], earliestDeparture: start, latestDeparture: end,
+    maximumJourneySeconds: 7 * 24 * 60 * 60 + 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 4 * 60 * 60,
+    transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    providerId: 'p1', providerName: 'Test Transit' };
+  const lazy = lazyEventLabelSearch(timetable, options);
+  assert.equal(lazy.searchTruncated, false);
+  const expected = new Set([
+    'p1:20261012:b1:0:3:1791781200000:1791782700000|p1:20261012:r1:0:1:1791783600000:1791784800000',
+    'p1:20261019:b1:0:3:1792386000000:1792387500000|p1:20261019:r1:0:1:1792388400000:1792389600000',
+  ]);
+  assert.deepEqual([...lazy.identities.keys()].sort(), [...expected].sort(),
+    'the frontier keeps both distinct service instances and uses the later alight call in the loop trip');
+  assert.ok([...lazy.identities.values()].every((entry) => entry.fareMinor === null),
+    'unpublished fare remains unknown, not a zero-cost label');
+
+  const lazyIdentities = new Set([...lazy.identities.values()].map((entry) => entry.serviceDates
+    .map((serviceDate, index) => `${entry.tripIds[index]}:${serviceDate}`).join('>')));
+  assert.deepEqual([...lazyIdentities].sort(), ['b1:20261012>r1:20261012', 'b1:20261019>r1:20261019']);
+
+  const removedService = structuredClone(timetable);
+  removedService.exceptions.set('weekday', new Map([['20261019', 2]]));
+  const afterException = lazyEventLabelSearch(removedService, options);
+  assert.deepEqual([...afterException.identities.values()].map((entry) => entry.serviceDates[0]).sort(), ['20261012'],
+    'a calendar-date removal suppresses only that service-date instance');
+
+  const afterMidnight = connectingFeed({ secondRouteType: '3', secondDeparture: '25:40:00' });
+  afterMidnight.stopTimes.get('b1')![0]!.arrivalSeconds = 25 * 3600;
+  afterMidnight.stopTimes.get('b1')![0]!.departureSeconds = 25 * 3600;
+  afterMidnight.stopTimes.get('b1')![1]!.arrivalSeconds = 25 * 3600 + 20 * 60;
+  afterMidnight.stopTimes.get('b1')![1]!.departureSeconds = 25 * 3600 + 20 * 60;
+  afterMidnight.stopTimes.get('r1')![1]!.arrivalSeconds = 26 * 3600;
+  afterMidnight.stopTimes.get('r1')![1]!.departureSeconds = 26 * 3600;
+  const overnight = lazyEventLabelSearch(afterMidnight, {
+    originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    earliestDeparture: new Date('2026-10-12T21:55:00Z'), latestDeparture: new Date('2026-10-12T22:05:00Z'),
+    maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 60 * 60,
+    transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    providerId: 'p1', providerName: 'Test Transit',
+  });
+  assert.equal(overnight.identities.size, 1, 'GTFS service times beyond 24:00 remain on their originating service date');
+  assert.ok([...overnight.identities.values()].every((entry) => entry.serviceDates.every((date) => date === '20261012')),
+    `overnight labels preserve originating date: ${JSON.stringify([...overnight.identities.keys()])}`);
+
+  const warsaw = structuredClone(timetable);
+  warsaw.timezone = 'Europe/Warsaw';
+  const warsawLabels = lazyEventLabelSearch(warsaw, {
+    originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    earliestDeparture: new Date('2026-10-12T05:55:00Z'), latestDeparture: new Date('2026-10-12T06:12:00Z'),
+    maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 60 * 60,
+    transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    providerId: 'p1', providerName: 'Test Transit',
+  });
+  const warsawChain = [...warsawLabels.identities.values()].find((entry) => entry.tripIds.join('>') === 'b1>r1');
+  assert.ok(warsawChain);
+  assert.equal(warsawChain.segmentIdentities[0]?.match(/@(\d+)>/)?.[1], String(Date.parse('2026-10-12T06:00:00Z')),
+    'service-date event projection honors the feed timezone offset');
+});
+
 test('applies parent-station transfer rules and preserves explicit in-seat transfers', () => {
   const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumStopDistanceMeters: 300, maximumTransfers: 1 };
   const parentRestricted = platformTransferFeed('08:40:00');
@@ -2411,6 +2741,10 @@ test('uses GTFS pathways for platform transfer time and geometry, and fails clos
   const merged = mergeGtfsTimetables([{ providerId: 'city', providerName: 'City transit', providerCity: 'Львів', feed: feedWithPathways }])!;
   const connected = findGtfsItineraries(merged, query).find((journey) => journey.segments.length === 2);
   assert.ok(connected);
+  const capturedPathwaySearch = lazyEventLabelSearchForRequest(merged, query);
+  assert.ok(capturedPathwaySearch.itineraries.some((journey) => journey.id === connected.id
+    && journey.transferWalkingMeters[0] === 400 && journey.transferWalkingSeconds[0] === 360),
+  'the graph-relative oracle traverses production pathway successors with the authoritative pathway measure');
   assert.deepEqual(connected.transferWalkingSeconds, [360]);
   assert.deepEqual(connected.transferWalkingMeters, [400]);
   assert.deepEqual(connected.transferWalkingGeometries[0], [[24.025, 49.845], [24.025025, 49.84502], [24.02505, 49.845]]);
@@ -2508,6 +2842,10 @@ test('composes across provider feeds using equivalent Kyiv timezone names and cl
   const merged = mergeGtfsTimetables(sources(destinationFeed('24.02505')))!;
   const results = findGtfsItineraries(merged, { ...options, providerId: 'merged', providerName: 'Merged providers', providerCity: 'Україна' });
   assert.equal(results.length, 1);
+  const capturedGraphSearch = lazyEventLabelSearchForRequest(merged,
+    { ...options, providerId: 'merged', providerName: 'Merged providers', providerCity: 'Україна' });
+  assert.deepEqual(capturedGraphSearch.itineraries.map(({ id }) => id).sort(), results.map(({ id }) => id).sort(),
+    'the graph-relative oracle traverses the exact cross-provider candidate graph');
   assert.deepEqual(results[0].segments.map((segment) => segment.providerId), ['city-bus', 'regional-rail']);
   assert.deepEqual(results[0].segments.map((segment) => segment.providerName), ['City bus provider', 'Regional rail provider']);
   assert.deepEqual(results[0].segments.map((segment) => segment.transportType), ['bus', 'train']);
