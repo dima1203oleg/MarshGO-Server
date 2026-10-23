@@ -1,6 +1,7 @@
 import { fetchJson } from './safeFetch';
 import { routeTypeLabel } from './gtfs';
 import { bboxOf, type ConnectionReport } from './types';
+import { isFreshMobilityTimestamp, parseMobilityTimestamp } from './timestamps';
 
 type Json = Record<string, unknown>;
 const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -27,8 +28,8 @@ export function vehicleTransportLabel(vehicle: Json): string {
   return 'other';
 }
 
-export function summarizeVehicles(list: Json[]) {
-  let valid = 0, invalid = 0; let newest = 0;
+export function summarizeVehicles(list: Json[], now = Date.now()) {
+  let valid = 0, invalid = 0, timestamped = 0; let newest = 0;
   const points: Array<[number, number]> = [];
   const byType: Record<string, number> = {};
   for (const vehicle of list) {
@@ -37,10 +38,11 @@ export function summarizeVehicles(list: Json[]) {
     valid++; points.push([lon, lat]);
     const label = vehicleTransportLabel(vehicle);
     byType[label] = (byType[label] ?? 0) + 1;
-    const ts = num(vehicle.timestamp);
-    if (Number.isFinite(ts) && ts > newest) newest = ts;
+    const timestamp = parseMobilityTimestamp(vehicle.timestamp ?? vehicle.updated_at ?? vehicle.last_update ?? vehicle.time, 'Europe/Kyiv', now);
+    if (timestamp) { timestamped++; newest = Math.max(newest, timestamp.getTime()); }
   }
-  return { points, valid, invalid, byType, ageSeconds: newest > 0 ? Math.round(Date.now() / 1000 - newest) : null };
+  return { points, valid, invalid, timestamped, byType, newestTimestampMs: newest || null,
+    ageSeconds: newest > 0 ? Math.round((now - newest) / 1000) : null };
 }
 
 export async function testJsonVehiclesConnection(url: string): Promise<ConnectionReport> {
@@ -54,7 +56,10 @@ export async function testJsonVehiclesConnection(url: string): Promise<Connectio
   if (list.length === 0) return { health: 'degraded', checks, counts: {}, responseMs: Date.now() - started, error: 'No vehicles in the feed (it may be empty at night)' };
   const summary = summarizeVehicles(list);
   checks.push({ name: 'Coordinates', ok: summary.valid > 0 && summary.invalid <= summary.valid * 0.05, detail: `${summary.valid} valid, ${summary.invalid} invalid` });
-  if (summary.ageSeconds !== null) checks.push({ name: 'Freshness', ok: summary.ageSeconds < 1800, detail: `${summary.ageSeconds}s old` });
-  const counts: Record<string, number> = { vehicles: summary.valid, ...Object.fromEntries(Object.entries(summary.byType).map(([type, count]) => [`vehicles_${type}`, count])), ...(summary.ageSeconds !== null ? { ageSeconds: summary.ageSeconds } : {}) };
+  checks.push({ name: 'Timestamped positions', ok: summary.timestamped > 0, detail: `${summary.timestamped} of ${summary.valid} positions have a parseable update time` });
+  const fresh = summary.newestTimestampMs !== null
+    && isFreshMobilityTimestamp(new Date(summary.newestTimestampMs), Date.now());
+  checks.push({ name: 'Freshness', ok: fresh, detail: summary.ageSeconds === null ? 'no parseable update time' : `${summary.ageSeconds}s old; live threshold is 90s` });
+  const counts: Record<string, number> = { vehicles: summary.valid, timestamped: summary.timestamped, ...Object.fromEntries(Object.entries(summary.byType).map(([type, count]) => [`vehicles_${type}`, count])), ...(summary.ageSeconds !== null ? { ageSeconds: summary.ageSeconds } : {}) };
   return { health: checks.every((check) => check.ok) ? 'healthy' : 'degraded', checks, counts, responseMs: Date.now() - started, ...(bboxOf(summary.points) ? { bbox: bboxOf(summary.points) } : {}) };
 }

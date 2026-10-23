@@ -270,6 +270,36 @@ test('reports when the itinerary result limit hides additional route chains', ()
   assert.equal(result.searchTruncated, false);
 });
 
+test('reports candidate-sampling caps as incomplete search, not only a result-page limit', () => {
+  const timetable = feed();
+  const baseStops = timetable.stopTimes.get('t1') ?? [];
+  for (const [tripId, departure, arrival] of [
+    ['t2', 8 * 3600 + 5 * 60, 8 * 3600 + 45 * 60],
+    ['t3', 8 * 3600 + 10 * 60, 8 * 3600 + 50 * 60],
+  ] as const) {
+    timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Central station' });
+    const stops = baseStops.map((stop, index) => ({ ...stop,
+      arrivalSeconds: index === 0 ? departure : arrival,
+      departureSeconds: index === 0 ? departure : arrival,
+    }));
+    timetable.stopTimes.set(tripId, stops);
+    for (const [index, stop] of stops.entries()) {
+      timetable.stopTimesByStop.set(stop.stopId, [
+        ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId, index },
+      ]);
+    }
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), limit: 1,
+    maximumTransfers: 0, maximumStopDistanceMeters: 1000,
+  });
+
+  assert.equal(result.itineraries.length, 1);
+  assert.equal(result.resultLimitReached, true);
+  assert.equal(result.searchTruncated, true);
+});
+
 test('keeps fastest and cheapest GTFS candidates when the response limit is tight', () => {
   const timetable = feed({ departure: '08:00:00', arrival: '08:30:00' });
   timetable.routes.set('r2', { name: 'Slow cheap bus', mode: 'BUS', transportType: 'bus' });

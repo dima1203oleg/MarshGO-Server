@@ -32,7 +32,7 @@ export interface GtfsTimetableFeed {
   timezone: string;
   routes: Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType; agencyId?: string; scheduleSemantics?: 'published_departures' | 'frequency_estimate' }>;
   stops: Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string; parentStation?: string; locationType?: number }>;
-  trips: Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string }>;
+  trips: Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string; directionId?: string }>;
   /** Actual GTFS shape coordinates, keyed by the feed's shape_id. */
   shapes?: Map<string, Array<[number, number]>>;
   stopTimes: Map<string, Array<{ stopId: string; sequence: number; arrivalSeconds: number; departureSeconds: number; pickupType: number; dropOffType: number; sourceStopId?: string; sourceParentStationId?: string; sourceStopName?: string; sourceStopCoordinates?: [number, number]; sourceZoneId?: string }>>;
@@ -255,11 +255,12 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
       ...(locationType !== 0 ? { locationType } : {}) });
   }
 
-  const trips = new Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string }>();
+  const trips = new Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string; directionId?: string }>();
   for (const row of csvRows(text('trips.txt'))) {
     if (!row.trip_id || !row.service_id || !routes.has(row.route_id)) continue;
     trips.set(row.trip_id, { routeId: row.route_id, serviceId: row.service_id, headsign: row.trip_headsign?.trim() || '',
-      ...(row.shape_id?.trim() ? { shapeId: row.shape_id.trim() } : {}) });
+      ...(row.shape_id?.trim() ? { shapeId: row.shape_id.trim() } : {}),
+      ...(row.direction_id?.trim() ? { directionId: row.direction_id.trim() } : {}) });
   }
 
   const referencedShapes = new Set([...trips.values()].flatMap((trip) => trip.shapeId ? [trip.shapeId] : []));
@@ -1230,6 +1231,13 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       if (realtimeUpdate?.relationship === 'CANCELED' || realtimeUpdate?.relationship === 'DELETED') continue;
       const dated = realtimeUpdate?.stops.length ? datedTripStops(feed, tripId, serviceDate) : undefined;
       if (dated && dated.stops.length !== stops.length) continue;
+      // Event times depend on a stop-time index, not on a boarding/alighting
+      // pair. Reuse them across the many candidate segments that share the
+      // same trip event instead of allocating a fresh Date for every edge.
+      const scheduledTimes = eligibleIndexes.map((index) => ({
+        departureAt: serviceTimeToUtc(serviceDate, stops[index].departureSeconds),
+        arrivalAt: serviceTimeToUtc(serviceDate, stops[index].arrivalSeconds),
+      }));
       for (let fromCursor = 0; fromCursor < eligibleIndexes.length - 1; fromCursor++) {
         const fromIndex = eligibleIndexes[fromCursor];
         const from = stops[fromIndex];
@@ -1237,7 +1245,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         if (!fromContext) continue;
         const datedFrom = dated?.stops[fromIndex];
         if (from.pickupType !== 0 || datedFrom?.skipped) continue;
-        const scheduledDepartureAt = serviceTimeToUtc(serviceDate, from.departureSeconds);
+        const scheduledDepartureAt = scheduledTimes[fromCursor]?.departureAt;
         const departureAt = datedFrom?.departureAt ?? scheduledDepartureAt;
         if (!scheduledDepartureAt || !departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
         for (let toCursor = fromCursor + 1; toCursor < eligibleIndexes.length && toCursor <= fromCursor + 20; toCursor++) {
@@ -1247,7 +1255,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
           if (!toContext) continue;
           const datedTo = dated?.stops[toIndex];
           if (to.dropOffType !== 0 || datedTo?.skipped || to.arrivalSeconds < from.departureSeconds) continue;
-          const scheduledArrivalAt = serviceTimeToUtc(serviceDate, to.arrivalSeconds);
+          const scheduledArrivalAt = scheduledTimes[toCursor]?.arrivalAt;
           const arrivalAt = datedTo?.arrivalAt ?? scheduledArrivalAt;
           if (!scheduledArrivalAt || !arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
             || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
@@ -1625,6 +1633,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     routeStates: transferCandidateViewCache.size, reachableStops: reachableWithin.at(-1)?.size ?? 0 });
   const maxFirstDeparture = input.latestDeparture.getTime();
   let candidateSamplingTruncated = false;
+  let legCountSamplingTruncated = false;
   const addPath = (path: GtfsDirectJourney[], expectedLegCount: number) => {
     if (path.length !== expectedLegCount) return;
     const first = path[0];
@@ -1658,7 +1667,12 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       .filter(Boolean).join('>');
     const routeChainCount = resultCountByRouteChain.get(routeChain) ?? 0;
     const legCount = resultCountByLegCount.get(path.length) ?? 0;
-    if (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || routeChainCount >= MAX_RESULTS_PER_ROUTE_CHAIN) {
+    if (legCount >= MAX_CANDIDATES_PER_LEG_COUNT) {
+      candidateSamplingTruncated = true;
+      legCountSamplingTruncated = true;
+      return;
+    }
+    if (routeChainCount >= MAX_RESULTS_PER_ROUTE_CHAIN) {
       candidateSamplingTruncated = true;
       return;
     }
@@ -1724,10 +1738,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const last = path.at(-1)!;
     if (destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
       addPath(path, maximumLegsForPass);
-      if ((resultCountByLegCount.get(maximumLegsForPass) ?? 0) >= MAX_CANDIDATES_PER_LEG_COUNT) {
-        activeDepthLimitReached = true;
-        candidateSamplingTruncated = true;
-      }
+      if (legCountSamplingTruncated) activeDepthLimitReached = true;
     }
     const remainingLegs = maximumLegsForPass - path.length;
     if (remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return;
@@ -1788,6 +1799,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
       : Math.min(MAX_SEARCH_STEPS, searchSteps + Math.max(1,
         Math.floor((MAX_SEARCH_STEPS - searchSteps) * depthWeights[depthIndex] / remainingWeight)));
     activeDepthLimitReached = false;
+    legCountSamplingTruncated = false;
     for (const segment of firstLegs) {
       if (activeDepthLimitReached) break;
       if (searchSteps >= stepLimit) { searchBudgetTruncated = true; break; }
@@ -1864,11 +1876,13 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     stopSelectionTruncated: Number(stopSelectionTruncated), searchBudgetTruncated: Number(searchBudgetTruncated),
     searchStepLimitReached: Number(searchSteps >= MAX_SEARCH_STEPS), candidateResultLimitReached: Number(results.size >= MAX_SEARCH_RESULTS),
     candidateSamplingTruncated: Number(candidateSamplingTruncated),
-    searchTruncated: Number(stopSelectionTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS || results.size >= MAX_SEARCH_RESULTS),
+    searchTruncated: Number(stopSelectionTruncated || searchBudgetTruncated || candidateSamplingTruncated
+      || searchSteps >= MAX_SEARCH_STEPS || results.size >= MAX_SEARCH_RESULTS),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
   return {
     itineraries,
-    searchTruncated: stopSelectionTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS || results.size >= MAX_SEARCH_RESULTS,
+    searchTruncated: stopSelectionTruncated || searchBudgetTruncated || candidateSamplingTruncated
+      || searchSteps >= MAX_SEARCH_STEPS || results.size >= MAX_SEARCH_RESULTS,
     resultLimitReached: rankedResults.length > itineraries.length || candidateSamplingTruncated,
   };
 }

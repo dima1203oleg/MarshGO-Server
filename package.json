@@ -19,6 +19,7 @@
     "test:integration:rate-limit": "tsx --test tests/redis-rate-limit.integration.test.ts",
     "test:integration:restart": "tsx --test tests/booking-restart.integration.test.ts",
     "test:integration:journey": "tsx --test tests/journey-schema.integration.test.ts",
+    "test:integration:live-journey": "tsx --test tests/live-journey.integration.test.ts",
     "test:integration": "bash scripts/run-integration-tests.sh",
     "mobility:seed": "tsx server/mobility/seedUkraine.ts",
     "mobility:audit-osm-bikes": "tsx scripts/audit-osm-bike-rentals.ts",
