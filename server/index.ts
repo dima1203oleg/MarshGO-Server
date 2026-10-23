@@ -18,7 +18,7 @@ import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, getWalkingRoute, RoutingUnavailableError } from './routing';
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
-import { getTrustedProxyHops, validateRuntimeConfig } from './config';
+import { getOtpRequestNetworkLimit, getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
@@ -66,6 +66,7 @@ const app = express();
 const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
 eventLoopDelay.enable();
 validateRuntimeConfig(process.env);
+const otpRequestNetworkLimit = getOtpRequestNetworkLimit(process.env);
 app.set('trust proxy', getTrustedProxyHops(process.env));
 const rendezvousSettings = getRendezvousSettings(process.env);
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
@@ -1777,7 +1778,7 @@ app.post('/api/v1/auth/otp/request', asyncHandler(async (req, res) => {
     );
     if (rows[0].seconds_since_latest !== null && rows[0].seconds_since_latest < 60) throw new ApiError(429, 'Wait before requesting another code');
     if (Number(rows[0].attempts_in_hour) >= 5) throw new ApiError(429, 'OTP request limit reached for this phone');
-    if (Number(rows[0].ip_attempts_in_hour) >= 20) throw new ApiError(429, 'OTP request limit reached for this network');
+    if (Number(rows[0].ip_attempts_in_hour) >= otpRequestNetworkLimit) throw new ApiError(429, 'OTP request limit reached for this network');
     await client.query(
       `INSERT INTO otp_challenges(id,phone_e164,code_hash,display_name,request_ip_hash,expires_at)
        VALUES ($1,$2,$3,$4,$5,now()+interval '5 minutes')`,
