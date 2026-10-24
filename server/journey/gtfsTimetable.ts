@@ -1596,10 +1596,10 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   const resultCountByLegCount = new Map<number, number>();
   const MAX_RESULTS_PER_ROUTE_CHAIN = 8;
   const maxTransitLegs = maximumTransfers + 1;
-  // Keep twice the visible limit per chain length so the later multi-objective
+  // Keep a bounded five-page candidate pool per chain length so the later multi-objective
   // ranking can compare a broader, balanced pool instead of ranking only the
   // first page of depth-first discoveries.
-  const MAX_CANDIDATES_PER_LEG_COUNT = Math.min(limit * 2, 500);
+  const MAX_CANDIDATES_PER_LEG_COUNT = Math.min(limit * 5, 1_000);
   // Most city-feed stops cannot lead to this destination. Exclude those dead
   // ends before enumerating timed transfer combinations.
   const reachableWithin = [destinationStopIds];

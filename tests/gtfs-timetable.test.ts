@@ -273,10 +273,10 @@ test('reports when the itinerary result limit hides additional route chains', ()
 test('reports candidate-sampling caps as incomplete search, not only a result-page limit', () => {
   const timetable = feed();
   const baseStops = timetable.stopTimes.get('t1') ?? [];
-  for (const [tripId, departure, arrival] of [
-    ['t2', 8 * 3600 + 5 * 60, 8 * 3600 + 45 * 60],
-    ['t3', 8 * 3600 + 10 * 60, 8 * 3600 + 50 * 60],
-  ] as const) {
+  for (const [tripId, departure, arrival] of Array.from({ length: 5 }, (_, index) => {
+    const offset = (index + 1) * 5 * 60;
+    return [`t${index + 2}`, 8 * 3600 + offset, 8 * 3600 + 40 * 60 + offset] as const;
+  })) {
     timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Central station' });
     const stops = baseStops.map((stop, index) => ({ ...stop,
       arrivalSeconds: index === 0 ? departure : arrival,
@@ -298,6 +298,41 @@ test('reports candidate-sampling caps as incomplete search, not only a result-pa
   assert.equal(result.itineraries.length, 1);
   assert.equal(result.resultLimitReached, true);
   assert.equal(result.searchTruncated, true);
+});
+
+test('searches beyond five visible pages before marking the candidate pool truncated', () => {
+  const timetable = feed();
+  const baseStops = timetable.stopTimes.get('t1') ?? [];
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  for (let routeIndex = 0; routeIndex < 20; routeIndex++) {
+    const routeId = `route-${routeIndex}`;
+    timetable.routes.set(routeId, { name: `Route ${routeIndex}`, mode: 'BUS', transportType: 'bus' });
+    for (let runIndex = 0; runIndex < 8; runIndex++) {
+      const tripId = `trip-${routeIndex}-${runIndex}`;
+      const offset = runIndex * 60;
+      const stops = baseStops.map((stop, index) => ({ ...stop,
+        arrivalSeconds: index === 0 ? 8 * 3600 + offset : 8 * 3600 + 30 * 60 + offset,
+        departureSeconds: index === 0 ? 8 * 3600 + offset : 8 * 3600 + 30 * 60 + offset,
+      }));
+      timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+      timetable.stopTimes.set(tripId, stops);
+      stops.forEach((stop, index) => timetable.stopTimesByStop.set(stop.stopId, [
+        ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId, index },
+      ]));
+    }
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    limit: 50, maximumTransfers: 0, maximumStopDistanceMeters: 1000,
+  });
+
+  assert.equal(result.itineraries.length, 50);
+  assert.equal(result.resultLimitReached, true);
+  assert.equal(result.searchTruncated, false);
 });
 
 test('keeps fastest and cheapest GTFS candidates when the response limit is tight', () => {
