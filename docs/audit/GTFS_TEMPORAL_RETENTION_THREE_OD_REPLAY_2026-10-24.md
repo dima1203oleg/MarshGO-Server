@@ -31,6 +31,19 @@ A separate, single debug replay of Holosko→Sykhiv on the candidate (not part o
 
 **Reject this candidate as a routing-completeness or release fix.** The targeted dense-feed regression fixture passes and the exact transfer check remains authoritative, but the 3-OD evidence fails the promotion gate: strategy winners are not preserved for every OD, alternatives decrease on two ODs, aggregate median runtime regresses, and truncation remains. Keep the commit isolated as an experiment; do not merge it into the release line or remove truncation disclosure.
 
+## Follow-up: bounded-safe retention tie-break — 2026-10-24
+
+The hard priority used above was replaced in the open candidate checkout with a narrower ordering: preserve the existing endpoint tiers, first rank transfer segments that have both a query-feasible prior event and next event, and order those feasible segments by their arrival time in the full query window before segment-only duration. Generic interchange degree remains the fallback for transfer segments without a complete temporal connection. The added dense irrelevant-interchange fixture passes and asserts the complete access→connector→egress chain survives a three-segment graph cap.
+
+Evidence for this follow-up:
+
+- Focused GTFS/scoring suite: 92/92 pass; full Server unit suite: 309 pass, 0 fail, 3 opt-in local integration skips; TypeScript, ESLint, and `git diff --check` pass.
+- Three serialized baseline/follow-up runs per frozen OD at the 100,000 graph cap produced identical ordered hashes, chain counts, and FASTEST/CHEAPEST/BALANCED winner identities and metrics. All remain truncated. This is no demonstrated completeness increase on the three production-shaped queries; timings varied within ordinary run noise.
+- A one-run 25,000-segment diagnostic also returned identical baseline/follow-up outputs across all three ODs, still truncated.
+- A separate one-run 125,000-segment experiment on Holosko→Sykhiv returned fewer distinct chains (57 trip / 34 route versus 58 / 37 at 100,000) and reported 651 MB RSS. The experimental cap change was reverted; do not raise the production graph limit from this evidence.
+
+This tie-break is safer than the rejected hard-priority variant and covers an explicit bounded-sampling correctness case, but it is not the dense-Lviv completeness solution and must not be reported as one. Preserve it as a candidate for review only with truncation still explicit; continue the route-budget/search allocation investigation below.
+
 ## Next engineering step
 
 Inspect route-budget allocation and per-route bounded trip-group replacement against the baseline with the exhaustive small-feed oracle. Design a retention change that preserves all three baseline strategy winners on these frozen ODs, improves useful-chain recall on more than one OD, and does not regress aggregate runtime materially. Repeat the same 3× paired replay before promotion. Avoid tuning a global search window: previous evidence shows the earlier graph budget, not the downstream search-step cap, is binding.
