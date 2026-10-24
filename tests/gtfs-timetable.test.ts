@@ -76,7 +76,11 @@ function connectingFeed(options: { secondRouteType?: string; secondDeparture?: s
   return parseGtfsTimetable(files);
 }
 
-function timeFeasibleChainWithHashCompetingTrips(options: { denseIrrelevantInterchange?: boolean; pathwayPlatformTransfers?: boolean } = {}) {
+function timeFeasibleChainWithHashCompetingTrips(options: {
+  denseIrrelevantInterchange?: boolean;
+  pathwayPlatformTransfers?: boolean;
+  reverseFirstPathway?: boolean;
+} = {}) {
   const timetable = feed();
   timetable.routes.clear();
   timetable.trips.clear();
@@ -134,10 +138,13 @@ function timeFeasibleChainWithHashCompetingTrips(options: { denseIrrelevantInter
       atStop.push({ tripId, index }); timetable.stopTimesByStop.set(entry.stopId, atStop);
     });
     timetable.pathways = [
-      { fromStopId: 'hub-a', toStopId: 'hub-a-platform', fromCoordinates: [24.025, 49.845],
-        toCoordinates: [24.0251, 49.8451], pathwayMode: 1, bidirectional: true, traversalTimeSeconds: 60, lengthMeters: 80 },
+      { fromStopId: options.reverseFirstPathway ? 'hub-a-platform' : 'hub-a',
+        toStopId: options.reverseFirstPathway ? 'hub-a' : 'hub-a-platform',
+        fromCoordinates: options.reverseFirstPathway ? [24.0251, 49.8451] : [24.025, 49.845],
+        toCoordinates: options.reverseFirstPathway ? [24.025, 49.845] : [24.0251, 49.8451],
+        pathwayMode: 1, bidirectional: false, traversalTimeSeconds: 60, lengthMeters: 80 },
       { fromStopId: 'hub-b-platform', toStopId: 'hub-b', fromCoordinates: [24.0271, 49.8471],
-        toCoordinates: [24.027, 49.847], pathwayMode: 1, bidirectional: true, traversalTimeSeconds: 60, lengthMeters: 80 },
+        toCoordinates: [24.027, 49.847], pathwayMode: 1, bidirectional: false, traversalTimeSeconds: 60, lengthMeters: 80 },
     ];
   }
   if (options.denseIrrelevantInterchange) {
@@ -1135,6 +1142,22 @@ test('query-time retention recognizes scheduled transfers between pathway-linked
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
     === `access-trip,${targetTripId},egress-trip`),
   'the connecting trip survives because GTFS pathways connect the distinct platform stop IDs');
+});
+
+test('query-time retention respects directed GTFS pathways between platforms', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips({
+    pathwayPlatformTransfers: true, reverseFirstPathway: true,
+  });
+  const searchInput = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+  };
+  const result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
+  assert.ok(result.candidateGraphTruncated, 'the fixture exercises a bounded graph');
+  assert.ok(!result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `access-trip,${targetTripId},egress-trip`),
+  'a reverse-only pathway cannot connect the access arrival to the next platform');
 });
 
 test('query-time retention does not let a temporally matched but forbidden trip crowd out a feasible chain', () => {
