@@ -76,7 +76,7 @@ function connectingFeed(options: { secondRouteType?: string; secondDeparture?: s
   return parseGtfsTimetable(files);
 }
 
-function timeFeasibleChainWithHashCompetingTrips(options: { denseIrrelevantInterchange?: boolean } = {}) {
+function timeFeasibleChainWithHashCompetingTrips(options: { denseIrrelevantInterchange?: boolean; pathwayPlatformTransfers?: boolean } = {}) {
   const timetable = feed();
   timetable.routes.clear();
   timetable.trips.clear();
@@ -120,6 +120,26 @@ function timeFeasibleChainWithHashCompetingTrips(options: { denseIrrelevantInter
   // the access and egress schedules. The desired trip can connect both.
   addTrip(decoyTripId, 'middle', ['hub-a', 'hub-b'], [8 * 3600 + 5 * 60, 8 * 3600 + 38 * 60]);
   addTrip(targetTripId, 'middle', ['hub-a', 'hub-b'], [8 * 3600 + 18 * 60, 8 * 3600 + 25 * 60]);
+  if (options.pathwayPlatformTransfers) {
+    for (const [stopId, name, lon, lat] of [
+      ['hub-a-platform', 'Hub A platform', 24.0251, 49.8451],
+      ['hub-b-platform', 'Hub B platform', 24.0271, 49.8471],
+    ] as const) timetable.stops.set(stopId, { id: stopId, name, lon, lat });
+    const middleStops = timetable.stopTimes.get(targetTripId)!;
+    middleStops[0]!.stopId = 'hub-a-platform';
+    middleStops[1]!.stopId = 'hub-b-platform';
+    timetable.stopTimesByStop = new Map();
+    for (const [tripId, entries] of timetable.stopTimes) entries.forEach((entry, index) => {
+      const atStop = timetable.stopTimesByStop.get(entry.stopId) ?? [];
+      atStop.push({ tripId, index }); timetable.stopTimesByStop.set(entry.stopId, atStop);
+    });
+    timetable.pathways = [
+      { fromStopId: 'hub-a', toStopId: 'hub-a-platform', fromCoordinates: [24.025, 49.845],
+        toCoordinates: [24.0251, 49.8451], pathwayMode: 1, bidirectional: true, traversalTimeSeconds: 60, lengthMeters: 80 },
+      { fromStopId: 'hub-b-platform', toStopId: 'hub-b', fromCoordinates: [24.0271, 49.8471],
+        toCoordinates: [24.027, 49.847], pathwayMode: 1, bidirectional: true, traversalTimeSeconds: 60, lengthMeters: 80 },
+    ];
+  }
   if (options.denseIrrelevantInterchange) {
     for (const [stopId, name, lon, lat] of [
       ['dense-a', 'Dense A', 24.0260, 49.8460], ['dense-b', 'Dense B', 24.0265, 49.8465],
@@ -1101,6 +1121,20 @@ test('query-time retention keeps a scheduled connector ahead of dense irrelevant
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
     === `access-trip,${targetTripId},egress-trip`),
   'the exact scheduled connector survives even when irrelevant stops have more connected routes');
+});
+
+test('query-time retention recognizes scheduled transfers between pathway-linked platforms', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips({ pathwayPlatformTransfers: true });
+  const searchInput = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+  };
+  const result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
+  assert.ok(result.candidateGraphTruncated, 'the fixture exercises a bounded graph');
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `access-trip,${targetTripId},egress-trip`),
+  'the connecting trip survives because GTFS pathways connect the distinct platform stop IDs');
 });
 
 test('query-time retention does not let a temporally matched but forbidden trip crowd out a feasible chain', () => {
