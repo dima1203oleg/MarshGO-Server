@@ -1853,6 +1853,7 @@ export function findGtfsItinerariesWithStats(
     tripId: string;
     routeId: string;
     stopId: string;
+    canonicalStopId: string;
     pathwayStopId: string;
     nodeIds: string[];
   };
@@ -1884,15 +1885,17 @@ export function findGtfsItinerariesWithStats(
     const nodeIds = retentionTransferNodes(entry);
     const stopId = entry.sourceStopId ?? entry.stopId;
     const atMs = at.getTime();
-    const event = { at: atMs, tripId, routeId, stopId, pathwayStopId: entry.stopId, nodeIds };
+    const event = { at: atMs, tripId, routeId, stopId, canonicalStopId: entry.stopId, pathwayStopId: stopId, nodeIds };
     const eventKey = `${tripId}\u0000${stopId}\u0000${atMs}`;
-    const seen = seenEventsByNode.get(stopId) ?? new Set<string>();
-    if (seen.has(eventKey)) return;
-    seen.add(eventKey);
-    seenEventsByNode.set(stopId, seen);
-    const values = events.get(stopId) ?? [];
-    values.push(event);
-    events.set(stopId, values);
+    for (const nodeId of new Set([stopId, entry.stopId])) {
+      const seen = seenEventsByNode.get(nodeId) ?? new Set<string>();
+      if (seen.has(eventKey)) continue;
+      seen.add(eventKey);
+      seenEventsByNode.set(nodeId, seen);
+      const values = events.get(nodeId) ?? [];
+      values.push(event);
+      events.set(nodeId, values);
+    }
   };
   const retentionRuleFor = (
     fromNodeIds: readonly string[], toNodeIds: readonly string[],
@@ -1995,12 +1998,19 @@ export function findGtfsItinerariesWithStats(
       || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId))] as const));
   const originRetentionEvents = sortedRetentionEvents(originReachableArrivalsByNode);
   const destinationRetentionEvents = sortedRetentionEvents(destinationReachableDeparturesByNode);
+  const bestPathwayMeasure = (fromStopIds: readonly string[], toStopIds: readonly string[]) => fromStopIds
+    .flatMap((fromStopId) => toStopIds.map((toStopId) => pathwayConnection(fromStopId, toStopId)))
+    .filter((measure): measure is GtfsTransferMeasure => Boolean(measure) && typeof measure === 'object')
+    .sort((left, right) => left.walkingSeconds - right.walkingSeconds || left.walkingMeters - right.walkingMeters)[0] ?? false;
   // Index pathway-connected arrival events by every directed platform they can
   // reach, so a different platform stop ID can participate in the bounded
   // retention hint without scanning the full event set per candidate segment.
   const originRetentionEventsByReachableStop = new Map<string, QueryReachabilityEvent[]>();
+  const indexedOriginEvents = new Set<QueryReachabilityEvent>();
   for (const events of originRetentionEvents.values()) for (const event of events) {
-    for (const stopId of reachablePathwayNodes(event.pathwayStopId)) {
+    if (indexedOriginEvents.has(event)) continue;
+    indexedOriginEvents.add(event);
+    for (const stopId of new Set([event.canonicalStopId, ...reachablePathwayNodes(event.pathwayStopId)])) {
       const reachableEvents = originRetentionEventsByReachableStop.get(stopId) ?? [];
       reachableEvents.push(event);
       originRetentionEventsByReachableStop.set(stopId, reachableEvents);
@@ -2008,21 +2018,19 @@ export function findGtfsItinerariesWithStats(
   }
   for (const events of originRetentionEventsByReachableStop.values()) events.sort((a, b) => a.at - b.at
     || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId));
-  const retentionNodesForSegment = (stopId: string) => [stopId];
   const hasPriorEvent = (segment: Pick<RetainedGtfsSegment,
     'departureAt' | 'originContext' | 'tripId' | 'routeId'>, minimumGapSeconds: number) => {
     const latestAllowed = segment.departureAt.getTime() - minimumGapSeconds * 1000;
-    const segmentNodes = retentionNodesForSegment(segment.originContext.details.id);
+    const segmentNodes = [...new Set([segment.originContext.details.id, ...segment.originContext.transferNodeIds])];
     const minimumGapForEvent = (event: QueryReachabilityEvent) => {
       const { rule, ambiguous } = retentionRuleFor(event.nodeIds, segment.originContext.transferNodeIds,
         event.tripId, segment.tripId, event.routeId, segment.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
-      const pathway = event.pathwayStopId === segment.originContext.details.id
+      const pathway = event.canonicalStopId === segment.originContext.details.id
         ? { walkingMeters: 0, walkingSeconds: 0 }
-        : pathwayConnection(event.pathwayStopId, segment.originContext.details.id);
-      if (event.stopId !== segment.originContext.details.id
-        && (!pathway || pathway.walkingMeters > transferRadius)) return null;
-      if (rule?.transferType === 4 && event.stopId === segment.originContext.details.id) return 0;
+        : bestPathwayMeasure([event.pathwayStopId], segment.originContext.transferNodeIds);
+      if (!pathway || pathway.walkingMeters > transferRadius) return null;
+      if (rule?.transferType === 4 && event.canonicalStopId === segment.originContext.details.id) return 0;
       return Math.max(minimumGapSeconds, pathway ? pathway.walkingSeconds : 0,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
     };
@@ -2052,32 +2060,31 @@ export function findGtfsItinerariesWithStats(
       const { rule, ambiguous } = retentionRuleFor(segment.destinationContext.transferNodeIds, event.nodeIds,
         segment.tripId, event.tripId, segment.routeId, event.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
-      const pathway = segment.destinationContext.details.id === event.pathwayStopId
+      const pathway = segment.destinationContext.details.id === event.canonicalStopId
         ? { walkingMeters: 0, walkingSeconds: 0 }
-        : pathwayConnection(segment.destinationContext.details.id, event.pathwayStopId);
-      if (event.stopId !== segment.destinationContext.details.id
-        && (!pathway || pathway.walkingMeters > transferRadius)) return null;
-      if (rule?.transferType === 4 && event.stopId === segment.destinationContext.details.id) return 0;
+        : bestPathwayMeasure(segment.destinationContext.transferNodeIds, [event.pathwayStopId]);
+      if (!pathway || pathway.walkingMeters > transferRadius) return null;
+      if (rule?.transferType === 4 && event.canonicalStopId === segment.destinationContext.details.id) return 0;
       return Math.max(minimumGapSeconds, pathway ? pathway.walkingSeconds : 0,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
     };
-    const reachableDestinationStops = reachablePathwayNodes(segment.destinationContext.details.id);
-    for (const nodeId of reachableDestinationStops) {
-      const events = destinationRetentionEvents.get(nodeId);
-      if (!events?.length) continue;
-      let low = 0, high = events.length;
-      while (low < high) {
-        const middle = (low + high) >>> 1;
-        if (events[middle]!.at < earliestAllowed) low = middle + 1;
-        else high = middle;
-      }
-      for (let index = low; index < events.length; index++) {
-        const event = events[index]!;
-        const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
-        if (availableSeconds > maximumWaitSeconds) break;
-        const requiredSeconds = minimumGapForEvent(event);
-        if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
-      }
+    const reachableDestinationStops = new Set([segment.destinationContext.details.id,
+      ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
+    const events = [...new Set([...reachableDestinationStops]
+      .flatMap((stopId) => destinationRetentionEvents.get(stopId) ?? []))]
+      .sort((a, b) => a.at - b.at || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId));
+    let low = 0, high = events.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (events[middle]!.at < earliestAllowed) low = middle + 1;
+      else high = middle;
+    }
+    for (let index = low; index < events.length; index++) {
+      const event = events[index]!;
+      const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
+      if (availableSeconds > maximumWaitSeconds) break;
+      const requiredSeconds = minimumGapForEvent(event);
+      if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
     }
     return false;
   };

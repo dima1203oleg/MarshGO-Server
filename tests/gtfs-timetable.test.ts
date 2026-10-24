@@ -1131,7 +1131,9 @@ test('query-time retention keeps a scheduled connector ahead of dense irrelevant
 });
 
 test('query-time retention recognizes scheduled transfers between pathway-linked platforms', () => {
-  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips({ pathwayPlatformTransfers: true });
+  const { timetable: sourceFeed, targetTripId } = timeFeasibleChainWithHashCompetingTrips({ pathwayPlatformTransfers: true });
+  const providerId = 'pathway-provider';
+  const timetable = mergeGtfsTimetables([{ providerId, providerName: 'Pathway provider', providerCity: 'Львів', feed: sourceFeed }])!;
   const searchInput = {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
     origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
@@ -1140,14 +1142,16 @@ test('query-time retention recognizes scheduled transfers between pathway-linked
   const result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
   assert.ok(result.candidateGraphTruncated, 'the fixture exercises a bounded graph');
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
-    === `access-trip,${targetTripId},egress-trip`),
-  'the connecting trip survives because GTFS pathways connect the distinct platform stop IDs');
+    === `${providerId}:access-trip,${providerId}:${targetTripId},${providerId}:egress-trip`),
+  'the connecting trip survives after the provider merge prefixes both source stop and pathway IDs');
 });
 
 test('query-time retention respects directed GTFS pathways between platforms', () => {
-  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips({
+  const { timetable: sourceFeed, targetTripId } = timeFeasibleChainWithHashCompetingTrips({
     pathwayPlatformTransfers: true, reverseFirstPathway: true,
   });
+  const providerId = 'pathway-provider';
+  const timetable = mergeGtfsTimetables([{ providerId, providerName: 'Pathway provider', providerCity: 'Львів', feed: sourceFeed }])!;
   const searchInput = {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
     origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
@@ -1156,7 +1160,7 @@ test('query-time retention respects directed GTFS pathways between platforms', (
   const result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
   assert.ok(result.candidateGraphTruncated, 'the fixture exercises a bounded graph');
   assert.ok(!result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
-    === `access-trip,${targetTripId},egress-trip`),
+    === `${providerId}:access-trip,${providerId}:${targetTripId},${providerId}:egress-trip`),
   'a reverse-only pathway cannot connect the access arrival to the next platform');
 });
 
