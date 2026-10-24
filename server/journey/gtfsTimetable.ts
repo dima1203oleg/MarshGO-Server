@@ -442,7 +442,7 @@ type RetainedGtfsSegment = {
   realtimeUpdatedAt?: Date;
   originZoneId?: string;
   destinationZoneId?: string;
-  sampleRank?: [number, number, number, number, number];
+  sampleRank?: [number, number, number, number, number, number];
   sampleKey?: string;
 };
 type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
@@ -2104,23 +2104,31 @@ export function findGtfsItinerariesWithStats(
   };
   const emptyTraveledZoneIds: string[] = [];
   const compareTripSegments = (left: RetainedGtfsSegment, right: RetainedGtfsSegment) => {
-    const rank = (candidate: RetainedGtfsSegment): [number, number, number, number, number] => {
+    const rank = (candidate: RetainedGtfsSegment): [number, number, number, number, number, number] => {
       if (candidate.sampleRank) return candidate.sampleRank;
       const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
       const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
       const accessSeconds = Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25);
       const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
         >= input.earliestDeparture.getTime() + accessSeconds * 1000;
+      // Within a retained route budget, preserve stop-pair edges that are
+      // proven to join both query-reachable sides before preferring generic
+      // high-connectivity interchanges. A dense feed can otherwise crowd out
+      // the one scheduled edge that completes a feasible itinerary.
+      const joinsQueryReachableSides = hasPriorEvent(candidate, minimumTransferBufferSeconds)
+        && hasNextEvent(candidate, minimumTransferBufferSeconds);
       const duration = candidate.arrivalAt.getTime() - candidate.departureAt.getTime();
-      const rankValue: [number, number, number, number, number] = canCatchOrigin && endsAtDestination
-        ? [0, candidate.originContext.distanceToOriginStopMeters + candidate.destinationContext.distanceFromDestinationStopMeters,
+      const rankValue: [number, number, number, number, number, number] = canCatchOrigin && endsAtDestination
+        ? [0, 0, candidate.originContext.distanceToOriginStopMeters + candidate.destinationContext.distanceFromDestinationStopMeters,
           duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
         : canCatchOrigin
-          ? [1, candidate.originContext.distanceToOriginStopMeters, candidate.departureAt.getTime(), duration, candidate.arrivalAt.getTime()]
+          ? [1, 0, candidate.originContext.distanceToOriginStopMeters, duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
           : endsAtDestination
-            ? [2, candidate.destinationContext.distanceFromDestinationStopMeters, candidate.arrivalAt.getTime(), duration, candidate.departureAt.getTime()]
-            : [3, 0, duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()];
-      if (rankValue[0] === 3) {
+            ? [2, 0, candidate.destinationContext.distanceFromDestinationStopMeters, duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
+            : joinsQueryReachableSides
+              ? [3, 0, 0, duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
+              : [3, 1, 0, duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()];
+      if (rankValue[0] === 3 && !joinsQueryReachableSides) {
         const connectedRoutes = new Set<string>();
         for (const stopId of [...candidate.originContext.transferNodeIds, candidate.destinationContext.details.id,
           ...candidate.destinationContext.transferNodeIds]) {
@@ -2131,7 +2139,7 @@ export function findGtfsItinerariesWithStats(
           }
         }
         connectedRoutes.delete(candidate.routeId);
-        rankValue[1] = -connectedRoutes.size;
+        rankValue[2] = -connectedRoutes.size;
       }
       candidate.sampleRank = rankValue;
       candidate.sampleKey = `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
