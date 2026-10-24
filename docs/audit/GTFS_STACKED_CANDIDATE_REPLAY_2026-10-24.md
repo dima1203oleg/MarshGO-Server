@@ -26,6 +26,18 @@
 - `git diff --check`: PASS before commit.
 - The current branch's hosted CI and database integration are pending; prior PR #34 CI applies to its exact SHA, not this cherry-picked head.
 
+## Lazy event-search investigation on the same frozen query
+
+The current bounded production graph and the opt-in test-only lazy event-label search were compared using the same GTFS archive and the production-selected 27 origin stops / 25 destination stops. The test oracle now calls the production `materializeTripInstanceLegs` projection for scheduled stop-pair eligibility, while retaining an independent transfer traversal. This avoids silently comparing different trip-instance/stop-pair rules. The diagnostic script is `scripts/replay-lviv-lazy-event-search.mts` and requires the external archive path plus its expected SHA.
+
+| Expanded-label cap | Expanded labels | Materialized boarding expansions | Projected legs | Found paths | Unique trip chains | Unique route chains | Truncated | Event-search time | Peak reported RSS |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: | ---: |
+| 10,000 | 10,000 | 2,025 | 35,754 | 166 | 16 | 3 | yes | 5,402 ms | 568 MB |
+| 20,000 | 20,000 | 2,025 | 35,754 | 344 | 34 | 3 | yes | 550 MB |
+| 100,000 | 100,000 | 5,221 | 84,478 | 1,904 | 88 | 6 | yes | 5,912 ms | 421 MB |
+
+All three runs returned `searchTruncated=true`; this traversal is not complete and is not suitable to replace production search as-is. The result counts grow as the expansion cap grows, and the 100k run still reports truncation. The event-search timing excludes the production search, and one-run RSS is noisy; neither is a load benchmark. The production result remained on the previously recorded deterministic hash for the prior replay. These results support a bounded, query-directed algorithm with dominance and explicit completeness accounting; simply raising the label cap does not establish exhaustive routing.
+
 ## Decision and remaining work
 
-The stacked code preserves separate BALANCED and FASTEST/CHEAPEST choices on the frozen query and is deterministic, but dense-feed search remains incomplete because graph and search truncation are explicit. Do not describe this as complete routing or production acceptance. Continue investigating bounded graph retention and query-directed expansion; compare all three strategy winners, chain recall, runtime and memory against frozen multi-OD inputs before changing the router. No live provider, staging, production or physical-device test was part of this replay.
+The stacked code preserves separate BALANCED and FASTEST/CHEAPEST choices on the frozen query and is deterministic, but dense-feed search remains incomplete because graph and search truncation are explicit. The test-only event traversal also remains incomplete at 100k labels. Do not describe this as complete routing or production acceptance. Continue investigating bounded graph retention and query-directed expansion; compare all three strategy winners, chain recall, runtime and memory against frozen multi-OD inputs before changing the router. No live provider, staging, production or physical-device test was part of this replay.

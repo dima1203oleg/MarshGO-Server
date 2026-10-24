@@ -1208,7 +1208,7 @@ function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex
 
 type DatedTripStop = { arrivalAt: Date; departureAt: Date; skipped: boolean; updated: boolean };
 
-type EligibleTripInstanceStopEvent = {
+export type EligibleTripInstanceStopEvent = {
   stopIndex: number;
   stopTime: NonNullable<GtfsTimetableFeed['stopTimes'] extends Map<string, (infer T)[]> ? T : never>;
   scheduledArrivalAt: Date | null;
@@ -1221,7 +1221,7 @@ type EligibleTripInstanceStopEvent = {
   canAlight: boolean;
 };
 
-type EligibleTripInstanceEvents = {
+export type EligibleTripInstanceEvents = {
   events: EligibleTripInstanceStopEvent[];
   /** Full trip-stop realtime vector is kept for exact segment-level update attribution. */
   datedStops?: DatedTripStop[];
@@ -1277,6 +1277,55 @@ export function eligibleTripInstanceStopEvents(
     ...(dated ? { datedStops: dated.stops } : {}),
     ...(dated?.update ? { realtimeUpdate: dated.update } : {}),
   };
+}
+
+export type GtfsTripLegProjection =
+  | { kind: 'leg'; fromCursor: number; toCursor: number; fromEvent: EligibleTripInstanceStopEvent; toEvent: EligibleTripInstanceStopEvent }
+  | { kind: 'omitted-beyond-window' };
+
+/** Shared, deterministic stop-pair eligibility projection for graph and event searches. */
+export function* materializeTripInstanceLegs(
+  events: readonly EligibleTripInstanceStopEvent[],
+  options: {
+    maximumTransfers: number;
+    earliestDeparture: Date;
+    journeyEnd: Date;
+    destinationStopIds: ReadonlySet<string>;
+    canBelongToDirectOnlyJourney: (fromStopId: string, toStopId: string) => boolean;
+    boardingStopIndex?: number;
+  },
+): Generator<GtfsTripLegProjection> {
+  const requestedCursor = options.boardingStopIndex === undefined
+    ? -1 : events.findIndex((event) => event.stopIndex === options.boardingStopIndex);
+  const firstCursor = options.boardingStopIndex === undefined ? 0 : requestedCursor;
+  const lastCursor = options.boardingStopIndex === undefined ? events.length - 2 : requestedCursor;
+  for (let fromCursor = firstCursor; fromCursor >= 0 && fromCursor <= lastCursor; fromCursor++) {
+    const fromEvent = events[fromCursor]!;
+    const from = fromEvent.stopTime;
+    const departureAt = fromEvent.departureAt;
+    if (!fromEvent.canBoard || !fromEvent.scheduledDepartureAt || !departureAt
+      || departureAt < options.earliestDeparture || departureAt > options.journeyEnd) continue;
+    for (let toCursor = fromCursor + 1; toCursor < events.length; toCursor++) {
+      const toEvent = events[toCursor]!;
+      const to = toEvent.stopTime;
+      if (options.maximumTransfers > 0 && toCursor > fromCursor + 20
+        && !options.destinationStopIds.has(to.stopId)) {
+        const omittedArrivalAt = toEvent.scheduledArrivalAt;
+        if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
+          && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
+          && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
+          yield { kind: 'omitted-beyond-window' };
+        }
+        continue;
+      }
+      if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds
+        || !toEvent.scheduledArrivalAt || !toEvent.arrivalAt
+        || toEvent.arrivalAt < departureAt || toEvent.arrivalAt > options.journeyEnd
+        || toEvent.arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000
+        || !options.canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
+      yield { kind: 'leg', fromCursor, toCursor, fromEvent, toEvent };
+    }
+  }
 }
 
 function stopCallsForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number, serviceDate: string, datedStops?: DatedTripStop[]) {
@@ -2128,40 +2177,27 @@ export function findGtfsItinerariesWithStats(
       // this trip instance so a citywide set of every candidate key is not
       // retained alongside the graph.
       const seenTripSegments = new Set<string>();
-      for (let fromCursor = 0; fromCursor < tripEvents.events.length - 1; fromCursor++) {
-        const fromEvent = tripEvents.events[fromCursor];
+      for (const projection of materializeTripInstanceLegs(tripEvents.events, {
+        maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
+        canBelongToDirectOnlyJourney,
+      })) {
+        if (projection.kind === 'omitted-beyond-window') {
+          // Preserve the partial-search signal for omitted, potentially useful legs.
+          segmentGraphTruncated = true;
+          continue;
+        }
+        const { fromCursor, toCursor, fromEvent, toEvent } = projection;
         const fromIndex = fromEvent.stopIndex;
+        const toIndex = toEvent.stopIndex;
         const from = fromEvent.stopTime;
+        const to = toEvent.stopTime;
         const fromContext = eligibleContexts[fromCursor];
-        if (!fromContext) continue;
-        if (!fromEvent.canBoard) continue;
+        const toContext = eligibleContexts[toCursor];
         const scheduledDepartureAt = fromEvent.scheduledDepartureAt;
+        const scheduledArrivalAt = toEvent.scheduledArrivalAt;
         const departureAt = fromEvent.departureAt;
-        if (!scheduledDepartureAt || !departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
-        for (let toCursor = fromCursor + 1; toCursor < tripEvents.events.length; toCursor++) {
-          const toEvent = tripEvents.events[toCursor];
-          const toIndex = toEvent.stopIndex;
-          const to = toEvent.stopTime;
-          const toContext = eligibleContexts[toCursor];
-          if (!toContext) continue;
-          if (maximumTransfers > 0 && toCursor > fromCursor + 20 && !destinationStopIds.has(to.stopId)) {
-            const omittedArrivalAt = toEvent.scheduledArrivalAt;
-            if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
-              && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= journeyEnd
-              && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
-              // The bounded segment graph omitted a schedule-valid, potentially
-              // connectable transfer segment. Keep the partial-search signal
-              // honest even if no sampled itinerary later happens to use it.
-              segmentGraphTruncated = true;
-            }
-            continue;
-          }
-          if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds) continue;
-          const scheduledArrivalAt = toEvent.scheduledArrivalAt;
-          const arrivalAt = toEvent.arrivalAt;
-          if (!scheduledArrivalAt || !arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
-            || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
-          if (!canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
+        const arrivalAt = toEvent.arrivalAt;
+        if (!fromContext || !toContext || !scheduledDepartureAt || !scheduledArrivalAt || !departureAt || !arrivalAt) continue;
           // A duplicate loop-route segment is defined by the same stops and
           // departure instant. Avoid formatting an ISO timestamp for every
           // candidate edge; the numeric epoch value is an identical key with
@@ -2197,7 +2233,6 @@ export function findGtfsItinerariesWithStats(
             tripCandidates = [];
           }
           boundedTripCandidates.consider(candidate);
-        }
       }
       if (boundedTripCandidates) {
         tripCandidates = boundedTripCandidates.toSortedArray();

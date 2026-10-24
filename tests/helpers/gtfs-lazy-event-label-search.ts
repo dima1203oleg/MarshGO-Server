@@ -2,6 +2,7 @@ import { calculateGtfsItineraryFare } from '../../server/journey/gtfsFares';
 import { calculateCityTariffFare } from '../../server/mobility/transportTariffs';
 import { scoreJourneys } from '../../server/journey/scoring';
 import { createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findGtfsItinerariesWithStats,
+  materializeTripInstanceLegs,
   rankGtfsItinerariesForCandidateSampling } from '../../server/journey/gtfsTimetable';
 import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, GtfsItinerarySearchInput,
   GtfsItinerarySearchResult, GtfsTimetableFeed } from '../../server/journey/gtfsTimetable';
@@ -46,6 +47,7 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
   const transferContext = createGtfsTransferDecisionContext({ feed,
     transferRadius: options.transferRadiusMeters,
     minimumTransferBufferSeconds: options.minimumTransferBufferSeconds });
+  const allStopIds = new Set(feed.stops.keys());
   const projections = new Map<string, EventProjection>();
   const boardingsByStop = new Map<string, BoardingCall[]>();
   const boardingByNode = new Map<string, BoardingCall[]>();
@@ -158,13 +160,23 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
     const trip = feed.trips.get(call.tripId), stopTimes = feed.stopTimes.get(call.tripId);
     const route = trip && feed.routes.get(trip.routeId);
     if (!projection || !trip || !stopTimes || !route) { legCache.set(cacheKey, []); return []; }
-    const from = projection.events[call.stopIndex];
-    if (!from?.canBoard || !from.departureAt || !from.scheduledDepartureAt) { legCache.set(cacheKey, []); return []; }
     const legs: LazyLeg[] = [];
-    for (let toIndex = call.stopIndex + 1; toIndex < projection.events.length; toIndex++) {
-      const to = projection.events[toIndex]!;
-      if (!to.canAlight || !to.arrivalAt || !to.scheduledArrivalAt || to.arrivalAt < from.departureAt
-        || to.arrivalAt.getTime() > journeyEnd) continue;
+    for (const legProjection of materializeTripInstanceLegs(projection.events, {
+      maximumTransfers: options.maximumTransfers,
+      earliestDeparture: options.earliestDeparture,
+      journeyEnd: new Date(journeyEnd),
+      // The event-label oracle intentionally considers every scheduled stop
+      // as a possible endpoint; exact walk, transfer and request bounds still
+      // decide whether a resulting path is feasible.
+      destinationStopIds: allStopIds,
+      canBelongToDirectOnlyJourney: () => true,
+      boardingStopIndex: call.stopIndex,
+    })) {
+      if (legProjection.kind !== 'leg') continue;
+      const from = legProjection.fromEvent;
+      const to = legProjection.toEvent;
+      if (!from.scheduledDepartureAt || !to.scheduledArrivalAt || !from.departureAt || !to.arrivalAt) continue;
+      const toIndex = to.stopIndex;
       const origin = from.stopTime, destination = to.stopTime;
       const originStop = feed.stops.get(origin.stopId), destinationStop = feed.stops.get(destination.stopId);
       const originCoordinates = origin.sourceStopCoordinates ?? (originStop ? [originStop.lon, originStop.lat] as [number, number] : undefined);
