@@ -24,7 +24,7 @@
 - ESLint: PASS.
 - `npm audit --audit-level=high`: 0 vulnerabilities.
 - `git diff --check`: PASS before commit.
-- The current branch's hosted CI and database integration are pending; prior PR #34 CI applies to its exact SHA, not this cherry-picked head.
+- Server CI completed successfully for PR #38 at head `cae92f4383e09838c5b91ba908e033df06dacf91`: dependency audit, lint, typecheck, unit suite, clean database migrations, integration suite, production API image build, and local PostGIS/Redis image smoke all passed. This is a GitHub CI result for the candidate branch, not a deployed production test.
 
 ## Lazy event-search investigation on the same frozen query
 
