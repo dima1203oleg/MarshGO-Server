@@ -6,7 +6,7 @@ import type { JourneyOption } from './types';
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
 import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
-import { BoundedBestK, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
+import { BoundedBestK, redistributeBoundedCandidates, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
 import { scoreJourneys } from './scoring';
 import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
@@ -336,7 +336,7 @@ export function createGtfsTransferDecisionContext(context: {
     pathwayReachableCache.set(fromStopId, reachable);
     return reachable;
   };
-  return { decide, decideBoarding, transferRuleFor, pathwayNodes, reachablePathwayNodes };
+  return { decide, decideBoarding, transferRuleFor, pathwayNodes, reachablePathwayNodes, pathwayConnection };
 }
 
 interface SearchInput {
@@ -1585,6 +1585,8 @@ export function findGtfsItinerariesWithStats(
     || maximumGraphSegmentsPerRoute > MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
+  const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
+  const { decide: transferDecision, transferRuleFor, pathwayNodes, reachablePathwayNodes, pathwayConnection } = transferDecisionContext;
 
   let stopSelectionTruncated = false;
   const closestStops = (point: [number, number], radius: number) => {
@@ -1851,6 +1853,8 @@ export function findGtfsItinerariesWithStats(
     tripId: string;
     routeId: string;
     stopId: string;
+    canonicalStopId: string;
+    pathwayStopId: string;
     nodeIds: string[];
   };
   const originReachableArrivalsByNode = new Map<string, QueryReachabilityEvent[]>();
@@ -1881,15 +1885,17 @@ export function findGtfsItinerariesWithStats(
     const nodeIds = retentionTransferNodes(entry);
     const stopId = entry.sourceStopId ?? entry.stopId;
     const atMs = at.getTime();
-    const event = { at: atMs, tripId, routeId, stopId, nodeIds };
+    const event = { at: atMs, tripId, routeId, stopId, canonicalStopId: entry.stopId, pathwayStopId: stopId, nodeIds };
     const eventKey = `${tripId}\u0000${stopId}\u0000${atMs}`;
-    const seen = seenEventsByNode.get(stopId) ?? new Set<string>();
-    if (seen.has(eventKey)) return;
-    seen.add(eventKey);
-    seenEventsByNode.set(stopId, seen);
-    const values = events.get(stopId) ?? [];
-    values.push(event);
-    events.set(stopId, values);
+    for (const nodeId of new Set([stopId, entry.stopId])) {
+      const seen = seenEventsByNode.get(nodeId) ?? new Set<string>();
+      if (seen.has(eventKey)) continue;
+      seen.add(eventKey);
+      seenEventsByNode.set(nodeId, seen);
+      const values = events.get(nodeId) ?? [];
+      values.push(event);
+      events.set(nodeId, values);
+    }
   };
   const retentionRuleFor = (
     fromNodeIds: readonly string[], toNodeIds: readonly string[],
@@ -1992,24 +1998,44 @@ export function findGtfsItinerariesWithStats(
       || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId))] as const));
   const originRetentionEvents = sortedRetentionEvents(originReachableArrivalsByNode);
   const destinationRetentionEvents = sortedRetentionEvents(destinationReachableDeparturesByNode);
-  const retentionNodesForSegment = (stopId: string) => [stopId];
+  const bestPathwayMeasure = (fromStopIds: readonly string[], toStopIds: readonly string[]) => fromStopIds
+    .flatMap((fromStopId) => toStopIds.map((toStopId) => pathwayConnection(fromStopId, toStopId)))
+    .filter((measure): measure is GtfsTransferMeasure => Boolean(measure) && typeof measure === 'object')
+    .sort((left, right) => left.walkingSeconds - right.walkingSeconds || left.walkingMeters - right.walkingMeters)[0] ?? false;
+  // Index pathway-connected arrival events by every directed platform they can
+  // reach, so a different platform stop ID can participate in the bounded
+  // retention hint without scanning the full event set per candidate segment.
+  const originRetentionEventsByReachableStop = new Map<string, QueryReachabilityEvent[]>();
+  const indexedOriginEvents = new Set<QueryReachabilityEvent>();
+  for (const events of originRetentionEvents.values()) for (const event of events) {
+    if (indexedOriginEvents.has(event)) continue;
+    indexedOriginEvents.add(event);
+    for (const stopId of new Set([event.canonicalStopId, ...reachablePathwayNodes(event.pathwayStopId)])) {
+      const reachableEvents = originRetentionEventsByReachableStop.get(stopId) ?? [];
+      reachableEvents.push(event);
+      originRetentionEventsByReachableStop.set(stopId, reachableEvents);
+    }
+  }
+  for (const events of originRetentionEventsByReachableStop.values()) events.sort((a, b) => a.at - b.at
+    || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId));
   const hasPriorEvent = (segment: Pick<RetainedGtfsSegment,
     'departureAt' | 'originContext' | 'tripId' | 'routeId'>, minimumGapSeconds: number) => {
     const latestAllowed = segment.departureAt.getTime() - minimumGapSeconds * 1000;
-    const segmentNodes = retentionNodesForSegment(segment.originContext.details.id);
+    const segmentNodes = [...new Set([segment.originContext.details.id, ...segment.originContext.transferNodeIds])];
     const minimumGapForEvent = (event: QueryReachabilityEvent) => {
       const { rule, ambiguous } = retentionRuleFor(event.nodeIds, segment.originContext.transferNodeIds,
         event.tripId, segment.tripId, event.routeId, segment.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
-      // A shared parent station is not proof that a platform-to-platform
-      // transfer is walkable; only exact stop identity promotes this hint.
-      if (event.stopId !== segment.originContext.details.id) return null;
-      if (rule?.transferType === 4) return 0;
-      return Math.max(minimumGapSeconds,
+      const pathway = event.canonicalStopId === segment.originContext.details.id
+        ? { walkingMeters: 0, walkingSeconds: 0 }
+        : bestPathwayMeasure([event.pathwayStopId], segment.originContext.transferNodeIds);
+      if (!pathway || pathway.walkingMeters > transferRadius) return null;
+      if (rule?.transferType === 4 && event.canonicalStopId === segment.originContext.details.id) return 0;
+      return Math.max(minimumGapSeconds, pathway ? pathway.walkingSeconds : 0,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
     };
     for (const nodeId of segmentNodes) {
-      const events = originRetentionEvents.get(nodeId);
+      const events = originRetentionEventsByReachableStop.get(nodeId);
       if (!events?.length) continue;
       let low = 0, high = events.length;
       while (low < high) {
@@ -2030,32 +2056,35 @@ export function findGtfsItinerariesWithStats(
   const hasNextEvent = (segment: Pick<RetainedGtfsSegment,
     'arrivalAt' | 'destinationContext' | 'tripId' | 'routeId'>, minimumGapSeconds: number) => {
     const earliestAllowed = segment.arrivalAt.getTime() + minimumGapSeconds * 1000;
-    const segmentNodes = retentionNodesForSegment(segment.destinationContext.details.id);
     const minimumGapForEvent = (event: QueryReachabilityEvent) => {
       const { rule, ambiguous } = retentionRuleFor(segment.destinationContext.transferNodeIds, event.nodeIds,
         segment.tripId, event.tripId, segment.routeId, event.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
-      if (event.stopId !== segment.destinationContext.details.id) return null;
-      if (rule?.transferType === 4) return 0;
-      return Math.max(minimumGapSeconds,
+      const pathway = segment.destinationContext.details.id === event.canonicalStopId
+        ? { walkingMeters: 0, walkingSeconds: 0 }
+        : bestPathwayMeasure(segment.destinationContext.transferNodeIds, [event.pathwayStopId]);
+      if (!pathway || pathway.walkingMeters > transferRadius) return null;
+      if (rule?.transferType === 4 && event.canonicalStopId === segment.destinationContext.details.id) return 0;
+      return Math.max(minimumGapSeconds, pathway ? pathway.walkingSeconds : 0,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
     };
-    for (const nodeId of segmentNodes) {
-      const events = destinationRetentionEvents.get(nodeId);
-      if (!events?.length) continue;
-      let low = 0, high = events.length;
-      while (low < high) {
-        const middle = (low + high) >>> 1;
-        if (events[middle]!.at < earliestAllowed) low = middle + 1;
-        else high = middle;
-      }
-      for (let index = low; index < events.length; index++) {
-        const event = events[index]!;
-        const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
-        if (availableSeconds > maximumWaitSeconds) break;
-        const requiredSeconds = minimumGapForEvent(event);
-        if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
-      }
+    const reachableDestinationStops = new Set([segment.destinationContext.details.id,
+      ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
+    const events = [...new Set([...reachableDestinationStops]
+      .flatMap((stopId) => destinationRetentionEvents.get(stopId) ?? []))]
+      .sort((a, b) => a.at - b.at || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId));
+    let low = 0, high = events.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (events[middle]!.at < earliestAllowed) low = middle + 1;
+      else high = middle;
+    }
+    for (let index = low; index < events.length; index++) {
+      const event = events[index]!;
+      const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
+      if (availableSeconds > maximumWaitSeconds) break;
+      const requiredSeconds = minimumGapForEvent(event);
+      if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
     }
     return false;
   };
@@ -2308,6 +2337,15 @@ export function findGtfsItinerariesWithStats(
       .slice(0, remaining);
     selectedSegmentsByRoute.set(routeId, [...selected, ...fill]);
   }
+  const redistributed = redistributeBoundedCandidates(
+    selectedSegmentsByRoute,
+    new Map([...overflowSegmentsByRoute].map(([routeId, reservoir]) => [routeId, reservoir.toSortedArray()])),
+    maximumGraphSegments,
+    maximumGraphSegmentsPerRoute,
+    (candidate) => `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`,
+  );
+  selectedSegmentsByRoute.clear();
+  for (const [routeId, routeSegments] of redistributed.routes) selectedSegmentsByRoute.set(routeId, routeSegments);
   const segments = [...selectedSegmentsByRoute.values()].flatMap((routeSegments) => routeSegments.map((candidate) => {
     const route = feed.routes.get(candidate.routeId)!;
     const trip = feed.trips.get(candidate.tripId)!;
@@ -2382,6 +2420,7 @@ export function findGtfsItinerariesWithStats(
     graphRoutesUnderfilled, graphRouteBudgetMaxUnused,
     overflowReservoirRetained: overflowReservoirSizes.reduce((sum, size) => sum + size, 0),
     overflowReservoirsAtCap: overflowReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_SEGMENTS).length,
+    overflowSegmentsRedistributed: redistributed.added,
     ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
     globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
@@ -2441,9 +2480,6 @@ export function findGtfsItinerariesWithStats(
   const transferCandidateReachableCache = new Map<string, GtfsDirectJourney[]>();
 
   const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
-
-  const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
-  const { decide: transferDecision, transferRuleFor, pathwayNodes, reachablePathwayNodes } = transferDecisionContext;
 
   const transferCandidatePool = (previous: GtfsDirectJourney) => {
     const stateKey = transferCandidateKey(previous);
