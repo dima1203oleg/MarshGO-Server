@@ -76,7 +76,7 @@ function connectingFeed(options: { secondRouteType?: string; secondDeparture?: s
   return parseGtfsTimetable(files);
 }
 
-function timeFeasibleChainWithHashCompetingTrips() {
+function timeFeasibleChainWithHashCompetingTrips(options: { denseIrrelevantInterchange?: boolean } = {}) {
   const timetable = feed();
   timetable.routes.clear();
   timetable.trips.clear();
@@ -120,6 +120,36 @@ function timeFeasibleChainWithHashCompetingTrips() {
   // the access and egress schedules. The desired trip can connect both.
   addTrip(decoyTripId, 'middle', ['hub-a', 'hub-b'], [8 * 3600 + 5 * 60, 8 * 3600 + 38 * 60]);
   addTrip(targetTripId, 'middle', ['hub-a', 'hub-b'], [8 * 3600 + 18 * 60, 8 * 3600 + 25 * 60]);
+  if (options.denseIrrelevantInterchange) {
+    for (const [stopId, name, lon, lat] of [
+      ['dense-a', 'Dense A', 24.0260, 49.8460], ['dense-b', 'Dense B', 24.0265, 49.8465],
+    ] as const) timetable.stops.set(stopId, { id: stopId, name, lon, lat });
+    timetable.stopTimes.set(targetTripId, ['hub-a', 'dense-a', 'dense-b', 'hub-b'].map((stopId, index) => ({
+      stopId, sequence: index + 1,
+      arrivalSeconds: [8 * 3600 + 18 * 60, 8 * 3600 + 20 * 60, 8 * 3600 + 22 * 60, 8 * 3600 + 25 * 60][index]!,
+      departureSeconds: [8 * 3600 + 18 * 60, 8 * 3600 + 20 * 60, 8 * 3600 + 22 * 60, 8 * 3600 + 25 * 60][index]!,
+      pickupType: 0, dropOffType: 0,
+    })));
+    // These routes inflate generic interchange connectivity, but their trips
+    // run outside the requested journey window and cannot form valid transfers.
+    for (const [stopIndex, stopId] of ['dense-a', 'dense-b'].entries()) {
+      for (let routeIndex = 0; routeIndex < 4; routeIndex++) {
+        const routeId = `irrelevant-${stopIndex}-${routeIndex}`;
+        const tripId = `${routeId}-trip`;
+        timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+        timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Outside search window' });
+        timetable.stopTimes.set(tripId, [
+          { stopId, sequence: 1, arrivalSeconds: 12 * 3600, departureSeconds: 12 * 3600, pickupType: 0, dropOffType: 0 },
+          { stopId: 'destination', sequence: 2, arrivalSeconds: 12 * 3600 + 10 * 60, departureSeconds: 12 * 3600 + 10 * 60, pickupType: 0, dropOffType: 0 },
+        ]);
+      }
+    }
+    timetable.stopTimesByStop = new Map();
+    for (const [tripId, entries] of timetable.stopTimes) entries.forEach((entry, index) => {
+      const atStop = timetable.stopTimesByStop.get(entry.stopId) ?? [];
+      atStop.push({ tripId, index }); timetable.stopTimesByStop.set(entry.stopId, atStop);
+    });
+  }
   return {
     timetable, targetTripId, decoyTripId,
     targetHash: retentionHash(targetKey),
@@ -1057,6 +1087,20 @@ test('query-time retention keeps a feasible multi-leg chain under an injected gr
   const skippedResult = findGtfsItinerariesWithStats(skipped, searchInput, graphLimits);
   assert.ok(!skippedResult.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === targetTripId)),
     'skipped boarding stops are excluded from temporal retention and returned itineraries');
+});
+
+test('query-time retention keeps a scheduled connector ahead of dense irrelevant interchanges', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips({ denseIrrelevantInterchange: true });
+  const searchInput = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+  };
+  const result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
+  assert.ok(result.candidateGraphTruncated, 'the fixture exercises a bounded dense graph');
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `access-trip,${targetTripId},egress-trip`),
+  'the exact scheduled connector survives even when irrelevant stops have more connected routes');
 });
 
 test('query-time retention does not let a temporally matched but forbidden trip crowd out a feasible chain', () => {

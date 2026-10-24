@@ -19,10 +19,20 @@ if (expectedSha256 && archiveSha256 !== expectedSha256) {
 const files = Object.fromEntries(Object.entries(unzipSync(archive))
   .filter(([name]) => !name.endsWith('/')).map(([name, bytes]) => [name, bytes]));
 const feed = parseGtfsTimetable(files, new Date('2026-10-22T08:00:00.000Z'));
+const parseCoordinates = (value: string | undefined, fallback: [number, number]) => {
+  if (!value) return fallback;
+  const coordinates = value.split(',').map(Number);
+  if (coordinates.length !== 2 || coordinates.some((coordinate) => !Number.isFinite(coordinate))) {
+    throw new Error('GTFS_REPLAY_ORIGIN and GTFS_REPLAY_DESTINATION must be lon,lat pairs.');
+  }
+  return coordinates as [number, number];
+};
+const origin = parseCoordinates(process.env.GTFS_REPLAY_ORIGIN, [24.008217, 49.864885]);
+const destination = parseCoordinates(process.env.GTFS_REPLAY_DESTINATION, [24.0175835, 49.8013165]);
 const startedAt = performance.now();
 const result = findGtfsItinerariesWithStats(feed, {
   providerId: 'lviv-frozen-replay', providerName: 'Lviv frozen GTFS', providerCity: 'Львів',
-  origin: [24.008217, 49.864885], destination: [24.0175835, 49.8013165],
+  origin, destination,
   earliestDeparture: new Date('2026-10-23T05:00:00.000Z'),
   latestDeparture: new Date('2026-10-23T05:30:00.000Z'),
   maximumJourneySeconds: 6 * 60 * 60, maximumTransfers: 2,
@@ -39,6 +49,8 @@ const signature = (item: typeof result.itineraries[number] | undefined) => item?
 const details = result as typeof result & Record<string, unknown>;
 console.log(JSON.stringify({
   iteration: process.env.BENCH_ITER ?? null,
+  origin,
+  destination,
   archiveSha256,
   runtime: process.version,
   searchMs: Number((performance.now() - startedAt).toFixed(2)),
