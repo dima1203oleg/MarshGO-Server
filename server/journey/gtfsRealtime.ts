@@ -4,7 +4,9 @@ import { fetchBinary } from '../mobility/safeFetch';
 const { transit_realtime } = bindings;
 type FeedMessage = InstanceType<typeof bindings.transit_realtime.FeedMessage>;
 const MAX_FEED_BYTES = 10 * 1024 * 1024;
-const MAX_FEED_AGE_MS = 5 * 60_000;
+// GTFS Realtime best practice expects Trip Updates to be no more than 90s old.
+// Keep stale predictions out of planning; the scheduled timetable remains the fallback.
+const MAX_FEED_AGE_MS = 90_000;
 const MAX_FUTURE_SKEW_MS = 30_000;
 const CACHE_TTL_MS = 15_000;
 
