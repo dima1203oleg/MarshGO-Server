@@ -86,3 +86,54 @@ export function retainBoundedTripGroup<T>(retained: BoundedTripGroup<T>[], candi
   retained.splice(low, 0, candidate);
   return { segments: segmentsAfterEviction + candidate.segments.length, retained: true };
 }
+
+/** Redistribute only otherwise-unused graph slots across routes with sampled overflow. */
+export function redistributeBoundedCandidates<T>(
+  retainedByRoute: ReadonlyMap<string, readonly T[]>,
+  overflowByRoute: ReadonlyMap<string, readonly T[]>,
+  totalLimit: number,
+  perRouteLimit: number,
+  candidateKey: (candidate: T) => string,
+): { routes: Map<string, T[]>; added: number } {
+  if (!Number.isSafeInteger(totalLimit) || totalLimit < 0
+    || !Number.isSafeInteger(perRouteLimit) || perRouteLimit < 1) {
+    throw new TypeError('redistribution bounds are invalid');
+  }
+  const routes = new Map([...retainedByRoute].map(([routeId, candidates]) => [routeId, [...candidates]]));
+  const keysByRoute = new Map([...routes].map(([routeId, candidates]) =>
+    [routeId, new Set(candidates.map(candidateKey))]));
+  const retainedCount = [...routes.values()].reduce((sum, candidates) => sum + candidates.length, 0);
+  let remaining = Math.max(0, totalLimit - retainedCount);
+  let added = 0;
+  const routeIds = [...overflowByRoute.keys()].sort();
+  const candidatesByRoute = new Map(routeIds.map((routeId) => [routeId, overflowByRoute.get(routeId) ?? []]));
+  const offsets = new Map(routeIds.map((routeId) => [routeId, 0]));
+
+  // Round-robin makes the bounded slack useful across lines rather than letting
+  // a single high-volume route consume it all. Input arrays must be ranked
+  // deterministically by the caller.
+  while (remaining > 0) {
+    let progressed = false;
+    for (const routeId of routeIds) {
+      if (remaining <= 0) break;
+      const route = routes.get(routeId) ?? [];
+      if (route.length >= perRouteLimit) continue;
+      const candidates = candidatesByRoute.get(routeId) ?? [];
+      let offset = offsets.get(routeId) ?? 0;
+      const keys = keysByRoute.get(routeId) ?? new Set<string>();
+      while (offset < candidates.length && keys.has(candidateKey(candidates[offset]))) offset++;
+      offsets.set(routeId, offset + 1);
+      if (offset >= candidates.length) continue;
+      const candidate = candidates[offset];
+      route.push(candidate);
+      routes.set(routeId, route);
+      keys.add(candidateKey(candidate));
+      keysByRoute.set(routeId, keys);
+      remaining--;
+      added++;
+      progressed = true;
+    }
+    if (!progressed) break;
+  }
+  return { routes, added };
+}

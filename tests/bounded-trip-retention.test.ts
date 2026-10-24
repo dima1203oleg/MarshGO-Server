@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BoundedBestK, retainBoundedTripGroup, type BoundedTripGroup } from '../server/journey/boundedTripRetention';
+import { BoundedBestK, redistributeBoundedCandidates, retainBoundedTripGroup, type BoundedTripGroup } from '../server/journey/boundedTripRetention';
 
 test('bounded segment sample keeps the best K candidates independent of enumeration order', () => {
   const candidates = [
@@ -61,4 +61,25 @@ test('bounded GTFS retention does not split an oversized trip to fill the remain
 
   assert.deepEqual(result, { segments: 3, retained: true });
   assert.deepEqual(retained.map((trip) => trip.key), ['trip-b']);
+});
+
+test('redistributes unused bounded graph capacity fairly and deterministically', () => {
+  const retained = new Map([['a', ['a-1']], ['b', ['b-1']]]);
+  const overflow = new Map([['b', ['b-1', 'b-2', 'b-3']], ['a', ['a-1', 'a-2', 'a-3']]]);
+  const result = redistributeBoundedCandidates(retained, overflow, 6, 3, (candidate) => candidate);
+
+  assert.deepEqual([...result.routes], [['a', ['a-1', 'a-2', 'a-3']], ['b', ['b-1', 'b-2', 'b-3']]]);
+  assert.equal(result.added, 4);
+  assert.equal([...result.routes.values()].flat().length, 6);
+});
+
+test('redistribution respects per-route and total bounds and ignores duplicate candidates', () => {
+  const result = redistributeBoundedCandidates(
+    new Map([['busy', ['keep-1', 'keep-2']], ['other', ['keep-3']]]),
+    new Map([['busy', ['keep-1', 'extra-1', 'extra-2', 'extra-3']], ['other', ['keep-3', 'extra-4']]]),
+    5, 3, (candidate) => candidate,
+  );
+
+  assert.deepEqual([...result.routes], [['busy', ['keep-1', 'keep-2', 'extra-1']], ['other', ['keep-3', 'extra-4']]]);
+  assert.equal(result.added, 2);
 });
