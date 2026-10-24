@@ -21,6 +21,10 @@ The sum of per-OD median runtimes is 6,312.56 ms baseline and 6,522.82 ms candid
 
 Every run returned 100 results and reported both `searchTruncated=true` and `candidateGraphTruncated=true`. The candidate changes the result set for all three ODs, improves chain counts only for Holosko→Sykhiv, loses a trip chain on each other OD, and changes all three selected objective candidates for Holosko→Sykhiv. Stable repeats confirm the effect is deterministic, not a one-run fluctuation.
 
+## One-query stage diagnostic
+
+A separate, single debug replay of Holosko→Sykhiv on the candidate (not part of the timing comparison) reported 415,997 estimated graph candidates against a 100,000-segment graph budget. It built 99,063 segments, leaving 937 budget slots unused; 41 of 70 routes reached their allocated cap and 31 overflow reservoirs reached their 200-segment cap. The routing traversal stopped at 122,500 search steps with 1,469 candidate results, including 1,422 two-/three-leg results, and set `searchBudgetTruncated=true` and `candidateSamplingTruncated=true`; it did not hit the 1,000,000 hard search-step ceiling. This narrows where to profile next but is one OD and one run, so it is not a population-wide performance claim.
+
 ## Decision
 
 **Reject this candidate as a routing-completeness or release fix.** The targeted dense-feed regression fixture passes and the exact transfer check remains authoritative, but the 3-OD evidence fails the promotion gate: strategy winners are not preserved for every OD, alternatives decrease on two ODs, aggregate median runtime regresses, and truncation remains. Keep the commit isolated as an experiment; do not merge it into the release line or remove truncation disclosure.
