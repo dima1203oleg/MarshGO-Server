@@ -712,6 +712,60 @@ test('keeps the nearest stop for each transport type and reports the bounded sto
   assert.equal(result.searchTruncated, true);
 });
 
+test('balances nearest endpoint stops with stops progressing toward the destination', () => {
+  const timetable = feed();
+  timetable.stops.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  const origin: [number, number] = [24.02, 49.84];
+  const destination: [number, number] = [24.03, 49.85];
+  timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: destination[0], lat: destination[1] });
+  const directionLength = Math.hypot(0.543, 0.839);
+  const east = 0.543 / directionLength;
+  const north = 0.839 / directionLength;
+  const perpendicularEast = -north;
+  const perpendicularNorth = east;
+  const coordinateOffset = (eastMeters: number, northMeters: number): [number, number] => [
+    origin[0] + eastMeters / (111_320 * Math.cos(origin[1] * Math.PI / 180)),
+    origin[1] + northMeters / 110_574,
+  ];
+  const addTrip = (stopId: string, coordinates: [number, number]) => {
+    timetable.stops.set(stopId, { id: stopId, name: stopId, lon: coordinates[0], lat: coordinates[1] });
+    const tripId = `trip-${stopId}`;
+    timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Destination' });
+    const originDeparture = stopId.startsWith('forward') ? 8 * 3600 + 25 * 60 : 8 * 3600 + 5 * 60;
+    const calls = [
+      { stopId, sequence: 1, arrivalSeconds: originDeparture, departureSeconds: originDeparture, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: 8 * 3600 + 40 * 60, departureSeconds: 8 * 3600 + 40 * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, calls);
+    timetable.stopTimesByStop.set(stopId, [{ tripId, index: 0 }]);
+    timetable.stopTimesByStop.set('destination', [...(timetable.stopTimesByStop.get('destination') ?? []), { tripId, index: 1 }]);
+  };
+
+  for (let index = 0; index < 20; index++) {
+    const lateralMeters = (index - 9.5) * 2;
+    addTrip(`near-${index}`, coordinateOffset(-500 * east + lateralMeters * perpendicularEast,
+      -500 * north + lateralMeters * perpendicularNorth));
+  }
+  for (let index = 0; index < 5; index++) {
+    addTrip(`forward-${index}`, coordinateOffset(650 * east, 650 * north));
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    providerId: 'p1', providerName: 'Test Transit', origin, destination,
+    earliestDeparture: new Date('2026-10-12T05:00:00Z'),
+    latestDeparture: new Date('2026-10-12T05:30:00Z'),
+    now: new Date('2026-10-12T04:55:00Z'), maximumJourneySeconds: 3_600,
+    maximumWaitSeconds: 3_600, maximumTransfers: 0, maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1_000,
+    limit: 100,
+  });
+  assert.ok(result.itineraries.some((journey) => journey.segments[0].originStop.id.startsWith('forward-')),
+    'a farther stop that progresses toward the destination remains among bounded endpoint candidates');
+  assert.equal(result.searchTruncated, true, 'the bounded stop selection remains explicitly incomplete');
+});
+
 test('composes across provider feeds using equivalent Kyiv timezone names and closely matched stops', () => {
   const originFeed = transferFeed({ routeType: '3', routeName: 'City bus', fromId: 'start', fromName: 'Start', fromLon: '24.0200', fromLat: '49.8400',
     toId: 'bus-hub', toName: 'Main station', toLon: '24.0250', toLat: '49.8450', departure: '08:00:00', arrival: '08:20:00', timezone: 'Europe/Kiev' });
