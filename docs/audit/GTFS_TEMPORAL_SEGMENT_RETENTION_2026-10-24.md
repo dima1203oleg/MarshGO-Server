@@ -1,5 +1,7 @@
 # GTFS query-temporal segment retention — 2026-10-24
 
+> Superseded for dense-feed promotion by the repeated three-OD paired replay in [`GTFS_TEMPORAL_RETENTION_THREE_OD_REPLAY_2026-10-24.md`](GTFS_TEMPORAL_RETENTION_THREE_OD_REPLAY_2026-10-24.md). The repeated evidence rejects this candidate as a completeness fix.
+
 ## Change under evaluation
 
 The per-route stop-pair sample now gives priority to a segment for which the query has both a schedule-feasible preceding event and following event, before using generic interchange route-count as the tie-breaker. Exact `transferDecision` remains authoritative during itinerary search. The replay harness accepts explicit `GTFS_REPLAY_ORIGIN` and `GTFS_REPLAY_DESTINATION` coordinate pairs; defaults are unchanged.
