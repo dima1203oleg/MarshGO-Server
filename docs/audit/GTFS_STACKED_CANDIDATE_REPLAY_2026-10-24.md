@@ -38,6 +38,12 @@ The current bounded production graph and the opt-in test-only lazy event-label s
 
 All three runs returned `searchTruncated=true`; this traversal is not complete and is not suitable to replace production search as-is. The result counts grow as the expansion cap grows, and the 100k run still reports truncation. The event-search timing excludes the production search, and one-run RSS is noisy; neither is a load benchmark. The production result remained on the previously recorded deterministic hash for the prior replay. These results support a bounded, query-directed algorithm with dominance and explicit completeness accounting; simply raising the label cap does not establish exhaustive routing.
 
+## Production-stage diagnostics
+
+One debug replay of the same archive/query reported: 27 origin stops, 25 destination stops, 423 corridor stops, 814 interchange stops, 15,716 trips considered, 15,541 with eligible stops, 99,054 retained graph segments across 70 routes, and estimated graph demand of 415,997. The graph was truncated; 41 routes reported at their allocated limit and the global segment budget was almost exhausted (99,054 / 100,000). Reachability included 360 transfer states and 358 stops. Search then visited 101,827 work steps (below its 1,000,000 hard step cap), considered 1,625 candidate results, and had a maximum queued-work count of 4,400. The result was capped at 100, with both candidate sampling and segment graph truncation flagged.
+
+This narrows the observed loss: the hard search-step limit was not reached. The retained graph and candidate-sampling stages are the current bottlenecks on this replay. This one OD does not establish the behavior for every city or request.
+
 ## Decision and remaining work
 
 The stacked code preserves separate BALANCED and FASTEST/CHEAPEST choices on the frozen query and is deterministic, but dense-feed search remains incomplete because graph and search truncation are explicit. The test-only event traversal also remains incomplete at 100k labels. Do not describe this as complete routing or production acceptance. Continue investigating bounded graph retention and query-directed expansion; compare all three strategy winners, chain recall, runtime and memory against frozen multi-OD inputs before changing the router. No live provider, staging, production or physical-device test was part of this replay.
