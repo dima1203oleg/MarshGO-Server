@@ -2161,21 +2161,25 @@ export function findGtfsItinerariesWithStats(
     };
     const reachableDestinationStops = new Set([segment.destinationContext.details.id,
       ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
-    const events = [...new Set([...reachableDestinationStops]
-      .flatMap((stopId) => destinationRetentionEventsByReachableStop.get(stopId) ?? []))]
-      .sort((a, b) => a.at - b.at || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId));
-    let low = 0, high = events.length;
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      if (events[middle]!.at < earliestAllowed) low = middle + 1;
-      else high = middle;
-    }
-    for (let index = low; index < events.length; index++) {
-      const event = events[index]!;
-      const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
-      if (availableSeconds > maximumWaitSeconds) break;
-      const requiredSeconds = minimumGapForEvent(event);
-      if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
+    // Each reachable-stop event list is already time sorted. The predicate
+    // only asks whether any feasible continuation exists, so merging and
+    // sorting all lists for every segment is unnecessary; scan each indexed
+    // list from its own lower bound and short-circuit on the first match.
+    for (const stopId of reachableDestinationStops) {
+      const events = destinationRetentionEventsByReachableStop.get(stopId) ?? [];
+      let low = 0, high = events.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (events[middle]!.at < earliestAllowed) low = middle + 1;
+        else high = middle;
+      }
+      for (let index = low; index < events.length; index++) {
+        const event = events[index]!;
+        const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
+        if (availableSeconds > maximumWaitSeconds) break;
+        const requiredSeconds = minimumGapForEvent(event);
+        if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
+      }
     }
     return false;
   };
