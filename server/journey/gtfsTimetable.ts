@@ -2555,6 +2555,15 @@ export function findGtfsItinerariesWithStats(
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
     globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
     segmentGraphTruncated: Number(segmentGraphTruncated) });
+  // Retention reservoirs and their compact stop-context candidates are only
+  // used to build the selected journey graph and its diagnostic snapshot.
+  // Release these references before creating transfer adjacency and searching
+  // paths so dense feeds do not keep both the discarded candidate graph and
+  // the public GtfsDirectJourney graph alive throughout the search.
+  segmentsByRoute.clear();
+  overflowSegmentsByRoute.clear();
+  selectedSegmentsByRoute.clear();
+  redistributed.routes.clear();
   const outgoing = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
     const choices = outgoing.get(segment.originStop.id) ?? [];
