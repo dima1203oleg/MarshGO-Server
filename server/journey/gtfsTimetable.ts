@@ -2082,7 +2082,8 @@ export function findGtfsItinerariesWithStats(
       const { rule, ambiguous } = retentionRuleFor(event.nodeIds, segment.originContext.transferNodeIds,
         event.tripId, segment.tripId, event.routeId, segment.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
-      const nearby = event.providerId === (feed.providersByRoute?.get(segment.routeId)?.id ?? input.providerId)
+      if (rule?.transferType === 4) return 0;
+      const nearby = event.providerId === (feed.providersByRoute?.get(segment.routeId)?.id ?? input.providerId) || rule !== null
         ? feed.stops.get(event.canonicalStopId) && feed.stops.get(segmentStopId)
           ? distanceMeters([feed.stops.get(event.canonicalStopId)!.lon, feed.stops.get(event.canonicalStopId)!.lat],
             [feed.stops.get(segmentStopId)!.lon, feed.stops.get(segmentStopId)!.lat]) : null
@@ -2093,7 +2094,6 @@ export function findGtfsItinerariesWithStats(
           || (nearby !== null && nearby <= transferRadius
             ? { walkingMeters: nearby, walkingSeconds: Math.ceil(nearby / 1.25) } : false);
       if (!pathway || pathway.walkingMeters > transferRadius) return null;
-      if (rule?.transferType === 4 && event.canonicalStopId === segment.originContext.details.id) return 0;
       return Math.max(minimumGapSeconds, pathway ? pathway.walkingSeconds : 0,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
     };
@@ -2123,8 +2123,9 @@ export function findGtfsItinerariesWithStats(
       const { rule, ambiguous } = retentionRuleFor(segment.destinationContext.transferNodeIds, event.nodeIds,
         segment.tripId, event.tripId, segment.routeId, event.routeId);
       if (ambiguous || rule?.transferType === 3) return null;
+      if (rule?.transferType === 4) return 0;
       const eventStopId = segment.destinationContext.details.id;
-      const nearby = event.providerId === (feed.providersByRoute?.get(segment.routeId)?.id ?? input.providerId)
+      const nearby = event.providerId === (feed.providersByRoute?.get(segment.routeId)?.id ?? input.providerId) || rule !== null
         ? feed.stops.get(eventStopId) && feed.stops.get(event.canonicalStopId)
           ? distanceMeters([feed.stops.get(eventStopId)!.lon, feed.stops.get(eventStopId)!.lat],
             [feed.stops.get(event.canonicalStopId)!.lon, feed.stops.get(event.canonicalStopId)!.lat]) : null
@@ -2135,7 +2136,6 @@ export function findGtfsItinerariesWithStats(
           || (nearby !== null && nearby <= transferRadius
             ? { walkingMeters: nearby, walkingSeconds: Math.ceil(nearby / 1.25) } : false);
       if (!pathway || pathway.walkingMeters > transferRadius) return null;
-      if (rule?.transferType === 4 && event.canonicalStopId === segment.destinationContext.details.id) return 0;
       return Math.max(minimumGapSeconds, pathway ? pathway.walkingSeconds : 0,
         rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
     };
@@ -2213,14 +2213,19 @@ export function findGtfsItinerariesWithStats(
       const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
         >= input.earliestDeparture.getTime() + accessSeconds * 1000;
       const duration = candidate.arrivalAt.getTime() - candidate.departureAt.getTime();
-      let joinsOppositeFrontier = queryFrontierConnectivity.get(candidate);
-      if (joinsOppositeFrontier === undefined) {
-        joinsOppositeFrontier = canCatchOrigin
-          ? hasNextEvent(candidate, minimumTransferBufferSeconds)
-          : endsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds);
-        queryFrontierConnectivity.set(candidate, joinsOppositeFrontier);
+      const direct = canCatchOrigin && endsAtDestination;
+      let joinsOppositeFrontier = false;
+      if (!direct) {
+        const cached = queryFrontierConnectivity.get(candidate);
+        if (cached !== undefined) joinsOppositeFrontier = cached;
+        else {
+          joinsOppositeFrontier = canCatchOrigin
+            ? hasNextEvent(candidate, minimumTransferBufferSeconds)
+            : endsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds);
+          queryFrontierConnectivity.set(candidate, joinsOppositeFrontier);
+        }
       }
-      const rankValue: [number, number, number, number, number, number] = canCatchOrigin && endsAtDestination
+      const rankValue: [number, number, number, number, number, number] = direct
         ? [0, 0, candidate.originContext.distanceToOriginStopMeters + candidate.destinationContext.distanceFromDestinationStopMeters,
           duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
         : joinsOppositeFrontier
