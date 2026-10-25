@@ -1037,6 +1037,8 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
     'bounded retention must not favor early rows in a chronologically ordered feed');
   assert.equal(result.searchTruncated, true, 'omitting graph candidates must be visible as a partial search');
   assert.equal(result.candidateGraphTruncated, true, 'the internal result identifies graph-level truncation');
+  assert.equal(result.truncation.candidateGraph, true, 'structured truncation reasons identify graph loss');
+  assert.equal(result.truncation.stopSelection, false, 'graph loss is distinguishable from stop-selection loss');
   assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
 
   const reordered = structuredClone(timetable);
@@ -1128,6 +1130,31 @@ test('query-time retention keeps a scheduled connector ahead of dense irrelevant
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
     === `access-trip,${targetTripId},egress-trip`),
   'the exact scheduled connector survives even when irrelevant stops have more connected routes');
+});
+
+test('query-time retention preserves a feasible connector across nearby stop IDs', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.stops.set('hub-a-near', { id: 'hub-a-near', name: 'Hub A nearby platform', lon: 24.0255, lat: 49.8450 });
+  timetable.stops.set('hub-b-near', { id: 'hub-b-near', name: 'Hub B nearby platform', lon: 24.0275, lat: 49.8470 });
+  const targetStops = timetable.stopTimes.get(targetTripId)!;
+  targetStops[0]!.stopId = 'hub-a-near';
+  timetable.stopTimes.get('egress-trip')![0]!.stopId = 'hub-b-near';
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, entries] of timetable.stopTimes) entries.forEach((entry, index) => {
+    const atStop = timetable.stopTimesByStop.get(entry.stopId) ?? [];
+    atStop.push({ tripId, index });
+    timetable.stopTimesByStop.set(entry.stopId, atStop);
+  });
+  const searchInput = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransferWalkingMeters: 400,
+    maximumTransfers: 2,
+  };
+  const result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `access-trip,${targetTripId},egress-trip`),
+  'the bounded graph keeps a feasible transfer across nearby stop IDs at the origin and destination frontiers');
 });
 
 test('query-time retention recognizes scheduled transfers between pathway-linked platforms', () => {
@@ -1723,6 +1750,8 @@ test('keeps a globally cheapest direct route discovered after the bounded candid
   assert.equal(cheapest.fare?.priceMinor, 100);
   assert.equal(result.resultLimitReached, true, 'the response must still report that candidate sampling omitted alternatives');
   assert.equal(result.candidateGraphTruncated, false, 'the test exhausts a complete route graph but exceeds the retained candidate sample');
+  assert.equal(result.truncation.candidateGraph, false);
+  assert.equal(result.truncation.responsePage, true, 'the response page is distinguished from graph loss');
 
   const globalLimitResult = findGtfsItinerariesWithStats(timetable, {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
@@ -2036,6 +2065,8 @@ test('matches an exhaustive small-feed oracle for every feasible one-transfer tr
 
   assert.deepEqual([...actual].sort(), [...expected].sort());
   assert.equal(result.searchTruncated, false, 'a feed below all sampling and graph caps must be complete');
+  assert.deepEqual(result.truncation, { stopSelection: false, candidateGraph: false, searchBudget: false,
+    searchStepLimit: false, candidatePoolLimit: false, candidateSampling: false, responsePage: false });
   assert.equal(expected.size, 6, 'oracle fixture covers early, marginal, and missed-buffer connections');
 });
 

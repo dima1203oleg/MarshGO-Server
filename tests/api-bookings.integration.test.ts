@@ -503,7 +503,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         }),
       });
       assert.equal(composedSearch.status, 200);
-      const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partial: boolean; partialReasons: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated: boolean; candidateGenerationTruncated: boolean; resultSamplingTruncated: boolean; journeys: Array<{
+      const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partial: boolean; partialReasons: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated: boolean; candidateGenerationTruncated: boolean; resultSamplingTruncated: boolean; gtfsTruncation: Record<string, boolean>; journeys: Array<{
         id: string; offerId: string | null; source?: string; state: string;
         legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string }>;
       }> } });
@@ -516,6 +516,10 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         'the API must surface both candidate-generation truncation and sampled result pages');
       assert.equal(composedData.partialReasons.includes('candidate_generation_truncated'), composedData.candidateGenerationTruncated,
         'candidate omission must be explained as an explicit partial reason');
+      assert.deepEqual(Object.keys(composedData.gtfsTruncation).sort(), [
+        'candidateGraph', 'candidatePoolLimit', 'candidateSampling', 'responsePage', 'searchBudget', 'searchStepLimit', 'stopSelection',
+      ], 'the API reports independent GTFS truncation causes');
+      assert.ok(Object.values(composedData.gtfsTruncation).every((value) => typeof value === 'boolean'));
       const composedJourney = composedData.journeys.find((candidate) => candidate.source === 'community-transit'
         && candidate.offerId === ids.transitCompositionOffer);
       assert.ok(composedJourney, 'the production API composes and persists a real GTFS prefix, Community ride, and GTFS suffix');
