@@ -392,6 +392,15 @@ export interface GtfsItinerarySearchResult {
   searchTruncated: boolean;
   resultLimitReached: boolean;
   candidateGraphTruncated: boolean;
+  truncation: {
+    stopSelection: boolean;
+    candidateGraph: boolean;
+    searchBudget: boolean;
+    searchStepLimit: boolean;
+    candidatePoolLimit: boolean;
+    candidateSampling: boolean;
+    responsePage: boolean;
+  };
 }
 
 /** Optional lower graph limits let tests exercise bounded retention deterministically. */
@@ -1641,7 +1650,9 @@ export function findGtfsItinerariesWithStats(
   const destinationStops = closestStops(input.destination, egressRadius);
   debugStage('stops-selected', { originStops: originStops.length, destinationStops: destinationStops.length });
   if (!originStops.length || !destinationStops.length) {
-    return { itineraries: [], searchTruncated: false, resultLimitReached: false, candidateGraphTruncated: false };
+    return { itineraries: [], searchTruncated: false, resultLimitReached: false, candidateGraphTruncated: false,
+      truncation: { stopSelection: false, candidateGraph: false, searchBudget: false,
+        searchStepLimit: false, candidatePoolLimit: false, candidateSampling: false, responsePage: false } };
   }
 
   const routeDistance = distanceMeters(input.origin, input.destination);
@@ -3206,6 +3217,15 @@ export function findGtfsItinerariesWithStats(
       || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated,
     resultLimitReached: rankedResults.length > itineraries.length || candidateSamplingTruncated,
     candidateGraphTruncated: segmentGraphTruncated,
+    truncation: {
+      stopSelection: stopSelectionTruncated,
+      candidateGraph: segmentGraphTruncated,
+      searchBudget: searchBudgetTruncated,
+      searchStepLimit: searchSteps >= MAX_SEARCH_STEPS,
+      candidatePoolLimit: results.size >= MAX_SEARCH_RESULTS,
+      candidateSampling: candidateSamplingTruncated,
+      responsePage: rankedResults.length > itineraries.length,
+    },
   };
 }
 

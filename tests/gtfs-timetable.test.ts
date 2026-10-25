@@ -1037,6 +1037,8 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
     'bounded retention must not favor early rows in a chronologically ordered feed');
   assert.equal(result.searchTruncated, true, 'omitting graph candidates must be visible as a partial search');
   assert.equal(result.candidateGraphTruncated, true, 'the internal result identifies graph-level truncation');
+  assert.equal(result.truncation.candidateGraph, true, 'structured truncation reasons identify graph loss');
+  assert.equal(result.truncation.stopSelection, false, 'graph loss is distinguishable from stop-selection loss');
   assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
 
   const reordered = structuredClone(timetable);
@@ -1748,6 +1750,8 @@ test('keeps a globally cheapest direct route discovered after the bounded candid
   assert.equal(cheapest.fare?.priceMinor, 100);
   assert.equal(result.resultLimitReached, true, 'the response must still report that candidate sampling omitted alternatives');
   assert.equal(result.candidateGraphTruncated, false, 'the test exhausts a complete route graph but exceeds the retained candidate sample');
+  assert.equal(result.truncation.candidateGraph, false);
+  assert.equal(result.truncation.responsePage, true, 'the response page is distinguished from graph loss');
 
   const globalLimitResult = findGtfsItinerariesWithStats(timetable, {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
@@ -2061,6 +2065,8 @@ test('matches an exhaustive small-feed oracle for every feasible one-transfer tr
 
   assert.deepEqual([...actual].sort(), [...expected].sort());
   assert.equal(result.searchTruncated, false, 'a feed below all sampling and graph caps must be complete');
+  assert.deepEqual(result.truncation, { stopSelection: false, candidateGraph: false, searchBudget: false,
+    searchStepLimit: false, candidatePoolLimit: false, candidateSampling: false, responsePage: false });
   assert.equal(expected.size, 6, 'oracle fixture covers early, marginal, and missed-buffer connections');
 });
 
