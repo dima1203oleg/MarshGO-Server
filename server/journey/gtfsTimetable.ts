@@ -2161,21 +2161,25 @@ export function findGtfsItinerariesWithStats(
     };
     const reachableDestinationStops = new Set([segment.destinationContext.details.id,
       ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
-    const events = [...new Set([...reachableDestinationStops]
-      .flatMap((stopId) => destinationRetentionEventsByReachableStop.get(stopId) ?? []))]
-      .sort((a, b) => a.at - b.at || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId));
-    let low = 0, high = events.length;
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      if (events[middle]!.at < earliestAllowed) low = middle + 1;
-      else high = middle;
-    }
-    for (let index = low; index < events.length; index++) {
-      const event = events[index]!;
-      const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
-      if (availableSeconds > maximumWaitSeconds) break;
-      const requiredSeconds = minimumGapForEvent(event);
-      if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
+    // Each reachable-stop event list is already time sorted. The predicate
+    // only asks whether any feasible continuation exists, so merging and
+    // sorting all lists for every segment is unnecessary; scan each indexed
+    // list from its own lower bound and short-circuit on the first match.
+    for (const stopId of reachableDestinationStops) {
+      const events = destinationRetentionEventsByReachableStop.get(stopId) ?? [];
+      let low = 0, high = events.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (events[middle]!.at < earliestAllowed) low = middle + 1;
+        else high = middle;
+      }
+      for (let index = low; index < events.length; index++) {
+        const event = events[index]!;
+        const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
+        if (availableSeconds > maximumWaitSeconds) break;
+        const requiredSeconds = minimumGapForEvent(event);
+        if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
+      }
     }
     return false;
   };
@@ -2551,6 +2555,15 @@ export function findGtfsItinerariesWithStats(
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
     globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
     segmentGraphTruncated: Number(segmentGraphTruncated) });
+  // Retention reservoirs and their compact stop-context candidates are only
+  // used to build the selected journey graph and its diagnostic snapshot.
+  // Release these references before creating transfer adjacency and searching
+  // paths so dense feeds do not keep both the discarded candidate graph and
+  // the public GtfsDirectJourney graph alive throughout the search.
+  segmentsByRoute.clear();
+  overflowSegmentsByRoute.clear();
+  selectedSegmentsByRoute.clear();
+  redistributed.routes.clear();
   const outgoing = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
     const choices = outgoing.get(segment.originStop.id) ?? [];
