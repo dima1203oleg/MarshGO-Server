@@ -1,5 +1,15 @@
 # MARSHGO Production Progress
 
+## GTFS sorted-frontier continuation — 2026-10-25
+
+**Status:** Server PR #42 remains an open draft stacked on PR #41. Its exact-head GitHub CI runs `40216580417` and `40216598199` pass. The indexed frontier scan preserves deterministic results and reduces frozen-feed latency, but all three dense Lviv origin/destination cases remain graph/search truncated. See the orchestration audit `docs/audit/200_GTFS_SORTED_FRONTIER_SCAN_PERFORMANCE_2026-10-25.md` for exact replay evidence.
+
+**Change on this continuation branch:** Commit `7e3924e459f14266e5e48a891389aecace6070cb` releases four temporary GTFS graph-retention maps after the selected graph and debug snapshot are built, before adjacency and search. The final `segments` graph is retained. A frozen replay preserved the baseline ordered ID hash and the BALANCED/FASTEST/CHEAPEST winners; the search stayed truncated. The complete timetable test file passed 76/76 and TypeScript passed on the change.
+
+**Performance boundary:** A paired five-run A/B was interrupted because a replay in another checkout was concurrently consuming resources. The one candidate sample showed inconsistent heap/RSS versus earlier baselines. No latency or memory gain is claimed. Node was `v25.4.0`, while this package requires `v24.21.0`; performance evidence must be repeated on the declared runtime in an idle environment.
+
+**Next action:** Continue dense-feed completeness investigation from the exact #42 stack without repeating rejected topology pruning, candidate-by-candidate scans, frontier memoization, temporal-index rebuilding, or budget inflation. First inspect the candidate graph/search truncation counters and design a batched strategy that passes exhaustive small-feed transfer oracles; then measure recall, winners, truncation, latency, and memory across all three frozen Lviv ODs. Do not merge #42 independently of #41 or promote it to the release manifest. `PRODUCTION_READY=false`; `RELEASE_STATUS=NOT_RELEASED`.
+
 ## GTFS routing continuation — 2026-10-24
 
 **Status:** The latest temporal-segment retention heuristic is not accepted for integration. Paired 3× replays on the exact frozen Lviv GTFS SHA preserved all three strategy winners only for two of three OD pairs; aggregate per-OD median runtime rose 3.33%, and all six query/version combinations remained graph- and search-truncated. It added one trip/route chain on Holosko→Sykhiv but lost one trip chain on each other OD. See `docs/audit/GTFS_TEMPORAL_RETENTION_THREE_OD_REPLAY_2026-10-24.md` for exact SHAs, hashes, inputs, and results.
