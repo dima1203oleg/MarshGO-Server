@@ -387,20 +387,22 @@ export interface GtfsItinerary {
   fare: ReturnType<typeof calculateGtfsItineraryFare>;
 }
 
+export interface GtfsItinerarySearchTruncation {
+  stopSelection: boolean;
+  candidateGraph: boolean;
+  searchBudget: boolean;
+  searchStepLimit: boolean;
+  candidatePoolLimit: boolean;
+  candidateSampling: boolean;
+  responsePage: boolean;
+}
+
 export interface GtfsItinerarySearchResult {
   itineraries: GtfsItinerary[];
   searchTruncated: boolean;
   resultLimitReached: boolean;
   candidateGraphTruncated: boolean;
-  truncation: {
-    stopSelection: boolean;
-    candidateGraph: boolean;
-    searchBudget: boolean;
-    searchStepLimit: boolean;
-    candidatePoolLimit: boolean;
-    candidateSampling: boolean;
-    responsePage: boolean;
-  };
+  truncation: GtfsItinerarySearchTruncation;
 }
 
 /** Optional lower graph limits let tests exercise bounded retention deterministically. */

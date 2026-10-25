@@ -22,7 +22,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
@@ -2647,6 +2647,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
 
   let candidateGenerationTruncated = rows.length > 100;
   let resultSamplingTruncated = false;
+  const gtfsTruncation: GtfsItinerarySearchTruncation = {
+    stopSelection: false, candidateGraph: false, searchBudget: false, searchStepLimit: false,
+    candidatePoolLimit: false, candidateSampling: false, responsePage: false,
+  };
+  const recordGtfsTruncation = (truncation: GtfsItinerarySearchTruncation) => {
+    for (const key of Object.keys(gtfsTruncation) as Array<keyof GtfsItinerarySearchTruncation>) {
+      gtfsTruncation[key] ||= truncation[key];
+    }
+  };
   const candidates = rows.slice(0, 100).flatMap((offer): Array<JourneyOption & { source: typeof offer; departureAt: Date; arrivalAt: Date; totalPriceMinor: number; waitingSeconds: number }> => {
     if (search.preferences.preferredVehicleClass || search.preferences.allowCommunity === false
       || !journeyTransportTypeSelected('carpool', search.preferences.allowedTransportTypes)) return [];
@@ -2815,6 +2824,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     // a stop, graph, or search-budget cap means candidate generation was cut short.
     candidateGenerationTruncated ||= itinerarySearch.searchTruncated;
     resultSamplingTruncated ||= itinerarySearch.resultLimitReached;
+    recordGtfsTruncation(itinerarySearch.truncation);
     const itineraries = itinerarySearch.itineraries.map(fareForPassengerCount);
     const feasibleItineraries = itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
       && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes))
@@ -3016,7 +3026,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         allowedTransportTypes: search.preferences.allowedTransportTypes,
         }); } catch {
           gtfsSecondarySearchUnavailable = true;
-          return { itineraries: [], searchTruncated: false, resultLimitReached: false };
+          return { itineraries: [], searchTruncated: false, resultLimitReached: false, candidateGraphTruncated: false,
+            truncation: { stopSelection: false, candidateGraph: false, searchBudget: false,
+              searchStepLimit: false, candidatePoolLimit: false, candidateSampling: false, responsePage: false } };
         }
       },
     );
@@ -3042,6 +3054,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             const found = await searchStationPath(station.coordinates, search.destination.coordinates, earliest);
             candidateGenerationTruncated ||= found.searchTruncated;
             resultSamplingTruncated ||= found.resultLimitReached;
+            recordGtfsTruncation(found.truncation);
             for (const itinerary of found.itineraries) {
               if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
               const routed = await routeTransitItinerary(itinerary, station.coordinates, search.destination.coordinates, walkingRouteBudget, false);
@@ -3057,6 +3070,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const found = await searchStationPath(search.origin.coordinates, station.coordinates, search.departureAt);
         candidateGenerationTruncated ||= found.searchTruncated;
         resultSamplingTruncated ||= found.resultLimitReached;
+        recordGtfsTruncation(found.truncation);
         for (const itinerary of found.itineraries) {
           if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
           const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, station.coordinates, walkingRouteBudget, false);
@@ -3128,6 +3142,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       }
       candidateGenerationTruncated ||= searchResult.searchTruncated;
       resultSamplingTruncated ||= searchResult.resultLimitReached;
+      recordGtfsTruncation(searchResult.truncation);
       const allowedPaths = searchResult.itineraries.map(fareForPassengerCount).filter((itinerary) => itinerary.segments.every((segment) =>
         transitAllowed(segment.mode)
         && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes)
@@ -3861,6 +3876,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     paretoCount: paretoCandidates.length,
     returnedCount: journeys.length,
     alternativeLimitPerStrategy,
+    gtfsTruncation,
     ...truncationState,
     partial: partialReasons.length > 0,
     partialReasons,
