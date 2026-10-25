@@ -1130,6 +1130,31 @@ test('query-time retention keeps a scheduled connector ahead of dense irrelevant
   'the exact scheduled connector survives even when irrelevant stops have more connected routes');
 });
 
+test('query-time retention preserves a feasible connector across nearby stop IDs', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.stops.set('hub-a-near', { id: 'hub-a-near', name: 'Hub A nearby platform', lon: 24.0255, lat: 49.8450 });
+  timetable.stops.set('hub-b-near', { id: 'hub-b-near', name: 'Hub B nearby platform', lon: 24.0275, lat: 49.8470 });
+  const targetStops = timetable.stopTimes.get(targetTripId)!;
+  targetStops[0]!.stopId = 'hub-a-near';
+  timetable.stopTimes.get('egress-trip')![0]!.stopId = 'hub-b-near';
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, entries] of timetable.stopTimes) entries.forEach((entry, index) => {
+    const atStop = timetable.stopTimesByStop.get(entry.stopId) ?? [];
+    atStop.push({ tripId, index });
+    timetable.stopTimesByStop.set(entry.stopId, atStop);
+  });
+  const searchInput = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransferWalkingMeters: 400,
+    maximumTransfers: 2,
+  };
+  const result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `access-trip,${targetTripId},egress-trip`),
+  'the bounded graph keeps a feasible transfer across nearby stop IDs at the origin and destination frontiers');
+});
+
 test('query-time retention recognizes scheduled transfers between pathway-linked platforms', () => {
   const { timetable: sourceFeed, targetTripId } = timeFeasibleChainWithHashCompetingTrips({ pathwayPlatformTransfers: true });
   const providerId = 'pathway-provider';
