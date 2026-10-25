@@ -7,7 +7,11 @@ import { probeProviderReachability } from './connection';
  * administrator's decision. A reachable source with a previous validated report stays healthy; otherwise it stays
  * degraded until a full validation is completed. Offline sources are skipped until a later probe finds them again.
  */
-export async function refreshProviderHealth(pool: Pool, log: (entry: Record<string, unknown>) => void = () => undefined) {
+export async function refreshProviderHealth(
+  pool: Pool,
+  log: (entry: Record<string, unknown>) => void = () => undefined,
+  providerIds?: readonly string[],
+) {
   const requestedBatchSize = Number(process.env.MOBILITY_HEALTH_BATCH_SIZE) || 25;
   const batchSize = Math.max(1, Math.min(100, Math.floor(requestedBatchSize)));
   const requestedConcurrency = Number(process.env.MOBILITY_HEALTH_CONCURRENCY) || 4;
@@ -17,7 +21,8 @@ export async function refreshProviderHealth(pool: Pool, log: (entry: Record<stri
     last_report: { counts?: Record<string, number> } | null;
   }>(
     `SELECT id,name,source_type,feed_url,health,last_report FROM mobility_providers
-      WHERE status='enabled' AND access='open' ORDER BY last_checked_at NULLS FIRST LIMIT $1`, [batchSize]);
+      WHERE status='enabled' AND access='open' AND ($2::uuid[] IS NULL OR id=ANY($2::uuid[]))
+      ORDER BY last_checked_at NULLS FIRST LIMIT $1`, [batchSize, providerIds ?? null]);
   let healthy = 0, degraded = 0, offline = 0;
   for (let offset = 0; offset < rows.length; offset += concurrency) {
     await Promise.all(rows.slice(offset, offset + concurrency).map(async (provider) => {

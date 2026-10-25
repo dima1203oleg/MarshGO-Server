@@ -33,11 +33,12 @@ start_api() {
   local routing_url="${1:-}"
   env NODE_ENV=development AUTH_DEV_BYPASS=true AUTH_DEV_OTP=true MOBILITY_HEALTH_DISABLED=true \
     DATABASE_URL="$DATABASE_URL" API_HOST=127.0.0.1 API_PORT="$API_PORT" \
+    MARSHGO_API_TEST_FIXTURE_MODE=1 MARSHGO_GTFS_TEST_FIXTURE_DIR="$PWD/tests/fixtures/gtfs-http" \
     TRUST_PROXY_HOPS="${API_TEST_TRUST_PROXY_HOPS:-0}" \
     REDIS_URL="$REDIS_URL" API_RATE_LIMIT_PREFIX="${API_TEST_RATE_LIMIT_PREFIX_OVERRIDE:-$RATE_LIMIT_TEST_PREFIX}" \
     API_RATE_LIMIT_LIMIT="${API_TEST_RATE_LIMIT_LIMIT:-5000}" \
     API_RATE_LIMIT_WINDOW_MS="${API_TEST_RATE_LIMIT_WINDOW_MS:-900000}" SESSION_SECRET="integration-test-session-secret-32chars" \
-    ROUTING_ENGINE_URL="$routing_url" ./node_modules/.bin/tsx server/index.ts &
+    OSRM_URL="" WALKING_ROUTING_URL="" ROUTING_ENGINE_URL="$routing_url" ./node_modules/.bin/tsx server/index.ts &
   API_PID=$!
   for _ in $(seq 1 60); do
     if curl --fail --silent "$API_URL/healthz" >/dev/null; then return 0; fi
@@ -77,8 +78,11 @@ start_secondary_api() {
 }
 
 start_api
-API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" npm run test:integration:live-journey
+API_TEST_GTFS_FIXTURE=1 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:bookings
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:partners
 stop_api
 
 OSRM_STUB_PORT=3304 node tests/fixtures/osrm-stub.mjs &

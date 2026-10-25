@@ -1,5 +1,13 @@
 # MARSHGO Production Progress
 
+## GTFS routing continuation — 2026-10-24
+
+**Status:** The latest temporal-segment retention heuristic is not accepted for integration. Paired 3× replays on the exact frozen Lviv GTFS SHA preserved all three strategy winners only for two of three OD pairs; aggregate per-OD median runtime rose 3.33%, and all six query/version combinations remained graph- and search-truncated. It added one trip/route chain on Holosko→Sykhiv but lost one trip chain on each other OD. See `docs/audit/GTFS_TEMPORAL_RETENTION_THREE_OD_REPLAY_2026-10-24.md` for exact SHAs, hashes, inputs, and results.
+
+**Checks:** On Node 24.21.0, the focused GTFS timetable/scoring suites passed 92/92, including exhaustive one-/two-transfer oracles and the dense irrelevant-interchange regression. The full server unit suite passed 309 tests, failed 0, and skipped 3 opt-in local integration tests (34.9 s). TypeScript `--noEmit`, ESLint over `server tests`, and `git diff --check` passed. The frozen feed downloaded from the publisher URL matched the recorded SHA-256 exactly. These results do not establish complete search or production acceptance.
+
+**Next action:** Inspect per-route budget allocation and bounded trip-group retention on the baseline/candidate pair. Any new candidate must preserve all three strategy winners across the frozen OD set, improve useful-chain recall, pass the exhaustive small-feed oracle, and show acceptable repeated latency before integration. `searchTruncated` remains truthful and the current heuristic stays isolated.
+
 ## Phase 0 — Local audit and baseline
 
 **Status:** Complete for the inspected baseline; the requested root task file was absent in this checkout, so the full technical specification pasted in the user message is the active source of requirements.

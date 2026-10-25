@@ -39,6 +39,9 @@ export interface StopInsertionPlan {
   dropoffOrdinal: number;
 }
 
+type RoutePriority = 'interactive' | 'navigation' | 'background';
+type RoadRouteFunction = (points: [number, number][], priority?: RoutePriority) => Promise<RoadRoute>;
+
 function validCoordinates(point: [number, number]) {
   return Array.isArray(point) && point.length === 2 && point.every(Number.isFinite)
     && Math.abs(point[0]) <= 180 && Math.abs(point[1]) <= 90;
@@ -120,7 +123,7 @@ function straightLineMeters(a: [number, number], b: [number, number]): number {
 
 export async function optimizeStopInsertion(
   input: StopInsertionRequest,
-  route: (points: [number, number][]) => Promise<RoadRoute>,
+  route: RoadRouteFunction,
 ): Promise<StopInsertionPlan | null> {
   const { candidate } = input;
   const datesValid = Number.isFinite(input.now.getTime()) && Number.isFinite(candidate.earliestPickupAt.getTime())
@@ -141,7 +144,10 @@ export async function optimizeStopInsertion(
     throw new TypeError('existing navigation stop is invalid');
   }
   const baselinePoints = [input.currentLocation, ...input.existingStops.map((stop) => stop.coordinates), input.destination];
-  const baseline = await routeWithRepeatedWaypointsCollapsed(baselinePoints, route);
+  const baseline = await routeWithRepeatedWaypointsCollapsed(
+    baselinePoints,
+    (points) => route(points, 'background'),
+  );
   if (!routeHasLegs(baseline, baselinePoints)) return null;
 
   const candidatePlans: Array<{ stops: NavigationStop[]; points: [number, number][]; approximateDistanceM: number }> = [];
@@ -164,7 +170,7 @@ export async function optimizeStopInsertion(
   const shortlist = candidatePlans.sort((a, b) => a.approximateDistanceM - b.approximateDistanceM).slice(0, 8);
   const evaluated = await Promise.all(shortlist.map(async ({ stops, points }) => {
       let proposed: RoadRoute;
-      try { proposed = await routeWithRepeatedWaypointsCollapsed(points, route); }
+      try { proposed = await routeWithRepeatedWaypointsCollapsed(points, (routePoints) => route(routePoints, 'background')); }
       catch { return null; }
       if (!routeHasLegs(proposed, points)) return null;
       const pickupOrdinal = stops.findIndex((stop) => stop.bookingId === candidate.bookingId && stop.kind === 'pickup') + 1;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { getJourneySearchPartialReasons } from '../server/journey/search';
+import { getJourneySearchPartialReasons, getJourneySearchTruncationState } from '../server/journey/search';
 
 describe('journey search completeness', () => {
   const complete = {
@@ -26,5 +26,26 @@ describe('journey search completeness', () => {
       'unsupported_preference',
       'walking_routing_unavailable',
     ]);
+  });
+
+  it('distinguishes sampled alternatives from incomplete candidate generation', () => {
+    assert.deepEqual(getJourneySearchTruncationState({
+      candidateGenerationTruncated: false,
+      resultSamplingTruncated: true,
+      rankedAlternativesOmitted: false,
+    }), {
+      resultsTruncated: true,
+      candidateGenerationTruncated: false,
+      resultSamplingTruncated: true,
+    });
+    assert.deepEqual(getJourneySearchTruncationState({
+      candidateGenerationTruncated: true,
+      resultSamplingTruncated: false,
+      rankedAlternativesOmitted: false,
+    }), {
+      resultsTruncated: true,
+      candidateGenerationTruncated: true,
+      resultSamplingTruncated: false,
+    });
   });
 });
