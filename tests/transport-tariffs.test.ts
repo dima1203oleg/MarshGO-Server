@@ -54,6 +54,13 @@ test('Lviv does not assign its integrated public transport tariff to a private m
   assert.equal(fare, null);
 });
 
+test('Lviv ATP-1 single fares and transfer rule record the current source verification date', () => {
+  const records = getTransportFareCatalog({ city: 'Львів' })
+    .filter((record) => ['lviv-leocard-adult', 'lviv-bank-card-adult', 'lviv-cash-adult', 'lviv-student-leocard', 'lviv-leocard-40-minute-transfer'].includes(record.id));
+  assert.equal(records.length, 5);
+  assert.ok(records.every((record) => record.status === 'verified_static' && record.lastVerifiedAt === '2026-10-25'));
+});
+
 test('Dnipro metro is priced at 10 UAH and Kharkiv metro at the published free fare', () => {
   const dnipro = calculateCityTariffFare([
     leg({ city: 'Дніпро', type: 'metro', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
