@@ -2620,6 +2620,44 @@ export function findGtfsItinerariesWithStats(
 
   const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
 
+  /** Iterate a transfer state's superset without allocating or sorting a candidate pool. */
+  const forEachTransferCandidate = (previous: GtfsDirectJourney, visit: (candidate: GtfsDirectJourney) => boolean) => {
+    for (const candidate of outgoing.get(previous.destinationStop.id) ?? []) if (!visit(candidate)) return false;
+    const [centerX, centerY] = transferCell(previous.destinationStop.coordinates);
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+      for (const stopId of outgoingStopIdsByTransferCell.get(`${centerX + dx}:${centerY + dy}`) ?? []) {
+        const coordinates = outgoingStopCoordinates.get(stopId);
+        if (!coordinates || distanceMeters(previous.destinationStop.coordinates, coordinates) > transferRadius) continue;
+        for (const candidate of outgoing.get(stopId) ?? []) {
+          const hasDeclaredCrossProviderTransfer = previous.destinationTransferNodeIds.some((fromNodeId) =>
+            candidate.originTransferNodeIds.some((toNodeId) => transferTargetsByFromNode.get(fromNodeId)?.has(toNodeId)));
+          // Same-feed platforms may use a bounded walking transfer even when
+          // transfers.txt is incomplete. Across independent providers, require
+          // a canonical merged stop or a declared transfer edge; coordinate
+          // proximity alone can join unrelated nearby systems.
+          if (previous.providerId !== candidate.providerId && !hasDeclaredCrossProviderTransfer) continue;
+          if (!visit(candidate)) return false;
+        }
+      }
+    }
+    for (const fromNodeId of previous.destinationTransferNodeIds) {
+      for (const toNodeId of transferTargetsByFromNode.get(fromNodeId) ?? []) {
+        for (const candidate of outgoingByTransferNodeId.get(toNodeId) ?? []) if (!visit(candidate)) return false;
+      }
+    }
+    if (previous.destinationTransferNodeIds.some((id) => pathwayNodes.has(id))) {
+      for (const fromNodeId of previous.destinationTransferNodeIds) {
+        if (!pathwayNodes.has(fromNodeId)) continue;
+        for (const toNodeId of reachablePathwayNodes(fromNodeId)) {
+          for (const candidate of outgoingByTransferNodeId.get(toNodeId) ?? []) {
+            if (previous.providerId === candidate.providerId && !visit(candidate)) return false;
+          }
+        }
+      }
+    }
+    return true;
+  };
+
   const transferCandidatePool = (previous: GtfsDirectJourney) => {
     const stateKey = transferCandidateKey(previous);
     const cached = transferCandidateCache.get(stateKey);
@@ -2753,8 +2791,8 @@ export function findGtfsItinerariesWithStats(
       if (!previous) continue;
       const reachableCandidateRoutes = new Set<string>();
       let sameRouteInSeatReachable = false;
-      for (const next of transferCandidatePool(previous)) {
-        if (!reachable.has(next.destinationStop.id)) continue;
+      forEachTransferCandidate(previous, (next) => {
+        if (!reachable.has(next.destinationStop.id)) return true;
         reachableCandidateRoutes.add(next.routeId);
         if (next.routeId === previous.routeId) {
           const { rule, ambiguous } = transferRuleFor(previous, next);
@@ -2762,8 +2800,8 @@ export function findGtfsItinerariesWithStats(
         }
         // Two distinct onward routes provide a feasible choice for every
         // previous line, so stop scanning this broad candidate pool early.
-        if (reachableCandidateRoutes.size > 1) break;
-      }
+        return reachableCandidateRoutes.size <= 1;
+      });
       // Reachability is queried at the arrival end of the current itinerary
       // leg. Keep that arrival stop reachable when a valid onward segment can
       // reach the destination within the remaining leg budget, including when

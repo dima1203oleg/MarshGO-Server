@@ -90,6 +90,8 @@ describe('partner platform API and tenant isolation (opt-in local integration te
 
     const noAdmin = await fetch(`${apiUrl}/api/v1/admin/partners`, { headers: auth(ownerA) });
     assert.equal(noAdmin.status, 403);
+    const noAdminAudit = await fetch(`${apiUrl}/api/v1/admin/audit`, { headers: auth(ownerA) });
+    assert.equal(noAdminAudit.status, 403);
     const noIntegrationAdmin = await fetch(`${apiUrl}/api/v1/admin/integrations`, { headers: auth(ownerA) });
     assert.equal(noIntegrationAdmin.status, 403);
     const integrationsResponse = await fetch(`${apiUrl}/api/v1/admin/integrations`, { headers: auth(admin) });
@@ -132,6 +134,13 @@ describe('partner platform API and tenant isolation (opt-in local integration te
     });
     assert.equal(approved.status, 200);
     assert.equal((await approved.json() as { data: { status: string; applicationStatus: string } }).data.status, 'ACTIVE');
+    const adminAudit = await fetch(`${apiUrl}/api/v1/admin/audit`, { headers: auth(admin) });
+    assert.equal(adminAudit.status, 200);
+    const adminAuditRows = (await adminAudit.json() as { data: Array<Record<string, unknown>> }).data;
+    const approvalEvent = adminAuditRows.find((event) => event.entity_id === resultA.data.organization.id && event.action === 'partner.application.approved');
+    assert.ok(approvalEvent);
+    assert.equal(approvalEvent.actor, 'Partner admin');
+    assert.equal(Object.hasOwn(approvalEvent, 'details'), false);
     const duplicateDecision = await fetch(`${apiUrl}/api/v1/admin/partners/${resultA.data.organization.id}/reject`, {
       method: 'POST', headers: auth(admin), body: JSON.stringify({ note: 'Повторне рішення' }),
     });
