@@ -33,6 +33,7 @@ function nextKyivMorningDeparture(now = new Date()): string {
 describe('API booking transaction (opt-in local integration test)', { skip: !enabled }, () => {
   const pool = new Pool({ connectionString: databaseUrl });
   let healthyLvivGtfsEnabled = false;
+  let healthyLvivRealGtfsEnabled = false;
   const ids = {
     driver: crypto.randomUUID(),
     passengers: Array.from({ length: 20 }, () => crypto.randomUUID()),
@@ -40,12 +41,15 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     vehicle: crypto.randomUUID(),
     offer: crypto.randomUUID(),
     journeyOffer: crypto.randomUUID(),
+    transitCompositionOffer: crypto.randomUUID(),
     rendezvousOffer: crypto.randomUUID(),
     expiredOffer: crypto.randomUUID(),
+    gtfsFixtureProvider: crypto.randomUUID(),
   };
   const keys = Array.from({ length: 20 }, () => `api-test-${crypto.randomUUID()}`);
   const passengerA = ids.passengers[0];
   const passengerB = ids.passengers[1];
+  const compositionPassenger = ids.passengers[2];
   let apiCreatedVehicleId: string | null = null;
   const extraVehicleIds: string[] = [];
   const verificationIds: string[] = [];
@@ -58,11 +62,30 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       `SELECT now() + interval '10 days' AS departure_at`,
     );
     journeyOfferDepartureAt = scheduledJourney.rows[0]!.departure_at;
-    const lvivProvider = await pool.query<{ enabled: boolean }>(
+    if (process.env.API_TEST_GTFS_FIXTURE === '1') {
+      await pool.query(`DELETE FROM mobility_providers WHERE name='MARSHGO HTTP GTFS integration fixture'
+        AND city='Львів' AND feed_url='https://gtfs-api-fixture.invalid/lviv.zip'`);
+      await pool.query(`INSERT INTO mobility_providers(id,name,city,provider_type,source_type,feed_url,priority,status,health,access,last_report)
+        VALUES ($1,'MARSHGO HTTP GTFS integration fixture','Львів','public_transit','gtfs',
+          'https://gtfs-api-fixture.invalid/lviv.zip',1,'enabled','healthy','open',
+          '{"bbox":[23.9,49.7,24.15,49.95],"counts":{"routes_bus":1,"routes_tram":1}}'::jsonb)`, [ids.gtfsFixtureProvider]);
+      const fixtureCandidate = await pool.query<{ id: string }>(`SELECT id FROM (
+        SELECT id FROM mobility_providers
+         WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
+           AND status='enabled' AND health IN ('healthy','degraded')
+         ORDER BY priority,name LIMIT 101
+      ) AS bounded_candidates WHERE id=$1`, [ids.gtfsFixtureProvider]);
+      assert.equal(fixtureCandidate.rowCount, 1, 'the fixture provider must survive the same bounded registry selection used by the API');
+    }
+    const lvivProvider = await pool.query<{ enabled: boolean; real_feed_enabled: boolean }>(
       `SELECT EXISTS (SELECT 1 FROM mobility_providers
-        WHERE city='Львів' AND source_type='gtfs' AND status='enabled' AND health='healthy') AS enabled`,
+        WHERE city='Львів' AND source_type='gtfs' AND status='enabled' AND health='healthy') AS enabled,
+        EXISTS (SELECT 1 FROM mobility_providers
+        WHERE city='Львів' AND source_type='gtfs' AND status='enabled' AND health='healthy'
+          AND feed_url <> 'https://gtfs-api-fixture.invalid/lviv.zip') AS real_feed_enabled`,
     );
     healthyLvivGtfsEnabled = lvivProvider.rows[0]?.enabled === true;
+    healthyLvivRealGtfsEnabled = lvivProvider.rows[0]?.real_feed_enabled === true;
     await pool.query(`INSERT INTO users(id,display_name,roles) VALUES
       ($1,'API test driver',ARRAY['driver']),($2,'API test administrator',ARRAY['admin'])`,
     [ids.driver, ids.admin]);
@@ -107,6 +130,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
   });
 
   after(async () => {
+    await pool.query('DELETE FROM mobility_providers WHERE id=$1', [ids.gtfsFixtureProvider]);
     if (otpUserId) await pool.query('DELETE FROM audit_events WHERE actor_id=$1', [otpUserId]);
     await pool.query('DELETE FROM vehicles WHERE owner_id IN (SELECT id FROM users WHERE phone_e164 LIKE $1)', [`+38099${process.pid}%`]);
     await pool.query('DELETE FROM users WHERE phone_e164 LIKE $1', [`+38099${process.pid}%`]);
@@ -236,6 +260,31 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       strategy: 'CHEAPEST',
       preferences: { allowCommunity: true, maxPriceMinor: 20000 },
     };
+    for (const maximumDurationMinutes of [30, 60, 120]) {
+      const maximumDurationSeconds = maximumDurationMinutes * 60;
+      const boundedTransitSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
+        body: JSON.stringify({
+          ...body,
+          origin: { name: 'Малоголосківська, Львів', coordinates: [24.0029933, 49.8681678] },
+          destination: { name: 'Сихів, Львів', coordinates: [24.057585, 49.794117] },
+          departureAt: nextKyivMorningDeparture(),
+          strategy: 'FASTEST',
+          preferences: { allowCommunity: false, allowedTransportTypes: ['bus', 'tram'], maxTotalDurationSeconds: maximumDurationSeconds },
+        }),
+      });
+      assert.equal(boundedTransitSearch.status, 200, `${maximumDurationMinutes}-minute transit search must remain valid at the API boundary`);
+      const boundedData = (await boundedTransitSearch.json() as { data: {
+        journeys: Array<{ totalDurationSeconds: number }>;
+        providerErrors: string[];
+      } }).data;
+      assert.ok(boundedData.journeys.every((journey) => journey.totalDurationSeconds <= maximumDurationSeconds),
+        `${maximumDurationMinutes}-minute search must not return an over-horizon journey`);
+      if (healthyLvivGtfsEnabled) {
+        assert.equal(boundedData.providerErrors.some((message) => message.startsWith('GTFS-пошук тимчасово недоступний')), false,
+          `${maximumDurationMinutes}-minute search must not silently discard a healthy GTFS search because transfer wait exceeds the journey horizon`);
+      }
+    }
     const modeMatrix: Array<{ type: string; journeys: number; blocked: boolean; walkingLegs: number }> = [];
     for (const transportType of ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer']) {
       const modeSearch = ['bus','marshrutka','tram'].includes(transportType) ? {
@@ -252,7 +301,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const modeData = (await modeResponse.json() as { data: {
         blockedProviders: string[];
         journeys: Array<{ offerId: string | null; origin: { name: string; coordinates: [number, number] }; destination: { name: string; coordinates: [number, number] }; legs: Array<{
-          mode: string; transportType?: string; source?: string;
+          mode: string; transportType?: string; source?: string; providerId?: string; routeId?: string; headsign?: string;
           origin?: { name: string; coordinates: [number, number] };
           destination?: { name: string; coordinates: [number, number] };
           stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string }>;
@@ -261,6 +310,9 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const assertScheduledStopCalls = (leg: typeof modeData.journeys[number]['legs'][number]) => {
         if (!['gtfs-static', 'gtfs-realtime-trip-updates'].includes(leg.source ?? '')) return;
         const stops = leg.stops ?? [];
+        assert.ok(leg.providerId, `${leg.transportType ?? leg.mode} response carries its provider scope for stop queries`);
+        assert.ok(leg.routeId, `${leg.transportType ?? leg.mode} response carries its feed route ID`);
+        assert.ok(leg.headsign, `${leg.transportType ?? leg.mode} response carries its direction for stop queries`);
         assert.ok(stops.length >= 2, `${leg.transportType ?? leg.mode} response carries boarding/alighting calls and every published intermediate call`);
         assert.deepEqual(stops[0]?.coordinates, leg.origin?.coordinates, 'the first stop call matches the selected boarding stop');
         assert.deepEqual(stops.at(-1)?.coordinates, leg.destination?.coordinates, 'the final stop call matches the selected alighting stop');
@@ -297,28 +349,86 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         walkingLegs: modeData.journeys.flatMap((journey) => journey.legs).filter((leg) => leg.mode === 'WALK').length,
       });
     }
+    const multiSearchDeparture = nextKyivMorningDeparture();
     const multiResponse = await fetch(`${apiUrl}/api/v1/journeys/search`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
       body: JSON.stringify({
         ...body,
         origin: { name: 'Малоголосківська, Львів', coordinates: [24.0029933, 49.8681678] },
         destination: { name: 'Сихів, Львів', coordinates: [24.057585, 49.794117] },
-        departureAt: nextKyivMorningDeparture(),
+        departureAt: multiSearchDeparture,
         strategy: 'BALANCED',
         preferences: { allowCommunity: true, allowedTransportTypes: ['bus','tram'] },
       }),
     });
     assert.equal(multiResponse.status, 200);
-    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; legs: Array<{
-      mode: string; transportType?: string; routeGeometry?: [number, number][];
+    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; providerErrors?: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; source?: string; strategyRanks?: Record<string, number>; totalDurationSeconds: number; totalPriceMinor: number | null; legs: Array<{
+      mode: string; source?: string; providerId?: string; transportType?: string; routeGeometry?: [number, number][];
+      departureAt?: string; arrivalAt?: string;
       origin?: { coordinates: [number, number] }; destination?: { coordinates: [number, number] };
-      stops?: Array<{ coordinates: [number, number]; arrivalAt: string }>;
+      stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string }>;
     }> }> } }).data;
     assert.equal(multiData.returnedCount, multiData.journeys.length, 'response metadata matches persisted alternatives');
-    if (healthyLvivGtfsEnabled) {
+    if (process.env.API_TEST_GTFS_FIXTURE === '1') {
+      const fixtureJourney = multiData.journeys.find((candidate) => candidate.source === 'gtfs-static'
+        && candidate.legs.some((leg) => leg.providerId === ids.gtfsFixtureProvider));
+      assert.ok(fixtureJourney, `the authenticated HTTP search returns a journey parsed from the exact local GTFS fixture provider; diagnostics=${JSON.stringify({
+        providerErrors: multiData.providerErrors, blockedProviders: multiData.blockedProviders,
+        journeys: multiData.journeys.map((candidate) => ({ source: candidate.source, legs: candidate.legs.map((leg) => ({ source: leg.source, providerId: leg.providerId, transportType: leg.transportType })) })),
+      })}`);
+      const fixtureTransitLegs = fixtureJourney.legs.filter((leg) => leg.providerId === ids.gtfsFixtureProvider);
+      assert.ok(fixtureTransitLegs.some((leg) => leg.transportType === 'bus'));
+      assert.ok(fixtureTransitLegs.some((leg) => leg.transportType === 'tram'));
+      assert.ok(fixtureTransitLegs.every((leg) => leg.source === 'gtfs-static'
+        && (leg.routeGeometry?.length ?? 0) >= 2), 'fixture bus/tram legs expose scheduled source and renderable GTFS shape geometry');
+      for (const strategy of ['BALANCED', 'FASTEST'] as const) {
+        assert.ok(multiData.availableStrategies.includes(strategy), `GTFS fixture participates in ${strategy} API ranking`);
+        assert.ok(Number.isInteger(fixtureJourney.strategyRanks?.[strategy]),
+          `the authenticated API response includes the GTFS fixture's ${strategy} rank`);
+      }
+      if (fixtureJourney.totalPriceMinor !== null) {
+        assert.ok(multiData.availableStrategies.includes('CHEAPEST'), 'a fixture journey with a known fare keeps CHEAPEST available');
+        assert.ok(Number.isInteger(fixtureJourney.strategyRanks?.CHEAPEST),
+          'the authenticated API response includes the known-fare GTFS fixture in CHEAPEST ranking');
+      } else {
+        assert.equal(fixtureJourney.strategyRanks?.CHEAPEST, undefined,
+          'an unknown transit fare is never represented as a CHEAPEST ranking');
+      }
+      for (const leg of fixtureTransitLegs) {
+        assert.ok((leg.stops?.length ?? 0) >= 2, `${leg.transportType} HTTP response preserves scheduled boarding and alighting calls`);
+        assert.ok(leg.stops!.every((stop, index) => index === 0
+          || Date.parse(leg.stops![index - 1]!.arrivalAt) <= Date.parse(stop.arrivalAt)),
+        `${leg.transportType} HTTP response preserves GTFS stop-time order`);
+        assert.ok(leg.departureAt && leg.arrivalAt
+          && Date.parse(leg.departureAt) < Date.parse(leg.arrivalAt),
+        `${leg.transportType} HTTP response preserves a valid scheduled interval`);
+      }
+    }
+    if (healthyLvivRealGtfsEnabled) {
       assert.ok(multiData.availableStrategies.includes('BALANCED'));
       assert.ok(multiData.journeys.some((journey) => typeof journey.strategyRanks?.BALANCED === 'number'),
         'each returned result exposes its place in the selected strategy ranking');
+      for (const strategy of ['BALANCED', 'FASTEST', 'CHEAPEST']) {
+        if (!multiData.availableStrategies.includes(strategy)) continue;
+        const ranked = multiData.journeys
+          .filter((journey) => Number.isInteger(journey.strategyRanks?.[strategy]))
+          .sort((left, right) => left.strategyRanks![strategy]! - right.strategyRanks![strategy]!);
+        assert.ok(ranked.length > 0, `${strategy} returns ranked route alternatives`);
+        assert.deepEqual(ranked.map((journey) => journey.strategyRanks![strategy]),
+          ranked.map((_, index) => index + 1), `${strategy} ranks are unique and contiguous`);
+        if (strategy === 'FASTEST') {
+          assert.ok(ranked.every((journey, index) => index === 0
+            || ranked[index - 1]!.totalDurationSeconds <= journey.totalDurationSeconds),
+          'FASTEST rank order never places a longer returned route ahead of a shorter one');
+        }
+        if (strategy === 'CHEAPEST') {
+          assert.ok(ranked.every((journey) => journey.totalPriceMinor !== null),
+            'CHEAPEST never ranks a route whose fare is unknown');
+          assert.ok(ranked.every((journey, index) => index === 0
+            || ranked[index - 1]!.totalPriceMinor! <= journey.totalPriceMinor!),
+          'CHEAPEST rank order never places a higher known fare ahead of a lower one');
+        }
+      }
       const realBusTramChain = multiData.journeys.find((journey) => {
         const modes = new Set(journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.transportType));
         return modes.has('bus') && modes.has('tram');
@@ -332,7 +442,131 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         assert.ok(leg.stops!.every((stop, index) => index === 0
           || Date.parse(leg.stops![index - 1]!.arrivalAt) <= Date.parse(stop.arrivalAt)), 'GTFS stop calls remain in time order');
       }
-    } else {
+
+      // Use the checked-in fixture for the transactional composition scenario.
+      // The live Lviv timetable is still verified above, but its next-day
+      // service and stop pairs are upstream data and cannot be a stable test
+      // prerequisite for creating a synthetic Community handoff offer.
+      const transitLegs = multiData.journeys.flatMap((candidate) => candidate.legs
+        .filter((leg) => leg.mode !== 'WALK' && leg.providerId === ids.gtfsFixtureProvider));
+      const buses = transitLegs.filter((leg) => leg.transportType === 'bus' && leg.origin && leg.destination && leg.arrivalAt);
+      const trams = transitLegs.filter((leg) => leg.transportType === 'tram' && leg.origin && leg.destination);
+      const compositionPair = buses.flatMap((bus) => trams.flatMap((tram) => {
+        const busArrival = Date.parse(bus.arrivalAt!);
+        const requestAt = Date.parse(multiSearchDeparture);
+        const gapMeters = Math.hypot(
+          (bus.destination!.coordinates[0] - tram.origin!.coordinates[0]) * 111_320,
+          (bus.destination!.coordinates[1] - tram.origin!.coordinates[1]) * 110_574,
+        );
+        if (busArrival - requestAt < 60_000 || busArrival - requestAt > 100 * 60_000 || gapMeters < 250 || gapMeters > 10_000) return [];
+        return [{ bus, tram, gapMeters }];
+      }))[0];
+      assert.ok(compositionPair, 'the deterministic Lviv fixture exposes a feasible bus-to-tram handoff for the integration scenario');
+      const suffixProbeDeparture = new Date(Date.parse(compositionPair.bus.arrivalAt!) + 25 * 60_000);
+      const suffixProbeResponse = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
+        body: JSON.stringify({ origin: { name: 'API tram boarding stop', coordinates: compositionPair.tram.origin!.coordinates },
+          destination: { name: 'API tram alighting stop', coordinates: compositionPair.tram.destination!.coordinates },
+          departureAt: suffixProbeDeparture.toISOString(), passengers: 1, strategy: 'FASTEST',
+          preferences: { allowedTransportTypes: ['tram'] } }),
+      });
+      assert.equal(suffixProbeResponse.status, 200);
+      const suffixProbe = (await suffixProbeResponse.json() as { data: { journeys: Array<{ legs: Array<{
+        transportType?: string; departureAt?: string;
+      }> }> } }).data;
+      const nextTramDeparture = suffixProbe.journeys.flatMap((journey) => journey.legs)
+        .find((leg) => leg.transportType === 'tram' && leg.departureAt)?.departureAt;
+      assert.ok(nextTramDeparture, 'the static Lviv feed has a later tram service after the private-ride transfer buffer');
+      const compositionDepartureAt = new Date(Date.parse(compositionPair.bus.arrivalAt!) + 10 * 60_000);
+      const compositionArrivalAt = new Date(Date.parse(nextTramDeparture) - 10 * 60_000);
+      const compositionDurationSeconds = Math.ceil((compositionArrivalAt.getTime() - compositionDepartureAt.getTime()) / 1000);
+      assert.ok(compositionDurationSeconds >= 300, 'the offer has time to make the connection after both 10-minute transfer buffers');
+      const offerOrigin = compositionPair.bus.destination!.coordinates;
+      const offerDestination = compositionPair.tram.origin!.coordinates;
+      const offerDistanceMeters = Math.max(250, Math.ceil(compositionPair.gapMeters * 1.3));
+      const offerRouteGeoJson = JSON.stringify({ type: 'LineString', coordinates: [offerOrigin, offerDestination] });
+      await pool.query(
+        `INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
+         VALUES($1,$2,$3,'API transit handoff pickup','API transit handoff dropoff',
+           ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,
+           ST_SetSRID(ST_GeomFromGeoJSON($8),4326),$9,$10,$11,$12,'api_integration_fixture',1000,2,2)`,
+        [ids.transitCompositionOffer, ids.driver, ids.vehicle, offerOrigin[0], offerOrigin[1], offerDestination[0], offerDestination[1],
+          offerRouteGeoJson, compositionDepartureAt, compositionArrivalAt, offerDistanceMeters, compositionDurationSeconds],
+      );
+      const composedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
+        body: JSON.stringify({
+          origin: { name: 'API bus departure stop', coordinates: compositionPair.bus.origin!.coordinates },
+          destination: { name: 'API tram arrival stop', coordinates: compositionPair.tram.destination!.coordinates },
+          departureAt: multiSearchDeparture, passengers: 1, strategy: 'FASTEST',
+          preferences: { allowCommunity: true, allowedTransportTypes: ['bus','tram','carpool'] },
+        }),
+      });
+      assert.equal(composedSearch.status, 200);
+      const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partial: boolean; partialReasons: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated: boolean; candidateGenerationTruncated: boolean; resultSamplingTruncated: boolean; gtfsTruncation: Record<string, boolean>; journeys: Array<{
+        id: string; offerId: string | null; source?: string; state: string;
+        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string }>;
+      }> } });
+      const composedData = composedPayload.data;
+      assert.equal(typeof composedData.partial, 'boolean');
+      assert.equal(composedData.partial, composedData.partialReasons.length > 0,
+        'the API partial flag must agree with its explicit reasons');
+      assert.equal(composedData.resultsTruncated,
+        composedData.candidateGenerationTruncated || composedData.resultSamplingTruncated,
+        'the API must surface both candidate-generation truncation and sampled result pages');
+      assert.equal(composedData.partialReasons.includes('candidate_generation_truncated'), composedData.candidateGenerationTruncated,
+        'candidate omission must be explained as an explicit partial reason');
+      assert.deepEqual(Object.keys(composedData.gtfsTruncation).sort(), [
+        'candidateGraph', 'candidatePoolLimit', 'candidateSampling', 'responsePage', 'searchBudget', 'searchStepLimit', 'stopSelection',
+      ], 'the API reports independent GTFS truncation causes');
+      assert.ok(Object.values(composedData.gtfsTruncation).every((value) => typeof value === 'boolean'));
+      const composedJourney = composedData.journeys.find((candidate) => candidate.source === 'community-transit'
+        && candidate.offerId === ids.transitCompositionOffer);
+      assert.ok(composedJourney, 'the production API composes and persists a real GTFS prefix, Community ride, and GTFS suffix');
+      assert.deepEqual(composedJourney.legs.map((leg) => leg.mode), ['BUS','COMMUNITY','TRAM']);
+      assert.equal(composedJourney.legs[1]!.offerId, ids.transitCompositionOffer);
+      assert.equal(composedJourney.legs[1]!.availabilityStatus, 'AVAILABLE');
+
+      const transferLimitedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
+        body: JSON.stringify({
+          origin: { name: 'API bus departure stop', coordinates: compositionPair.bus.origin!.coordinates },
+          destination: { name: 'API tram arrival stop', coordinates: compositionPair.tram.destination!.coordinates },
+          departureAt: multiSearchDeparture, passengers: 1, strategy: 'FASTEST',
+          preferences: { allowCommunity: true, allowedTransportTypes: ['bus','tram','carpool'], maxTransfers: 1 },
+        }),
+      });
+      assert.equal(transferLimitedSearch.status, 200);
+      const transferLimitedData = (await transferLimitedSearch.json() as { data: { journeys: Array<{
+        offerId: string | null; source?: string;
+      }> } }).data;
+      assert.equal(transferLimitedData.journeys.some((candidate) => candidate.source === 'community-transit'
+        && candidate.offerId === ids.transitCompositionOffer), false,
+      'a BUS → COMMUNITY → TRAM journey has two vehicle changes and must not appear under maxTransfers=1');
+
+      const storedComposition = await pool.query<{ state: string; modes: string[]; leg_states: string[] }>(
+        `SELECT j.state,array_agg(l.mode ORDER BY l.ordinal) AS modes,array_agg(l.state ORDER BY l.ordinal) AS leg_states
+           FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 AND j.user_id=$2 GROUP BY j.id`,
+        [composedJourney.id, compositionPassenger],
+      );
+      assert.deepEqual(storedComposition.rows[0], { state: 'PLANNED', modes: ['BUS','COMMUNITY','TRAM'], leg_states: ['SUGGESTED','SELECTED','SUGGESTED'] });
+      const selectedCommunityLeg = composedJourney.legs[1]!;
+      const compositionBooking = await fetch(`${apiUrl}/api/v1/bookings`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger,
+          'idempotency-key': `composed-leg-${crypto.randomUUID()}` },
+        body: JSON.stringify({ offerId: ids.transitCompositionOffer, seats: 1,
+          journeyId: composedJourney.id, journeyLegId: selectedCommunityLeg.id }),
+      });
+      assert.equal(compositionBooking.status, 201, 'the selected private leg can be booked through the normal atomic booking API');
+      const bookedComposition = await pool.query<{ state: string; confirmed: number; stillSuggestedTransit: number }>(
+        `SELECT j.state,
+                count(*) FILTER (WHERE l.mode='COMMUNITY' AND l.state='CONFIRMED')::int AS confirmed,
+                count(*) FILTER (WHERE l.mode IN ('BUS','TRAM') AND l.state='SUGGESTED')::int AS still_suggested_transit
+           FROM journeys j JOIN journey_legs l ON l.journey_id=j.id WHERE j.id=$1 GROUP BY j.id`, [composedJourney.id],
+      );
+      assert.deepEqual(bookedComposition.rows[0], { state: 'PARTIALLY_RESERVED', confirmed: 1, still_suggested_transit: 2 },
+        'booking the private leg does not pretend the transit legs are reservations');
+    } else if (!healthyLvivGtfsEnabled) {
       assert.equal(multiData.journeys.length, 0, 'an empty provider registry must not produce fabricated transit alternatives');
       assert.ok(multiData.blockedProviders.some((value) => value.startsWith('transportType:bus:')));
       assert.ok(multiData.blockedProviders.some((value) => value.startsWith('transportType:tram:')));
@@ -354,7 +588,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA }, body: JSON.stringify(body),
     });
     assert.equal(response.status, 200);
-    const result = await response.json() as { data: { partial: boolean; partialReasons: string[]; blockedProviders: string[]; unsupportedPreferences: string[]; journeys: Array<{ id: string; offerId: string | null; strategy: string; confirmedPriceMinor: number | null; totalPriceMinor: number | null; source?: string; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
+    const result = await response.json() as { data: { partial: boolean; partialReasons: string[]; blockedProviders: string[]; unsupportedPreferences: string[]; availableStrategies: string[]; journeys: Array<{ id: string; offerId: string | null; strategy: string; recommendedStrategies?: string[]; strategyRanks?: Record<string, number>; confirmedPriceMinor: number | null; totalPriceMinor: number | null; source?: string; legs: Array<{ id: string; mode: string; priceStatus: string; availabilityStatus: string; driver?: { averageRating: number | null } }> }> } };
     assert.equal(result.data.partial, true);
     assert.ok(result.data.partialReasons.length > 0);
     assert.ok(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:taxi:')));
@@ -364,14 +598,28 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(communityJourneys.length, 1);
     const journey = communityJourneys[0];
     assert.ok(journey);
+    for (const strategy of ['BALANCED', 'FASTEST', 'CHEAPEST']) {
+      assert.ok(result.data.availableStrategies.includes(strategy),
+        `a known-price community offer keeps ${strategy} available at the authenticated API boundary`);
+      assert.equal(journey.strategyRanks?.[strategy], 1,
+        `the persisted community result has a rank for ${strategy}`);
+      assert.ok(journey.recommendedStrategies?.includes(strategy),
+        `the API recommendation labels the community result for ${strategy}`);
+    }
     assert.equal(journey.confirmedPriceMinor, null);
     assert.equal(journey.totalPriceMinor, 15000);
     assert.equal(journey.legs[0].driver?.averageRating, 5);
     assert.equal(typeof journey.legs[0].driver?.averageRating, 'number');
     assert.deepEqual(journey.legs.map((leg) => [leg.mode, leg.priceStatus, leg.availabilityStatus]), [['COMMUNITY', 'ESTIMATED', 'AVAILABLE']]);
-    if (result.data.unsupportedPreferences.includes('CHEAPEST:public-transit-fares-unavailable')) {
-      assert.equal(result.data.journeys.some((item) => item.strategy === 'CHEAPEST'), false,
-        'an unknown transit fare prevents the API from claiming a cheapest overall route');
+    assert.ok(result.data.availableStrategies.includes('CHEAPEST'),
+      'a known UAH community fare keeps CHEAPEST available even when a different provider has unknown pricing');
+    assert.ok(result.data.journeys.filter((item) => typeof item.strategyRanks?.CHEAPEST === 'number')
+      .every((item) => item.totalPriceMinor !== null),
+    'the API never labels an unknown-fare journey as part of CHEAPEST');
+    if (result.data.availableStrategies.includes('CHEAPEST')) {
+      assert.ok(result.data.journeys.filter((item) => typeof item.strategyRanks?.CHEAPEST === 'number')
+        .every((item) => item.totalPriceMinor !== null),
+      'the cheapest ranking only includes routes with a known comparable fare');
     }
     if (result.data.unsupportedPreferences.includes('maxPriceMinor:public-transit-fare-unavailable')) {
       assert.equal(result.data.journeys.some((item) => item.source === 'gtfs-static'), false,
@@ -545,16 +793,38 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const initial = await sessionResponse.json() as { data: { id: string; state: string; locationSharingEnabled: boolean } };
     assert.equal(initial.data.state, 'SCHEDULED');
     assert.equal(initial.data.locationSharingEnabled, false);
+    const approachesBeforeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: passengerHeaders });
+    assert.equal(approachesBeforeConsent.status, 409);
     const prematureLocation = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
       method: 'POST', headers: passengerHeaders,
       body: JSON.stringify({ longitude: 24, latitude: 49, accuracyMeters: 5, capturedAt: new Date().toISOString() }),
     });
-    assert.equal(prematureLocation.status, 409);
+    assert.equal(prematureLocation.status, 403);
 
     const activate = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous/activate`, { method: 'POST', headers: driverHeaders });
     assert.equal(activate.status, 200);
     const active = await activate.json() as { data: { state: string; locationSharingEnabled: boolean } };
-    assert.deepEqual({ state: active.data.state, sharing: active.data.locationSharingEnabled }, { state: 'ACTIVE', sharing: true });
+    assert.deepEqual({ state: active.data.state, sharing: active.data.locationSharingEnabled }, { state: 'ACTIVE', sharing: false });
+
+    const passengerConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: passengerHeaders, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(passengerConsent.status, 200);
+    const passengerConsented = await passengerConsent.json() as { data: { currentParticipantConsent: boolean; locationSharingEnabled: boolean } };
+    assert.deepEqual({ consent: passengerConsented.data.currentParticipantConsent, sharing: passengerConsented.data.locationSharingEnabled }, { consent: true, sharing: false });
+
+    const driverBeforeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: driverHeaders,
+      body: JSON.stringify({ longitude: 24.0001, latitude: 49, accuracyMeters: 8, capturedAt: new Date().toISOString() }),
+    });
+    assert.equal(driverBeforeConsent.status, 403, 'one participant cannot transmit location before their own consent');
+
+    const driverConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: driverHeaders, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(driverConsent.status, 200);
+    const driverConsented = await driverConsent.json() as { data: { currentParticipantConsent: boolean; otherParticipantConsent: boolean; locationSharingEnabled: boolean } };
+    assert.deepEqual({ own: driverConsented.data.currentParticipantConsent, other: driverConsented.data.otherParticipantConsent, sharing: driverConsented.data.locationSharingEnabled }, { own: true, other: true, sharing: true });
 
     const capturedAt = new Date().toISOString();
     const location = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
@@ -574,6 +844,46 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     const driverState = await driverView.json() as { data: { locations: { passenger: { freshness: string; coordinates: number[] } | null } } };
     assert.deepEqual(driverState.data.locations.passenger?.coordinates, [24, 49]);
     assert.equal(driverState.data.locations.passenger?.freshness, 'LIVE');
+
+    const driverCapturedAt = new Date(Date.parse(capturedAt) + 1_000).toISOString();
+    const driverLocation = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: driverHeaders,
+      body: JSON.stringify({ longitude: 24.0001, latitude: 49, accuracyMeters: 8, capturedAt: driverCapturedAt }),
+    });
+    assert.equal(driverLocation.status, 200);
+    const passengerView = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous`, { headers: passengerHeaders });
+    const passengerState = await passengerView.json() as { data: { locations: { driver: { freshness: string; coordinates: number[] } | null } } };
+    assert.deepEqual(passengerState.data.locations.driver?.coordinates, [24.0001, 49]);
+    assert.equal(passengerState.data.locations.driver?.freshness, 'LIVE');
+    const approaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: passengerHeaders });
+    assert.equal(approaches.status, 200);
+    const approachData = await approaches.json() as { data: {
+      driver: { approach: { status: string; geometry: unknown; distanceMeters: number | null } };
+      passenger: { approach: { status: string; geometry: unknown; distanceMeters: number | null } };
+    } };
+    assert.equal(approachData.data.driver.approach.status, 'ROUTING_UNAVAILABLE');
+    assert.equal(approachData.data.driver.approach.geometry, null);
+    assert.equal(approachData.data.driver.approach.distanceMeters, null);
+    assert.equal(approachData.data.passenger.approach.status, 'ROUTING_UNAVAILABLE');
+    assert.equal(approachData.data.passenger.approach.geometry, null);
+    const outsiderApproaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: { 'x-dev-user-id': passengerB } });
+    assert.equal(outsiderApproaches.status, 404);
+
+    const revokeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: passengerHeaders, body: JSON.stringify({ enabled: false }),
+    });
+    assert.equal(revokeConsent.status, 200);
+    const revoked = await revokeConsent.json() as { data: { locationSharingEnabled: boolean; locations: { driver: unknown; passenger: unknown } } };
+    assert.deepEqual({ sharing: revoked.data.locationSharingEnabled, driver: revoked.data.locations.driver, passenger: revoked.data.locations.passenger }, { sharing: false, driver: null, passenger: null });
+    const renewConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/consent`, {
+      method: 'POST', headers: passengerHeaders, body: JSON.stringify({ enabled: true }),
+    });
+    assert.equal(renewConsent.status, 200);
+    const oldDriverSample = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
+      method: 'POST', headers: driverHeaders,
+      body: JSON.stringify({ longitude: 24.0001, latitude: 49, accuracyMeters: 8, capturedAt }),
+    });
+    assert.equal(oldDriverSample.status, 409, 'a sample from before the renewed mutual-consent period cannot reappear');
 
     const driverArrived = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/status`, {
       method: 'POST', headers: driverHeaders, body: JSON.stringify({ action: 'arrived' }),

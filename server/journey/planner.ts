@@ -2,6 +2,7 @@ import type { ProviderOption } from '../providers/types';
 import type { JourneyOption, JourneyStrategy } from './types';
 import { paretoFrontier, scoreJourneys } from './scoring';
 import { evaluateTransfer, type TransferEvaluation } from './transferEngine';
+import { compareStableId } from './stableOrdering';
 
 export interface RouteConnection {
   /** Measured by a routing provider, never inferred from straight-line distance. */
@@ -106,7 +107,7 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
   }
 
   const options = input.options.filter(validateOption)
-    .sort((a, b) => a.departureAt!.getTime() - b.departureAt!.getTime() || a.id.localeCompare(b.id));
+    .sort((a, b) => a.departureAt!.getTime() - b.departureAt!.getTime() || compareStableId(a.id, b.id));
   const routes: PlannedJourney[] = [];
   const maxDeparture = input.departureAt.getTime() + maximumWaitSeconds * 1000;
 

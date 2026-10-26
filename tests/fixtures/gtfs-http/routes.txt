@@ -1,0 +1,3 @@
+route_id,agency_id,route_short_name,route_long_name,route_type
+fixture-bus,fixture,99,Fixture bus,3
+fixture-tram,fixture,8,Fixture tram,0

@@ -144,6 +144,23 @@ describe('GTFS parsing', () => {
     const dateAdded = { ...base, 'calendar_dates.txt': strToU8('service_id,date,exception_type\nweekday,20261012,1\n') };
     assert.equal(summarizeGtfs(dateAdded, now).hasUpcomingService, true);
   });
+  it('does not claim GTFS service is usable without a valid agency timezone', () => {
+    const base = {
+      'agency.txt': strToU8('agency_id,agency_name,agency_timezone\na,Test,Not/A_Timezone\n'),
+      'routes.txt': strToU8('route_id,route_type\nr,3\n'),
+      'trips.txt': strToU8('route_id,service_id,trip_id\nr,weekday,t1\n'),
+      'stops.txt': strToU8('stop_id,stop_name,stop_lat,stop_lon\ns,Stop,49.84,24.03\n'),
+      'stop_times.txt': strToU8('trip_id,arrival_time,departure_time,stop_id,stop_sequence\nt1,08:00:00,08:00:00,s,1\n'),
+      'calendar.txt': strToU8('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,1,1,1,1,0,0,20261005,20261012\n'),
+    };
+    const now = new Date('2026-10-09T09:00:00.000Z');
+    const invalid = summarizeGtfs(base, now);
+    assert.equal(invalid.hasValidTimezone, false);
+    assert.equal(invalid.hasUpcomingService, false);
+    const valid = summarizeGtfs({ ...base, 'agency.txt': strToU8('agency_id,agency_name,agency_timezone\na,Test,Europe/Kyiv\n') }, now);
+    assert.equal(valid.hasValidTimezone, true);
+    assert.equal(valid.hasUpcomingService, true);
+  });
 });
 
 import { extractVehicleList, summarizeVehicles, vehicleTransportLabel } from '../server/mobility/jsonVehicles';
@@ -166,5 +183,19 @@ describe('JSON vehicle feeds', () => {
     assert.equal(summary.valid, 2); assert.equal(summary.invalid, 2);
     assert.deepEqual(summary.byType, { bus: 1, tram: 1 });
     assert.ok(summary.ageSeconds !== null && summary.ageSeconds < 120);
+  });
+  it('parses Dozor local `time` fields as Europe/Kyiv and reports position freshness', () => {
+    const now = Date.parse('2026-10-19T09:00:00.000Z');
+    const summary = summarizeVehicles([{ latitude: 49.84, longitude: 24.03, route_type: 3, time: '2026-10-19 12:00:00' }], now);
+    assert.equal(summary.timestamped, 1);
+    assert.equal(summary.ageSeconds, 0);
+  });
+  it('keeps JSON position freshness aligned with the 90-second live map limit', () => {
+    const now = Date.parse('2026-10-19T09:00:00.000Z');
+    const stale = summarizeVehicles([{ latitude: 49.84, longitude: 24.03, time: '2026-10-19 11:58:29' }], now);
+    const fresh = summarizeVehicles([{ latitude: 49.84, longitude: 24.03, time: '2026-10-19 11:58:30' }], now);
+    assert.equal(stale.ageSeconds, 91);
+    assert.equal(stale.newestTimestampMs, now - 91_000);
+    assert.equal(fresh.newestTimestampMs, now - 90_000);
   });
 });

@@ -32,6 +32,8 @@ export interface ConnectionReport {
   responseMs: number;
   /** Coverage of the source: [minLon, minLat, maxLon, maxLat] from its real coordinates. */
   bbox?: [number, number, number, number];
+  /** SHA-256 of the validated static feed payload, used to invalidate normalized L2 catalogs. */
+  sourceVersion?: string;
   error?: string;
 }
 
