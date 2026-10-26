@@ -1072,6 +1072,17 @@ app.get('/api/v1/admin/mobility/audit', requireAuth, requireAdmin, asyncHandler(
   res.json({ data: rows });
 }));
 
+app.get('/api/v1/admin/audit', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT a.id,a.action,a.entity_type,a.entity_id,a.created_at,u.display_name AS actor
+       FROM audit_events a LEFT JOIN users u ON u.id=a.actor_id
+      WHERE a.entity_type IN ('mobility_provider','organization')
+         OR a.action IN ('role.admin.granted_by_config','role.enabled','user.blocked','user.unblocked')
+      ORDER BY a.created_at DESC,a.id DESC LIMIT 100`,
+  );
+  res.json({ data: rows });
+}));
+
 app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
 app.get('/metrics', (req, res) => {
   const configuredToken = process.env.METRICS_BEARER_TOKEN;
