@@ -409,6 +409,8 @@ export interface GtfsItinerarySearchResult {
 export interface GtfsGraphBudgetLimits {
   totalSegments?: number;
   segmentsPerRoute?: number;
+  /** Test-only override for verifying bounded search-frontier behavior. */
+  maxQueuedSearchWork?: number;
 }
 
 /** Internal, read-only snapshot for alternate GTFS search experiments in tests. */
@@ -2980,6 +2982,11 @@ export function findGtfsItinerariesWithStats(
   // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
   // but do not cut off ordinary city results at the first-route frontier.
   const MAX_SEARCH_STEPS = 1_000_000;
+  // A step ceiling alone does not bound memory: each expanded path can enqueue
+  // a large transfer fan-out before the next work item is visited. Keep the
+  // pending frontier bounded independently, and disclose any dropped work via
+  // the existing search-budget truncation flag.
+  const MAX_QUEUED_SEARCH_WORK = graphLimits.maxQueuedSearchWork ?? 10_000;
   let searchBudgetTruncated = false;
   let maximumQueuedSearchWork = 0;
 
@@ -3083,6 +3090,10 @@ export function findGtfsItinerariesWithStats(
     preferFirstLeg: boolean;
   };
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork) => {
+    if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK) {
+      searchBudgetTruncated = true;
+      return;
+    }
     queue.work.push(work);
     maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
       queuesPendingWork + 1);
