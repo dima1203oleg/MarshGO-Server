@@ -1818,6 +1818,27 @@ test('finds service after midnight when GTFS uses a 24-hour stop time', () => {
   ], 'dated event labels honor a calendar exception, agency timezone, and GTFS 24:15 service time');
 });
 
+test('finds a 71-hour GTFS service trip on its two-day-old service date', () => {
+  const timetable = feed({ departure: '71:15:00', arrival: '71:55:00', monday: '0', exceptionDate: '20261012' });
+  const query = {
+    ...request('2026-10-14T20:10:00Z', '2026-10-14T20:30:00Z'),
+    maximumTransfers: 0,
+  };
+  const direct = findDirectGtfsJourneys(timetable, query);
+  assert.equal(direct.length, 1);
+  assert.equal(direct[0].serviceDate, '20261012');
+  assert.equal(direct[0].departureAt.toISOString(), '2026-10-14T20:15:00.000Z');
+  assert.equal(direct[0].arrivalAt.toISOString(), '2026-10-14T20:55:00.000Z');
+
+  const routed = findGtfsItinerariesWithStats(timetable, query);
+  assert.equal(routed.itineraries.length, 1,
+    'the production multimodal search must include the prior two service dates too');
+  assert.equal(routed.itineraries[0].segments[0].serviceDate, '20261012');
+  assert.equal(routed.itineraries[0].segments[0].departureAt.toISOString(), '2026-10-14T20:15:00.000Z');
+  assert.equal(routed.itineraries[0].segments[0].arrivalAt.toISOString(), '2026-10-14T20:55:00.000Z');
+  assert.equal(routed.searchTruncated, false, 'the complete tiny 71-hour service-date fixture is not truncated');
+});
+
 test('normalizes GTFS rail and ferry journeys into supported journey modes', () => {
   const interval = request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z');
   assert.equal(findDirectGtfsJourneys(feed({ routeType: '2' }), interval)[0]?.mode, 'RAIL');
