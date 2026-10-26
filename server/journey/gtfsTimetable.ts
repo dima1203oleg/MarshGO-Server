@@ -1459,9 +1459,14 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
   const firstDate = localDate(input.earliestDeparture, feed.timezone);
   const lastDate = localDate(input.latestDeparture, feed.timezone);
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
-  // GTFS permits stop times beyond 24:00. Include the prior service day so
-  // trips such as Monday 24:15 can be found for a Tuesday 00:15 departure.
-  const serviceDates = [...new Set([dateStringAfter(firstDate, -1), firstDate, lastDate])];
+  // GTFS stop times may extend through 71:59:59. Search the two preceding
+  // service dates as well as every date spanned by the requested departure
+  // window; otherwise a trip just after midnight can be attached to a service
+  // date two calendar days earlier and disappear from direct results.
+  const serviceDates: string[] = [];
+  for (let date = dateStringAfter(firstDate, -2); date <= lastDate; date = dateStringAfter(date, 1)) {
+    serviceDates.push(date);
+  }
   const results: GtfsDirectJourney[] = [];
   const segmentIndexes = new WeakMap<GtfsDirectJourney, { fromIndex: number; toIndex: number; serviceDate: string }>();
   const originEntriesByTrip = new Map<string, Array<{ index: number; originStopId: string }>>();
@@ -1746,7 +1751,9 @@ export function findGtfsItinerariesWithStats(
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
   const serviceDates = new Set<string>();
   const dayCount = Math.ceil((journeyEnd.getTime() - input.earliestDeparture.getTime()) / 86_400_000) + 2;
-  for (let day = -1; day <= dayCount; day++) {
+  // GTFS stop_times permits hours through 71:59:59, so a post-midnight query
+  // can still belong to a service date two days before the local calendar date.
+  for (let day = -2; day <= dayCount; day++) {
     const date = dateStringAfter(firstServiceDate, day);
     if (date <= lastServiceDate || day < 0) serviceDates.add(date);
   }
