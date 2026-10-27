@@ -2670,30 +2670,28 @@ export function findGtfsItinerariesWithStats(
           ?? new BoundedBestK<RetainedGtfsSegment>(Math.min(MAX_ROUTE_OVERFLOW_CONNECTORS, graphSegmentLimitPerRoute), compareTripSegments);
         let temporallyConnectsQueryEnds = false;
         let bestConnector: { segment: RetainedGtfsSegment; arrivalAt: number } | undefined;
-        const internalConnectors: RetainedGtfsSegment[] = [];
+        let feasibleConnectorEvaluations = 0;
         for (const candidate of tripCandidates) {
           const canCatchOrigin = canBoardOriginCandidate(candidate);
           const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
           const servesQueryEndpoint = canCatchOrigin || endsAtDestination;
           if (servesQueryEndpoint) overflow.consider(candidate);
-          else internalConnectors.push(candidate);
           if (servesQueryEndpoint) {
             if (!temporallyConnectsQueryEnds && hasPriorEvent(candidate, minimumTransferBufferSeconds)
               && hasNextEvent(candidate, minimumTransferBufferSeconds)) temporallyConnectsQueryEnds = true;
+            continue;
           }
-        }
-        // Keep the best temporally feasible through-connector per trip group
-        // in the bounded reservoir too. Endpoint-only overflow can leave
-        // redistributed graph capacity unused on connector routes.
-        if (internalConnectors.length > 1) internalConnectors.sort((left, right) => left.arrivalAt.getTime()
-          - right.arrivalAt.getTime() || compareTripSegments(left, right));
-        for (const candidate of internalConnectors) {
+          // Keep a bounded sample of feasible through-connectors per trip.
+          // The cursor-first candidate plus one alternative covers different
+          // alighting stops without sorting/materializing all stop pairs.
+          if (feasibleConnectorEvaluations >= 2) continue;
           // A continuation cannot arrive before this segment itself. Once a
-          // better onward arrival is known, later segments cannot beat it.
-          if (bestConnector && candidate.arrivalAt.getTime() > bestConnector.arrivalAt) break;
+          // better onward arrival is known, this candidate cannot beat it.
+          if (bestConnector && candidate.arrivalAt.getTime() > bestConnector.arrivalAt) continue;
           if (hasPriorEvent(candidate, minimumTransferBufferSeconds)) {
             const onwardArrival = earliestQueryArrivalAfterSegment(candidate, minimumTransferBufferSeconds);
             if (onwardArrival !== null) {
+              feasibleConnectorEvaluations++;
               temporallyConnectsQueryEnds = true;
               if (!bestConnector || onwardArrival < bestConnector.arrivalAt
                 || (onwardArrival === bestConnector.arrivalAt
