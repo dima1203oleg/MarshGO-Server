@@ -3631,6 +3631,91 @@ test('does not invent a feasible transfer when the configured buffer is missed',
   assert.equal(results.length, 0);
 });
 
+test('does not let post-latestDeparture origin departures displace an in-window chain or intermediate connector under a tight route cap', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set('origin-a', { id: 'origin-a', name: 'Origin A', lon: 24.0200, lat: 49.8400 });
+  timetable.stops.set('origin-b', { id: 'origin-b', name: 'Origin B', lon: 24.0210, lat: 49.8400 });
+  timetable.stops.set('hub', { id: 'hub', name: 'Transfer Hub', lon: 24.0260, lat: 49.8450 });
+  timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: 24.0320, lat: 49.8500 });
+
+  const retentionHash = (routeId: string, tripId: string, serviceDate = '20261012') => {
+    const key = `${routeId}\u0000${tripId}\u0000${serviceDate}`;
+    let hash = 0x811c9dc5;
+    for (let index = 0; index < key.length; index++) {
+      hash = Math.imul(hash ^ key.charCodeAt(index), 0x01000193);
+    }
+    return hash >>> 0;
+  };
+  assert.ok(
+    retentionHash('first-route', 'first-out-of-window') < retentionHash('first-route', 'first-in-window'),
+    'out-of-window first-route trip hashes ahead of the valid first leg if placed in the same retention tier',
+  );
+  assert.ok(
+    retentionHash('connector-route', 'connector-out-of-window') < retentionHash('connector-route', 'connector-in-chain'),
+    'out-of-window connector trip hashes ahead of the valid connector if placed in the same retention tier',
+  );
+
+  const addRoute = (routeId: string) => timetable.routes.set(routeId, {
+    name: routeId, mode: 'BUS', transportType: 'bus',
+  });
+  const addTrip = (
+    tripId: string, routeId: string, from: string, to: string,
+    departureSeconds: number, arrivalSeconds: number,
+  ) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [from, to].map((stopId, index) => ({
+      stopId,
+      sequence: index + 1,
+      arrivalSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      departureSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      pickupType: 0,
+      dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+
+  addRoute('first-route');
+  addRoute('connector-route');
+  addRoute('final-route');
+
+  // Query window is 08:00..08:10 local time (05:00..05:10Z) with a 30-minute maximum wait.
+  addTrip('first-in-window', 'first-route', 'origin-a', 'origin-b', 8 * 3600 + 5 * 60, 8 * 3600 + 10 * 60);
+  addTrip('first-out-of-window', 'first-route', 'origin-a', 'origin-b', 8 * 3600 + 35 * 60, 8 * 3600 + 40 * 60);
+
+  // Both connector trips depart origin-b (which is within the origin access radius) after latestDeparture (08:10).
+  // connector-in-chain is a valid 2nd leg from first-in-window (25 min wait <= 30 min max wait);
+  // connector-out-of-window waits 35 min after first-in-window and would only appear reachable if
+  // first-out-of-window falsely seeded origin reachability at 08:40.
+  addTrip('connector-in-chain', 'connector-route', 'origin-b', 'hub', 8 * 3600 + 35 * 60, 8 * 3600 + 50 * 60);
+  addTrip('connector-out-of-window', 'connector-route', 'origin-b', 'hub', 8 * 3600 + 45 * 60, 9 * 3600);
+
+  addTrip('final-valid', 'final-route', 'hub', 'destination', 9 * 3600 + 10 * 60, 9 * 3600 + 25 * 60);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T05:00:00Z', '2026-10-12T05:10:00Z'),
+    origin: [24.0200, 49.8400],
+    destination: [24.0320, 49.8500],
+    maximumAccessWalkingMeters: 200,
+    maximumEgressWalkingMeters: 200,
+    maximumTransferWalkingMeters: 100,
+    minimumTransferBufferSeconds: 180,
+    maximumWaitSeconds: 1800,
+    maximumTransfers: 2,
+  }, { totalSegments: 3, segmentsPerRoute: 1 });
+
+  assert.deepEqual(
+    result.itineraries.map((itinerary) => itinerary.segments.map((segment) => segment.tripId).join('>')),
+    ['first-in-window>connector-in-chain>final-valid'],
+  );
+});
+
 test('rejects feeds without a timezone and validates query bounds', () => {
   assert.throws(() => parseGtfsTimetable({ 'agency.txt': new TextEncoder().encode('agency_name\nTransit') }), /agency_timezone/);
   assert.throws(() => findDirectGtfsJourneys(feed(), { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumStopDistanceMeters: 50 }), /between 100 and 10000/);

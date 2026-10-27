@@ -1886,6 +1886,7 @@ export function findGtfsItinerariesWithStats(
   }
 
   const journeyEnd = new Date(input.earliestDeparture.getTime() + maximumJourneySeconds * 1000);
+  const maxFirstDeparture = input.latestDeparture.getTime();
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
   const serviceDates = new Set(gtfsServiceDatesForWindow(feed, input.earliestDeparture, journeyEnd, serviceTimeToUtc));
 
@@ -2120,7 +2121,8 @@ export function findGtfsItinerariesWithStats(
             const fromStop = feed.stops.get(from.stopId);
             const coordinates = from.sourceStopCoordinates ?? (fromStop ? [fromStop.lon, fromStop.lat] as [number, number] : null);
             const accessSeconds = coordinates ? Math.ceil(distanceMeters(input.origin, coordinates) / 1.25) : Infinity;
-            if (departureAt.getTime() >= input.earliestDeparture.getTime() + accessSeconds * 1000) {
+            if (departureAt.getTime() <= maxFirstDeparture
+              && departureAt.getTime() >= input.earliestDeparture.getTime() + accessSeconds * 1000) {
               addRetentionEvent(originReachableArrivalsByNode, seenOriginRetentionEventsByNode, to, arrivalAt, tripId, trip.routeId);
             }
           }
@@ -2436,14 +2438,16 @@ export function findGtfsItinerariesWithStats(
   };
   const emptyTraveledZoneIds: string[] = [];
   const queryFrontierConnectivity = new WeakMap<RetainedGtfsSegment, boolean>();
+  const canBoardOriginCandidate = (candidate: Pick<RetainedGtfsSegment, 'originContext' | 'departureAt'>) =>
+    originStopIds.has(candidate.originContext.details.id)
+    && candidate.departureAt.getTime() <= maxFirstDeparture
+    && candidate.departureAt.getTime() >= input.earliestDeparture.getTime()
+      + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
   const compareTripSegments = (left: RetainedGtfsSegment, right: RetainedGtfsSegment) => {
     const rank = (candidate: RetainedGtfsSegment): [number, number, number, number, number, number] => {
       if (candidate.sampleRank) return candidate.sampleRank;
-      const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
       const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
-      const accessSeconds = Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25);
-      const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
-        >= input.earliestDeparture.getTime() + accessSeconds * 1000;
+      const canCatchOrigin = canBoardOriginCandidate(candidate);
       const duration = candidate.arrivalAt.getTime() - candidate.departureAt.getTime();
       const direct = canCatchOrigin && endsAtDestination;
       let joinsOppositeFrontier = false;
@@ -2610,10 +2614,7 @@ export function findGtfsItinerariesWithStats(
           ?? new BoundedBestK<RetainedGtfsSegment>(Math.min(MAX_ROUTE_OVERFLOW_CONNECTORS, graphSegmentLimitPerRoute), compareTripSegments);
         let temporallyConnectsQueryEnds = false;
         for (const candidate of tripCandidates) {
-          const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
-          const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
-            >= input.earliestDeparture.getTime()
-              + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
+          const canCatchOrigin = canBoardOriginCandidate(candidate);
           const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
           const servesQueryEndpoint = canCatchOrigin || endsAtDestination;
           if (servesQueryEndpoint) overflow.consider(candidate);
@@ -2631,9 +2632,7 @@ export function findGtfsItinerariesWithStats(
         overflowConnectorsByRoute.set(trip.routeId, connectorOverflow);
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
         const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
-        const canBoardFromOrigin = tripCandidates.some((candidate) => originStopIds.has(candidate.originContext.details.id)
-          && candidate.departureAt.getTime() >= input.earliestDeparture.getTime()
-            + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000);
+        const canBoardFromOrigin = tripCandidates.some(canBoardOriginCandidate);
         const canAlightAtDestination = tripCandidates.some((candidate) => destinationStopIds.has(candidate.destinationContext.details.id));
         // Reserve graph capacity for endpoint-serving trips before sampling
         // transfer-only lines. A uniformly hashed reservoir can otherwise
@@ -2647,9 +2646,7 @@ export function findGtfsItinerariesWithStats(
         // route budget, reserve priority for endpoint trips that actually
         // connect to the opposite query frontier before hashing alternatives.
         const connectsOppositeQueryFrontier = tripCandidates.some((candidate) => {
-          const candidateStartsAtOrigin = originStopIds.has(candidate.originContext.details.id)
-            && candidate.departureAt.getTime() >= input.earliestDeparture.getTime()
-              + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
+          const candidateStartsAtOrigin = canBoardOriginCandidate(candidate);
           const candidateEndsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
           return (candidateStartsAtOrigin && hasNextEvent(candidate, minimumTransferBufferSeconds))
             || (candidateEndsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds));
@@ -3061,7 +3058,6 @@ export function findGtfsItinerariesWithStats(
   };
   debugStage('reachability-built', { transferStates: transferCandidateCache.size,
     routeStates: transferCandidateViewCache.size, reachableStops: reachableWithin.at(-1)?.size ?? 0 });
-  const maxFirstDeparture = input.latestDeparture.getTime();
   let candidateSamplingTruncated = false;
   const addPath = (path: GtfsDirectJourney[], expectedLegCount: number) => {
     if (path.length !== expectedLegCount) return;
