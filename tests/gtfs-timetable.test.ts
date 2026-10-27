@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsDeterministicOverflowSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 import { queryDirectedEventIndexPrototype, validateEventIndexCandidatesWithProductionTransfers } from './helpers/gtfs-event-label-prototype';
@@ -1481,31 +1481,35 @@ test('route-chain sample preserves the full FASTEST, CHEAPEST, and BALANCED winn
     `route-chain sampling must retain strategy winner ${winner}`);
 });
 
-test('bounded objective overflow sample retains the shared BALANCED winner', () => {
+test('bounded objective overflow sample is stable across candidate arrival order', () => {
   const base = findGtfsItineraries(feed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
   })[0];
   assert.ok(base);
   const candidates = [
-    ...Array.from({ length: 18 }, (_, index) => ({
-      ...base, id: `ordinary-${index}`, durationSeconds: 4_400 + index * 17,
-      walkingMeters: 800 + index * 5, transfers: index % 3 === 0 ? 1 : 0,
-      fare: { priceMinor: 800 + index * 13, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
-    })),
-    { ...base, id: 'fastest-extreme', durationSeconds: 1_800, walkingMeters: 1_200, transfers: 1,
-      fare: { priceMinor: 1_800, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
-    { ...base, id: 'cheapest-extreme', durationSeconds: 7_200, walkingMeters: 500, transfers: 0,
-      fare: { priceMinor: 100, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
-    { ...base, id: 'balanced-winner', durationSeconds: 3_900, walkingMeters: 100, transfers: 0,
-      fare: { priceMinor: 700, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'fast-expensive', durationSeconds: 900, walkingMeters: 1_800, transfers: 1,
+      fare: { priceMinor: 900, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'cheap-slow', durationSeconds: 5_400, walkingMeters: 100, transfers: 1,
+      fare: { priceMinor: 600, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'middle', durationSeconds: 3_000, walkingMeters: 700, transfers: 0,
+      fare: { priceMinor: 250, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'low-walk', durationSeconds: 4_200, walkingMeters: 1_000, transfers: 0,
+      fare: { priceMinor: 0, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'fast-cheap-transfer', durationSeconds: 1_500, walkingMeters: 300, transfers: 2,
+      fare: { priceMinor: 500, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
   ];
-  const fullWinner = rankGtfsItinerariesForCandidateSampling(candidates)[0];
-  assert.equal(fullWinner?.id, 'balanced-winner', 'fixture has a distinct BALANCED winner');
-
-  let retained: GtfsItinerary[] = [];
-  for (const candidate of candidates) retained = retainGtfsBalancedObjectiveSample(retained, candidate, 4);
-  assert.ok(retained.some((item) => item.id === fullWinner.id),
-    'the bounded overflow backstop keeps the shared BALANCED winner instead of only retaining single-metric extremes');
+  const permute = <T,>(items: T[]): T[][] => items.length
+    ? items.flatMap((item, index) => permute(items.filter((_, otherIndex) => otherIndex !== index)
+      ).map((permutation) => [item, ...permutation]))
+    : [[]];
+  const permutations = permute(candidates);
+  const expected = permutations[0]!.reduce((sample, candidate) =>
+    retainGtfsDeterministicOverflowSample(sample, candidate, 1), [] as GtfsItinerary[]).map(({ id }) => id);
+  for (const [index, order] of permutations.entries()) {
+    const retained = order.reduce((sample, candidate) =>
+      retainGtfsDeterministicOverflowSample(sample, candidate, 1), [] as GtfsItinerary[]);
+    assert.deepEqual(retained.map(({ id }) => id), expected, `sample is order-independent (permutation ${index})`);
+  }
 });
 
 test('cross-provider GTFS cap preserves slow cheapest routes before filling by arrival', () => {

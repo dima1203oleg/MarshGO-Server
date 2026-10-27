@@ -523,18 +523,21 @@ function rankGtfsItinerariesForStrategySampling(
     .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
 }
 
-/** Keep a bounded rolling sample for the shared BALANCED ranking objective. */
-export function retainGtfsBalancedObjectiveSample(
+/** Keep a deterministic bounded overflow sample; rank retained candidates after collection. */
+export function retainGtfsDeterministicOverflowSample(
   existing: readonly GtfsItinerary[], candidate: GtfsItinerary, maximum: number,
 ): GtfsItinerary[] {
   if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('objective sample maximum must be positive');
-  if (existing.some((item) => item.id === candidate.id)) return [...existing].slice(0, maximum);
-  // Evaluate the candidate against the retained sample with the same scorer
-  // used by the cross-provider BALANCED tab. This is a bounded approximation
-  // because normalization changes as new candidates arrive; truncation remains
-  // explicit to callers, and the sample is only a backstop after the main pool
-  // reaches its cap.
-  return rankGtfsItinerariesForCandidateSampling([...existing, candidate]).slice(0, maximum);
+  const unique = new Map(existing.map((item) => [item.id, item]));
+  unique.set(candidate.id, candidate);
+  // BALANCED scores are normalized against the full candidate set, so an
+  // online top-K score changes as new minima/maxima arrive and is dependent on
+  // feed iteration order. Use stable identity for bounded discovery instead;
+  // the retained candidates are ranked by the shared scorer after collection.
+  return [...unique.values()]
+    .sort((left, right) => gtfsSegmentRetentionPriority(left.id) - gtfsSegmentRetentionPriority(right.id)
+      || compareStableId(left.id, right.id))
+    .slice(0, maximum);
 }
 
 /**
@@ -2776,7 +2779,7 @@ export function findGtfsItinerariesWithStats(
       || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
     retainObjectiveCandidate('walking', candidate, (a, b) => a.walkingMeters - b.walkingMeters
       || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
-    objectiveCandidateSamples.set('balanced', retainGtfsBalancedObjectiveSample(
+    objectiveCandidateSamples.set('balanced', retainGtfsDeterministicOverflowSample(
       objectiveCandidateSamples.get('balanced') ?? [], candidate, objectiveSampleLimit));
   };
   const resultCountByRouteChain = new Map<string, number>();
