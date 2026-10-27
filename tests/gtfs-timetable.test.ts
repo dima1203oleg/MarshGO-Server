@@ -1890,6 +1890,31 @@ test('finds a 99-hour GTFS service trip on its four-day-old service date', () =>
   assert.equal(arrivals[0].scheduledArrivalAt.toISOString(), '2026-10-16T00:55:00.000Z');
 });
 
+test('includes the next GTFS service date during the prior-evening spring-forward overlap', () => {
+  const timetable = feed({ departure: '00:30:00', arrival: '00:45:00', monday: '0', exceptionDate: '20270328' });
+  const query = {
+    ...request('2027-03-27T21:25:00Z', '2027-03-27T21:35:00Z'),
+    maximumTransfers: 0,
+  };
+
+  const direct = findDirectGtfsJourneys(timetable, query);
+  assert.equal(direct.length, 1);
+  assert.equal(direct[0].serviceDate, '20270328');
+  assert.equal(direct[0].departureAt.toISOString(), '2027-03-27T21:30:00.000Z');
+  assert.equal(direct[0].arrivalAt.toISOString(), '2027-03-27T21:45:00.000Z');
+
+  const routed = findGtfsItinerariesWithStats(timetable, query);
+  assert.equal(routed.itineraries.length, 1);
+  assert.equal(routed.itineraries[0].segments[0].serviceDate, '20270328');
+  assert.equal(routed.itineraries[0].segments[0].departureAt.toISOString(), '2027-03-27T21:30:00.000Z');
+
+  const arrivals = findGtfsStopArrivals(timetable, 'destination', {
+    now: new Date('2027-03-27T21:25:00Z'), horizonSeconds: 60 * 60, limit: 10,
+  });
+  assert.equal(arrivals.length, 1);
+  assert.equal(arrivals[0].scheduledArrivalAt.toISOString(), '2027-03-27T21:45:00.000Z');
+});
+
 test('normalizes GTFS rail and ferry journeys into supported journey modes', () => {
   const interval = request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z');
   assert.equal(findDirectGtfsJourneys(feed({ routeType: '2' }), interval)[0]?.mode, 'RAIL');
