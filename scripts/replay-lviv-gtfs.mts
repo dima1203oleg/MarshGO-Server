@@ -29,6 +29,17 @@ const parseCoordinates = (value: string | undefined, fallback: [number, number])
 };
 const origin = parseCoordinates(process.env.GTFS_REPLAY_ORIGIN, [24.008217, 49.864885]);
 const destination = parseCoordinates(process.env.GTFS_REPLAY_DESTINATION, [24.0175835, 49.8013165]);
+const departureStartUtc = process.env.GTFS_REPLAY_DEPARTURE_START_UTC ?? '2026-10-23T05:00:00.000Z';
+if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(departureStartUtc)) {
+  throw new Error('GTFS_REPLAY_DEPARTURE_START_UTC must be an ISO 8601 UTC timestamp ending in Z.');
+}
+const earliestDeparture = new Date(departureStartUtc);
+if (!Number.isFinite(earliestDeparture.getTime())) throw new Error('GTFS replay departure start is invalid.');
+const departureWindowMinutes = Number(process.env.GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES ?? '30');
+if (!Number.isInteger(departureWindowMinutes) || departureWindowMinutes < 1 || departureWindowMinutes > 180) {
+  throw new Error('GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES must be an integer from 1 to 180.');
+}
+const latestDeparture = new Date(earliestDeparture.getTime() + departureWindowMinutes * 60_000);
 const traceRouteIds = new Set((process.env.GTFS_REPLAY_TRACE_ROUTE_IDS ?? '')
   .split(',').map((routeId) => routeId.trim()).filter(Boolean));
 const traceTripIds = new Set((process.env.GTFS_REPLAY_TRACE_TRIP_IDS ?? '')
@@ -106,8 +117,8 @@ try {
   result = findGtfsItinerariesWithStats(feed, {
     providerId: 'lviv-frozen-replay', providerName: 'Lviv frozen GTFS', providerCity: 'Львів',
     origin, destination,
-    earliestDeparture: new Date('2026-10-23T05:00:00.000Z'),
-    latestDeparture: new Date('2026-10-23T05:30:00.000Z'),
+    earliestDeparture,
+    latestDeparture,
     maximumJourneySeconds: 6 * 60 * 60, maximumTransfers: 2,
     maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1000,
     maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
@@ -133,6 +144,7 @@ console.log(JSON.stringify({
   iteration: process.env.BENCH_ITER ?? null,
   origin,
   destination,
+  departureWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
   archiveSha256,
   runtime: process.version,
   searchMs: Number((performance.now() - startedAt).toFixed(2)),

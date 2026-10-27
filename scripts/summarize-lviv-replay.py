@@ -18,7 +18,7 @@ if set(by_revision) != expected_revisions or any(len(items) != 3 for items in by
     raise SystemExit("Expected exactly three serialized runs for baseline and candidate.")
 
 stable_fields = (
-    "origin", "destination", "idHash", "uniqueTripChains", "uniqueRouteChains", "strategyCandidates",
+    "origin", "destination", "departureWindow", "idHash", "uniqueTripChains", "uniqueRouteChains", "strategyCandidates",
     "tripChainIds", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
 )
 for revision, items in by_revision.items():
@@ -42,6 +42,7 @@ print(f"- Feed SHA-256: `{baseline[0]['archiveSha256']}`")
 print(f"- Baseline SHA: `{baseline[0]['revision']}` (three repeat-stable runs)")
 print(f"- Candidate SHA: `{candidate[0]['revision']}` (three repeat-stable runs)")
 print(f"- OD: `{baseline[0]['origin']}` → `{baseline[0]['destination']}`")
+print(f"- Departure window (UTC): `{baseline[0]['departureWindow'][0]}` → `{baseline[0]['departureWindow'][1]}`")
 print(f"- Ordered result identity parity: **{'YES' if same_hash else 'NO'}**")
 print(f"- FASTEST/CHEAPEST/BALANCED winner parity: **{'YES' if same_winners else 'NO'}**")
 print(f"- Added trip-chain identities: `{json.dumps(sorted(candidate_chains - baseline_chains))}`")

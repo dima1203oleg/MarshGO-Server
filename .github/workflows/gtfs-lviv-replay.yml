@@ -25,6 +25,16 @@ on:
         required: false
         type: string
         default: 24.0175835,49.8013165
+      departure_start_utc:
+        description: Inclusive UTC start of the replay departure window (ISO 8601 ending in Z)
+        required: false
+        type: string
+        default: '2026-10-23T05:00:00.000Z'
+      departure_window_minutes:
+        description: Width of the replay departure window, from 1 to 180 minutes
+        required: false
+        type: string
+        default: '30'
       trace_trip_chains:
         description: Optional pipe-separated trip-chain IDs for debug-only ranked-pool/page presence checks
         required: false
@@ -59,6 +69,8 @@ jobs:
       GTFS_REPLAY_URL: https://track.ua-gis.com/gtfs/lviv/static.zip
       GTFS_REPLAY_ORIGIN: ${{ inputs.origin || '24.008217,49.864885' }}
       GTFS_REPLAY_DESTINATION: ${{ inputs.destination || '24.0175835,49.8013165' }}
+      GTFS_REPLAY_DEPARTURE_START_UTC: ${{ inputs.departure_start_utc || '2026-10-23T05:00:00.000Z' }}
+      GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES: ${{ inputs.departure_window_minutes || '30' }}
       GTFS_REPLAY_TRACE_TRIP_CHAINS: ${{ inputs.trace_trip_chains || '' }}
       GTFS_REPLAY_TRACE_ROUTE_IDS: ${{ inputs.trace_route_ids || '' }}
       GTFS_REPLAY_TRACE_TRIP_IDS: ${{ inputs.trace_trip_ids || '' }}
@@ -109,6 +121,8 @@ jobs:
                 BENCH_ITER="$iteration" \
                 GTFS_REPLAY_ZIP="$FEED_PATH" \
                 GTFS_REPLAY_EXPECTED_SHA256="$GTFS_REPLAY_EXPECTED_SHA256" \
+                GTFS_REPLAY_DEPARTURE_START_UTC="$GTFS_REPLAY_DEPARTURE_START_UTC" \
+                GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES="$GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES" \
                 GTFS_REPLAY_TRACE_ROUTE_IDS="$GTFS_REPLAY_TRACE_ROUTE_IDS" \
                 GTFS_REPLAY_TRACE_TRIP_IDS="$GTFS_REPLAY_TRACE_TRIP_IDS" \
                 ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
