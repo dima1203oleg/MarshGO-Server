@@ -542,9 +542,11 @@ test('keeps the same GTFS trip as distinct scheduled instances on different serv
 
 test('debug search diagnostics separate graph demand from bounded search saturation', () => {
   const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTraceValue = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
   const originalInfo = console.info;
   const messages: string[] = [];
   process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
   console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
   try {
     findGtfsItinerariesWithStats(feed(), {
@@ -554,6 +556,8 @@ test('debug search diagnostics separate graph demand from bounded search saturat
     console.info = originalInfo;
     if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
     else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+    if (previousTraceValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTraceValue;
   }
 
   const stages = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown });
@@ -573,6 +577,68 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.ok(Array.isArray(JSON.parse(String(graph.routeBudgetUnderfillSample))));
   assert.equal(typeof ranked.searchStepLimit, 'number');
   assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
+  assert.equal(ranked.debugTripChainPresence, undefined, 'exact graph tracing stays absent without target IDs');
+});
+
+test('debug trip-chain trace distinguishes a feasible exact graph path from candidate generation', () => {
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+  const previousInfo = console.info;
+  const diagnostics: Array<Record<string, unknown>> = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = 'p1:20261012:b1>p1:20261012:r1';
+  console.info = (...args: unknown[]) => {
+    if (typeof args[0] !== 'string') return;
+    try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
+  };
+  try {
+    const timetable = connectingFeed();
+    const baseInput = {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+      maximumTransfers: 1,
+      maximumAccessWalkingMeters: 100,
+      maximumEgressWalkingMeters: 100,
+      maximumTransferWalkingMeters: 100,
+      maximumWaitSeconds: 3_600,
+    };
+    findGtfsItinerariesWithStats(timetable, baseInput);
+    findGtfsItinerariesWithStats(timetable, { ...baseInput, maximumJourneySeconds: 3_900 });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+    if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTrace;
+  }
+
+  const rankedRows = diagnostics.filter((entry) => entry.stage === 'itineraries-ranked');
+  assert.equal(rankedRows.length, 2, 'both focused searches emit the opt-in trace');
+  const decodeTarget = (ranked: Record<string, unknown>) => {
+    const presence = JSON.parse(String(ranked.debugTripChainPresence)) as Record<string, {
+      allLegTripsInRetainedGraph: boolean;
+      pathCompleted: boolean;
+      generated: boolean;
+      candidateGraphPath: { firstLegCount: number; feasibleDestinationPath: boolean; complete: boolean } | null;
+    }>;
+    return presence['p1:20261012:b1>p1:20261012:r1'];
+  };
+  const target = decodeTarget(rankedRows[0]!);
+  assert.ok(target, 'the requested exact trip chain is included');
+  assert.equal(target.allLegTripsInRetainedGraph, true);
+  assert.equal(target.candidateGraphPath?.complete, true, 'the bounded witness scan completed');
+  assert.ok((target.candidateGraphPath?.firstLegCount ?? 0) > 0, 'the exact first leg is retained as an origin candidate');
+  assert.equal(target.candidateGraphPath?.feasibleDestinationPath, true,
+    'the exact second leg reaches the destination with a feasible scheduled transfer');
+  assert.equal(target.pathCompleted, true, 'the search assembled the exact ordered trip chain');
+  assert.equal(target.generated, true, 'the chain passed the maximum journey duration check');
+
+  const durationRejected = decodeTarget(rankedRows[1]!);
+  assert.ok(durationRejected, 'the target remains visible in the duration-limited trace');
+  assert.equal(durationRejected.pathCompleted, true, 'the ordered path was assembled before duration validation');
+  assert.equal(durationRejected.generated, false, 'the path is distinguished from an accepted candidate');
+  assert.equal(durationRejected.candidateGraphPath?.complete, true);
+  assert.equal(durationRejected.candidateGraphPath?.feasibleDestinationPath, false,
+    'the graph witness includes the total journey horizon and destination egress walking');
 });
 
 test('GTFS maximum transfer wait never exceeds the total journey horizon', () => {

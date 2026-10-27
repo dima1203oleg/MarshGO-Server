@@ -1642,6 +1642,7 @@ export function findGtfsItinerariesWithStats(
       .filter((tripChain) => tripChain.length > 0 && tripChain.length <= 512).slice(0, 16)
     : [];
   const debugTraceTripChainSet = debugTraceTripChains.length > 0 ? new Set(debugTraceTripChains) : undefined;
+  const debugCompletedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
   const debugGeneratedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
   const debugTripChainsIn = (candidates: readonly GtfsItinerary[]) => {
     const found = new Set<string>();
@@ -1653,6 +1654,7 @@ export function findGtfsItinerariesWithStats(
     }
     return found;
   };
+  const MAX_DEBUG_GRAPH_PATH_CANDIDATES = 10_000;
   const now = input.now ?? new Date();
   const maximumJourneySeconds = input.maximumJourneySeconds ?? 24 * 60 * 60;
   const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
@@ -3003,6 +3005,10 @@ export function findGtfsItinerariesWithStats(
   let candidateSamplingTruncated = false;
   const addPath = (path: GtfsDirectJourney[], expectedLegCount: number) => {
     if (path.length !== expectedLegCount) return;
+    if (debugTraceTripChainSet) {
+      const tripChain = path.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+      if (debugTraceTripChainSet.has(tripChain)) debugCompletedTripChains?.add(tripChain);
+    }
     const first = path[0];
     const last = path.at(-1)!;
     const accessMeters = first.distanceToOriginStopMeters;
@@ -3524,15 +3530,61 @@ export function findGtfsItinerariesWithStats(
     candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
     maxQueuedSearchWork: maximumQueuedSearchWork,
     ...(debugTraceTripChains.length > 0 ? { debugTripChainPresence: (() => {
-      // This checks trip identity presence only; it does not prove each exact
-      // stop-to-stop leg survived graph construction or was traversable.
-      const retainedGraphTripKeys = new Set(segments.map((segment) =>
-        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`));
+      const requestedTripKeys = new Set(debugTraceTripChains.flatMap((tripChain) => tripChain.split('>')));
+      const retainedTargetTripKeys = new Set<string>();
+      for (const segment of segments) {
+        const tripKey = `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`;
+        if (requestedTripKeys.has(tripKey)) retainedTargetTripKeys.add(tripKey);
+      }
       return JSON.stringify(Object.fromEntries(debugTraceTripChains.map((tripChain) => {
         const targetTrips = tripChain.split('>');
+        let graphPath: { firstLegCount: number; feasibleDestinationPath: boolean; complete: boolean; scannedCandidates: number } | null = null;
+        if (targetTrips.length === 2) {
+          const firstLegCandidates = firstLegs.filter((segment) =>
+            `${segment.providerId}:${segment.serviceDate}:${segment.tripId}` === targetTrips[0]);
+          let feasibleDestinationPath = false;
+          let complete = true;
+          let scannedCandidates = 0;
+          for (const first of firstLegCandidates) {
+            const visitedStops = new Set([first.originStop.id, first.destinationStop.id]);
+            const latestNext = Math.min(first.arrivalAt.getTime() + maximumWaitSeconds * 1000, journeyEnd.getTime());
+            const seenCandidates = new Set<GtfsDirectJourney>();
+            forEachTransferCandidate(first, (next) => {
+              if (seenCandidates.has(next)) return true;
+              seenCandidates.add(next);
+              scannedCandidates++;
+              if (scannedCandidates > MAX_DEBUG_GRAPH_PATH_CANDIDATES) {
+                complete = false;
+                return false;
+              }
+              if (`${next.providerId}:${next.serviceDate}:${next.tripId}` !== targetTrips[1]
+                || next.tripId === first.tripId
+                || !destinationStopIds.has(next.destinationStop.id)
+                || visitedStops.has(next.destinationStop.id)
+                || next.departureAt.getTime() < first.arrivalAt.getTime()
+                || next.departureAt.getTime() > latestNext) return true;
+              if (next.routeId === first.routeId) {
+                const { rule, ambiguous } = transferRuleFor(first, next);
+                if (ambiguous || rule?.transferType !== 4) return true;
+              }
+              if (!transferDecision(first, next).feasible) return true;
+              const arrivalWithEgressMs = next.arrivalAt.getTime()
+                + walkingSeconds(next.distanceFromDestinationStopMeters) * 1000;
+              if (Math.ceil((arrivalWithEgressMs - input.earliestDeparture.getTime()) / 1000) > maximumJourneySeconds) return true;
+              feasibleDestinationPath = true;
+              // Keep enumerating so `complete` means the bounded candidate
+              // scan actually finished, even after finding a positive witness.
+              return true;
+            });
+            if (!complete) break;
+          }
+          graphPath = { firstLegCount: firstLegCandidates.length, feasibleDestinationPath, complete, scannedCandidates };
+        }
         return [tripChain, {
-          allLegTripsInRetainedGraph: targetTrips.every((targetTrip) => retainedGraphTripKeys.has(targetTrip)),
+          allLegTripsInRetainedGraph: targetTrips.every((targetTrip) => retainedTargetTripKeys.has(targetTrip)),
+          pathCompleted: debugCompletedTripChains?.has(tripChain) ?? false,
           generated: debugGeneratedTripChains?.has(tripChain) ?? false,
+          candidateGraphPath: graphPath,
           candidatePoolBeforeFinalSampling: debugTripChainsBeforeFinalSampling?.has(tripChain) ?? false,
           afterTripChainSampling: debugTripChainsAfterTripSampling?.has(tripChain) ?? false,
           rankedPool: debugTripChainsAfterRouteSampling?.has(tripChain) ?? false,
