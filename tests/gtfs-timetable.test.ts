@@ -1125,7 +1125,25 @@ test('query-time retention keeps a scheduled connector ahead of dense irrelevant
     origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
     maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
   };
-  const result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
+  const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const originalInfo = console.info;
+  const messages: string[] = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
+  } finally {
+    console.info = originalInfo;
+    if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+  }
+  const graph = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown })
+    .find((stage) => stage.stage === 'segments-built');
+  assert.ok(graph, 'the fixture exposes graph-retention diagnostics');
+  assert.ok(Number(graph.overflowReservoirRetained) >= 3,
+    'bounded overflow keeps a temporally feasible connector in addition to endpoint fallbacks');
+  assert.ok(Number(graph.segments) <= 3, 'connector recovery preserves the injected total graph cap');
   assert.ok(result.candidateGraphTruncated, 'the fixture exercises a bounded dense graph');
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
     === `access-trip,${targetTripId},egress-trip`),

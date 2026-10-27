@@ -2417,13 +2417,24 @@ export function findGtfsItinerariesWithStats(
         const overflowCapacity = Math.min(MAX_ROUTE_OVERFLOW_SEGMENTS, graphSegmentLimitPerRoute);
         const overflow = overflowSegmentsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
+        let temporallyConnectsQueryEnds = false;
         for (const candidate of tripCandidates) {
           const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
           const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
             >= input.earliestDeparture.getTime()
               + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
           const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
-          if (canCatchOrigin || endsAtDestination) overflow.consider(candidate);
+          const servesQueryEndpoint = canCatchOrigin || endsAtDestination;
+          if (servesQueryEndpoint) overflow.consider(candidate);
+          // Keep one temporally feasible through-connector per trip group in
+          // the bounded overflow reservoir too. Endpoint-only overflow could
+          // leave redistributed graph capacity unused on connector routes.
+          if (!temporallyConnectsQueryEnds
+            && hasPriorEvent(candidate, minimumTransferBufferSeconds)
+            && hasNextEvent(candidate, minimumTransferBufferSeconds)) {
+            temporallyConnectsQueryEnds = true;
+            if (!servesQueryEndpoint) overflow.consider(candidate);
+          }
         }
         overflowSegmentsByRoute.set(trip.routeId, overflow);
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
@@ -2451,9 +2462,6 @@ export function findGtfsItinerariesWithStats(
           return (candidateStartsAtOrigin && hasNextEvent(candidate, minimumTransferBufferSeconds))
             || (candidateEndsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds));
         });
-        const temporallyConnectsQueryEnds = tripCandidates.some((candidate) =>
-          hasPriorEvent(candidate, minimumTransferBufferSeconds)
-          && hasNextEvent(candidate, minimumTransferBufferSeconds));
         const retentionPriorityTier = retentionTier === 0 ? 0
           : retentionTier < 3 ? connectsOppositeQueryFrontier ? 1 : 3
             : temporallyConnectsQueryEnds ? 2 : 4;
