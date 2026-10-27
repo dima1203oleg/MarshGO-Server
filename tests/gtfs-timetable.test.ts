@@ -1143,6 +1143,8 @@ test('query-time retention keeps a scheduled connector ahead of dense irrelevant
   assert.ok(graph, 'the fixture exposes graph-retention diagnostics');
   assert.ok(Number(graph.overflowReservoirRetained) >= 3,
     'bounded overflow keeps a temporally feasible connector in addition to endpoint fallbacks');
+  assert.ok(Number(graph.overflowConnectorReservoirRetained) >= 1,
+    'connector fallbacks use a separate bounded reservoir');
   assert.ok(Number(graph.segments) <= 3, 'connector recovery preserves the injected total graph cap');
   assert.ok(result.candidateGraphTruncated, 'the fixture exercises a bounded dense graph');
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')

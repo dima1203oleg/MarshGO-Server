@@ -461,6 +461,9 @@ type RetainedGtfsSegment = {
 type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
 // Small deterministic endpoint-only reservoir to use route-budget gaps left by whole-trip bundles.
 const MAX_ROUTE_OVERFLOW_SEGMENTS = 200;
+// Keep connector discovery independent from endpoint fallbacks, but prevent
+// dense routes from expanding the search graph with hundreds of middle trips.
+const MAX_ROUTE_OVERFLOW_CONNECTORS = 8;
 
 // Keep the same deterministic, order-independent sample for a feed snapshot.
 // GTFS feeds are often written in departure-time order, so a simple prefix cap
@@ -1858,6 +1861,7 @@ export function findGtfsItinerariesWithStats(
   const segmentsByRoute = new Map<string, RetainedGtfsTrip[]>();
   const retainedSegmentCountByRoute = new Map<string, number>();
   const overflowSegmentsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
+  const overflowConnectorsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
   const candidateStopCountByRoute = new Map<string, number>();
   for (const [stopId, routeIds] of routesByStop) {
     if (!interchangeStopIds.has(stopId)) continue;
@@ -2417,6 +2421,8 @@ export function findGtfsItinerariesWithStats(
         const overflowCapacity = Math.min(MAX_ROUTE_OVERFLOW_SEGMENTS, graphSegmentLimitPerRoute);
         const overflow = overflowSegmentsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
+        const connectorOverflow = overflowConnectorsByRoute.get(trip.routeId)
+          ?? new BoundedBestK<RetainedGtfsSegment>(Math.min(MAX_ROUTE_OVERFLOW_CONNECTORS, graphSegmentLimitPerRoute), compareTripSegments);
         let temporallyConnectsQueryEnds = false;
         for (const candidate of tripCandidates) {
           const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
@@ -2433,10 +2439,11 @@ export function findGtfsItinerariesWithStats(
             && hasPriorEvent(candidate, minimumTransferBufferSeconds)
             && hasNextEvent(candidate, minimumTransferBufferSeconds)) {
             temporallyConnectsQueryEnds = true;
-            if (!servesQueryEndpoint) overflow.consider(candidate);
+            if (!servesQueryEndpoint) connectorOverflow.consider(candidate);
           }
         }
         overflowSegmentsByRoute.set(trip.routeId, overflow);
+        overflowConnectorsByRoute.set(trip.routeId, connectorOverflow);
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
         const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
         const canBoardFromOrigin = tripCandidates.some((candidate) => originStopIds.has(candidate.originContext.details.id)
@@ -2483,24 +2490,35 @@ export function findGtfsItinerariesWithStats(
       }
     }
   }
+  const retainedCandidateKey = (candidate: RetainedGtfsSegment) =>
+    `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
+  const overflowCandidatesByRoute = new Map<string, RetainedGtfsSegment[]>();
+  const overflowRouteIds = new Set([...overflowSegmentsByRoute.keys(), ...overflowConnectorsByRoute.keys()]);
+  for (const routeId of overflowRouteIds) {
+    const unique = new Map<string, RetainedGtfsSegment>();
+    for (const candidate of [
+      ...(overflowSegmentsByRoute.get(routeId)?.toSortedArray() ?? []),
+      ...(overflowConnectorsByRoute.get(routeId)?.toSortedArray() ?? []),
+    ]) unique.set(retainedCandidateKey(candidate), candidate);
+    overflowCandidatesByRoute.set(routeId, [...unique.values()].sort(compareTripSegments));
+  }
+
   const selectedSegmentsByRoute = new Map<string, RetainedGtfsSegment[]>();
   for (const [routeId, trips] of segmentsByRoute) {
     const selected = trips.flatMap((trip) => trip.segments);
-    const candidateKey = (candidate: RetainedGtfsSegment) =>
-      `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
-    const selectedKeys = new Set(selected.map(candidateKey));
+    const selectedKeys = new Set(selected.map(retainedCandidateKey));
     const remaining = Math.max(0, (graphSegmentBudgetByRoute.get(routeId) ?? 0) - selected.length);
-    const overflow = overflowSegmentsByRoute.get(routeId)?.toSortedArray() ?? [];
-    const fill = overflow.filter((candidate) => !selectedKeys.has(candidateKey(candidate)))
+    const overflow = overflowCandidatesByRoute.get(routeId) ?? [];
+    const fill = overflow.filter((candidate) => !selectedKeys.has(retainedCandidateKey(candidate)))
       .slice(0, remaining);
     selectedSegmentsByRoute.set(routeId, [...selected, ...fill]);
   }
   const redistributed = redistributeBoundedCandidates(
     selectedSegmentsByRoute,
-    new Map([...overflowSegmentsByRoute].map(([routeId, reservoir]) => [routeId, reservoir.toSortedArray()])),
+    overflowCandidatesByRoute,
     maximumGraphSegments,
     maximumGraphSegmentsPerRoute,
-    (candidate) => `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`,
+    retainedCandidateKey,
   );
   selectedSegmentsByRoute.clear();
   for (const [routeId, routeSegments] of redistributed.routes) selectedSegmentsByRoute.set(routeId, routeSegments);
@@ -2552,13 +2570,14 @@ export function findGtfsItinerariesWithStats(
   }));
   const graphRoutesUnderfilled = perRouteBudgetUsage.filter(({ budget, retained }) => retained < budget).length;
   const graphRouteBudgetMaxUnused = Math.max(0, ...perRouteBudgetUsage.map(({ budget, retained }) => budget - retained));
-  const overflowReservoirSizes = [...overflowSegmentsByRoute.values()].map((reservoir) => reservoir.toSortedArray().length);
+  const overflowReservoirSizes = [...overflowCandidatesByRoute.values()].map((reservoir) => reservoir.length);
+  const overflowConnectorReservoirSizes = [...overflowConnectorsByRoute.values()].map((reservoir) => reservoir.toSortedArray().length);
   const routeBudgetUnderfillSample = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
     ? [...graphSegmentBudgetByRoute].map(([routeId, budget]) => {
       const retainedSegments = selectedSegmentsByRoute.get(routeId)?.length ?? 0;
       const wholeTripSegments = (segmentsByRoute.get(routeId) ?? [])
         .reduce((total, trip) => total + trip.segments.length, 0);
-      const overflowCandidates = overflowSegmentsByRoute.get(routeId)?.toSortedArray().length ?? 0;
+      const overflowCandidates = overflowCandidatesByRoute.get(routeId)?.length ?? 0;
       return {
         routeId, budget, estimatedDemand: candidateDemandByRoute.get(routeId) ?? 0,
         wholeTripSegments, overflowCandidates, overflowAdded: Math.max(0, retainedSegments - wholeTripSegments),
@@ -2578,6 +2597,8 @@ export function findGtfsItinerariesWithStats(
     graphRoutesUnderfilled, graphRouteBudgetMaxUnused,
     overflowReservoirRetained: overflowReservoirSizes.reduce((sum, size) => sum + size, 0),
     overflowReservoirsAtCap: overflowReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_SEGMENTS).length,
+    overflowConnectorReservoirRetained: overflowConnectorReservoirSizes.reduce((sum, size) => sum + size, 0),
+    overflowConnectorReservoirsAtCap: overflowConnectorReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_CONNECTORS).length,
     overflowSegmentsRedistributed: redistributed.added,
     ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
