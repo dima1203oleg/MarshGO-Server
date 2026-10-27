@@ -609,7 +609,6 @@ export function sampleGtfsTripChainCandidates(
     && (fastest?.fare?.currency !== 'UAH' || cheapest.fare!.priceMinor < fastest.fare.priceMinor)) {
     selected.set(cheapest.id, cheapest);
   }
-  // The production three-slot sample backs the three visible strategies.
   // Keep the shared BALANCED winner before adding a standalone low-walking
   // fallback, which can otherwise crowd out the user's Optimal option.
   if (maximum >= 3) take(rankGtfsItinerariesForCandidateSampling(itineraries), maximum - selected.size);
@@ -2788,7 +2787,7 @@ export function findGtfsItinerariesWithStats(
   const MAX_RESULTS_PER_ROUTE_CHAIN = 8;
   // Keep a few useful boarding/alighting variants for the same scheduled
   // vehicles, selected across time, fare, transfer, and walking objectives.
-  const MAX_RESULTS_PER_TRIP_CHAIN = 3;
+  const MAX_RESULTS_PER_TRIP_CHAIN = 4;
   const maxTransitLegs = maximumTransfers + 1;
   // Keep the per-leg sampling cap independent of the caller's response-page
   // size so later cross-provider ranking receives a consistent diverse pool.

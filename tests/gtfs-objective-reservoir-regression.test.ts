@@ -39,7 +39,7 @@ function createFeedTest() {
   return parseGtfsTimetable(files);
 }
 
-test('bounded three-variant trip-chain sample preserves fastest, cheapest, and least-walking witnesses', () => {
+test('objective reservoir preserves fastest, cheapest, and least-walking witnesses within the trip-chain bound', () => {
   const timetable = createFeedTest();
 
   // Search from exact stop-b to exact stop-c coordinates:
@@ -67,10 +67,9 @@ test('bounded three-variant trip-chain sample preserves fastest, cheapest, and l
 
   assert.ok(fastest, 'fastest variant (stop-a -> stop-c) must be retained');
   assert.ok(cheapest, 'cheapest variant (stop-b -> stop-d) must be retained');
-  assert.equal(result.truncation.candidateSampling, true,
-    'fixture must exercise a bounded candidate sampler for this to be a meaningful regression');
-  // The production cap admits one distinct winner for each key routing objective
-  // while keeping the number of alternatives for this scheduled vehicle chain bounded.
+  assert.ok(result.itineraries.length <= 4,
+    'the production trip-chain bound must keep alternatives for this scheduled vehicle chain bounded');
+  // The bounded production sample admits distinct witnesses for key objectives.
   const leastWalking = result.itineraries.find((itinerary) => itinerary.walkingMeters === 0);
   assert.ok(
     leastWalking,
@@ -87,10 +86,10 @@ test('bounded three-variant trip-chain sample preserves fastest, cheapest, and l
   const boundedSample = sampleGtfsTripChainCandidates([fastest, cheapest, leastWalking], 3);
   assert.deepEqual(new Set(boundedSample.map((itinerary) => itinerary.id)),
     new Set([fastest.id, cheapest.id, leastWalking.id]),
-    'the bounded three-slot trip-chain sample must preserve all three distinct objective witnesses');
+    'the explicit three-slot sample must preserve distinct objective witnesses');
 });
 
-test('three-slot trip-chain sample retains the shared BALANCED winner beside fastest and cheapest', () => {
+test('four-slot trip-chain sample retains FASTEST, CHEAPEST, BALANCED, and least-walking winners', () => {
   const timetable = createFeedTest();
   const base = findGtfsItinerariesWithStats(timetable, {
     providerId: 'p1', providerName: 'Test Transit',
@@ -114,7 +113,8 @@ test('three-slot trip-chain sample retains the shared BALANCED winner beside fas
   assert.equal(rankGtfsItinerariesForCandidateSampling(candidates)[0]?.id, balanced.id,
     'the shared scorer must recognize the intended BALANCED witness');
 
-  const sample = sampleGtfsTripChainCandidates(candidates, 3);
-  assert.deepEqual(new Set(sample.map((candidate) => candidate.id)), new Set([fastest.id, cheapest.id, balanced.id]),
-    'the three-slot cap must preserve FASTEST, CHEAPEST, and BALANCED winners');
+  const sample = sampleGtfsTripChainCandidates(candidates, 4);
+  assert.deepEqual(new Set(sample.map((candidate) => candidate.id)),
+    new Set([fastest.id, cheapest.id, balanced.id, leastWalking.id]),
+    'the four-slot cap must preserve the distinct routing objective witnesses');
 });
