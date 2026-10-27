@@ -618,7 +618,7 @@ test('debug trip-chain trace distinguishes a feasible exact graph path from cand
       allLegTripsInRetainedGraph: boolean;
       pathCompleted: boolean;
       generated: boolean;
-      candidateGraphPath: { firstLegCount: number; feasibleDestinationPath: boolean; complete: boolean } | null;
+      candidateGraphPath: { firstLegCount: number; feasibleDestinationPath: boolean; complete: boolean; scannedTargetSegments: number } | null;
     }>;
     return presence['p1:20261012:b1>p1:20261012:r1'];
   };
@@ -626,6 +626,8 @@ test('debug trip-chain trace distinguishes a feasible exact graph path from cand
   assert.ok(target, 'the requested exact trip chain is included');
   assert.equal(target.allLegTripsInRetainedGraph, true);
   assert.equal(target.candidateGraphPath?.complete, true, 'the bounded witness scan completed');
+  assert.equal(target.candidateGraphPath?.scannedTargetSegments, 1,
+    'the diagnostic examines the requested trip segments instead of unrelated hub successors');
   assert.ok((target.candidateGraphPath?.firstLegCount ?? 0) > 0, 'the exact first leg is retained as an origin candidate');
   assert.equal(target.candidateGraphPath?.feasibleDestinationPath, true,
     'the exact second leg reaches the destination with a feasible scheduled transfer');
@@ -637,6 +639,7 @@ test('debug trip-chain trace distinguishes a feasible exact graph path from cand
   assert.equal(durationRejected.pathCompleted, true, 'the ordered path was assembled before duration validation');
   assert.equal(durationRejected.generated, false, 'the path is distinguished from an accepted candidate');
   assert.equal(durationRejected.candidateGraphPath?.complete, true);
+  assert.equal(durationRejected.candidateGraphPath?.scannedTargetSegments, 1);
   assert.equal(durationRejected.candidateGraphPath?.feasibleDestinationPath, false,
     'the graph witness includes the total journey horizon and destination egress walking');
 });
