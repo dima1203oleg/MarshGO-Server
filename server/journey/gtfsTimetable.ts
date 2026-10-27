@@ -3563,33 +3563,64 @@ export function findGtfsItinerariesWithStats(
       };
       return JSON.stringify(Object.fromEntries(debugTraceTripChains.map((tripChain) => {
         const targetTrips = tripChain.split('>');
-        let graphPath: { firstLegCount: number; feasibleDestinationPath: boolean; complete: boolean; scannedTargetSegments: number } | null = null;
+        let graphPath: {
+          firstLegCount: number;
+          feasibleDestinationPath: boolean;
+          complete: boolean;
+          scannedTargetSegments: number;
+          rejectionCounts: {
+            transferAdjacency: number;
+            repeatedTrip: number;
+            destination: number;
+            cycle: number;
+            departureBeforeArrival: number;
+            waitHorizon: number;
+            sameRouteRule: number;
+            transferDecision: number;
+            journeyDuration: number;
+            feasible: number;
+          };
+        } | null = null;
         if (targetTrips.length === 2) {
           const firstLegCandidates = firstLegs.filter((segment) =>
             `${segment.providerId}:${segment.serviceDate}:${segment.tripId}` === targetTrips[0]);
           const targetSecondLegs = retainedSegmentsByTripKey.get(targetTrips[1]) ?? [];
-          let feasibleDestinationPath = false;
+          const rejectionCounts = {
+            transferAdjacency: 0,
+            repeatedTrip: 0,
+            destination: 0,
+            cycle: 0,
+            departureBeforeArrival: 0,
+            waitHorizon: 0,
+            sameRouteRule: 0,
+            transferDecision: 0,
+            journeyDuration: 0,
+            feasible: 0,
+          };
           let scannedTargetSegments = 0;
           for (const first of firstLegCandidates) {
             const visitedStops = new Set([first.originStop.id, first.destinationStop.id]);
             const latestNext = Math.min(first.arrivalAt.getTime() + maximumWaitSeconds * 1000, journeyEnd.getTime());
             for (const next of targetSecondLegs) {
               scannedTargetSegments++;
-              if (!isTransferCandidate(first, next)
-                || next.tripId === first.tripId
-                || !destinationStopIds.has(next.destinationStop.id)
-                || visitedStops.has(next.destinationStop.id)
-                || next.departureAt.getTime() < first.arrivalAt.getTime()
-                || next.departureAt.getTime() > latestNext) continue;
+              if (!isTransferCandidate(first, next)) { rejectionCounts.transferAdjacency++; continue; }
+              if (next.tripId === first.tripId) { rejectionCounts.repeatedTrip++; continue; }
+              if (!destinationStopIds.has(next.destinationStop.id)) { rejectionCounts.destination++; continue; }
+              if (visitedStops.has(next.destinationStop.id)) { rejectionCounts.cycle++; continue; }
+              if (next.departureAt.getTime() < first.arrivalAt.getTime()) { rejectionCounts.departureBeforeArrival++; continue; }
+              if (next.departureAt.getTime() > latestNext) { rejectionCounts.waitHorizon++; continue; }
               if (next.routeId === first.routeId) {
                 const { rule, ambiguous } = transferRuleFor(first, next);
-                if (ambiguous || rule?.transferType !== 4) continue;
+                if (ambiguous || rule?.transferType !== 4) { rejectionCounts.sameRouteRule++; continue; }
               }
-              if (!transferDecision(first, next).feasible) continue;
+              if (!transferDecision(first, next).feasible) { rejectionCounts.transferDecision++; continue; }
               const arrivalWithEgressMs = next.arrivalAt.getTime()
                 + walkingSeconds(next.distanceFromDestinationStopMeters) * 1000;
-              if (Math.ceil((arrivalWithEgressMs - input.earliestDeparture.getTime()) / 1000) > maximumJourneySeconds) continue;
-              feasibleDestinationPath = true;
+              if (Math.ceil((arrivalWithEgressMs - input.earliestDeparture.getTime()) / 1000) > maximumJourneySeconds) {
+                rejectionCounts.journeyDuration++;
+                continue;
+              }
+              rejectionCounts.feasible++;
             }
           }
           // This trace checks only retained segments for the requested exact
@@ -3597,9 +3628,10 @@ export function findGtfsItinerariesWithStats(
           // fan-out or a broad candidate scan cap.
           graphPath = {
             firstLegCount: firstLegCandidates.length,
-            feasibleDestinationPath,
+            feasibleDestinationPath: rejectionCounts.feasible > 0,
             complete: true,
             scannedTargetSegments,
+            rejectionCounts,
           };
         }
         return [tripChain, {
