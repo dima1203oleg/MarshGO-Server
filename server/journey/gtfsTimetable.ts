@@ -23,6 +23,10 @@ const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
 const MAX_STOPS_PER_SIDE = 48;
 const MAX_STOPS_PER_ROUTE_PATTERN = 8;
+// Google Transit accepts GTFS service times through 99:59:59. Keep the
+// parser and service-date lookback aligned with that widely used ceiling.
+const MAX_GTFS_SERVICE_HOUR = 99;
+const MAX_GTFS_SERVICE_DAY_LOOKBACK = Math.floor(MAX_GTFS_SERVICE_HOUR / 24);
 const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
 // Bound the per-request materialized GTFS graph. A dense city feed can create
@@ -461,6 +465,9 @@ type RetainedGtfsSegment = {
 type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
 // Small deterministic endpoint-only reservoir to use route-budget gaps left by whole-trip bundles.
 const MAX_ROUTE_OVERFLOW_SEGMENTS = 200;
+// Keep connector discovery independent from endpoint fallbacks, but prevent
+// dense routes from expanding the search graph with hundreds of middle trips.
+const MAX_ROUTE_OVERFLOW_CONNECTORS = 8;
 
 // Keep the same deterministic, order-independent sample for a feed snapshot.
 // GTFS feeds are often written in departure-time order, so a simple prefix cap
@@ -523,18 +530,26 @@ function rankGtfsItinerariesForStrategySampling(
     .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
 }
 
-/** Keep a bounded rolling sample for the shared BALANCED ranking objective. */
-export function retainGtfsBalancedObjectiveSample(
+/** Keep a deterministic bounded overflow sample; rank retained candidates after collection. */
+export function retainGtfsDeterministicOverflowSample(
   existing: readonly GtfsItinerary[], candidate: GtfsItinerary, maximum: number,
 ): GtfsItinerary[] {
   if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('objective sample maximum must be positive');
-  if (existing.some((item) => item.id === candidate.id)) return [...existing].slice(0, maximum);
-  // Evaluate the candidate against the retained sample with the same scorer
-  // used by the cross-provider BALANCED tab. This is a bounded approximation
-  // because normalization changes as new candidates arrive; truncation remains
-  // explicit to callers, and the sample is only a backstop after the main pool
-  // reaches its cap.
-  return rankGtfsItinerariesForCandidateSampling([...existing, candidate]).slice(0, maximum);
+  const unique = new Map(existing.map((item) => [item.id, item]));
+  unique.set(candidate.id, candidate);
+  // BALANCED scores are normalized against the full candidate set, so an
+  // online top-K score changes as new minima/maxima arrive and is dependent on
+  // feed iteration order. Use stable identity for bounded discovery instead;
+  // the retained candidates are ranked by the shared scorer after collection.
+  // Compute each ID's hash once per update. Re-hashing both sides of the sort
+  // comparator for every comparison made the hot overflow path needlessly
+  // expensive on dense feeds.
+  return [...unique.values()]
+    .map((itinerary) => ({ itinerary, priority: gtfsSegmentRetentionPriority(itinerary.id) }))
+    .sort((left, right) => left.priority - right.priority
+      || compareStableId(left.itinerary.id, right.itinerary.id))
+    .slice(0, maximum)
+    .map(({ itinerary }) => itinerary);
 }
 
 /**
@@ -609,6 +624,9 @@ export function sampleGtfsTripChainCandidates(
     && (fastest?.fare?.currency !== 'UAH' || cheapest.fare!.priceMinor < fastest.fare.priceMinor)) {
     selected.set(cheapest.id, cheapest);
   }
+  // Keep the shared BALANCED winner before adding a standalone low-walking
+  // fallback, which can otherwise crowd out the user's Optimal option.
+  if (maximum >= 3) take(rankGtfsItinerariesForCandidateSampling(itineraries), maximum - selected.size);
   take(byWalking, maximum - selected.size);
   take(rankGtfsItinerariesForCandidateSampling(itineraries), maximum - selected.size);
   take(byDuration, maximum - selected.size);
@@ -682,8 +700,21 @@ function integer(value: string | undefined, fallback = 0): number {
 function gtfsTime(value: string | undefined): number | null {
   if (!value || !/^\d{1,3}:\d{2}:\d{2}$/.test(value)) return null;
   const [hours, minutes, seconds] = value.split(':').map(Number);
-  if (minutes > 59 || seconds > 59 || hours > 71) return null;
+  if (minutes > 59 || seconds > 59 || hours > MAX_GTFS_SERVICE_HOUR) return null;
   return hours * 3600 + minutes * 60 + seconds;
+}
+
+const gtfsServiceDateLookbackCache = new WeakMap<GtfsTimetableFeed, number>();
+function gtfsServiceDateLookback(feed: GtfsTimetableFeed): number {
+  const cached = gtfsServiceDateLookbackCache.get(feed);
+  if (cached !== undefined) return cached;
+  let maximumServiceTimeSeconds = 0;
+  for (const stopTimes of feed.stopTimes.values()) for (const stopTime of stopTimes) {
+    maximumServiceTimeSeconds = Math.max(maximumServiceTimeSeconds, stopTime.arrivalSeconds, stopTime.departureSeconds);
+  }
+  const lookback = Math.min(MAX_GTFS_SERVICE_DAY_LOOKBACK, Math.floor(maximumServiceTimeSeconds / 86_400));
+  gtfsServiceDateLookbackCache.set(feed, lookback);
+  return lookback;
 }
 
 function routeMode(routeType: number, routeName: string): { mode: TransitJourneyMode; transportType: GtfsTransportType } | null {
@@ -1119,10 +1150,11 @@ export function findGtfsStopArrivals(
   const horizonAt = new Date(now.getTime() + horizonSeconds * 1000);
   const firstServiceDate = localDate(now, feed.timezone);
   const lastServiceDate = localDate(horizonAt, feed.timezone);
-  // GTFS permits stop times through 71:59:59, so an arrival just after
-  // midnight can belong to a service day up to two calendar days earlier.
+  // Extended service times can place an arrival on a later calendar date
+  // than its service date; scan only the prior dates this feed can require.
+  const serviceDayLookback = gtfsServiceDateLookback(feed);
   const serviceDates = new Set<string>();
-  const firstRelevantDate = dateStringAfter(firstServiceDate, -2);
+  const firstRelevantDate = dateStringAfter(firstServiceDate, -serviceDayLookback);
   const daysToLast = Math.round((Date.UTC(Number(lastServiceDate.slice(0, 4)), Number(lastServiceDate.slice(4, 6)) - 1, Number(lastServiceDate.slice(6, 8)))
     - Date.UTC(Number(firstRelevantDate.slice(0, 4)), Number(firstRelevantDate.slice(4, 6)) - 1, Number(firstRelevantDate.slice(6, 8)))) / 86_400_000);
   for (let offset = 0; offset <= daysToLast; offset++) serviceDates.add(dateStringAfter(firstRelevantDate, offset));
@@ -1459,12 +1491,11 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
   const firstDate = localDate(input.earliestDeparture, feed.timezone);
   const lastDate = localDate(input.latestDeparture, feed.timezone);
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
-  // GTFS stop times may extend through 71:59:59. Search the two preceding
-  // service dates as well as every date spanned by the requested departure
-  // window; otherwise a trip just after midnight can be attached to a service
-  // date two calendar days earlier and disappear from direct results.
+  // Extended service times may place a trip after its service date; use the
+  // minimum prior-date scan supported by this feed's actual stop times.
+  const serviceDayLookback = gtfsServiceDateLookback(feed);
   const serviceDates: string[] = [];
-  for (let date = dateStringAfter(firstDate, -2); date <= lastDate; date = dateStringAfter(date, 1)) {
+  for (let date = dateStringAfter(firstDate, -serviceDayLookback); date <= lastDate; date = dateStringAfter(date, 1)) {
     serviceDates.push(date);
   }
   const results: GtfsDirectJourney[] = [];
@@ -1751,9 +1782,9 @@ export function findGtfsItinerariesWithStats(
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
   const serviceDates = new Set<string>();
   const dayCount = Math.ceil((journeyEnd.getTime() - input.earliestDeparture.getTime()) / 86_400_000) + 2;
-  // GTFS stop_times permits hours through 71:59:59, so a post-midnight query
-  // can still belong to a service date two days before the local calendar date.
-  for (let day = -2; day <= dayCount; day++) {
+  // Include only the prior service dates needed by the feed's actual time data.
+  const serviceDayLookback = gtfsServiceDateLookback(feed);
+  for (let day = -serviceDayLookback; day <= dayCount; day++) {
     const date = dateStringAfter(firstServiceDate, day);
     if (date <= lastServiceDate || day < 0) serviceDates.add(date);
   }
@@ -1847,6 +1878,7 @@ export function findGtfsItinerariesWithStats(
   const segmentsByRoute = new Map<string, RetainedGtfsTrip[]>();
   const retainedSegmentCountByRoute = new Map<string, number>();
   const overflowSegmentsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
+  const overflowConnectorsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
   const candidateStopCountByRoute = new Map<string, number>();
   for (const [stopId, routeIds] of routesByStop) {
     if (!interchangeStopIds.has(stopId)) continue;
@@ -2406,15 +2438,29 @@ export function findGtfsItinerariesWithStats(
         const overflowCapacity = Math.min(MAX_ROUTE_OVERFLOW_SEGMENTS, graphSegmentLimitPerRoute);
         const overflow = overflowSegmentsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
+        const connectorOverflow = overflowConnectorsByRoute.get(trip.routeId)
+          ?? new BoundedBestK<RetainedGtfsSegment>(Math.min(MAX_ROUTE_OVERFLOW_CONNECTORS, graphSegmentLimitPerRoute), compareTripSegments);
+        let temporallyConnectsQueryEnds = false;
         for (const candidate of tripCandidates) {
           const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
           const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
             >= input.earliestDeparture.getTime()
               + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
           const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
-          if (canCatchOrigin || endsAtDestination) overflow.consider(candidate);
+          const servesQueryEndpoint = canCatchOrigin || endsAtDestination;
+          if (servesQueryEndpoint) overflow.consider(candidate);
+          // Keep one temporally feasible through-connector per trip group in
+          // the bounded overflow reservoir too. Endpoint-only overflow could
+          // leave redistributed graph capacity unused on connector routes.
+          if (!temporallyConnectsQueryEnds
+            && hasPriorEvent(candidate, minimumTransferBufferSeconds)
+            && hasNextEvent(candidate, minimumTransferBufferSeconds)) {
+            temporallyConnectsQueryEnds = true;
+            if (!servesQueryEndpoint) connectorOverflow.consider(candidate);
+          }
         }
         overflowSegmentsByRoute.set(trip.routeId, overflow);
+        overflowConnectorsByRoute.set(trip.routeId, connectorOverflow);
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
         const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
         const canBoardFromOrigin = tripCandidates.some((candidate) => originStopIds.has(candidate.originContext.details.id)
@@ -2440,9 +2486,6 @@ export function findGtfsItinerariesWithStats(
           return (candidateStartsAtOrigin && hasNextEvent(candidate, minimumTransferBufferSeconds))
             || (candidateEndsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds));
         });
-        const temporallyConnectsQueryEnds = tripCandidates.some((candidate) =>
-          hasPriorEvent(candidate, minimumTransferBufferSeconds)
-          && hasNextEvent(candidate, minimumTransferBufferSeconds));
         const retentionPriorityTier = retentionTier === 0 ? 0
           : retentionTier < 3 ? connectsOppositeQueryFrontier ? 1 : 3
             : temporallyConnectsQueryEnds ? 2 : 4;
@@ -2464,24 +2507,35 @@ export function findGtfsItinerariesWithStats(
       }
     }
   }
+  const retainedCandidateKey = (candidate: RetainedGtfsSegment) =>
+    `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
+  const overflowCandidatesByRoute = new Map<string, RetainedGtfsSegment[]>();
+  const overflowRouteIds = new Set([...overflowSegmentsByRoute.keys(), ...overflowConnectorsByRoute.keys()]);
+  for (const routeId of overflowRouteIds) {
+    const unique = new Map<string, RetainedGtfsSegment>();
+    for (const candidate of [
+      ...(overflowSegmentsByRoute.get(routeId)?.toSortedArray() ?? []),
+      ...(overflowConnectorsByRoute.get(routeId)?.toSortedArray() ?? []),
+    ]) unique.set(retainedCandidateKey(candidate), candidate);
+    overflowCandidatesByRoute.set(routeId, [...unique.values()].sort(compareTripSegments));
+  }
+
   const selectedSegmentsByRoute = new Map<string, RetainedGtfsSegment[]>();
   for (const [routeId, trips] of segmentsByRoute) {
     const selected = trips.flatMap((trip) => trip.segments);
-    const candidateKey = (candidate: RetainedGtfsSegment) =>
-      `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
-    const selectedKeys = new Set(selected.map(candidateKey));
+    const selectedKeys = new Set(selected.map(retainedCandidateKey));
     const remaining = Math.max(0, (graphSegmentBudgetByRoute.get(routeId) ?? 0) - selected.length);
-    const overflow = overflowSegmentsByRoute.get(routeId)?.toSortedArray() ?? [];
-    const fill = overflow.filter((candidate) => !selectedKeys.has(candidateKey(candidate)))
+    const overflow = overflowCandidatesByRoute.get(routeId) ?? [];
+    const fill = overflow.filter((candidate) => !selectedKeys.has(retainedCandidateKey(candidate)))
       .slice(0, remaining);
     selectedSegmentsByRoute.set(routeId, [...selected, ...fill]);
   }
   const redistributed = redistributeBoundedCandidates(
     selectedSegmentsByRoute,
-    new Map([...overflowSegmentsByRoute].map(([routeId, reservoir]) => [routeId, reservoir.toSortedArray()])),
+    overflowCandidatesByRoute,
     maximumGraphSegments,
     maximumGraphSegmentsPerRoute,
-    (candidate) => `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`,
+    retainedCandidateKey,
   );
   selectedSegmentsByRoute.clear();
   for (const [routeId, routeSegments] of redistributed.routes) selectedSegmentsByRoute.set(routeId, routeSegments);
@@ -2533,13 +2587,14 @@ export function findGtfsItinerariesWithStats(
   }));
   const graphRoutesUnderfilled = perRouteBudgetUsage.filter(({ budget, retained }) => retained < budget).length;
   const graphRouteBudgetMaxUnused = Math.max(0, ...perRouteBudgetUsage.map(({ budget, retained }) => budget - retained));
-  const overflowReservoirSizes = [...overflowSegmentsByRoute.values()].map((reservoir) => reservoir.toSortedArray().length);
+  const overflowReservoirSizes = [...overflowCandidatesByRoute.values()].map((reservoir) => reservoir.length);
+  const overflowConnectorReservoirSizes = [...overflowConnectorsByRoute.values()].map((reservoir) => reservoir.toSortedArray().length);
   const routeBudgetUnderfillSample = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
     ? [...graphSegmentBudgetByRoute].map(([routeId, budget]) => {
       const retainedSegments = selectedSegmentsByRoute.get(routeId)?.length ?? 0;
       const wholeTripSegments = (segmentsByRoute.get(routeId) ?? [])
         .reduce((total, trip) => total + trip.segments.length, 0);
-      const overflowCandidates = overflowSegmentsByRoute.get(routeId)?.toSortedArray().length ?? 0;
+      const overflowCandidates = overflowCandidatesByRoute.get(routeId)?.length ?? 0;
       return {
         routeId, budget, estimatedDemand: candidateDemandByRoute.get(routeId) ?? 0,
         wholeTripSegments, overflowCandidates, overflowAdded: Math.max(0, retainedSegments - wholeTripSegments),
@@ -2559,6 +2614,8 @@ export function findGtfsItinerariesWithStats(
     graphRoutesUnderfilled, graphRouteBudgetMaxUnused,
     overflowReservoirRetained: overflowReservoirSizes.reduce((sum, size) => sum + size, 0),
     overflowReservoirsAtCap: overflowReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_SEGMENTS).length,
+    overflowConnectorReservoirRetained: overflowConnectorReservoirSizes.reduce((sum, size) => sum + size, 0),
+    overflowConnectorReservoirsAtCap: overflowConnectorReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_CONNECTORS).length,
     overflowSegmentsRedistributed: redistributed.added,
     ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
@@ -2773,7 +2830,7 @@ export function findGtfsItinerariesWithStats(
       || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
     retainObjectiveCandidate('walking', candidate, (a, b) => a.walkingMeters - b.walkingMeters
       || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
-    objectiveCandidateSamples.set('balanced', retainGtfsBalancedObjectiveSample(
+    objectiveCandidateSamples.set('balanced', retainGtfsDeterministicOverflowSample(
       objectiveCandidateSamples.get('balanced') ?? [], candidate, objectiveSampleLimit));
   };
   const resultCountByRouteChain = new Map<string, number>();
@@ -2784,7 +2841,7 @@ export function findGtfsItinerariesWithStats(
   const MAX_RESULTS_PER_ROUTE_CHAIN = 8;
   // Keep a few useful boarding/alighting variants for the same scheduled
   // vehicles, selected across time, fare, transfer, and walking objectives.
-  const MAX_RESULTS_PER_TRIP_CHAIN = 2;
+  const MAX_RESULTS_PER_TRIP_CHAIN = 4;
   const maxTransitLegs = maximumTransfers + 1;
   // Keep the per-leg sampling cap independent of the caller's response-page
   // size so later cross-provider ranking receives a consistent diverse pool.
@@ -2927,6 +2984,9 @@ export function findGtfsItinerariesWithStats(
     const selectedVariants = sampleGtfsTripChainCandidates([...existingVariants, candidate], MAX_RESULTS_PER_TRIP_CHAIN);
     const selectedIds = new Set(selectedVariants.map((itinerary) => itinerary.id));
     if (!selectedIds.has(id)) {
+      // The local two-variant limit can reject a search-wide winner for
+      // walking or balanced effort; preserve it for final global ranking.
+      retainCandidateObjectives(candidate);
       candidateSamplingTruncated = true;
       return;
     }
@@ -2941,6 +3001,9 @@ export function findGtfsItinerariesWithStats(
     const selectedRouteVariants = sampleGtfsRouteChainCandidates([...tripVariantsForRouteSample, candidate], MAX_RESULTS_PER_ROUTE_CHAIN);
     const selectedRouteIds = new Set(selectedRouteVariants.map((itinerary) => itinerary.id));
     if (!selectedRouteIds.has(id)) {
+      // Route-chain normalization is local; a rejected option may still win
+      // once candidates from the whole search are compared.
+      retainCandidateObjectives(candidate);
       candidateSamplingTruncated = true;
       return;
     }
@@ -2956,6 +3019,9 @@ export function findGtfsItinerariesWithStats(
     for (const removedId of removedIds) {
       const removed = results.get(removedId);
       if (!removed) continue;
+      // Keep previously selected candidates that the replacement evicts from
+      // the bounded result pool available to the global objective reservoirs.
+      retainCandidateObjectives(removed);
       results.delete(removedId);
       routeChainIds.delete(removedId);
       const removedTripChain = removed.segments.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
@@ -3220,7 +3286,7 @@ export function findGtfsItinerariesWithStats(
   }
 
   const allCandidateIds = new Set(results.keys());
-  const rankedResults = [...results.values()];
+  let rankedResults = [...results.values()];
   for (const sample of objectiveCandidateSamples.values()) {
     for (const candidate of sample) {
       if (allCandidateIds.has(candidate.id)) continue;
@@ -3228,6 +3294,32 @@ export function findGtfsItinerariesWithStats(
       rankedResults.push(candidate);
     }
   }
+  // Objective reservoirs are independent bounded samples. Their union can
+  // exceed the per-chain limits even though the general result pool cannot;
+  // reapply both limits before ranking the public response candidates.
+  const candidatesByTripChain = new Map<string, GtfsItinerary[]>();
+  for (const candidate of rankedResults) {
+    const tripChain = candidate.segments.map((segment) =>
+      `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+    const group = candidatesByTripChain.get(tripChain) ?? [];
+    group.push(candidate);
+    candidatesByTripChain.set(tripChain, group);
+  }
+  const boundedTripCandidates = [...candidatesByTripChain.values()].flatMap((group) =>
+    sampleGtfsTripChainCandidates(group, MAX_RESULTS_PER_TRIP_CHAIN));
+  const candidatesByRouteChain = new Map<string, GtfsItinerary[]>();
+  for (const candidate of boundedTripCandidates) {
+    const routeChain = candidate.segments.filter((segment, index) => index === 0
+      || candidate.segments[index - 1]?.providerId !== segment.providerId
+      || candidate.segments[index - 1]?.routeId !== segment.routeId)
+      .map((segment) => `${segment.providerId}:${segment.routeId}`).join('>');
+    const group = candidatesByRouteChain.get(routeChain) ?? [];
+    group.push(candidate);
+    candidatesByRouteChain.set(routeChain, group);
+  }
+  rankedResults = [...candidatesByRouteChain.values()].flatMap((group) =>
+    sampleGtfsRouteChainCandidates(group, MAX_RESULTS_PER_ROUTE_CHAIN));
+  if (rankedResults.length < allCandidateIds.size) candidateSamplingTruncated = true;
   rankedResults.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byDuration = [...rankedResults].sort((a, b) => a.durationSeconds - b.durationSeconds
     || a.transfers - b.transfers || compareStableId(a.id, b.id));

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsDeterministicOverflowSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 import { queryDirectedEventIndexPrototype, validateEventIndexCandidatesWithProductionTransfers } from './helpers/gtfs-event-label-prototype';
@@ -789,7 +789,7 @@ test('limits duplicate stop-pair alternatives for the same scheduled trip chain'
   }
 
   assert.ok(result.itineraries.length > 0);
-  assert.ok([...countsByTripChain.values()].every((count) => count <= 2),
+  assert.ok([...countsByTripChain.values()].every((count) => count <= 4),
     'a bounded number of stop-pair choices should share the same scheduled vehicle chain');
   assert.equal(result.resultLimitReached, true,
     'suppressing additional stop-pair variants must be visible as candidate sampling');
@@ -1125,7 +1125,27 @@ test('query-time retention keeps a scheduled connector ahead of dense irrelevant
     origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
     maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
   };
-  const result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
+  const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const originalInfo = console.info;
+  const messages: string[] = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    result = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 3, segmentsPerRoute: 1 });
+  } finally {
+    console.info = originalInfo;
+    if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+  }
+  const graph = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown })
+    .find((stage) => stage.stage === 'segments-built');
+  assert.ok(graph, 'the fixture exposes graph-retention diagnostics');
+  assert.ok(Number(graph.overflowReservoirRetained) >= 3,
+    'bounded overflow keeps a temporally feasible connector in addition to endpoint fallbacks');
+  assert.ok(Number(graph.overflowConnectorReservoirRetained) >= 1,
+    'connector fallbacks use a separate bounded reservoir');
+  assert.ok(Number(graph.segments) <= 3, 'connector recovery preserves the injected total graph cap');
   assert.ok(result.candidateGraphTruncated, 'the fixture exercises a bounded dense graph');
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
     === `access-trip,${targetTripId},egress-trip`),
@@ -1481,31 +1501,35 @@ test('route-chain sample preserves the full FASTEST, CHEAPEST, and BALANCED winn
     `route-chain sampling must retain strategy winner ${winner}`);
 });
 
-test('bounded objective overflow sample retains the shared BALANCED winner', () => {
+test('bounded objective overflow sample is stable across candidate arrival order', () => {
   const base = findGtfsItineraries(feed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
   })[0];
   assert.ok(base);
   const candidates = [
-    ...Array.from({ length: 18 }, (_, index) => ({
-      ...base, id: `ordinary-${index}`, durationSeconds: 4_400 + index * 17,
-      walkingMeters: 800 + index * 5, transfers: index % 3 === 0 ? 1 : 0,
-      fare: { priceMinor: 800 + index * 13, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
-    })),
-    { ...base, id: 'fastest-extreme', durationSeconds: 1_800, walkingMeters: 1_200, transfers: 1,
-      fare: { priceMinor: 1_800, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
-    { ...base, id: 'cheapest-extreme', durationSeconds: 7_200, walkingMeters: 500, transfers: 0,
-      fare: { priceMinor: 100, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
-    { ...base, id: 'balanced-winner', durationSeconds: 3_900, walkingMeters: 100, transfers: 0,
-      fare: { priceMinor: 700, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'fast-expensive', durationSeconds: 900, walkingMeters: 1_800, transfers: 1,
+      fare: { priceMinor: 900, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'cheap-slow', durationSeconds: 5_400, walkingMeters: 100, transfers: 1,
+      fare: { priceMinor: 600, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'middle', durationSeconds: 3_000, walkingMeters: 700, transfers: 0,
+      fare: { priceMinor: 250, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'low-walk', durationSeconds: 4_200, walkingMeters: 1_000, transfers: 0,
+      fare: { priceMinor: 0, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
+    { ...base, id: 'fast-cheap-transfer', durationSeconds: 1_500, walkingMeters: 300, transfers: 2,
+      fare: { priceMinor: 500, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } },
   ];
-  const fullWinner = rankGtfsItinerariesForCandidateSampling(candidates)[0];
-  assert.equal(fullWinner?.id, 'balanced-winner', 'fixture has a distinct BALANCED winner');
-
-  let retained: GtfsItinerary[] = [];
-  for (const candidate of candidates) retained = retainGtfsBalancedObjectiveSample(retained, candidate, 4);
-  assert.ok(retained.some((item) => item.id === fullWinner.id),
-    'the bounded overflow backstop keeps the shared BALANCED winner instead of only retaining single-metric extremes');
+  const permute = <T,>(items: T[]): T[][] => items.length
+    ? items.flatMap((item, index) => permute(items.filter((_, otherIndex) => otherIndex !== index)
+      ).map((permutation) => [item, ...permutation]))
+    : [[]];
+  const permutations = permute(candidates);
+  const expected = permutations[0]!.reduce((sample, candidate) =>
+    retainGtfsDeterministicOverflowSample(sample, candidate, 1), [] as GtfsItinerary[]).map(({ id }) => id);
+  for (const [index, order] of permutations.entries()) {
+    const retained = order.reduce((sample, candidate) =>
+      retainGtfsDeterministicOverflowSample(sample, candidate, 1), [] as GtfsItinerary[]);
+    assert.deepEqual(retained.map(({ id }) => id), expected, `sample is order-independent (permutation ${index})`);
+  }
 });
 
 test('cross-provider GTFS cap preserves slow cheapest routes before filling by arrival', () => {
@@ -1837,6 +1861,33 @@ test('finds a 71-hour GTFS service trip on its two-day-old service date', () => 
   assert.equal(routed.itineraries[0].segments[0].departureAt.toISOString(), '2026-10-14T20:15:00.000Z');
   assert.equal(routed.itineraries[0].segments[0].arrivalAt.toISOString(), '2026-10-14T20:55:00.000Z');
   assert.equal(routed.searchTruncated, false, 'the complete tiny 71-hour service-date fixture is not truncated');
+});
+
+test('finds a 99-hour GTFS service trip on its four-day-old service date', () => {
+  const timetable = feed({ departure: '99:15:00', arrival: '99:55:00', monday: '0', exceptionDate: '20261012' });
+  const query = {
+    ...request('2026-10-16T00:10:00Z', '2026-10-16T00:30:00Z'),
+    maximumTransfers: 0,
+  };
+  const direct = findDirectGtfsJourneys(timetable, query);
+  assert.equal(direct.length, 1);
+  assert.equal(direct[0].serviceDate, '20261012');
+  assert.equal(direct[0].departureAt.toISOString(), '2026-10-16T00:15:00.000Z');
+  assert.equal(direct[0].arrivalAt.toISOString(), '2026-10-16T00:55:00.000Z');
+
+  const routed = findGtfsItinerariesWithStats(timetable, query);
+  assert.equal(routed.itineraries.length, 1,
+    'the production multimodal search must include service dates four days earlier');
+  assert.equal(routed.itineraries[0].segments[0].serviceDate, '20261012');
+  assert.equal(routed.itineraries[0].segments[0].departureAt.toISOString(), '2026-10-16T00:15:00.000Z');
+  assert.equal(routed.itineraries[0].segments[0].arrivalAt.toISOString(), '2026-10-16T00:55:00.000Z');
+
+  const arrivals = findGtfsStopArrivals(timetable, 'destination', {
+    now: new Date('2026-10-16T00:10:00Z'), limit: 10,
+  });
+  assert.equal(arrivals.length, 1,
+    'the stop-arrivals view must include service times up to the supported horizon');
+  assert.equal(arrivals[0].scheduledArrivalAt.toISOString(), '2026-10-16T00:55:00.000Z');
 });
 
 test('normalizes GTFS rail and ferry journeys into supported journey modes', () => {

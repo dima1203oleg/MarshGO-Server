@@ -30,17 +30,45 @@ const parseCoordinates = (value: string | undefined, fallback: [number, number])
 const origin = parseCoordinates(process.env.GTFS_REPLAY_ORIGIN, [24.008217, 49.864885]);
 const destination = parseCoordinates(process.env.GTFS_REPLAY_DESTINATION, [24.0175835, 49.8013165]);
 const startedAt = performance.now();
-const result = findGtfsItinerariesWithStats(feed, {
-  providerId: 'lviv-frozen-replay', providerName: 'Lviv frozen GTFS', providerCity: 'Львів',
-  origin, destination,
-  earliestDeparture: new Date('2026-10-23T05:00:00.000Z'),
-  latestDeparture: new Date('2026-10-23T05:30:00.000Z'),
-  maximumJourneySeconds: 6 * 60 * 60, maximumTransfers: 2,
-  maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1000,
-  maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
-  maximumWaitSeconds: 4 * 60 * 60, limit: 100,
-  now: new Date('2026-10-22T08:00:00.000Z'),
-});
+const searchDiagnosticsByStage: Record<string, Record<string, unknown>> = {};
+const originalConsoleInfo = console.info.bind(console);
+const previousDebugSetting = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+console.info = (...args: unknown[]) => {
+  if (typeof args[0] === 'string') {
+    try {
+      const record = JSON.parse(args[0]) as Record<string, unknown>;
+      if (record.event === 'gtfs.search.debug') {
+        if (typeof record.stage === 'string' && ['segments-built', 'reachability-built', 'itineraries-ranked'].includes(record.stage)) {
+          const { elapsedMs: _elapsedMs, heapUsedBytes: _heapUsedBytes, rssBytes: _rssBytes, ...stable } = record;
+          searchDiagnosticsByStage[record.stage] = stable;
+        }
+        return;
+      }
+    } catch {
+      // Preserve unrelated diagnostic output rather than swallowing it.
+    }
+  }
+  originalConsoleInfo(...args);
+};
+let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+try {
+  result = findGtfsItinerariesWithStats(feed, {
+    providerId: 'lviv-frozen-replay', providerName: 'Lviv frozen GTFS', providerCity: 'Львів',
+    origin, destination,
+    earliestDeparture: new Date('2026-10-23T05:00:00.000Z'),
+    latestDeparture: new Date('2026-10-23T05:30:00.000Z'),
+    maximumJourneySeconds: 6 * 60 * 60, maximumTransfers: 2,
+    maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1000,
+    maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
+    maximumWaitSeconds: 4 * 60 * 60, limit: 100,
+    now: new Date('2026-10-22T08:00:00.000Z'),
+  });
+} finally {
+  console.info = originalConsoleInfo;
+  if (previousDebugSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugSetting;
+}
 const fastest = [...result.itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id))[0];
 const cheapest = [...result.itineraries].filter((item) => item.fare?.currency === 'UAH')
   .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id))[0];
@@ -48,6 +76,8 @@ const balanced = rankGtfsItinerariesForCandidateSampling(result.itineraries)[0];
 const signature = (item: typeof result.itineraries[number] | undefined) => item?.id ?? null;
 const details = result as typeof result & Record<string, unknown>;
 console.log(JSON.stringify({
+  comparisonGroup: process.env.REPLAY_GROUP ?? null,
+  revision: process.env.REPLAY_REF ?? null,
   iteration: process.env.BENCH_ITER ?? null,
   origin,
   destination,
@@ -59,8 +89,12 @@ console.log(JSON.stringify({
   returned: result.itineraries.length,
   idHash: createHash('sha256').update(result.itineraries.map(({ id }) => id).join('\n')).digest('hex'),
   uniqueTripChains: new Set(result.itineraries.map((item) => item.segments.map((segment) => segment.tripId).join(','))).size,
+  tripChainIds: [...new Set(result.itineraries.map((item) => item.segments
+    .map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>')))].sort(),
   uniqueRouteChains: new Set(result.itineraries.map((item) => item.segments.map((segment) => segment.routeId).join(','))).size,
   strategyCandidates: { balanced: signature(balanced), fastest: signature(fastest), cheapest: signature(cheapest) },
   searchTruncated: details.searchTruncated,
   candidateGraphTruncated: details.candidateGraphTruncated,
+  truncation: result.truncation,
+  searchDiagnosticsByStage,
 }, null, 2));
