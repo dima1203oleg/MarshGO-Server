@@ -2446,6 +2446,94 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
   }
 });
 
+test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set('origin', { id: 'origin', name: 'Origin', lon: 24.0200, lat: 49.8400 });
+  timetable.stops.set('hub', { id: 'hub', name: 'Transfer hub', lon: 24.0250, lat: 49.8450 });
+  timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: 24.0300, lat: 49.8500 });
+
+  const addRoute = (routeId: string) => timetable.routes.set(routeId, {
+    name: routeId, mode: 'BUS', transportType: 'bus',
+  });
+  const addTrip = (tripId: string, routeId: string, from: string, to: string,
+    departureSeconds: number, arrivalSeconds: number) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [from, to].map((stopId, index) => ({
+      stopId, sequence: index + 1,
+      arrivalSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      departureSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+
+  addRoute('origin-route');
+  addTrip('origin-trip', 'origin-route', 'origin', 'hub', 8 * 3600, 8 * 3600 + 10 * 60);
+  const earlyRouteCount = 94;
+  const onwardRouteCount = earlyRouteCount + 1;
+  const lateTripsPerRoute = 132;
+  for (let routeIndex = 0; routeIndex < onwardRouteCount; routeIndex++) {
+    const routeId = `onward-route-${routeIndex}`;
+    addRoute(routeId);
+    const earlyTripCount = routeIndex < earlyRouteCount ? 8 : 1;
+    for (let tripIndex = 0; tripIndex < earlyTripCount; tripIndex++) {
+      addTrip(`onward-${routeIndex}-${tripIndex}`, routeId, 'hub', 'destination',
+        8 * 3600 + (routeIndex < earlyRouteCount ? 30 : 35) * 60,
+        8 * 3600 + 50 * 60);
+    }
+    for (let tripIndex = 0; tripIndex < lateTripsPerRoute; tripIndex++) {
+      addTrip(`onward-${routeIndex}-late-${tripIndex}`, routeId, 'hub', 'destination',
+        8 * 3600 + 40 * 60, 9 * 3600);
+    }
+  }
+
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousInfo = console.info;
+  const diagnostics: Array<Record<string, unknown>> = [];
+  let result: ReturnType<typeof findGtfsItinerariesWithStats> | undefined;
+  try {
+    process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+    console.info = (...args: unknown[]) => {
+      if (typeof args[0] !== 'string') return;
+      try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
+    };
+    result = findGtfsItinerariesWithStats(timetable, {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:20:00Z'),
+      maximumAccessWalkingMeters: 1000, maximumEgressWalkingMeters: 1000,
+      maximumTransferWalkingMeters: 100, maximumTransfers: 1, limit: 100,
+    });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+  }
+
+  assert.ok(result, 'search returned a result');
+  const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
+  assert.ok(ranked, 'the bounded-search diagnostic is captured');
+  const reachedByLeg = JSON.parse(String(ranked.candidatePoolReachedAtStepByLegCount)) as Record<string, number>;
+  assert.ok((ranked.candidatesWith2Legs as number) >= 750, 'the two-leg candidate pool reached its bound');
+  assert.equal((ranked.searchSteps as number) - reachedByLeg['2'], 25_000,
+    'the objective reservoir scans exactly its bounded window after pool saturation');
+  assert.ok((ranked.maxQueuedSearchWork as number) < 10_000, 'the queue frontier cap did not trigger');
+  assert.equal(ranked.searchStepLimitReached, 0, 'the global search-step cap did not trigger');
+  assert.equal(ranked.candidateResultLimitReached, 0, 'the global retained-candidate cap did not trigger');
+  assert.equal(result.truncation.candidateGraph, false);
+  assert.equal(result.truncation.stopSelection, false);
+  assert.equal(result.truncation.searchBudget, true,
+    'unexpanded feasible transfer work after the objective reservoir is reported as partial');
+  assert.equal(result.truncation.searchStepLimit, false);
+  assert.equal(result.truncation.candidatePoolLimit, false);
+  assert.equal(result.searchTruncated, true);
+});
+
 test('keeps type-4 event labels and fare-v1 coverage/zones separate from passenger transfer counts', () => {
   const timetable = connectingFeed({ secondDeparture: '08:21:00', transferType: '4', inSeat: true, sameRoute: true });
   timetable.stopTimes.get('b1')![0]!.sourceZoneId = 'z1';
