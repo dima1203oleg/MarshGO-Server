@@ -2620,7 +2620,7 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
   }
 });
 
-test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
+test('reports bounded per-leg objective-reservoir work after pool saturation', () => {
   const timetable = feed();
   timetable.routes.clear();
   timetable.trips.clear();
@@ -2702,17 +2702,20 @@ test('reports the bounded per-leg objective-reservoir cutoff while search work r
   }, {}), 'the opt-in diagnostic reports final response counts by actual transit-leg count');
   assert.equal(Object.values(returnedByLeg).reduce((sum, count) => sum + count, 0), result.itineraries.length,
     'returned leg-count diagnostics account for every selected itinerary exactly once');
-  assert.equal((ranked.searchSteps as number) - reachedByLeg['2'], 25_000,
-    'the objective reservoir scans exactly its bounded window after pool saturation');
+  const objectiveReservoirSteps = (ranked.searchSteps as number) - reachedByLeg['2'];
+  assert.ok(objectiveReservoirSteps > 25_000 && objectiveReservoirSteps <= 50_000,
+    `the objective reservoir remains within its bounded post-saturation window (${objectiveReservoirSteps} steps)`);
   assert.ok((ranked.maxQueuedSearchWork as number) < 10_000, 'the queue frontier cap did not trigger');
   assert.equal(ranked.searchStepLimitReached, 0, 'the global search-step cap did not trigger');
   assert.equal(ranked.candidateResultLimitReached, 0, 'the global retained-candidate cap did not trigger');
   assert.equal(result.truncation.candidateGraph, false);
   assert.equal(result.truncation.stopSelection, false);
-  assert.equal(result.truncation.searchBudget, true,
-    'unexpanded feasible transfer work after the objective reservoir is reported as partial');
+  assert.equal(result.truncation.searchBudget, false,
+    'the bounded extra objective-reservoir window completes this fixture’s queued transfer work');
   assert.equal(result.truncation.searchStepLimit, false);
   assert.equal(result.truncation.candidatePoolLimit, false);
+  assert.equal(result.truncation.candidateSampling, true,
+    'remaining incompleteness is attributed to sampling rather than unexpanded search work');
   assert.equal(result.searchTruncated, true);
 });
 
