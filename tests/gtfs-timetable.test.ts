@@ -1411,6 +1411,80 @@ test('keeps exhaustive strategy winners under a tight graph budget with a discon
   }
 });
 
+test('keeps a multi-transfer connector ahead of an earlier dead-end endpoint trip under a tight route budget', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
+  const stopTimes = [
+    { stopId: 'hub-b', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+    { stopId: 'destination', sequence: 2, arrivalSeconds: 8 * 3600 + 10 * 60,
+      departureSeconds: 8 * 3600 + 10 * 60, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.trips.set('dead-end-middle', { routeId: 'middle', serviceId: 'weekday', headsign: 'Destination' });
+  timetable.stopTimes.set('dead-end-middle', stopTimes);
+  stopTimes.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+    [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId: 'dead-end-middle', index }]));
+  const input = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransferWalkingMeters: 100,
+    maximumTransfers: 2,
+    maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 2 * 60 * 60,
+  };
+  const chainId = (journey: GtfsItinerary) => journey.segments.map((segment) => segment.tripId).join(',');
+  const exhaustive = findGtfsItinerariesWithStats(timetable, input, { totalSegments: 100, segmentsPerRoute: 100 });
+  const bounded = findGtfsItinerariesWithStats(timetable, input, { totalSegments: 3, segmentsPerRoute: 1 });
+  const expected = `access-trip,${targetTripId},egress-trip`;
+
+  assert.deepEqual(exhaustive.itineraries.map(chainId), [expected], 'the exhaustive oracle retains the only feasible chain');
+  assert.equal(bounded.truncation.candidateGraph, true);
+  assert.ok(bounded.itineraries.some((journey) => chainId(journey) === expected),
+    `the bounded route must retain the feasible multi-transfer connector over dead-end-middle; got ${JSON.stringify(
+      bounded.itineraries.map(chainId))}`);
+});
+
+test('retains a trip-specific in-seat feeder with a sub-buffer connection under a tight graph budget', () => {
+  const { timetable } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.routes.clear();
+  timetable.routes.set('access', { name: 'Access', mode: 'BUS', transportType: 'bus' });
+  timetable.routes.set('egress', { name: 'Egress', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  const addTrip = (tripId: string, routeId: string, stops: string[], times: number[]) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    const entries = stops.map((stopId, index) => ({ stopId, sequence: index + 1,
+      arrivalSeconds: times[index]!, departureSeconds: times[index]!, pickupType: 0, dropOffType: 0 }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+  addTrip('early-but-not-transferable', 'access', ['origin', 'hub-a'], [8 * 3600, 8 * 3600 + 4 * 60]);
+  addTrip('in-seat-access', 'access', ['origin', 'hub-a'], [8 * 3600 + 60, 8 * 3600 + 5 * 60]);
+  addTrip('in-seat-egress-trip', 'egress', ['hub-a', 'destination'], [8 * 3600 + 6 * 60, 8 * 3600 + 25 * 60]);
+  timetable.transfers = [{ fromStopId: 'hub-a', toStopId: 'hub-a', transferType: 4,
+    fromTripId: 'in-seat-access', toTripId: 'in-seat-egress-trip',
+    fromRouteId: 'access', toRouteId: 'egress' }];
+
+  const input = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransferWalkingMeters: 0,
+    maximumTransfers: 1, maximumJourneySeconds: 60 * 60, maximumWaitSeconds: 10 * 60,
+  };
+  const exhaustive = findGtfsItinerariesWithStats(timetable, input,
+    { totalSegments: 100, segmentsPerRoute: 100 });
+  const boundedGraphs: GtfsCandidateGraphSnapshot[] = [];
+  const bounded = findGtfsItinerariesWithStats(timetable, input,
+    { totalSegments: 2, segmentsPerRoute: 1 }, (snapshot) => boundedGraphs.push(snapshot));
+  const winner = (result: ReturnType<typeof findGtfsItinerariesWithStats>) =>
+    result.itineraries.map((journey) => journey.segments.map((segment) => segment.tripId).join('>'));
+
+  assert.deepEqual(winner(exhaustive), ['in-seat-access>in-seat-egress-trip']);
+  assert.deepEqual(winner(bounded), winner(exhaustive),
+    `short-gap type-4 events must survive retention prefilters and outrank the earlier infeasible feeder; retained=${JSON.stringify(
+      boundedGraphs[0]?.segments.map(({ journey }) => [journey.tripId, journey.routeId, journey.originStop.id, journey.destinationStop.id]))}`);
+  assert.equal(bounded.truncation.candidateGraph, true);
+});
+
 test('bounded connector overflow preserves the fastest onward stop from one middle trip', () => {
   const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
   timetable.stops.set('hub-b', { id: 'hub-b', name: 'Hub B', lon: 24.031, lat: 49.847 });
