@@ -534,10 +534,15 @@ export function retainGtfsDeterministicOverflowSample(
   // online top-K score changes as new minima/maxima arrive and is dependent on
   // feed iteration order. Use stable identity for bounded discovery instead;
   // the retained candidates are ranked by the shared scorer after collection.
+  // Compute each ID's hash once per update. Re-hashing both sides of the sort
+  // comparator for every comparison made the hot overflow path needlessly
+  // expensive on dense feeds.
   return [...unique.values()]
-    .sort((left, right) => gtfsSegmentRetentionPriority(left.id) - gtfsSegmentRetentionPriority(right.id)
-      || compareStableId(left.id, right.id))
-    .slice(0, maximum);
+    .map((itinerary) => ({ itinerary, priority: gtfsSegmentRetentionPriority(itinerary.id) }))
+    .sort((left, right) => left.priority - right.priority
+      || compareStableId(left.itinerary.id, right.itinerary.id))
+    .slice(0, maximum)
+    .map(({ itinerary }) => itinerary);
 }
 
 /**
