@@ -2402,7 +2402,7 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
     id, durationSeconds: journey.durationSeconds,
     priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
     transfers: journey.transfers, walkingMeters: journey.walkingMeters,
-    reliability: null, transferRisk: journey.transfers > 0 ? 0.25 : 0, comfort: null,
+    reliability: null, transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
     legs: journey.segments.map((segment) => ({ mode: segment.mode })),
   }));
   const expectedScoringOptions = [...expected.values()];
@@ -2436,7 +2436,7 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
     durationSeconds: journey.durationSeconds,
     priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
     transfers: journey.transfers, walkingMeters: journey.walkingMeters,
-    reliability: null, transferRisk: journey.transfers > 0 ? 0.25 : 0, comfort: null,
+    reliability: null, transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
     legs: journey.segments.map((segment) => ({ mode: segment.mode })),
   }));
   for (const [strategy, winnerId] of Object.entries(exhaustiveWinnerIds)) {
