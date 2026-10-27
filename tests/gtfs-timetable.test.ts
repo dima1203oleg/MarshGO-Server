@@ -1279,6 +1279,7 @@ test('query-time retention keeps a feasible multi-leg chain under an injected gr
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
     origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
     maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+    maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 2 * 60 * 60,
   };
   const graphLimits = { totalSegments: 3, segmentsPerRoute: 1 };
   const result = findGtfsItinerariesWithStats(timetable, searchInput, graphLimits);
@@ -1328,6 +1329,111 @@ test('query-time retention keeps a feasible multi-leg chain under an injected gr
   const skippedResult = findGtfsItinerariesWithStats(skipped, searchInput, graphLimits);
   assert.ok(!skippedResult.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === targetTripId)),
     'skipped boarding stops are excluded from temporal retention and returned itineraries');
+});
+
+test('bounded connector overflow preserves the fastest onward stop from one middle trip', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.stops.set('hub-b', { id: 'hub-b', name: 'Hub B', lon: 24.031, lat: 49.847 });
+  timetable.stops.set('hub-c', { id: 'hub-c', name: 'Hub C', lon: 24.034, lat: 49.852 });
+  const targetStops = timetable.stopTimes.get(targetTripId)!;
+  targetStops.push({ stopId: 'hub-c', sequence: 3, arrivalSeconds: 8 * 3600 + 25 * 60,
+    departureSeconds: 8 * 3600 + 25 * 60, pickupType: 0, dropOffType: 0 });
+  const addTrip = (tripId: string, routeId: string, stops: Array<[string, number]>) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    timetable.stopTimes.set(tripId, stops.map(([stopId, seconds], index) => ({
+      stopId, sequence: index + 1, arrivalSeconds: seconds, departureSeconds: seconds, pickupType: 0, dropOffType: 0,
+    })));
+  };
+  addTrip('egress-fast-trip', 'egress', [
+    ['hub-c', 8 * 3600 + 28 * 60], ['destination', 8 * 3600 + 40 * 60],
+  ]);
+  // This direct group occupies one middle-route slot ahead of the two-edge
+  // connector group, forcing the latter to use the bounded overflow reservoir.
+  addTrip('slow-direct-trip', 'middle', [['origin', 8 * 3600 + 5 * 60], ['destination', 9 * 3600]]);
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, stops] of timetable.stopTimes) stops.forEach((stopTime, index) => {
+    timetable.stopTimesByStop.set(stopTime.stopId,
+      [...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index }]);
+  });
+
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+    maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 2 * 60 * 60,
+  };
+  let graph: GtfsCandidateGraphSnapshot | undefined;
+  const bounded = findGtfsItinerariesWithStats(timetable, query, { totalSegments: 5, segmentsPerRoute: 2 },
+    (snapshot) => { graph = snapshot; });
+  assert.equal(bounded.truncation.candidateGraph, true, 'the fixture exercises a deliberately bounded graph');
+  assert.ok(graph);
+
+  // Independent brute-force oracle: enumerate every exact-stop trip pair/triple
+  // in this tiny static feed and apply the GTFS-time transfer buffer directly.
+  const utcAt = (seconds: number) => Date.UTC(2026, 9, 12) + seconds * 1000 - 3 * 60 * 60_000;
+  const oracle: Array<{ tripIds: string[]; arrival: number }> = [];
+  for (const [firstTripId] of timetable.trips) {
+    const firstStops = timetable.stopTimes.get(firstTripId) ?? [];
+    for (let firstFrom = 0; firstFrom < firstStops.length; firstFrom++) {
+      const origin = firstStops[firstFrom]!;
+      if (origin.stopId !== 'origin') continue;
+      const departure = utcAt(origin.departureSeconds);
+      if (departure < query.earliestDeparture.getTime() || departure > query.latestDeparture.getTime()) continue;
+      for (let firstTo = firstFrom + 1; firstTo < firstStops.length; firstTo++) {
+        const firstEnd = firstStops[firstTo]!;
+        const firstArrival = utcAt(firstEnd.arrivalSeconds);
+        if (firstEnd.stopId === 'destination') oracle.push({ tripIds: [firstTripId], arrival: firstArrival });
+        for (const [middleTripId] of timetable.trips) {
+          if (middleTripId === firstTripId) continue;
+          const middleStops = timetable.stopTimes.get(middleTripId) ?? [];
+          for (let middleFrom = 0; middleFrom < middleStops.length; middleFrom++) {
+            const middleStart = middleStops[middleFrom]!;
+            if (middleStart.stopId !== firstEnd.stopId
+              || utcAt(middleStart.departureSeconds) - firstArrival < DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS * 1000) continue;
+            for (let middleTo = middleFrom + 1; middleTo < middleStops.length; middleTo++) {
+              const middleEnd = middleStops[middleTo]!;
+              const middleArrival = utcAt(middleEnd.arrivalSeconds);
+              for (const [lastTripId] of timetable.trips) {
+                if (lastTripId === firstTripId || lastTripId === middleTripId) continue;
+                const lastStops = timetable.stopTimes.get(lastTripId) ?? [];
+                for (let lastFrom = 0; lastFrom < lastStops.length; lastFrom++) {
+                  const lastStart = lastStops[lastFrom]!;
+                  if (lastStart.stopId !== middleEnd.stopId
+                    || utcAt(lastStart.departureSeconds) - middleArrival < DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS * 1000) continue;
+                  for (let lastTo = lastFrom + 1; lastTo < lastStops.length; lastTo++) {
+                    const lastEnd = lastStops[lastTo]!;
+                    const arrival = utcAt(lastEnd.arrivalSeconds);
+                    if (lastEnd.stopId === 'destination' && arrival - departure <= query.maximumJourneySeconds! * 1000) {
+                      oracle.push({ tripIds: [firstTripId, middleTripId, lastTripId], arrival });
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  const oracleWinner = oracle.sort((left, right) => left.arrival - right.arrival)[0]!;
+  assert.deepEqual(oracleWinner.tripIds, ['access-trip', targetTripId, 'egress-fast-trip']);
+  assert.equal(oracleWinner.arrival, Date.parse('2026-10-12T05:40:00Z'));
+  const exhaustive = findGtfsItinerariesWithStats(timetable, query, { totalSegments: 100, segmentsPerRoute: 100 });
+  assert.equal(exhaustive.truncation.candidateGraph, false, 'all tiny-feed graph candidates fit the oracle run');
+  assert.equal(exhaustive.searchTruncated, false, 'the tiny-feed oracle search is complete');
+  assert.ok(exhaustive.itineraries.some((journey) => journey.segments.map((segment) => segment.tripId).join(',')
+    === oracleWinner.tripIds.join(',') && journey.arrivalAt.getTime() === oracleWinner.arrival),
+  'unbounded production traversal agrees with the independently enumerated fastest chain');
+  const returnedWinner = [...bounded.itineraries].sort((left, right) => left.arrivalAt.getTime() - right.arrivalAt.getTime())[0];
+  assert.ok(returnedWinner);
+  const graphHasFastConnector = graph.segments.some(({ journey }) => journey.tripId === targetTripId
+    && journey.originStop.id === 'hub-a' && journey.destinationStop.id === 'hub-c');
+  assert.equal(graphHasFastConnector, true, 'the bounded graph must retain the connector needed by the exhaustive winner');
+  assert.deepEqual(returnedWinner.segments.map((segment) => segment.tripId), oracleWinner.tripIds,
+    'bounded same-trip connector retention must preserve the exhaustive fastest continuation');
+  assert.deepEqual([returnedWinner.segments[1]?.originStop.id, returnedWinner.segments[1]?.destinationStop.id],
+    ['hub-a', 'hub-c'], 'the winner rides the middle trip beyond the walking-transfer radius');
+  assert.equal(returnedWinner.arrivalAt.getTime(), oracleWinner.arrival);
 });
 
 test('query-time retention keeps a scheduled connector ahead of dense irrelevant interchanges', () => {

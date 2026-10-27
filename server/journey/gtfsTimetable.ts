@@ -2007,6 +2007,7 @@ export function findGtfsItinerariesWithStats(
   type QueryReachabilityEvent = {
     key: string;
     at: number;
+    journeyArrivalAt?: number;
     providerId: string;
     tripId: string;
     routeId: string;
@@ -2039,12 +2040,15 @@ export function findGtfsItinerariesWithStats(
     at: Date,
     tripId: string,
     routeId: string,
+    journeyArrivalAt?: Date,
   ) => {
     const nodeIds = retentionTransferNodes(entry);
     const stopId = entry.sourceStopId ?? entry.stopId;
     const atMs = at.getTime();
     const eventKey = `${tripId}\u0000${stopId}\u0000${atMs}`;
-    const event = { key: eventKey, at: atMs, providerId: feed.providersByRoute?.get(routeId)?.id ?? input.providerId,
+    const event = { key: eventKey, at: atMs,
+      ...(journeyArrivalAt ? { journeyArrivalAt: journeyArrivalAt.getTime() } : {}),
+      providerId: feed.providersByRoute?.get(routeId)?.id ?? input.providerId,
       tripId, routeId, stopId, canonicalStopId: entry.stopId, pathwayStopId: stopId, nodeIds };
     for (const nodeId of new Set([stopId, entry.stopId])) {
       const seen = seenEventsByNode.get(nodeId) ?? new Set<string>();
@@ -2127,7 +2131,8 @@ export function findGtfsItinerariesWithStats(
             }
           }
           if (interchangeStopIds.has(from.stopId) && destinationStopIds.has(to.stopId)) {
-            addRetentionEvent(destinationReachableDeparturesByNode, seenDestinationRetentionEventsByNode, from, departureAt, tripId, trip.routeId);
+            addRetentionEvent(destinationReachableDeparturesByNode, seenDestinationRetentionEventsByNode,
+              from, departureAt, tripId, trip.routeId, arrivalAt);
           }
           pairOpportunities++;
         }
@@ -2393,6 +2398,53 @@ export function findGtfsItinerariesWithStats(
     }
     return false;
   };
+  const onwardArrivalCache = new WeakMap<RetainedGtfsSegment, number | null>();
+  const earliestQueryArrivalAfterSegment = (segment: RetainedGtfsSegment, minimumGapSeconds: number) => {
+    const cached = onwardArrivalCache.get(segment);
+    if (cached !== undefined) return cached;
+    const earliestAllowed = segment.arrivalAt.getTime() + minimumGapSeconds * 1000;
+    const reachableDestinationStops = new Set([segment.destinationContext.details.id,
+      ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
+    let earliestArrival = Infinity;
+    for (const stopId of reachableDestinationStops) {
+      const events = destinationRetentionEventsByReachableStop.get(stopId) ?? [];
+      let low = 0, high = events.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (events[middle]!.at < earliestAllowed) low = middle + 1;
+        else high = middle;
+      }
+      for (let index = low; index < events.length; index++) {
+        const event = events[index]!;
+        const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
+        if (availableSeconds > maximumWaitSeconds) break;
+        if (event.journeyArrivalAt !== undefined
+          && event.journeyArrivalAt > input.earliestDeparture.getTime() + maximumJourneySeconds * 1000) continue;
+        const { rule, ambiguous } = retentionRuleFor(segment.destinationContext.transferNodeIds, event.nodeIds,
+          segment.tripId, event.tripId, segment.routeId, event.routeId);
+        if (ambiguous || rule?.transferType === 3) continue;
+        const eventStopId = segment.destinationContext.details.id;
+        const nearby = event.providerId === (feed.providersByRoute?.get(segment.routeId)?.id ?? input.providerId) || rule !== null
+          ? feed.stops.get(eventStopId) && feed.stops.get(event.canonicalStopId)
+            ? distanceMeters([feed.stops.get(eventStopId)!.lon, feed.stops.get(eventStopId)!.lat],
+              [feed.stops.get(event.canonicalStopId)!.lon, feed.stops.get(event.canonicalStopId)!.lat]) : null
+          : null;
+        const pathway = eventStopId === event.canonicalStopId
+          ? { walkingMeters: 0, walkingSeconds: 0 }
+          : bestPathwayMeasure(segment.destinationContext.transferNodeIds, [event.pathwayStopId])
+            || (nearby !== null && nearby <= transferRadius
+              ? { walkingMeters: nearby, walkingSeconds: Math.ceil(nearby / 1.25) } : false);
+        if (!pathway || pathway.walkingMeters > transferRadius) continue;
+        const requiredSeconds = rule?.transferType === 4 ? 0 : Math.max(minimumGapSeconds,
+          pathway.walkingSeconds, rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
+        if (availableSeconds < requiredSeconds || event.journeyArrivalAt === undefined) continue;
+        earliestArrival = Math.min(earliestArrival, event.journeyArrivalAt);
+      }
+    }
+    const result = Number.isFinite(earliestArrival) ? earliestArrival : null;
+    onwardArrivalCache.set(segment, result);
+    return result;
+  };
   let tripsConsidered = 0;
   let tripsWithEligibleStops = 0;
   const stopDetailsCache = new Map<string, { id: string; name: string; coordinates: [number, number] }>();
@@ -2613,6 +2665,7 @@ export function findGtfsItinerariesWithStats(
         const connectorOverflow = overflowConnectorsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(Math.min(MAX_ROUTE_OVERFLOW_CONNECTORS, graphSegmentLimitPerRoute), compareTripSegments);
         let temporallyConnectsQueryEnds = false;
+        const feasibleConnectors: RetainedGtfsSegment[] = [];
         for (const candidate of tripCandidates) {
           const canCatchOrigin = canBoardOriginCandidate(candidate);
           const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
@@ -2621,13 +2674,18 @@ export function findGtfsItinerariesWithStats(
           // Keep one temporally feasible through-connector per trip group in
           // the bounded overflow reservoir too. Endpoint-only overflow could
           // leave redistributed graph capacity unused on connector routes.
-          if (!temporallyConnectsQueryEnds
-            && hasPriorEvent(candidate, minimumTransferBufferSeconds)
+          if (hasPriorEvent(candidate, minimumTransferBufferSeconds)
             && hasNextEvent(candidate, minimumTransferBufferSeconds)) {
             temporallyConnectsQueryEnds = true;
-            if (!servesQueryEndpoint) connectorOverflow.consider(candidate);
+            if (!servesQueryEndpoint) feasibleConnectors.push(candidate);
           }
         }
+        feasibleConnectors.sort((left, right) => {
+          const leftArrival = earliestQueryArrivalAfterSegment(left, minimumTransferBufferSeconds) ?? Infinity;
+          const rightArrival = earliestQueryArrivalAfterSegment(right, minimumTransferBufferSeconds) ?? Infinity;
+          return leftArrival - rightArrival || compareTripSegments(left, right);
+        });
+        if (feasibleConnectors[0]) connectorOverflow.consider(feasibleConnectors[0]);
         overflowSegmentsByRoute.set(trip.routeId, overflow);
         overflowConnectorsByRoute.set(trip.routeId, connectorOverflow);
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
