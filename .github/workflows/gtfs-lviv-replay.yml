@@ -1,0 +1,98 @@
+name: Frozen Lviv GTFS replay
+
+on:
+  push:
+    branches:
+      - 'codex/gtfs-objective-reservoir-*'
+    paths:
+      - 'server/journey/gtfsTimetable.ts'
+      - 'scripts/replay-lviv-gtfs.mts'
+      - 'scripts/summarize-lviv-replay.py'
+      - '.github/workflows/gtfs-lviv-replay.yml'
+  workflow_dispatch:
+    inputs:
+      baseline_sha:
+        description: Baseline Server commit to compare with the dispatched ref
+        required: true
+        default: ee60e4c7ffeb5645e1dc13f472b47fd43f0e838a
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lviv-gtfs-replay-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BASELINE_SHA: ${{ inputs.baseline_sha || 'ee60e4c7ffeb5645e1dc13f472b47fd43f0e838a' }}
+      CANDIDATE_SHA: ${{ github.sha }}
+      GTFS_REPLAY_EXPECTED_SHA256: bb4ac0ce9127b4967ad889379f523b04b84a0bb033814aa8c844526b42078164
+      GTFS_REPLAY_URL: https://track.ua-gis.com/gtfs/lviv/static.zip
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: candidate
+      - name: Checkout baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.baseline_sha || 'ee60e4c7ffeb5645e1dc13f472b47fd43f0e838a' }}
+          path: baseline
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+          cache: npm
+          cache-dependency-path: candidate/package-lock.json
+      - name: Install replay dependencies
+        run: |
+          npm ci --prefix baseline
+          npm ci --prefix candidate
+      - name: Download and verify publisher feed
+        env:
+          FEED_PATH: ${{ runner.temp }}/marshgo-lviv-static.zip
+        run: |
+          curl --fail --location --silent --show-error --max-time 120 "$GTFS_REPLAY_URL" --output "$FEED_PATH"
+          printf '%s  %s\n' "$GTFS_REPLAY_EXPECTED_SHA256" "$FEED_PATH" | sha256sum --check --status
+          echo "Verified publisher archive SHA-256: $GTFS_REPLAY_EXPECTED_SHA256"
+      - name: Run three serialized paired replays
+        env:
+          FEED_PATH: ${{ runner.temp }}/marshgo-lviv-static.zip
+        run: |
+          set -euo pipefail
+          : > replay-results.jsonl
+          for revision in baseline candidate; do
+            if [ "$revision" = baseline ]; then
+              replay_sha="$BASELINE_SHA"
+            else
+              replay_sha="$CANDIDATE_SHA"
+            fi
+            for iteration in 1 2 3; do
+              (
+                cd "$revision"
+                REPLAY_GROUP="$revision" \
+                REPLAY_REF="$replay_sha" \
+                BENCH_ITER="$iteration" \
+                GTFS_REPLAY_ZIP="$FEED_PATH" \
+                GTFS_REPLAY_EXPECTED_SHA256="$GTFS_REPLAY_EXPECTED_SHA256" \
+                ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
+              ) | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))' >> replay-results.jsonl
+            done
+          done
+      - name: Summarize determinism and paired deltas
+        run: |
+          python3 candidate/scripts/summarize-lviv-replay.py replay-results.jsonl > replay-summary.md
+          printf '\nFeed attribution: [Lviv municipal GTFS open data](https://data.gov.ua/en/dataset/lviv-public-transport-gtfs-real-time). The publisher specifies attribution for reuse.\n' >> replay-summary.md
+          cat replay-summary.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload replay evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: frozen-lviv-gtfs-replay-${{ github.sha }}
+          path: |
+            replay-results.jsonl
+            replay-summary.md
+          retention-days: 14

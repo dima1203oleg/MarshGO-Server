@@ -48,6 +48,8 @@ const balanced = rankGtfsItinerariesForCandidateSampling(result.itineraries)[0];
 const signature = (item: typeof result.itineraries[number] | undefined) => item?.id ?? null;
 const details = result as typeof result & Record<string, unknown>;
 console.log(JSON.stringify({
+  comparisonGroup: process.env.REPLAY_GROUP ?? null,
+  revision: process.env.REPLAY_REF ?? null,
   iteration: process.env.BENCH_ITER ?? null,
   origin,
   destination,
