@@ -38,9 +38,11 @@ console.info = (...args: unknown[]) => {
   if (typeof args[0] === 'string') {
     try {
       const record = JSON.parse(args[0]) as Record<string, unknown>;
-      if (record.event === 'gtfs.search.debug' && record.stage === 'itineraries-ranked') {
-        const { elapsedMs: _elapsedMs, heapUsedBytes: _heapUsedBytes, rssBytes: _rssBytes, ...stable } = record;
-        searchDiagnostics = stable;
+      if (record.event === 'gtfs.search.debug') {
+        if (record.stage === 'itineraries-ranked') {
+          const { elapsedMs: _elapsedMs, heapUsedBytes: _heapUsedBytes, rssBytes: _rssBytes, ...stable } = record;
+          searchDiagnostics = stable;
+        }
         return;
       }
     } catch {
