@@ -2406,25 +2406,34 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
     legs: journey.segments.map((segment) => ({ mode: segment.mode })),
   }));
   const expectedScoringOptions = [...expected.values()];
-  const winnerIds: string[] = [];
+  const exhaustiveWinnerIds: Partial<Record<'FASTEST' | 'CHEAPEST' | 'BALANCED', string>> = {};
   for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
     const expectedWinner = scoreJourneys(expectedScoringOptions, strategy)[0]?.journey.id;
     const actualWinner = scoreJourneys(actualScoringOptions, strategy)[0]?.journey.id;
     assert.equal(actualWinner, expectedWinner, `${strategy} winner matches exhaustive oracle`);
-    if (expectedWinner) winnerIds.push(expectedWinner);
+    if (expectedWinner) exhaustiveWinnerIds[strategy] = expectedWinner;
   }
-  assert.equal(new Set(winnerIds).size, 3, `the fixture exercises distinct strategy winners: ${JSON.stringify(winnerIds)}`);
+  assert.deepEqual(exhaustiveWinnerIds, {
+    FASTEST: 'bus-0-trip>tram-0-trip>train-0-trip',
+    CHEAPEST: 'bus-1-trip>tram-1-trip>train-1-trip',
+    BALANCED: 'bus-3-trip',
+  }, 'the independently enumerated fixture has known, distinct winners for all three strategies');
 
   const boundedResult = findGtfsItinerariesWithStats(timetable, {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
     maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
     maximumTransferWalkingMeters: 100, maximumTransfers: 2,
-  }, { totalSegments: 2, segmentsPerRoute: 1 });
+  }, { totalSegments: 9, segmentsPerRoute: 1 });
   assert.equal(boundedResult.candidateGraphTruncated, true,
     'a graph whose route demand exceeds its global budget is marked incomplete');
   assert.equal(boundedResult.truncation.candidateGraph, true);
   assert.equal(boundedResult.searchTruncated, true,
-    'an empty result from a constrained graph must not look like a complete no-route answer');
+    'the deliberately tight graph budget must continue to be reported as partial');
+  const boundedChainIds = new Set(boundedResult.itineraries.map((journey) => journey.segments
+    .map((segment) => segment.tripId).join('>')));
+  for (const [strategy, winnerId] of Object.entries(exhaustiveWinnerIds)) {
+    assert.ok(boundedChainIds.has(winnerId), `bounded graph retains the exhaustive ${strategy} winner ${winnerId}`);
+  }
 });
 
 test('keeps type-4 event labels and fare-v1 coverage/zones separate from passenger transfer counts', () => {
