@@ -31,17 +31,45 @@ const origin = parseCoordinates(process.env.GTFS_REPLAY_ORIGIN, [24.008217, 49.8
 const destination = parseCoordinates(process.env.GTFS_REPLAY_DESTINATION, [24.0175835, 49.8013165]);
 const traceRouteIds = new Set((process.env.GTFS_REPLAY_TRACE_ROUTE_IDS ?? '')
   .split(',').map((routeId) => routeId.trim()).filter(Boolean));
+const traceTripIds = new Set((process.env.GTFS_REPLAY_TRACE_TRIP_IDS ?? '')
+  .split(',').map((tripId) => tripId.trim()).filter(Boolean));
 const retainedTripGroupsByRoute = new Map<string, Map<string, { serviceDate: string; tripId: string; segments: number }>>();
-const graphObserver = traceRouteIds.size > 0
-  ? (graph: { segments: readonly { journey: { routeId: string; serviceDate: string; tripId: string } }[] }) => {
-    for (const { journey } of graph.segments) {
-      if (!traceRouteIds.has(journey.routeId)) continue;
-      const routeGroups = retainedTripGroupsByRoute.get(journey.routeId) ?? new Map();
-      retainedTripGroupsByRoute.set(journey.routeId, routeGroups);
-      const key = `${journey.serviceDate}:${journey.tripId}`;
-      const group = routeGroups.get(key) ?? { serviceDate: journey.serviceDate, tripId: journey.tripId, segments: 0 };
-      group.segments += 1;
-      routeGroups.set(key, group);
+const retainedSegmentsByTripId = new Map<string, Map<string, {
+  routeId: string;
+  serviceDate: string;
+  tripId: string;
+  originStopId: string;
+  destinationStopId: string;
+  departureAt: string;
+  arrivalAt: string;
+}>>();
+const graphObserver = traceRouteIds.size > 0 || traceTripIds.size > 0
+  ? (graph: { segments: readonly { id: string; journey: {
+    routeId: string; serviceDate: string; tripId: string;
+    originStop: { id: string }; destinationStop: { id: string };
+    departureAt: Date; arrivalAt: Date;
+  } }[] }) => {
+    for (const { id, journey } of graph.segments) {
+      if (traceRouteIds.has(journey.routeId)) {
+        const routeGroups = retainedTripGroupsByRoute.get(journey.routeId) ?? new Map();
+        retainedTripGroupsByRoute.set(journey.routeId, routeGroups);
+        const key = `${journey.serviceDate}:${journey.tripId}`;
+        const group = routeGroups.get(key) ?? { serviceDate: journey.serviceDate, tripId: journey.tripId, segments: 0 };
+        group.segments += 1;
+        routeGroups.set(key, group);
+      }
+      if (!traceTripIds.has(journey.tripId)) continue;
+      const tripSegments = retainedSegmentsByTripId.get(journey.tripId) ?? new Map();
+      retainedSegmentsByTripId.set(journey.tripId, tripSegments);
+      tripSegments.set(id, {
+        routeId: journey.routeId,
+        serviceDate: journey.serviceDate,
+        tripId: journey.tripId,
+        originStopId: journey.originStop.id,
+        destinationStopId: journey.destinationStop.id,
+        departureAt: journey.departureAt.toISOString(),
+        arrivalAt: journey.arrivalAt.toISOString(),
+      });
     }
   }
   : undefined;
@@ -124,5 +152,10 @@ console.log(JSON.stringify({
     .map((routeId) => [routeId, [...(retainedTripGroupsByRoute.get(routeId)?.values() ?? [])]
       .sort((left, right) => left.serviceDate.localeCompare(right.serviceDate)
         || left.tripId.localeCompare(right.tripId))])) } : {}),
+  ...(traceTripIds.size > 0 ? { retainedSegmentsByTripId: Object.fromEntries([...traceTripIds].sort()
+    .map((tripId) => [tripId, [...(retainedSegmentsByTripId.get(tripId)?.values() ?? [])]
+      .sort((left, right) => left.departureAt.localeCompare(right.departureAt)
+        || left.originStopId.localeCompare(right.originStopId)
+        || left.destinationStopId.localeCompare(right.destinationStopId))])) } : {}),
   searchDiagnosticsByStage,
 }, null, 2));
