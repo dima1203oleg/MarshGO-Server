@@ -89,6 +89,8 @@ console.log(JSON.stringify({
   returned: result.itineraries.length,
   idHash: createHash('sha256').update(result.itineraries.map(({ id }) => id).join('\n')).digest('hex'),
   uniqueTripChains: new Set(result.itineraries.map((item) => item.segments.map((segment) => segment.tripId).join(','))).size,
+  tripChainIds: [...new Set(result.itineraries.map((item) => item.segments
+    .map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>')))].sort(),
   uniqueRouteChains: new Set(result.itineraries.map((item) => item.segments.map((segment) => segment.routeId).join(','))).size,
   strategyCandidates: { balanced: signature(balanced), fastest: signature(fastest), cheapest: signature(cheapest) },
   searchTruncated: details.searchTruncated,

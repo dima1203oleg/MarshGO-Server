@@ -19,7 +19,7 @@ if set(by_revision) != expected_revisions or any(len(items) != 3 for items in by
 
 stable_fields = (
     "origin", "destination", "idHash", "uniqueTripChains", "uniqueRouteChains", "strategyCandidates",
-    "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
+    "tripChainIds", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
 )
 for revision, items in by_revision.items():
     for field in stable_fields:
@@ -30,6 +30,8 @@ baseline = by_revision["baseline"]
 candidate = by_revision["candidate"]
 same_hash = baseline[0]["idHash"] == candidate[0]["idHash"]
 same_winners = baseline[0]["strategyCandidates"] == candidate[0]["strategyCandidates"]
+baseline_chains = set(baseline[0]["tripChainIds"])
+candidate_chains = set(candidate[0]["tripChainIds"])
 baseline_median = statistics.median(item["searchMs"] for item in baseline)
 candidate_median = statistics.median(item["searchMs"] for item in candidate)
 delta = ((candidate_median / baseline_median) - 1) * 100 if baseline_median else 0.0
@@ -42,6 +44,8 @@ print(f"- Candidate SHA: `{candidate[0]['revision']}` (three repeat-stable runs)
 print(f"- OD: `{baseline[0]['origin']}` → `{baseline[0]['destination']}`")
 print(f"- Ordered result identity parity: **{'YES' if same_hash else 'NO'}**")
 print(f"- FASTEST/CHEAPEST/BALANCED winner parity: **{'YES' if same_winners else 'NO'}**")
+print(f"- Added trip-chain identities: `{json.dumps(sorted(candidate_chains - baseline_chains))}`")
+print(f"- Removed trip-chain identities: `{json.dumps(sorted(baseline_chains - candidate_chains))}`")
 print(f"- Median search time: {baseline_median:.2f} ms → {candidate_median:.2f} ms ({delta:+.2f}%)")
 print(f"- Peak sampled RSS: {max(item['rssBytes'] for item in baseline) / 1_048_576:.1f} MiB → {max(item['rssBytes'] for item in candidate) / 1_048_576:.1f} MiB")
 print(f"- Truncated: baseline `{baseline[0]['searchTruncated']}` / candidate `{candidate[0]['searchTruncated']}`; graph truncated: baseline `{baseline[0]['candidateGraphTruncated']}` / candidate `{candidate[0]['candidateGraphTruncated']}`")
