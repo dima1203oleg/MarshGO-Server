@@ -2050,7 +2050,12 @@ export function findGtfsItinerariesWithStats(
   const graphRoutesAtPerRouteCap = [...graphSegmentBudgetByRoute.values()]
     .filter((budget) => budget === maximumGraphSegmentsPerRoute).length;
   const globalGraphBudgetBinding = estimatedGraphDemand > maximumGraphSegments;
-  let segmentGraphTruncated = false;
+  // Route budgets are allocated from bounded graph demand estimates. If a
+  // route's estimated demand exceeds its share, the search is incomplete even
+  // when that route happens not to materialize a segment before filtering.
+  // Surface the bounded result as partial instead of reporting an empty graph
+  // as a complete no-route answer.
+  let segmentGraphTruncated = graphRoutesBudgetLimited > 0;
   // A national feed can produce a very large number of stop-pair candidates.
   // Keep only the stop-time indexes during graph construction and materialize
   // route shapes for the small set of itineraries that will actually be shown.
