@@ -2927,6 +2927,9 @@ export function findGtfsItinerariesWithStats(
     const selectedVariants = sampleGtfsTripChainCandidates([...existingVariants, candidate], MAX_RESULTS_PER_TRIP_CHAIN);
     const selectedIds = new Set(selectedVariants.map((itinerary) => itinerary.id));
     if (!selectedIds.has(id)) {
+      // The local two-variant limit can reject a search-wide winner for
+      // walking or balanced effort; preserve it for final global ranking.
+      retainCandidateObjectives(candidate);
       candidateSamplingTruncated = true;
       return;
     }
@@ -2941,6 +2944,9 @@ export function findGtfsItinerariesWithStats(
     const selectedRouteVariants = sampleGtfsRouteChainCandidates([...tripVariantsForRouteSample, candidate], MAX_RESULTS_PER_ROUTE_CHAIN);
     const selectedRouteIds = new Set(selectedRouteVariants.map((itinerary) => itinerary.id));
     if (!selectedRouteIds.has(id)) {
+      // Route-chain normalization is local; a rejected option may still win
+      // once candidates from the whole search are compared.
+      retainCandidateObjectives(candidate);
       candidateSamplingTruncated = true;
       return;
     }
@@ -2956,6 +2962,9 @@ export function findGtfsItinerariesWithStats(
     for (const removedId of removedIds) {
       const removed = results.get(removedId);
       if (!removed) continue;
+      // Keep previously selected candidates that the replacement evicts from
+      // the bounded result pool available to the global objective reservoirs.
+      retainCandidateObjectives(removed);
       results.delete(removedId);
       routeChainIds.delete(removedId);
       const removedTripChain = removed.segments.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
