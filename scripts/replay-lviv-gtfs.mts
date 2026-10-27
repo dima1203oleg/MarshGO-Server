@@ -29,6 +29,22 @@ const parseCoordinates = (value: string | undefined, fallback: [number, number])
 };
 const origin = parseCoordinates(process.env.GTFS_REPLAY_ORIGIN, [24.008217, 49.864885]);
 const destination = parseCoordinates(process.env.GTFS_REPLAY_DESTINATION, [24.0175835, 49.8013165]);
+const traceRouteIds = new Set((process.env.GTFS_REPLAY_TRACE_ROUTE_IDS ?? '')
+  .split(',').map((routeId) => routeId.trim()).filter(Boolean));
+const retainedTripGroupsByRoute = new Map<string, Map<string, { serviceDate: string; tripId: string; segments: number }>>();
+const graphObserver = traceRouteIds.size > 0
+  ? (graph: { segments: readonly { journey: { routeId: string; serviceDate: string; tripId: string } }[] }) => {
+    for (const { journey } of graph.segments) {
+      if (!traceRouteIds.has(journey.routeId)) continue;
+      const routeGroups = retainedTripGroupsByRoute.get(journey.routeId) ?? new Map();
+      retainedTripGroupsByRoute.set(journey.routeId, routeGroups);
+      const key = `${journey.serviceDate}:${journey.tripId}`;
+      const group = routeGroups.get(key) ?? { serviceDate: journey.serviceDate, tripId: journey.tripId, segments: 0 };
+      group.segments += 1;
+      routeGroups.set(key, group);
+    }
+  }
+  : undefined;
 const startedAt = performance.now();
 const searchDiagnosticsByStage: Record<string, Record<string, unknown>> = {};
 const originalConsoleInfo = console.info.bind(console);
@@ -69,7 +85,7 @@ try {
     maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
     maximumWaitSeconds: 4 * 60 * 60, limit: 100,
     now: new Date('2026-10-22T08:00:00.000Z'),
-  });
+  }, {}, graphObserver);
 } finally {
   console.info = originalConsoleInfo;
   if (previousDebugSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
@@ -104,5 +120,9 @@ console.log(JSON.stringify({
   searchTruncated: details.searchTruncated,
   candidateGraphTruncated: details.candidateGraphTruncated,
   truncation: result.truncation,
+  ...(traceRouteIds.size > 0 ? { retainedTripGroupsByRoute: Object.fromEntries([...traceRouteIds].sort()
+    .map((routeId) => [routeId, [...(retainedTripGroupsByRoute.get(routeId)?.values() ?? [])]
+      .sort((left, right) => left.serviceDate.localeCompare(right.serviceDate)
+        || left.tripId.localeCompare(right.tripId))])) } : {}),
   searchDiagnosticsByStage,
 }, null, 2));
