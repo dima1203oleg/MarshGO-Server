@@ -2534,6 +2534,48 @@ test('reports the bounded per-leg objective-reservoir cutoff while search work r
   assert.equal(result.searchTruncated, true);
 });
 
+test('reports a depth-pass cutoff without backfilling omitted direct journeys', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set('origin', { id: 'origin', name: 'Origin', lon: 24.0200, lat: 49.8400 });
+  timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: 24.0300, lat: 49.8500 });
+
+  for (let index = 0; index < 20; index++) {
+    const routeId = `direct-${String(index).padStart(2, '0')}`;
+    const tripId = `${routeId}-trip`;
+    const departureSeconds = 8 * 3600 + (index === 19 ? 2 : 0) * 60;
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    const entries = [
+      { stopId: 'origin', sequence: 1, arrivalSeconds: departureSeconds, departureSeconds, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: departureSeconds + 30 * 60, departureSeconds: departureSeconds + 30 * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, stopIndex) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index: stopIndex }]));
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumAccessWalkingMeters: 1000, maximumEgressWalkingMeters: 1000,
+    maximumTransferWalkingMeters: 100, maximumTransfers: 1, limit: 100,
+  }, { maxSearchSteps: 100 });
+
+  assert.equal(result.itineraries.length, 12, 'the first depth pass admits only the direct paths reached in its step slice');
+  assert.ok(result.itineraries.every((journey) => journey.segments.length === 1),
+    'the deeper pass must not backfill paths completed at a shallower depth');
+  assert.equal(result.itineraries.some((journey) => journey.segments[0]?.routeId === 'direct-19'), false,
+    'the deliberately late direct route remains omitted after the depth-pass cutoff');
+  assert.equal(result.truncation.searchBudget, true, 'queued feasible work at the depth-pass boundary is disclosed');
+  assert.equal(result.truncation.searchStepLimit, false, 'the global step limit itself was not exhausted');
+  assert.equal(result.truncation.candidatePoolLimit, false, 'the objective-reservoir limit did not cause this cutoff');
+  assert.equal(result.searchTruncated, true, 'the response is marked partial when candidates are omitted');
+});
+
 test('keeps type-4 event labels and fare-v1 coverage/zones separate from passenger transfer counts', () => {
   const timetable = connectingFeed({ secondDeparture: '08:21:00', transferType: '4', inSeat: true, sameRoute: true });
   timetable.stopTimes.get('b1')![0]!.sourceZoneId = 'z1';

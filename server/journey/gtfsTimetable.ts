@@ -415,6 +415,8 @@ export interface GtfsGraphBudgetLimits {
   segmentsPerRoute?: number;
   /** Test-only override for verifying bounded search-frontier behavior. */
   maxQueuedSearchWork?: number;
+  /** Test-only override for verifying weighted depth-pass search truncation. */
+  maxSearchSteps?: number;
 }
 
 /** Internal, read-only snapshot for alternate GTFS search experiments in tests. */
@@ -3064,7 +3066,10 @@ export function findGtfsItinerariesWithStats(
   // Dense urban feeds can require hundreds of thousands of bounded cursor
   // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
   // but do not cut off ordinary city results at the first-route frontier.
-  const MAX_SEARCH_STEPS = 1_000_000;
+  const MAX_SEARCH_STEPS = graphLimits.maxSearchSteps ?? 1_000_000;
+  if (!Number.isSafeInteger(MAX_SEARCH_STEPS) || MAX_SEARCH_STEPS < 1) {
+    throw new RangeError('maxSearchSteps must be a positive safe integer');
+  }
   // A step ceiling alone does not bound memory: each expanded path can enqueue
   // a large transfer fan-out before the next work item is visited. Keep the
   // pending frontier bounded independently, and disclose any dropped work via
