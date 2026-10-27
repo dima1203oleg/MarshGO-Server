@@ -3075,7 +3075,8 @@ export function findGtfsItinerariesWithStats(
   // pending frontier bounded independently, and disclose any dropped work via
   // the existing search-budget truncation flag.
   const MAX_QUEUED_SEARCH_WORK = graphLimits.maxQueuedSearchWork ?? 10_000;
-  let searchBudgetTruncated = false;
+  let queueWorkDropped = false;
+  let globalBudgetPreventedDepthPass = false;
   let maximumQueuedSearchWork = 0;
 
   // Feed/trip insertion order is not a routing priority. In a dense city feed,
@@ -3177,9 +3178,11 @@ export function findGtfsItinerariesWithStats(
     workIndex: number;
     preferFirstLeg: boolean;
   };
+  const pausedDepthPassQueues = new Map<number, RouteSearchQueue[]>();
+  const truncatedDepthPasses = new Set<number>();
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork) => {
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK) {
-      searchBudgetTruncated = true;
+      queueWorkDropped = true;
       return;
     }
     queue.work.push(work);
@@ -3256,6 +3259,24 @@ export function findGtfsItinerariesWithStats(
       enqueueWork(queue, work);
     }
   };
+  const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number) => {
+    while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
+      && canContinueCandidateSearch(maximumLegsForPass)) {
+      let processed = false;
+      for (const queue of queues) {
+        if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS
+          || !canContinueCandidateSearch(maximumLegsForPass)) break;
+        const work = takeNextWork(queue);
+        if (!work) continue;
+        processed = true;
+        if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass);
+        else expandNextChild(work, queue);
+      }
+      if (!processed) break;
+    }
+  };
+  const countPendingWork = (queues: RouteSearchQueue[]) => queues.reduce((count, queue) =>
+    count + queue.work.length - queue.workIndex, 0);
   // Give each possible chain length an explicit share of the bounded search.
   // A single depth-first pass otherwise fills its candidate pool with the
   // maximum-transfer branches before it has represented useful shorter trips.
@@ -3263,7 +3284,7 @@ export function findGtfsItinerariesWithStats(
   for (let depthIndex = 0; depthIndex < maxTransitLegs; depthIndex++) {
     const maximumLegsForPass = depthIndex + 1;
     if ((resultCountByLegCount.get(maximumLegsForPass) ?? 0) >= limit) continue;
-    if (searchSteps >= MAX_SEARCH_STEPS) { searchBudgetTruncated = true; break; }
+    if (searchSteps >= MAX_SEARCH_STEPS) { globalBudgetPreventedDepthPass = true; break; }
     if (results.size >= MAX_SEARCH_RESULTS
       && !candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass)) {
       candidatePoolReachedAtStepByLegCount.set(maximumLegsForPass, searchSteps);
@@ -3284,21 +3305,39 @@ export function findGtfsItinerariesWithStats(
     const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true,
     }));
-    while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS && canContinueCandidateSearch(maximumLegsForPass)) {
-      let processed = false;
-      for (const queue of queues) {
-        if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS || !canContinueCandidateSearch(maximumLegsForPass)) break;
-        const work = takeNextWork(queue);
-        if (!work) continue;
-        processed = true;
-        if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass);
-        else expandNextChild(work, queue);
+    runDepthPass(queues, maximumLegsForPass, stepLimit);
+    if (hasQueuedWork(queues)) {
+      truncatedDepthPasses.add(maximumLegsForPass);
+      if (searchSteps >= stepLimit && stepLimit < MAX_SEARCH_STEPS
+        && canContinueCandidateSearch(maximumLegsForPass)) {
+        pausedDepthPassQueues.set(maximumLegsForPass, queues);
       }
-      if (!processed) break;
     }
-    if (searchSteps >= stepLimit && hasQueuedWork(queues)) searchBudgetTruncated = true;
-    if (!canContinueCandidateSearch(maximumLegsForPass) && hasQueuedWork(queues)) searchBudgetTruncated = true;
   }
+
+  // Reuse budget left idle by a shallow depth pass only after all weighted
+  // passes have had their own independent queues and allocations. Never use a
+  // deeper pass's cursor to stand in for a shallower one: their path lengths
+  // and completeness requirements differ.
+  if (!queueWorkDropped && searchSteps < MAX_SEARCH_STEPS && pausedDepthPassQueues.size > 0) {
+    const pausedDepths = [...pausedDepthPassQueues.keys()].sort((a, b) => a - b);
+    let remainingWeight = pausedDepths.reduce((sum, depth) => sum + (depthWeights[depth - 1] ?? 1), 0);
+    for (let index = 0; index < pausedDepths.length && searchSteps < MAX_SEARCH_STEPS; index++) {
+      const depth = pausedDepths[index]!;
+      const queues = pausedDepthPassQueues.get(depth)!;
+      if (!hasQueuedWork(queues) || !canContinueCandidateSearch(depth)) continue;
+      const weight = depthWeights[depth - 1] ?? 1;
+      const stepLimit = index === pausedDepths.length - 1
+        ? MAX_SEARCH_STEPS
+        : Math.min(MAX_SEARCH_STEPS, searchSteps + Math.max(1,
+          Math.floor((MAX_SEARCH_STEPS - searchSteps) * weight / remainingWeight)));
+      queuesPendingWork = countPendingWork(queues);
+      runDepthPass(queues, depth, stepLimit);
+      if (!hasQueuedWork(queues)) truncatedDepthPasses.delete(depth);
+      remainingWeight -= weight;
+    }
+  }
+  const searchBudgetTruncated = queueWorkDropped || globalBudgetPreventedDepthPass || truncatedDepthPasses.size > 0;
 
   const allCandidateIds = new Set(results.keys());
   let rankedResults = [...results.values()];

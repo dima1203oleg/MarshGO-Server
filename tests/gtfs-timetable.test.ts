@@ -2534,7 +2534,7 @@ test('reports the bounded per-leg objective-reservoir cutoff while search work r
   assert.equal(result.searchTruncated, true);
 });
 
-test('reports a depth-pass cutoff without backfilling omitted direct journeys', () => {
+test('uses spare depth-pass budget to recover direct routes without losing transfers', () => {
   const timetable = feed();
   timetable.routes.clear();
   timetable.trips.clear();
@@ -2542,6 +2542,7 @@ test('reports a depth-pass cutoff without backfilling omitted direct journeys', 
   timetable.stopTimesByStop.clear();
   timetable.stops.clear();
   timetable.stops.set('origin', { id: 'origin', name: 'Origin', lon: 24.0200, lat: 49.8400 });
+  timetable.stops.set('hub', { id: 'hub', name: 'Transfer hub', lon: 24.0250, lat: 49.8450 });
   timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: 24.0300, lat: 49.8500 });
 
   for (let index = 0; index < 20; index++) {
@@ -2552,7 +2553,21 @@ test('reports a depth-pass cutoff without backfilling omitted direct journeys', 
     timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
     const entries = [
       { stopId: 'origin', sequence: 1, arrivalSeconds: departureSeconds, departureSeconds, pickupType: 0, dropOffType: 0 },
-      { stopId: 'destination', sequence: 2, arrivalSeconds: departureSeconds + 30 * 60, departureSeconds: departureSeconds + 30 * 60, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: departureSeconds + (index === 19 ? 18 : 30) * 60, departureSeconds: departureSeconds + (index === 19 ? 18 : 30) * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, stopIndex) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index: stopIndex }]));
+  }
+  for (const [routeId, tripId, from, to, departureSeconds, arrivalSeconds] of [
+    ['transfer-first', 'transfer-first-trip', 'origin', 'hub', 8 * 3600, 8 * 3600 + 5 * 60],
+    ['transfer-second', 'transfer-second-trip', 'hub', 'destination', 8 * 3600 + 10 * 60, 8 * 3600 + 25 * 60],
+  ] as const) {
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [
+      { stopId: from, sequence: 1, arrivalSeconds: departureSeconds, departureSeconds, pickupType: 0, dropOffType: 0 },
+      { stopId: to, sequence: 2, arrivalSeconds, departureSeconds: arrivalSeconds, pickupType: 0, dropOffType: 0 },
     ];
     timetable.stopTimes.set(tripId, entries);
     entries.forEach((entry, stopIndex) => timetable.stopTimesByStop.set(entry.stopId,
@@ -2565,15 +2580,19 @@ test('reports a depth-pass cutoff without backfilling omitted direct journeys', 
     maximumTransferWalkingMeters: 100, maximumTransfers: 1, limit: 100,
   }, { maxSearchSteps: 100 });
 
-  assert.equal(result.itineraries.length, 12, 'the first depth pass admits only the direct paths reached in its step slice');
-  assert.ok(result.itineraries.every((journey) => journey.segments.length === 1),
-    'the deeper pass must not backfill paths completed at a shallower depth');
-  assert.equal(result.itineraries.some((journey) => journey.segments[0]?.routeId === 'direct-19'), false,
-    'the deliberately late direct route remains omitted after the depth-pass cutoff');
-  assert.equal(result.truncation.searchBudget, true, 'queued feasible work at the depth-pass boundary is disclosed');
+  const directRouteIds = new Set(result.itineraries.filter((journey) => journey.segments.length === 1
+    && journey.segments[0]?.routeId.startsWith('direct-')).map((journey) => journey.segments[0]!.routeId));
+  assert.equal(directRouteIds.size, 20, 'the rescue sweep recovers all twenty feasible direct route options');
+  assert.ok(directRouteIds.has('direct-19'),
+  'the post-pass rescue sweep recovers the deliberately late, faster direct route');
+  assert.ok(result.itineraries.some((journey) => journey.segments.length === 2
+    && journey.segments[0]?.routeId === 'transfer-first'
+    && journey.segments[1]?.routeId === 'transfer-second'),
+  'the regular deeper pass retains its feasible transfer chain before rescue work');
+  assert.equal(result.truncation.searchBudget, false, 'the rescue sweep drains the paused shallow queue within unused budget');
   assert.equal(result.truncation.searchStepLimit, false, 'the global step limit itself was not exhausted');
   assert.equal(result.truncation.candidatePoolLimit, false, 'the objective-reservoir limit did not cause this cutoff');
-  assert.equal(result.searchTruncated, true, 'the response is marked partial when candidates are omitted');
+  assert.equal(result.searchTruncated, false, 'the fully drained bounded fixture is not reported as partial');
 });
 
 test('keeps type-4 event labels and fare-v1 coverage/zones separate from passenger transfer counts', () => {
