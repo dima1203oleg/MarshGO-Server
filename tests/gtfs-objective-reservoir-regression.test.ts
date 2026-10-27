@@ -182,6 +182,10 @@ test('response selection reserves a page slot for a missing longer chain without
   assert.equal(selected.length, 100, 'response size remains bounded');
   assert.ok(selected.some((itinerary) => itinerary.id === longerChain.id),
     'a feasible longer-chain candidate is not hidden by a page of direct routes');
+  const selectedTripChains = new Set(selected.map((itinerary) => itinerary.segments.map((segment) =>
+    `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>')));
+  assert.equal(selectedTripChains.size, 2,
+  'the reserved slot adds a trip chain while retaining the page’s original chain');
   for (const winner of [byDuration[0], byFare[0], balanced[0]]) {
     assert.ok(selected.some((itinerary) => itinerary.id === winner?.id),
       `existing objective witness ${winner?.id} remains in the response`);

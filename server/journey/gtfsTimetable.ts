@@ -532,7 +532,7 @@ function rankGtfsItinerariesForStrategySampling(
     .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
 }
 
-/** Keep objective winners while reserving response-page slots for longer feasible chains. */
+/** Keep objective winners while preserving space for novel feasible trip chains. */
 export function selectGtfsResponseItineraries(
   rankedResults: readonly GtfsItinerary[],
   rankings: readonly (readonly GtfsItinerary[])[],
@@ -542,32 +542,49 @@ export function selectGtfsResponseItineraries(
   const orderedResults = [...rankedResults].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
     || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const legCounts = [...new Set(orderedResults.map((itinerary) => itinerary.segments.length))].sort((a, b) => a - b);
-  // Preserve at least one slot for each of the five existing objective rankings.
   const diversitySlots = Math.min(legCounts.length, Math.max(0, limit - 5));
-  const objectiveLimit = limit - diversitySlots;
-  const perObjective = Math.max(1, Math.floor(objectiveLimit / 5));
+  const perObjective = Math.max(1, Math.floor(limit / 5));
   const selected = new Map<string, GtfsItinerary>();
   for (const ranking of rankings) {
     for (const itinerary of ranking.slice(0, perObjective)) {
-      if (selected.size >= objectiveLimit) break;
+      if (selected.size >= limit) break;
       selected.set(itinerary.id, itinerary);
     }
-  }
-
-  // The candidate pool already contains only feasible itineraries. Prefer the
-  // balanced ranking when filling a missing leg-count witness.
-  const diversityRanking = rankings.at(-1) ?? orderedResults;
-  const diversityLegCounts = diversitySlots > 0 ? legCounts.slice(-diversitySlots).reverse() : [];
-  for (const legCount of diversityLegCounts) {
-    if ([...selected.values()].some((itinerary) => itinerary.segments.length === legCount)) continue;
-    if (selected.size >= limit) break;
-    const candidate = diversityRanking.find((itinerary) => itinerary.segments.length === legCount)
-      ?? orderedResults.find((itinerary) => itinerary.segments.length === legCount);
-    if (candidate) selected.set(candidate.id, candidate);
   }
   for (const itinerary of orderedResults) {
     if (selected.size >= limit) break;
     selected.set(itinerary.id, itinerary);
+  }
+
+  // The candidate pool already contains only feasible itineraries. Replace a
+  // redundant stop-pair variant with a new trip chain, never its last witness.
+  const diversityRanking = rankings.at(-1) ?? orderedResults;
+  const diversityLegCounts = diversitySlots > 0 ? legCounts.slice(-diversitySlots).reverse() : [];
+  const tripChainKey = (itinerary: GtfsItinerary) => itinerary.segments.map((segment) =>
+    `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+  const protectedWinners = new Set(rankings.flatMap((ranking) => ranking[0] ? [ranking[0].id] : []));
+  for (const legCount of diversityLegCounts) {
+    const representedChains = new Set([...selected.values()].map(tripChainKey));
+    const candidate = diversityRanking.find((itinerary) => itinerary.segments.length === legCount
+      && !representedChains.has(tripChainKey(itinerary)))
+      ?? orderedResults.find((itinerary) => itinerary.segments.length === legCount
+        && !representedChains.has(tripChainKey(itinerary)));
+    if (!candidate) continue;
+
+    const selectedByChain = new Map<string, GtfsItinerary[]>();
+    for (const itinerary of selected.values()) {
+      const key = tripChainKey(itinerary);
+      const group = selectedByChain.get(key) ?? [];
+      group.push(itinerary);
+      selectedByChain.set(key, group);
+    }
+    const victim = [...selected.values()]
+      .filter((itinerary) => !protectedWinners.has(itinerary.id)
+        && (selectedByChain.get(tripChainKey(itinerary))?.length ?? 0) > 1)
+      .sort((a, b) => b.arrivalAt.getTime() - a.arrivalAt.getTime() || compareStableId(b.id, a.id))[0];
+    if (victim) selected.delete(victim.id);
+    else if (selected.size >= limit) continue;
+    selected.set(candidate.id, candidate);
   }
   return [...selected.values()].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
     || a.transfers - b.transfers || compareStableId(a.id, b.id));
