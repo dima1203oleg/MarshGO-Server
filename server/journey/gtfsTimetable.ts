@@ -23,6 +23,10 @@ const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
 const MAX_STOPS_PER_SIDE = 48;
 const MAX_STOPS_PER_ROUTE_PATTERN = 8;
+// Google Transit accepts GTFS service times through 99:59:59. Keep the
+// parser and service-date lookback aligned with that widely used ceiling.
+const MAX_GTFS_SERVICE_HOUR = 99;
+const MAX_GTFS_SERVICE_DAY_LOOKBACK = Math.floor(MAX_GTFS_SERVICE_HOUR / 24);
 const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
 // Bound the per-request materialized GTFS graph. A dense city feed can create
@@ -696,7 +700,7 @@ function integer(value: string | undefined, fallback = 0): number {
 function gtfsTime(value: string | undefined): number | null {
   if (!value || !/^\d{1,3}:\d{2}:\d{2}$/.test(value)) return null;
   const [hours, minutes, seconds] = value.split(':').map(Number);
-  if (minutes > 59 || seconds > 59 || hours > 71) return null;
+  if (minutes > 59 || seconds > 59 || hours > MAX_GTFS_SERVICE_HOUR) return null;
   return hours * 3600 + minutes * 60 + seconds;
 }
 
@@ -1133,10 +1137,10 @@ export function findGtfsStopArrivals(
   const horizonAt = new Date(now.getTime() + horizonSeconds * 1000);
   const firstServiceDate = localDate(now, feed.timezone);
   const lastServiceDate = localDate(horizonAt, feed.timezone);
-  // GTFS permits stop times through 71:59:59, so an arrival just after
-  // midnight can belong to a service day up to two calendar days earlier.
+  // Extended service times can place an arrival on a later calendar date
+  // than its service date; include every potentially relevant prior date.
   const serviceDates = new Set<string>();
-  const firstRelevantDate = dateStringAfter(firstServiceDate, -2);
+  const firstRelevantDate = dateStringAfter(firstServiceDate, -MAX_GTFS_SERVICE_DAY_LOOKBACK);
   const daysToLast = Math.round((Date.UTC(Number(lastServiceDate.slice(0, 4)), Number(lastServiceDate.slice(4, 6)) - 1, Number(lastServiceDate.slice(6, 8)))
     - Date.UTC(Number(firstRelevantDate.slice(0, 4)), Number(firstRelevantDate.slice(4, 6)) - 1, Number(firstRelevantDate.slice(6, 8)))) / 86_400_000);
   for (let offset = 0; offset <= daysToLast; offset++) serviceDates.add(dateStringAfter(firstRelevantDate, offset));
@@ -1473,12 +1477,10 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
   const firstDate = localDate(input.earliestDeparture, feed.timezone);
   const lastDate = localDate(input.latestDeparture, feed.timezone);
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
-  // GTFS stop times may extend through 71:59:59. Search the two preceding
-  // service dates as well as every date spanned by the requested departure
-  // window; otherwise a trip just after midnight can be attached to a service
-  // date two calendar days earlier and disappear from direct results.
+  // Extended service times may place a trip four calendar dates after its
+  // service date; search that many preceding dates for direct results.
   const serviceDates: string[] = [];
-  for (let date = dateStringAfter(firstDate, -2); date <= lastDate; date = dateStringAfter(date, 1)) {
+  for (let date = dateStringAfter(firstDate, -MAX_GTFS_SERVICE_DAY_LOOKBACK); date <= lastDate; date = dateStringAfter(date, 1)) {
     serviceDates.push(date);
   }
   const results: GtfsDirectJourney[] = [];
@@ -1765,9 +1767,9 @@ export function findGtfsItinerariesWithStats(
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
   const serviceDates = new Set<string>();
   const dayCount = Math.ceil((journeyEnd.getTime() - input.earliestDeparture.getTime()) / 86_400_000) + 2;
-  // GTFS stop_times permits hours through 71:59:59, so a post-midnight query
-  // can still belong to a service date two days before the local calendar date.
-  for (let day = -2; day <= dayCount; day++) {
+  // Include service dates far enough back for the supported extended-time
+  // ceiling; otherwise valid late service disappears from routed results.
+  for (let day = -MAX_GTFS_SERVICE_DAY_LOOKBACK; day <= dayCount; day++) {
     const date = dateStringAfter(firstServiceDate, day);
     if (date <= lastServiceDate || day < 0) serviceDates.add(date);
   }
