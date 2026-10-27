@@ -2431,8 +2431,18 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
     'the deliberately tight graph budget must continue to be reported as partial');
   const boundedChainIds = new Set(boundedResult.itineraries.map((journey) => journey.segments
     .map((segment) => segment.tripId).join('>')));
+  const boundedScoringOptions = boundedResult.itineraries.map((journey) => ({
+    id: journey.segments.map((segment) => segment.tripId).join('>'),
+    durationSeconds: journey.durationSeconds,
+    priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+    transfers: journey.transfers, walkingMeters: journey.walkingMeters,
+    reliability: null, transferRisk: journey.transfers > 0 ? 0.25 : 0, comfort: null,
+    legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+  }));
   for (const [strategy, winnerId] of Object.entries(exhaustiveWinnerIds)) {
     assert.ok(boundedChainIds.has(winnerId), `bounded graph retains the exhaustive ${strategy} winner ${winnerId}`);
+    assert.equal(scoreJourneys(boundedScoringOptions, strategy as 'FASTEST' | 'CHEAPEST' | 'BALANCED')[0]?.journey.id, winnerId,
+      `bounded graph keeps the exhaustive ${strategy} winner ranked first`);
   }
 });
 
