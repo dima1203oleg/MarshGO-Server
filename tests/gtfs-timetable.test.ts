@@ -542,9 +542,11 @@ test('keeps the same GTFS trip as distinct scheduled instances on different serv
 
 test('debug search diagnostics separate graph demand from bounded search saturation', () => {
   const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTraceValue = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
   const originalInfo = console.info;
   const messages: string[] = [];
   process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
   console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
   try {
     findGtfsItinerariesWithStats(feed(), {
@@ -554,6 +556,8 @@ test('debug search diagnostics separate graph demand from bounded search saturat
     console.info = originalInfo;
     if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
     else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+    if (previousTraceValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTraceValue;
   }
 
   const stages = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown });
@@ -573,6 +577,80 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.ok(Array.isArray(JSON.parse(String(graph.routeBudgetUnderfillSample))));
   assert.equal(typeof ranked.searchStepLimit, 'number');
   assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
+  assert.equal(ranked.debugTripChainPresence, undefined, 'exact graph tracing stays absent without target IDs');
+});
+
+test('debug trip-chain trace distinguishes a feasible exact graph path from candidate generation', () => {
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+  const previousInfo = console.info;
+  const diagnostics: Array<Record<string, unknown>> = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = 'p1:20261012:b1>p1:20261012:r1';
+  console.info = (...args: unknown[]) => {
+    if (typeof args[0] !== 'string') return;
+    try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
+  };
+  try {
+    const timetable = connectingFeed();
+    const baseInput = {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+      maximumTransfers: 1,
+      maximumAccessWalkingMeters: 100,
+      maximumEgressWalkingMeters: 100,
+      maximumTransferWalkingMeters: 100,
+      maximumWaitSeconds: 3_600,
+    };
+    findGtfsItinerariesWithStats(timetable, baseInput);
+    findGtfsItinerariesWithStats(timetable, { ...baseInput, maximumJourneySeconds: 3_900 });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+    if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTrace;
+  }
+
+  const rankedRows = diagnostics.filter((entry) => entry.stage === 'itineraries-ranked');
+  assert.equal(rankedRows.length, 2, 'both focused searches emit the opt-in trace');
+  const decodeTarget = (ranked: Record<string, unknown>) => {
+    const presence = JSON.parse(String(ranked.debugTripChainPresence)) as Record<string, {
+      allLegTripsInRetainedGraph: boolean;
+      pathCompleted: boolean;
+      generated: boolean;
+      candidateGraphPath: {
+        firstLegCount: number;
+        feasibleDestinationPath: boolean;
+        complete: boolean;
+        scannedTargetSegments: number;
+        rejectionCounts: { feasible: number; [reason: string]: number };
+      } | null;
+    }>;
+    return presence['p1:20261012:b1>p1:20261012:r1'];
+  };
+  const target = decodeTarget(rankedRows[0]!);
+  assert.ok(target, 'the requested exact trip chain is included');
+  assert.equal(target.allLegTripsInRetainedGraph, true);
+  assert.equal(target.candidateGraphPath?.complete, true, 'the bounded witness scan completed');
+  assert.equal(target.candidateGraphPath?.scannedTargetSegments, 1,
+    'the diagnostic examines the requested trip segments instead of unrelated hub successors');
+  assert.equal(target.candidateGraphPath?.rejectionCounts.feasible, 1);
+  assert.ok((target.candidateGraphPath?.firstLegCount ?? 0) > 0, 'the exact first leg is retained as an origin candidate');
+  assert.equal(target.candidateGraphPath?.feasibleDestinationPath, true,
+    'the exact second leg reaches the destination with a feasible scheduled transfer');
+  assert.equal(target.pathCompleted, true, 'the search assembled the exact ordered trip chain');
+  assert.equal(target.generated, true, 'the chain passed the maximum journey duration check');
+
+  const durationRejected = decodeTarget(rankedRows[1]!);
+  assert.ok(durationRejected, 'the target remains visible in the duration-limited trace');
+  assert.equal(durationRejected.pathCompleted, true, 'the ordered path was assembled before duration validation');
+  assert.equal(durationRejected.generated, false, 'the path is distinguished from an accepted candidate');
+  assert.equal(durationRejected.candidateGraphPath?.complete, true);
+  assert.equal(durationRejected.candidateGraphPath?.scannedTargetSegments, 1);
+  assert.equal(durationRejected.candidateGraphPath?.feasibleDestinationPath, false,
+    'the graph witness includes the total journey horizon and destination egress walking');
+  assert.equal(durationRejected.candidateGraphPath?.rejectionCounts.journeyDuration, 1,
+    'the trace identifies total journey duration as the exact rejection stage');
 });
 
 test('GTFS maximum transfer wait never exceeds the total journey horizon', () => {
@@ -751,6 +829,102 @@ test('keeps a direct GTFS segment whose destination lies beyond twenty interchan
   'the full ride must remain available when many intermediate stops are transfer-capable');
   assert.equal(result.searchTruncated, true,
     'the long direct segment is preserved, while omitted beyond-window transfer alternatives remain disclosed');
+});
+
+test('keeps and budgets a long first leg to a query-reachable transfer hub', () => {
+  const timetable = feed();
+  timetable.trips.delete('t1');
+  timetable.stopTimes.delete('t1');
+  for (const [stopId, entries] of timetable.stopTimesByStop) {
+    const retained = entries.filter((entry) => entry.tripId !== 't1');
+    if (retained.length) timetable.stopTimesByStop.set(stopId, retained);
+    else timetable.stopTimesByStop.delete(stopId);
+  }
+  const routeStops = Array.from({ length: 22 }, (_, index) => {
+    const stopId = `transfer-corridor-${index}`;
+    const stop = { id: stopId, name: `Transfer corridor ${index}`, lon: 24.02 + index * 0.0052, lat: 49.84 };
+    timetable.stops.set(stopId, stop);
+    return { stopId, sequence: index + 1, seconds: 8 * 3600 + index * 2 * 60 };
+  });
+  for (let index = 1; index < routeStops.length - 1; index += 1) {
+    const routeId = `transfer-branch-route-${index}`;
+    const tripId = `transfer-branch-trip-${index}`;
+    const terminalId = `transfer-branch-terminal-${index}`;
+    timetable.routes.set(routeId, { name: `Branch ${index}`, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Remote terminal' });
+    timetable.stops.set(terminalId, { id: terminalId, name: terminalId, lon: 24.02 + index * 0.0052, lat: 50.1 });
+    const branchTimes = [
+      { stopId: routeStops[index].stopId, sequence: 1, arrivalSeconds: routeStops[index].seconds, departureSeconds: routeStops[index].seconds, pickupType: 0, dropOffType: 0 },
+      { stopId: terminalId, sequence: 2, arrivalSeconds: routeStops[index].seconds + 20 * 60, departureSeconds: routeStops[index].seconds + 20 * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, branchTimes);
+    for (const [stopIndex, stopTime] of branchTimes.entries()) {
+      timetable.stopTimesByStop.set(stopTime.stopId, [
+        ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index: stopIndex },
+      ]);
+    }
+  }
+
+  const firstTripId = 'long-transfer-first';
+  timetable.trips.set(firstTripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Long transfer hub' });
+  timetable.stopTimes.set(firstTripId, routeStops.map((stop) => ({
+    stopId: stop.stopId, sequence: stop.sequence, arrivalSeconds: stop.seconds, departureSeconds: stop.seconds,
+    pickupType: 0, dropOffType: 0,
+  })));
+  for (const [index, stop] of routeStops.entries()) {
+    timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: firstTripId, index },
+    ]);
+  }
+
+  const onwardRouteId = 'long-transfer-onward-route';
+  const onwardTripId = 'long-transfer-onward';
+  const destinationId = 'long-transfer-destination';
+  const hub = routeStops.at(-1)!;
+  const destination = { id: destinationId, name: 'Long transfer destination', lon: 24.02 + 21 * 0.0052 + 0.0015, lat: 49.84 };
+  timetable.routes.set(onwardRouteId, { name: 'Onward bus', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.set(onwardTripId, { routeId: onwardRouteId, serviceId: 'weekday', headsign: 'Destination' });
+  timetable.stops.set(destinationId, destination);
+  const onwardTimes = [
+    { stopId: hub.stopId, sequence: 1, arrivalSeconds: 8 * 3600 + 48 * 60, departureSeconds: 8 * 3600 + 48 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: destinationId, sequence: 2, arrivalSeconds: 9 * 3600, departureSeconds: 9 * 3600, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.stopTimes.set(onwardTripId, onwardTimes);
+  for (const [index, stopTime] of onwardTimes.entries()) {
+    timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId: onwardTripId, index },
+    ]);
+  }
+
+  const diagnosticRows: Array<Record<string, unknown>> = [];
+  const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const originalInfo = console.info;
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: unknown[]) => { diagnosticRows.push(JSON.parse(String(args[0])) as Record<string, unknown>); };
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    result = findGtfsItinerariesWithStats(timetable, {
+      providerId: 'test', providerName: 'Test Transit', providerCity: 'Львів',
+      origin: [24.02, 49.84], destination: [destination.lon, destination.lat],
+      earliestDeparture: new Date('2026-10-12T04:55:00Z'),
+      latestDeparture: new Date('2026-10-12T05:30:00Z'),
+      now: new Date('2026-10-12T04:00:00Z'),
+      limit: 20, maximumTransfers: 1, maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+    }, { totalSegments: 231, segmentsPerRoute: 500 });
+  } finally {
+    console.info = originalInfo;
+    if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+  }
+
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `${firstTripId},${onwardTripId}`),
+  'a feasible onward trip keeps the first-leg hub reachable even when it is more than twenty interchange stops away');
+  const graphStats = diagnosticRows.find((row) => row.stage === 'segments-built');
+  assert.equal(graphStats?.estimatedGraphDemand, 232,
+    'graph demand includes the long transfer leg before the hard global budget is allocated');
+  assert.equal(graphStats?.globalGraphBudgetBinding, 1,
+    'the corrected demand estimate truthfully reports that the 231-segment graph cap binds');
 });
 
 test('limits duplicate stop-pair alternatives for the same scheduled trip chain', () => {
@@ -1605,6 +1779,12 @@ test('cross-provider GTFS cap uses the shared candidate pool when preserving its
   const completeStrategyWinners = ['FASTEST', 'CHEAPEST', 'BALANCED'].map((strategy) =>
     scoreJourneys([...candidates.map(toScorable), communityCandidate], strategy as 'FASTEST' | 'CHEAPEST' | 'BALANCED')[0]?.journey.id,
   );
+  assert.equal(new Set(completeStrategyWinners).size, 3,
+    'the mixed-mode fixture has a distinct winner for each user-facing strategy');
+
+  const minimumStrategySample = selectGtfsCandidatesForCrossProviderSearch(candidates, 3, [communityCandidate]);
+  assert.deepEqual(new Set(minimumStrategySample.map(({ id }) => id)), new Set(completeStrategyWinners),
+    'a three-candidate cap reserves FASTEST, CHEAPEST, and BALANCED winners before auxiliary samples');
 
   const transitOnlySample = selectGtfsCandidatesForCrossProviderSearch(candidates, 5);
   assert.ok(!transitOnlySample.some(({ id }) => id === 'balanced-winner'),
@@ -1915,6 +2095,32 @@ test('includes the next GTFS service date during the prior-evening spring-forwar
   assert.equal(arrivals[0].scheduledArrivalAt.toISOString(), '2027-03-27T21:45:00.000Z');
 });
 
+test('keeps extended GTFS service seconds anchored to the originating service date across spring-forward', () => {
+  const timetable = feed({ departure: '27:30:00', arrival: '28:30:00', monday: '0', exceptionDate: '20270327' });
+  const query = {
+    ...request('2027-03-28T01:20:00Z', '2027-03-28T01:40:00Z'),
+    maximumTransfers: 0,
+  };
+
+  const direct = findDirectGtfsJourneys(timetable, query);
+  assert.equal(direct.length, 1);
+  assert.equal(direct[0].serviceDate, '20270327');
+  assert.equal(direct[0].departureAt.toISOString(), '2027-03-28T01:30:00.000Z');
+  assert.equal(direct[0].arrivalAt.toISOString(), '2027-03-28T02:30:00.000Z');
+
+  const routed = findGtfsItinerariesWithStats(timetable, query);
+  assert.equal(routed.itineraries.length, 1);
+  assert.equal(routed.itineraries[0].segments[0].serviceDate, '20270327');
+  assert.equal(routed.itineraries[0].segments[0].departureAt.toISOString(), '2027-03-28T01:30:00.000Z');
+  assert.equal(routed.itineraries[0].segments[0].arrivalAt.toISOString(), '2027-03-28T02:30:00.000Z');
+
+  const arrivals = findGtfsStopArrivals(timetable, 'destination', {
+    now: new Date('2027-03-28T01:20:00Z'), horizonSeconds: 2 * 60 * 60, limit: 10,
+  });
+  assert.equal(arrivals.length, 1);
+  assert.equal(arrivals[0].scheduledArrivalAt.toISOString(), '2027-03-28T02:30:00.000Z');
+});
+
 test('uses the noon-minus-12 service origin on the Kyiv fall-back date without a forward lookahead', () => {
   const timetable = feed({ departure: '00:30:00', arrival: '00:45:00', monday: '0', exceptionDate: '20261025' });
   const query = {
@@ -1938,6 +2144,32 @@ test('uses the noon-minus-12 service origin on the Kyiv fall-back date without a
   });
   assert.equal(arrivals.length, 1);
   assert.equal(arrivals[0].scheduledArrivalAt.toISOString(), '2026-10-24T22:45:00.000Z');
+});
+
+test('finds prior-service-date GTFS times during the Kyiv fall-back midnight window', () => {
+  const timetable = feed({ departure: '24:30:00', arrival: '24:45:00', monday: '0', exceptionDate: '20261024' });
+  const query = {
+    ...request('2026-10-24T21:20:00Z', '2026-10-24T21:40:00Z'),
+    maximumTransfers: 0,
+  };
+
+  const direct = findDirectGtfsJourneys(timetable, query);
+  assert.equal(direct.length, 1);
+  assert.equal(direct[0].serviceDate, '20261024');
+  assert.equal(direct[0].departureAt.toISOString(), '2026-10-24T21:30:00.000Z');
+  assert.equal(direct[0].arrivalAt.toISOString(), '2026-10-24T21:45:00.000Z');
+
+  const routed = findGtfsItinerariesWithStats(timetable, query);
+  assert.equal(routed.itineraries.length, 1);
+  assert.equal(routed.itineraries[0].segments[0].serviceDate, '20261024');
+  assert.equal(routed.itineraries[0].segments[0].departureAt.toISOString(), '2026-10-24T21:30:00.000Z');
+  assert.equal(routed.itineraries[0].segments[0].arrivalAt.toISOString(), '2026-10-24T21:45:00.000Z');
+
+  const arrivals = findGtfsStopArrivals(timetable, 'destination', {
+    now: new Date('2026-10-24T21:20:00Z'), horizonSeconds: 60 * 60, limit: 10,
+  });
+  assert.equal(arrivals.length, 1);
+  assert.equal(arrivals[0].scheduledArrivalAt.toISOString(), '2026-10-24T21:45:00.000Z');
 });
 
 test('normalizes GTFS rail and ferry journeys into supported journey modes', () => {
@@ -2350,29 +2582,205 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
     id, durationSeconds: journey.durationSeconds,
     priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
     transfers: journey.transfers, walkingMeters: journey.walkingMeters,
-    reliability: null, transferRisk: journey.transfers > 0 ? 0.25 : 0, comfort: null,
+    reliability: null, transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
     legs: journey.segments.map((segment) => ({ mode: segment.mode })),
   }));
   const expectedScoringOptions = [...expected.values()];
-  const winnerIds: string[] = [];
+  const exhaustiveWinnerIds: Partial<Record<'FASTEST' | 'CHEAPEST' | 'BALANCED', string>> = {};
   for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
     const expectedWinner = scoreJourneys(expectedScoringOptions, strategy)[0]?.journey.id;
     const actualWinner = scoreJourneys(actualScoringOptions, strategy)[0]?.journey.id;
     assert.equal(actualWinner, expectedWinner, `${strategy} winner matches exhaustive oracle`);
-    if (expectedWinner) winnerIds.push(expectedWinner);
+    if (expectedWinner) exhaustiveWinnerIds[strategy] = expectedWinner;
   }
-  assert.equal(new Set(winnerIds).size, 3, `the fixture exercises distinct strategy winners: ${JSON.stringify(winnerIds)}`);
+  assert.deepEqual(exhaustiveWinnerIds, {
+    FASTEST: 'bus-0-trip>tram-0-trip>train-0-trip',
+    CHEAPEST: 'bus-1-trip>tram-1-trip>train-1-trip',
+    BALANCED: 'bus-3-trip',
+  }, 'the independently enumerated fixture has known, distinct winners for all three strategies');
 
   const boundedResult = findGtfsItinerariesWithStats(timetable, {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
     maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
     maximumTransferWalkingMeters: 100, maximumTransfers: 2,
-  }, { totalSegments: 2, segmentsPerRoute: 1 });
+  }, { totalSegments: 9, segmentsPerRoute: 1 });
   assert.equal(boundedResult.candidateGraphTruncated, true,
     'a graph whose route demand exceeds its global budget is marked incomplete');
   assert.equal(boundedResult.truncation.candidateGraph, true);
   assert.equal(boundedResult.searchTruncated, true,
-    'an empty result from a constrained graph must not look like a complete no-route answer');
+    'the deliberately tight graph budget must continue to be reported as partial');
+  const boundedChainIds = new Set(boundedResult.itineraries.map((journey) => journey.segments
+    .map((segment) => segment.tripId).join('>')));
+  const boundedScoringOptions = boundedResult.itineraries.map((journey) => ({
+    id: journey.segments.map((segment) => segment.tripId).join('>'),
+    durationSeconds: journey.durationSeconds,
+    priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+    transfers: journey.transfers, walkingMeters: journey.walkingMeters,
+    reliability: null, transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+    legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+  }));
+  for (const [strategy, winnerId] of Object.entries(exhaustiveWinnerIds)) {
+    assert.ok(boundedChainIds.has(winnerId), `bounded graph retains the exhaustive ${strategy} winner ${winnerId}`);
+    assert.equal(scoreJourneys(boundedScoringOptions, strategy as 'FASTEST' | 'CHEAPEST' | 'BALANCED')[0]?.journey.id, winnerId,
+      `bounded graph keeps the exhaustive ${strategy} winner ranked first`);
+  }
+});
+
+test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set('origin', { id: 'origin', name: 'Origin', lon: 24.0200, lat: 49.8400 });
+  timetable.stops.set('hub', { id: 'hub', name: 'Transfer hub', lon: 24.0250, lat: 49.8450 });
+  timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: 24.0300, lat: 49.8500 });
+
+  const addRoute = (routeId: string) => timetable.routes.set(routeId, {
+    name: routeId, mode: 'BUS', transportType: 'bus',
+  });
+  const addTrip = (tripId: string, routeId: string, from: string, to: string,
+    departureSeconds: number, arrivalSeconds: number) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [from, to].map((stopId, index) => ({
+      stopId, sequence: index + 1,
+      arrivalSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      departureSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+
+  addRoute('origin-route');
+  addTrip('origin-trip', 'origin-route', 'origin', 'hub', 8 * 3600, 8 * 3600 + 10 * 60);
+  const earlyRouteCount = 94;
+  const onwardRouteCount = earlyRouteCount + 1;
+  const lateTripsPerRoute = 132;
+  for (let routeIndex = 0; routeIndex < onwardRouteCount; routeIndex++) {
+    const routeId = `onward-route-${routeIndex}`;
+    addRoute(routeId);
+    const earlyTripCount = routeIndex < earlyRouteCount ? 8 : 1;
+    for (let tripIndex = 0; tripIndex < earlyTripCount; tripIndex++) {
+      addTrip(`onward-${routeIndex}-${tripIndex}`, routeId, 'hub', 'destination',
+        8 * 3600 + (routeIndex < earlyRouteCount ? 30 : 35) * 60,
+        8 * 3600 + 50 * 60);
+    }
+    for (let tripIndex = 0; tripIndex < lateTripsPerRoute; tripIndex++) {
+      addTrip(`onward-${routeIndex}-late-${tripIndex}`, routeId, 'hub', 'destination',
+        8 * 3600 + 40 * 60, 9 * 3600);
+    }
+  }
+
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousInfo = console.info;
+  const diagnostics: Array<Record<string, unknown>> = [];
+  let result: ReturnType<typeof findGtfsItinerariesWithStats> | undefined;
+  try {
+    process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+    console.info = (...args: unknown[]) => {
+      if (typeof args[0] !== 'string') return;
+      try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
+    };
+    result = findGtfsItinerariesWithStats(timetable, {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:20:00Z'),
+      maximumAccessWalkingMeters: 1000, maximumEgressWalkingMeters: 1000,
+      maximumTransferWalkingMeters: 100, maximumTransfers: 1, limit: 100,
+    });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+  }
+
+  assert.ok(result, 'search returned a result');
+  const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
+  assert.ok(ranked, 'the bounded-search diagnostic is captured');
+  const reachedByLeg = JSON.parse(String(ranked.candidatePoolReachedAtStepByLegCount)) as Record<string, number>;
+  const returnedByLeg = JSON.parse(String(ranked.returnedByLegCount)) as Record<string, number>;
+  assert.ok((ranked.candidatesWith2Legs as number) >= 750, 'the two-leg candidate pool reached its bound');
+  assert.deepEqual(returnedByLeg, result.itineraries.reduce<Record<string, number>>((counts, itinerary) => {
+    const legCount = String(itinerary.segments.length);
+    counts[legCount] = (counts[legCount] ?? 0) + 1;
+    return counts;
+  }, {}), 'the opt-in diagnostic reports final response counts by actual transit-leg count');
+  assert.equal(Object.values(returnedByLeg).reduce((sum, count) => sum + count, 0), result.itineraries.length,
+    'returned leg-count diagnostics account for every selected itinerary exactly once');
+  assert.equal((ranked.searchSteps as number) - reachedByLeg['2'], 25_000,
+    'the objective reservoir scans exactly its bounded window after pool saturation');
+  assert.ok((ranked.maxQueuedSearchWork as number) < 10_000, 'the queue frontier cap did not trigger');
+  assert.equal(ranked.searchStepLimitReached, 0, 'the global search-step cap did not trigger');
+  assert.equal(ranked.candidateResultLimitReached, 0, 'the global retained-candidate cap did not trigger');
+  assert.equal(result.truncation.candidateGraph, false);
+  assert.equal(result.truncation.stopSelection, false);
+  assert.equal(result.truncation.searchBudget, true,
+    'unexpanded feasible transfer work after the objective reservoir is reported as partial');
+  assert.equal(result.truncation.searchStepLimit, false);
+  assert.equal(result.truncation.candidatePoolLimit, false);
+  assert.equal(result.searchTruncated, true);
+});
+
+test('uses spare depth-pass budget to recover direct routes without losing transfers', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set('origin', { id: 'origin', name: 'Origin', lon: 24.0200, lat: 49.8400 });
+  timetable.stops.set('hub', { id: 'hub', name: 'Transfer hub', lon: 24.0250, lat: 49.8450 });
+  timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: 24.0300, lat: 49.8500 });
+
+  for (let index = 0; index < 20; index++) {
+    const routeId = `direct-${String(index).padStart(2, '0')}`;
+    const tripId = `${routeId}-trip`;
+    const departureSeconds = 8 * 3600 + (index === 19 ? 2 : 0) * 60;
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    const entries = [
+      { stopId: 'origin', sequence: 1, arrivalSeconds: departureSeconds, departureSeconds, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: departureSeconds + (index === 19 ? 18 : 30) * 60, departureSeconds: departureSeconds + (index === 19 ? 18 : 30) * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, stopIndex) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index: stopIndex }]));
+  }
+  for (const [routeId, tripId, from, to, departureSeconds, arrivalSeconds] of [
+    ['transfer-first', 'transfer-first-trip', 'origin', 'hub', 8 * 3600, 8 * 3600 + 5 * 60],
+    ['transfer-second', 'transfer-second-trip', 'hub', 'destination', 8 * 3600 + 10 * 60, 8 * 3600 + 25 * 60],
+  ] as const) {
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [
+      { stopId: from, sequence: 1, arrivalSeconds: departureSeconds, departureSeconds, pickupType: 0, dropOffType: 0 },
+      { stopId: to, sequence: 2, arrivalSeconds, departureSeconds: arrivalSeconds, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, stopIndex) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index: stopIndex }]));
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumAccessWalkingMeters: 1000, maximumEgressWalkingMeters: 1000,
+    maximumTransferWalkingMeters: 100, maximumTransfers: 1, limit: 100,
+  }, { maxSearchSteps: 100 });
+
+  const directRouteIds = new Set(result.itineraries.filter((journey) => journey.segments.length === 1
+    && journey.segments[0]?.routeId.startsWith('direct-')).map((journey) => journey.segments[0]!.routeId));
+  assert.equal(directRouteIds.size, 20, 'the rescue sweep recovers all twenty feasible direct route options');
+  assert.ok(directRouteIds.has('direct-19'),
+  'the post-pass rescue sweep recovers the deliberately late, faster direct route');
+  assert.ok(result.itineraries.some((journey) => journey.segments.length === 2
+    && journey.segments[0]?.routeId === 'transfer-first'
+    && journey.segments[1]?.routeId === 'transfer-second'),
+  'the regular deeper pass retains its feasible transfer chain before rescue work');
+  assert.equal(result.truncation.searchBudget, false, 'the rescue sweep drains the paused shallow queue within unused budget');
+  assert.equal(result.truncation.searchStepLimit, false, 'the global step limit itself was not exhausted');
+  assert.equal(result.truncation.candidatePoolLimit, false, 'the objective-reservoir limit did not cause this cutoff');
+  assert.equal(result.searchTruncated, false, 'the fully drained bounded fixture is not reported as partial');
 });
 
 test('keeps type-4 event labels and fare-v1 coverage/zones separate from passenger transfer counts', () => {

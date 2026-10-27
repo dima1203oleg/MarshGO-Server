@@ -9,7 +9,7 @@ export interface CatalogEntry {
   feedUrl: string; realtimeUrl?: string; vehiclePositionUrl?: string; access: 'open' | 'requires_credentials' | 'requires_partner_access' | 'insecure_endpoint'; license?: string; updateFrequency?: string; coverage: string; sourceRef: string; priority?: number;
 }
 
-const lvivLicense = 'Open data portal of Lviv city (opendata.city-adm.lviv.ua)';
+const lvivLicense = 'CC BY 4.0; commercial reuse permitted with attribution to https://data.gov.ua/dataset/lviv-public-transport-gtfs-real-time';
 export const ukraineCatalog: CatalogEntry[] = [
   { name: 'Львівавтодор — розклад (GTFS)', city: 'Львів', providerType: 'public_transit', sourceType: 'gtfs', feedUrl: 'https://track.ua-gis.com/gtfs/lviv/static.zip', realtimeUrl: 'https://track.ua-gis.com/gtfs/lviv/trip_updates', vehiclePositionUrl: 'https://track.ua-gis.com/gtfs/lviv/vehicle_position', access: 'open', license: lvivLicense, updateFrequency: 'статичний розклад + GTFS-Realtime оновлення рейсів і GPS позиції', coverage: 'Громадський транспорт Львова: автобуси, трамваї та realtime-дані', sourceRef: 'mdb:ua-lviv-lvivavtodor-gtfs-2374', priority: 10 },
   { name: 'Львівавтодор — realtime позиції (GTFS-RT)', city: 'Львів', providerType: 'public_transit', sourceType: 'gtfs_rt', feedUrl: 'https://track.ua-gis.com/gtfs/lviv/vehicle_position', access: 'open', license: lvivLicense, updateFrequency: 'реальний час (секунди)', coverage: 'Позиції транспорту Львова', sourceRef: 'mdb:ua-lviv-lvivavtodor-gtfs-rt-vp-2376', priority: 10 },

@@ -162,6 +162,7 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
     if (!projection || !trip || !stopTimes || !route) { legCache.set(cacheKey, []); return []; }
     const legs: LazyLeg[] = [];
     for (const legProjection of materializeTripInstanceLegs(projection.events, {
+      tripId: call.tripId,
       maximumTransfers: options.maximumTransfers,
       earliestDeparture: options.earliestDeparture,
       journeyEnd: new Date(journeyEnd),
