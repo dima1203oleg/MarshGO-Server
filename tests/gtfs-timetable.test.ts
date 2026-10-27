@@ -2362,6 +2362,17 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
     if (expectedWinner) winnerIds.push(expectedWinner);
   }
   assert.equal(new Set(winnerIds).size, 3, `the fixture exercises distinct strategy winners: ${JSON.stringify(winnerIds)}`);
+
+  const boundedResult = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 100, maximumTransfers: 2,
+  }, { totalSegments: 2, segmentsPerRoute: 1 });
+  assert.equal(boundedResult.candidateGraphTruncated, true,
+    'a graph whose route demand exceeds its global budget is marked incomplete');
+  assert.equal(boundedResult.truncation.candidateGraph, true);
+  assert.equal(boundedResult.searchTruncated, true,
+    'an empty result from a constrained graph must not look like a complete no-route answer');
 });
 
 test('keeps type-4 event labels and fare-v1 coverage/zones separate from passenger transfer counts', () => {
