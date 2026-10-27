@@ -65,4 +65,5 @@ console.log(JSON.stringify({
   strategyCandidates: { balanced: signature(balanced), fastest: signature(fastest), cheapest: signature(cheapest) },
   searchTruncated: details.searchTruncated,
   candidateGraphTruncated: details.candidateGraphTruncated,
+  truncation: result.truncation,
 }, null, 2));
