@@ -25,6 +25,11 @@ on:
         required: false
         type: string
         default: 24.0175835,49.8013165
+      trace_trip_chains:
+        description: Optional pipe-separated trip-chain IDs for debug-only ranked-pool/page presence checks
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -44,6 +49,7 @@ jobs:
       GTFS_REPLAY_URL: https://track.ua-gis.com/gtfs/lviv/static.zip
       GTFS_REPLAY_ORIGIN: ${{ inputs.origin || '24.008217,49.864885' }}
       GTFS_REPLAY_DESTINATION: ${{ inputs.destination || '24.0175835,49.8013165' }}
+      GTFS_REPLAY_TRACE_TRIP_CHAINS: ${{ inputs.trace_trip_chains || '' }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@v4

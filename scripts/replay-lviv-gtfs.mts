@@ -33,7 +33,13 @@ const startedAt = performance.now();
 const searchDiagnosticsByStage: Record<string, Record<string, unknown>> = {};
 const originalConsoleInfo = console.info.bind(console);
 const previousDebugSetting = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+const previousTraceSetting = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
 process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+if (process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS) {
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS;
+} else {
+  delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+}
 console.info = (...args: unknown[]) => {
   if (typeof args[0] === 'string') {
     try {
@@ -68,6 +74,8 @@ try {
   console.info = originalConsoleInfo;
   if (previousDebugSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
   else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugSetting;
+  if (previousTraceSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+  else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTraceSetting;
 }
 const fastest = [...result.itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id))[0];
 const cheapest = [...result.itineraries].filter((item) => item.fare?.currency === 'UAH')

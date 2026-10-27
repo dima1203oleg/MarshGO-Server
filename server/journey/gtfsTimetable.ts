@@ -1637,6 +1637,10 @@ export function findGtfsItinerariesWithStats(
         heapUsedBytes: memory.heapUsed, rssBytes: memory.rss, ...details }));
     }
   };
+  const debugTraceTripChains = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
+    ? (process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS ?? '').split('|')
+      .filter((tripChain) => tripChain.length > 0 && tripChain.length <= 512).slice(0, 16)
+    : [];
   const now = input.now ?? new Date();
   const maximumJourneySeconds = input.maximumJourneySeconds ?? 24 * 60 * 60;
   const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
@@ -3503,6 +3507,14 @@ export function findGtfsItinerariesWithStats(
     candidatePoolReachedAtStepByLegCount: JSON.stringify(Object.fromEntries(candidatePoolReachedAtStepByLegCount)),
     candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
     maxQueuedSearchWork: maximumQueuedSearchWork,
+    ...(debugTraceTripChains.length > 0 ? { debugTripChainPresence: JSON.stringify(Object.fromEntries(
+      debugTraceTripChains.map((tripChain) => [tripChain, {
+        rankedPool: rankedResults.some((itinerary) => itinerary.segments
+          .map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>') === tripChain),
+        responsePage: itineraries.some((itinerary) => itinerary.segments
+          .map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>') === tripChain),
+      }]),
+    )) } : {}),
     searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
