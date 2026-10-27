@@ -19,7 +19,7 @@ if set(by_revision) != expected_revisions or any(len(items) != 3 for items in by
 
 stable_fields = (
     "origin", "destination", "idHash", "uniqueTripChains", "uniqueRouteChains", "strategyCandidates",
-    "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnostics",
+    "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
 )
 for revision, items in by_revision.items():
     for field in stable_fields:
@@ -46,6 +46,7 @@ print(f"- Median search time: {baseline_median:.2f} ms → {candidate_median:.2f
 print(f"- Peak sampled RSS: {max(item['rssBytes'] for item in baseline) / 1_048_576:.1f} MiB → {max(item['rssBytes'] for item in candidate) / 1_048_576:.1f} MiB")
 print(f"- Truncated: baseline `{baseline[0]['searchTruncated']}` / candidate `{candidate[0]['searchTruncated']}`; graph truncated: baseline `{baseline[0]['candidateGraphTruncated']}` / candidate `{candidate[0]['candidateGraphTruncated']}`")
 print(f"- Truncation causes: baseline `{json.dumps(baseline[0]['truncation'], sort_keys=True)}`; candidate `{json.dumps(candidate[0]['truncation'], sort_keys=True)}`")
-print(f"- Search diagnostic counters: baseline `{json.dumps(baseline[0]['searchDiagnostics'], sort_keys=True)}`; candidate `{json.dumps(candidate[0]['searchDiagnostics'], sort_keys=True)}`")
+for stage in ("segments-built", "reachability-built", "itineraries-ranked"):
+    print(f"- `{stage}` counters: baseline `{json.dumps(baseline[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`; candidate `{json.dumps(candidate[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`")
 print()
 print("This is one static Lviv OD and a diagnostic comparison, not a live GPS, realtime, staging, production, or complete-routing acceptance test.")

@@ -30,7 +30,7 @@ const parseCoordinates = (value: string | undefined, fallback: [number, number])
 const origin = parseCoordinates(process.env.GTFS_REPLAY_ORIGIN, [24.008217, 49.864885]);
 const destination = parseCoordinates(process.env.GTFS_REPLAY_DESTINATION, [24.0175835, 49.8013165]);
 const startedAt = performance.now();
-let searchDiagnostics: Record<string, unknown> | null = null;
+const searchDiagnosticsByStage: Record<string, Record<string, unknown>> = {};
 const originalConsoleInfo = console.info.bind(console);
 const previousDebugSetting = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
 process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
@@ -39,9 +39,9 @@ console.info = (...args: unknown[]) => {
     try {
       const record = JSON.parse(args[0]) as Record<string, unknown>;
       if (record.event === 'gtfs.search.debug') {
-        if (record.stage === 'itineraries-ranked') {
+        if (typeof record.stage === 'string' && ['segments-built', 'reachability-built', 'itineraries-ranked'].includes(record.stage)) {
           const { elapsedMs: _elapsedMs, heapUsedBytes: _heapUsedBytes, rssBytes: _rssBytes, ...stable } = record;
-          searchDiagnostics = stable;
+          searchDiagnosticsByStage[record.stage] = stable;
         }
         return;
       }
@@ -94,5 +94,5 @@ console.log(JSON.stringify({
   searchTruncated: details.searchTruncated,
   candidateGraphTruncated: details.candidateGraphTruncated,
   truncation: result.truncation,
-  searchDiagnostics,
+  searchDiagnosticsByStage,
 }, null, 2));
