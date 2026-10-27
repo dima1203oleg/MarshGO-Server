@@ -1641,6 +1641,18 @@ export function findGtfsItinerariesWithStats(
     ? (process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS ?? '').split('|')
       .filter((tripChain) => tripChain.length > 0 && tripChain.length <= 512).slice(0, 16)
     : [];
+  const debugTraceTripChainSet = debugTraceTripChains.length > 0 ? new Set(debugTraceTripChains) : undefined;
+  const debugGeneratedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
+  const debugTripChainsIn = (candidates: readonly GtfsItinerary[]) => {
+    const found = new Set<string>();
+    if (!debugTraceTripChainSet) return found;
+    for (const itinerary of candidates) {
+      const tripChain = itinerary.segments.map((segment) =>
+        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+      if (debugTraceTripChainSet.has(tripChain)) found.add(tripChain);
+    }
+    return found;
+  };
   const now = input.now ?? new Date();
   const maximumJourneySeconds = input.maximumJourneySeconds ?? 24 * 60 * 60;
   const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
@@ -3022,6 +3034,7 @@ export function findGtfsItinerariesWithStats(
       .filter(Boolean).join('>');
     const routeChainIds = resultIdsByRouteChain.get(routeChain) ?? new Set<string>();
     const tripChain = path.map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+    if (debugGeneratedTripChains) debugGeneratedTripChains.add(tripChain);
     const tripChainIds = resultIdsByTripChain.get(tripChain) ?? new Set<string>();
     const isKnownTripChain = tripChainIds.size > 0;
     const legCount = resultCountByLegCount.get(path.length) ?? 0;
@@ -3430,6 +3443,7 @@ export function findGtfsItinerariesWithStats(
       rankedResults.push(candidate);
     }
   }
+  const debugTripChainsBeforeFinalSampling = debugTraceTripChainSet ? debugTripChainsIn(rankedResults) : undefined;
   // Objective reservoirs are independent bounded samples. Their union can
   // exceed the per-chain limits even though the general result pool cannot;
   // reapply both limits before ranking the public response candidates.
@@ -3443,6 +3457,7 @@ export function findGtfsItinerariesWithStats(
   }
   const boundedTripCandidates = [...candidatesByTripChain.values()].flatMap((group) =>
     sampleGtfsTripChainCandidates(group, MAX_RESULTS_PER_TRIP_CHAIN));
+  const debugTripChainsAfterTripSampling = debugTraceTripChainSet ? debugTripChainsIn(boundedTripCandidates) : undefined;
   const candidatesByRouteChain = new Map<string, GtfsItinerary[]>();
   for (const candidate of boundedTripCandidates) {
     const routeChain = candidate.segments.filter((segment, index) => index === 0
@@ -3455,6 +3470,7 @@ export function findGtfsItinerariesWithStats(
   }
   rankedResults = [...candidatesByRouteChain.values()].flatMap((group) =>
     sampleGtfsRouteChainCandidates(group, MAX_RESULTS_PER_ROUTE_CHAIN));
+  const debugTripChainsAfterRouteSampling = debugTraceTripChainSet ? debugTripChainsIn(rankedResults) : undefined;
   if (rankedResults.length < allCandidateIds.size) candidateSamplingTruncated = true;
   rankedResults.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byDuration = [...rankedResults].sort((a, b) => a.durationSeconds - b.durationSeconds
@@ -3507,14 +3523,24 @@ export function findGtfsItinerariesWithStats(
     candidatePoolReachedAtStepByLegCount: JSON.stringify(Object.fromEntries(candidatePoolReachedAtStepByLegCount)),
     candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
     maxQueuedSearchWork: maximumQueuedSearchWork,
-    ...(debugTraceTripChains.length > 0 ? { debugTripChainPresence: JSON.stringify(Object.fromEntries(
-      debugTraceTripChains.map((tripChain) => [tripChain, {
-        rankedPool: rankedResults.some((itinerary) => itinerary.segments
-          .map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>') === tripChain),
-        responsePage: itineraries.some((itinerary) => itinerary.segments
-          .map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>') === tripChain),
-      }]),
-    )) } : {}),
+    ...(debugTraceTripChains.length > 0 ? { debugTripChainPresence: (() => {
+      // This checks trip identity presence only; it does not prove each exact
+      // stop-to-stop leg survived graph construction or was traversable.
+      const retainedGraphTripKeys = new Set(segments.map((segment) =>
+        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`));
+      return JSON.stringify(Object.fromEntries(debugTraceTripChains.map((tripChain) => {
+        const targetTrips = tripChain.split('>');
+        return [tripChain, {
+          allLegTripsInRetainedGraph: targetTrips.every((targetTrip) => retainedGraphTripKeys.has(targetTrip)),
+          generated: debugGeneratedTripChains?.has(tripChain) ?? false,
+          candidatePoolBeforeFinalSampling: debugTripChainsBeforeFinalSampling?.has(tripChain) ?? false,
+          afterTripChainSampling: debugTripChainsAfterTripSampling?.has(tripChain) ?? false,
+          rankedPool: debugTripChainsAfterRouteSampling?.has(tripChain) ?? false,
+          responsePage: itineraries.some((itinerary) => itinerary.segments
+            .map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>') === tripChain),
+        }];
+      })));
+    })() } : {}),
     searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
