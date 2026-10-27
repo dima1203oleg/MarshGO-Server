@@ -645,9 +645,12 @@ export function selectGtfsCandidatesForCrossProviderSearch(
   // walking, reliability, or the shared normalization ranges.
   take(rankGtfsItinerariesForStrategySampling(itineraries, 'FASTEST', rankingContext), perObjective);
   take(rankGtfsItinerariesForStrategySampling(itineraries, 'CHEAPEST', rankingContext), perObjective);
+  // Reserve the three user-facing strategy winners before auxiliary criteria.
+  // For small explicit caps (3–4), transfer/walking samples must not crowd out
+  // the BALANCED winner; the production default of 100 still retains 20 each.
+  take(rankGtfsItinerariesForStrategySampling(itineraries, 'BALANCED', rankingContext), perObjective);
   take(byTransfers, perObjective);
   take(byWalking, perObjective);
-  take(rankGtfsItinerariesForStrategySampling(itineraries, 'BALANCED', rankingContext), perObjective);
   take(byArrival, maximum - selected.size);
   return [...selected.values()].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
     || a.departureAt.getTime() - b.departureAt.getTime() || compareStableId(a.id, b.id));

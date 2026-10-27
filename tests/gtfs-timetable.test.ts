@@ -1779,6 +1779,12 @@ test('cross-provider GTFS cap uses the shared candidate pool when preserving its
   const completeStrategyWinners = ['FASTEST', 'CHEAPEST', 'BALANCED'].map((strategy) =>
     scoreJourneys([...candidates.map(toScorable), communityCandidate], strategy as 'FASTEST' | 'CHEAPEST' | 'BALANCED')[0]?.journey.id,
   );
+  assert.equal(new Set(completeStrategyWinners).size, 3,
+    'the mixed-mode fixture has a distinct winner for each user-facing strategy');
+
+  const minimumStrategySample = selectGtfsCandidatesForCrossProviderSearch(candidates, 3, [communityCandidate]);
+  assert.deepEqual(new Set(minimumStrategySample.map(({ id }) => id)), new Set(completeStrategyWinners),
+    'a three-candidate cap reserves FASTEST, CHEAPEST, and BALANCED winners before auxiliary samples');
 
   const transitOnlySample = selectGtfsCandidatesForCrossProviderSearch(candidates, 5);
   assert.ok(!transitOnlySample.some(({ id }) => id === 'balanced-winner'),
