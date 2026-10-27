@@ -1088,11 +1088,9 @@ function serviceRuns(feed: GtfsTimetableFeed, serviceId: string, date: string): 
   return calendar.weekdays[mondayFirst] === true;
 }
 
-function localServiceTimeToUtc(serviceDate: string, secondsAfterMidnight: number, timezone: string): Date | null {
-  const dayOffset = Math.floor(secondsAfterMidnight / 86400);
-  const time = secondsAfterMidnight % 86400;
-  const base = Date.UTC(Number(serviceDate.slice(0, 4)), Number(serviceDate.slice(4, 6)) - 1, Number(serviceDate.slice(6, 8)) + dayOffset);
-  const target = base + time * 1000;
+function localWallTimeToUtc(civilDate: string, secondsAfterMidnight: number, timezone: string): Date | null {
+  const base = Date.UTC(Number(civilDate.slice(0, 4)), Number(civilDate.slice(4, 6)) - 1, Number(civilDate.slice(6, 8)));
+  const target = base + secondsAfterMidnight * 1000;
   let guess = target;
   for (let attempt = 0; attempt < 3; attempt++) {
     const parts = timezoneFormatter(timezone, true).formatToParts(new Date(guess));
@@ -1101,8 +1099,16 @@ function localServiceTimeToUtc(serviceDate: string, secondsAfterMidnight: number
     guess += target - represented;
   }
   const result = new Date(guess);
-  if (localDate(result, timezone) !== dateStringAfter(serviceDate, dayOffset)) return null;
+  if (localDate(result, timezone) !== civilDate) return null;
   return result;
+}
+
+function localServiceTimeToUtc(serviceDate: string, secondsAfterMidnight: number, timezone: string): Date | null {
+  const localNoon = localWallTimeToUtc(serviceDate, 12 * 60 * 60, timezone);
+  if (!localNoon) return null;
+  // GTFS service time is elapsed from noon minus 12 hours. This is civil
+  // midnight on ordinary dates, but can differ on daylight-saving transitions.
+  return new Date(localNoon.getTime() - 12 * 60 * 60 * 1000 + secondsAfterMidnight * 1000);
 }
 
 function createServiceTimeConverter(timezone: string): (serviceDate: string, secondsAfterMidnight: number) => Date | null {
@@ -1114,6 +1120,31 @@ function createServiceTimeConverter(timezone: string): (serviceDate: string, sec
     cache.set(key, converted);
     return converted;
   };
+}
+
+function gtfsServiceDatesForWindow(
+  feed: GtfsTimetableFeed,
+  startAt: Date,
+  endAt: Date,
+  serviceTimeToUtc: (serviceDate: string, secondsAfterMidnight: number) => Date | null,
+): string[] {
+  const firstDate = localDate(startAt, feed.timezone);
+  const lastDate = localDate(endAt, feed.timezone);
+  const lookback = gtfsServiceDateLookback(feed);
+  const serviceDates: string[] = [];
+  for (let date = dateStringAfter(firstDate, -lookback); date <= lastDate; date = dateStringAfter(date, 1)) {
+    serviceDates.push(date);
+  }
+
+  // On a spring-forward transition, the next civil service date can begin in
+  // the prior local evening. Include it only when its actual origin overlaps
+  // this search window.
+  const nextServiceDate = dateStringAfter(lastDate, 1);
+  const nextServiceStart = serviceTimeToUtc(nextServiceDate, 0);
+  if (nextServiceStart && nextServiceStart <= endAt && localDate(nextServiceStart, feed.timezone) < nextServiceDate) {
+    serviceDates.push(nextServiceDate);
+  }
+  return serviceDates;
 }
 
 function dateStringAfter(date: string, days: number): string {
@@ -1148,17 +1179,8 @@ export function findGtfsStopArrivals(
   const stop = feed.stops.get(stopId);
   if (!stop) return [];
   const horizonAt = new Date(now.getTime() + horizonSeconds * 1000);
-  const firstServiceDate = localDate(now, feed.timezone);
-  const lastServiceDate = localDate(horizonAt, feed.timezone);
-  // Extended service times can place an arrival on a later calendar date
-  // than its service date; scan only the prior dates this feed can require.
-  const serviceDayLookback = gtfsServiceDateLookback(feed);
-  const serviceDates = new Set<string>();
-  const firstRelevantDate = dateStringAfter(firstServiceDate, -serviceDayLookback);
-  const daysToLast = Math.round((Date.UTC(Number(lastServiceDate.slice(0, 4)), Number(lastServiceDate.slice(4, 6)) - 1, Number(lastServiceDate.slice(6, 8)))
-    - Date.UTC(Number(firstRelevantDate.slice(0, 4)), Number(firstRelevantDate.slice(4, 6)) - 1, Number(firstRelevantDate.slice(6, 8)))) / 86_400_000);
-  for (let offset = 0; offset <= daysToLast; offset++) serviceDates.add(dateStringAfter(firstRelevantDate, offset));
   const toUtc = createServiceTimeConverter(feed.timezone);
+  const serviceDates = new Set(gtfsServiceDatesForWindow(feed, now, horizonAt, toUtc));
   const arrivals: GtfsStopArrival[] = [];
   for (const entry of feed.stopTimesByStop.get(stopId) ?? []) {
     const trip = feed.trips.get(entry.tripId);
@@ -1488,16 +1510,8 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
   if (originStops.length === 0 || destinationStops.length === 0) return [];
   const originById = new Map(originStops.map((item) => [item.stop.id, item]));
   const destinationById = new Map(destinationStops.map((item) => [item.stop.id, item]));
-  const firstDate = localDate(input.earliestDeparture, feed.timezone);
-  const lastDate = localDate(input.latestDeparture, feed.timezone);
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
-  // Extended service times may place a trip after its service date; use the
-  // minimum prior-date scan supported by this feed's actual stop times.
-  const serviceDayLookback = gtfsServiceDateLookback(feed);
-  const serviceDates: string[] = [];
-  for (let date = dateStringAfter(firstDate, -serviceDayLookback); date <= lastDate; date = dateStringAfter(date, 1)) {
-    serviceDates.push(date);
-  }
+  const serviceDates = gtfsServiceDatesForWindow(feed, input.earliestDeparture, input.latestDeparture, serviceTimeToUtc);
   const results: GtfsDirectJourney[] = [];
   const segmentIndexes = new WeakMap<GtfsDirectJourney, { fromIndex: number; toIndex: number; serviceDate: string }>();
   const originEntriesByTrip = new Map<string, Array<{ index: number; originStopId: string }>>();
@@ -1777,17 +1791,8 @@ export function findGtfsItinerariesWithStats(
   }
 
   const journeyEnd = new Date(input.earliestDeparture.getTime() + maximumJourneySeconds * 1000);
-  const firstServiceDate = localDate(input.earliestDeparture, feed.timezone);
-  const lastServiceDate = localDate(journeyEnd, feed.timezone);
   const serviceTimeToUtc = createServiceTimeConverter(feed.timezone);
-  const serviceDates = new Set<string>();
-  const dayCount = Math.ceil((journeyEnd.getTime() - input.earliestDeparture.getTime()) / 86_400_000) + 2;
-  // Include only the prior service dates needed by the feed's actual time data.
-  const serviceDayLookback = gtfsServiceDateLookback(feed);
-  for (let day = -serviceDayLookback; day <= dayCount; day++) {
-    const date = dateStringAfter(firstServiceDate, day);
-    if (date <= lastServiceDate || day < 0) serviceDates.add(date);
-  }
+  const serviceDates = new Set(gtfsServiceDatesForWindow(feed, input.earliestDeparture, journeyEnd, serviceTimeToUtc));
 
   const originStopIds = new Set(originStops.map(({ stop }) => stop.id));
   const destinationStopIds = new Set(destinationStops.map(({ stop }) => stop.id));
