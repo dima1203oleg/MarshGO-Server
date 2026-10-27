@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findGtfsItinerariesWithStats, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsTripChainCandidates } from '../server/journey/gtfsTimetable';
+import { findGtfsItinerariesWithStats, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsTripChainCandidates, selectGtfsResponseItineraries } from '../server/journey/gtfsTimetable';
 
 function createFeedTest() {
   const encode = (text: string) => new TextEncoder().encode(text);
@@ -140,4 +140,54 @@ test('four-slot trip-chain sample retains FASTEST, CHEAPEST, BALANCED, and least
     }
     assertWitnessesSurvive(shuffled, `seeded shuffle ${iteration}`);
   }
+});
+
+test('response selection reserves a page slot for a missing longer chain without dropping objective winners', () => {
+  const base = findGtfsItinerariesWithStats(createFeedTest(), {
+    providerId: 'p1', providerName: 'Test Transit',
+    origin: [24.0200, 49.8400], destination: [24.0300, 49.8500],
+    earliestDeparture: new Date('2026-10-12T04:55:00Z'), latestDeparture: new Date('2026-10-12T05:30:00Z'),
+    now: new Date('2026-10-08T00:00:00Z'), maximumAccessWalkingMeters: 500,
+    maximumEgressWalkingMeters: 500, maximumTransfers: 0, limit: 5,
+  }).itineraries[0];
+  assert.ok(base?.segments[0]);
+  const directCandidates = Array.from({ length: 100 }, (_, index) => ({
+    ...base,
+    id: `direct-${String(index).padStart(3, '0')}`,
+    segments: [base.segments[0]!],
+    arrivalAt: new Date(base.arrivalAt.getTime() + index * 60_000),
+    durationSeconds: 1_000 + index,
+    walkingMeters: index,
+    fare: { priceMinor: 1_000 + index, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  }));
+  const longerChain = {
+    ...base,
+    id: 'three-leg-chain',
+    segments: [base.segments[0]!, base.segments[0]!, base.segments[0]!],
+    arrivalAt: new Date(base.arrivalAt.getTime() + 200 * 60_000),
+    durationSeconds: 20_000,
+    transfers: 2,
+    fare: { priceMinor: 2_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  };
+  const rankedResults = [...directCandidates, longerChain];
+  const byDuration = [...rankedResults].sort((a, b) => a.durationSeconds - b.durationSeconds);
+  const byFare = [...rankedResults].sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor);
+  const byTransfers = [...rankedResults].sort((a, b) => a.transfers - b.transfers);
+  const byWalking = [...rankedResults].sort((a, b) => a.walkingMeters - b.walkingMeters);
+  const balanced = [...rankedResults].sort((a, b) => a.id.localeCompare(b.id));
+  const selected = selectGtfsResponseItineraries(
+    rankedResults, [byDuration, byFare, byTransfers, byWalking, balanced], 100,
+  );
+
+  assert.equal(selected.length, 100, 'response size remains bounded');
+  assert.ok(selected.some((itinerary) => itinerary.id === longerChain.id),
+    'a feasible longer-chain candidate is not hidden by a page of direct routes');
+  for (const winner of [byDuration[0], byFare[0], balanced[0]]) {
+    assert.ok(selected.some((itinerary) => itinerary.id === winner?.id),
+      `existing objective witness ${winner?.id} remains in the response`);
+  }
+  assert.deepEqual(selectGtfsResponseItineraries(
+    [...rankedResults].reverse(), [byDuration, byFare, byTransfers, byWalking, balanced], 100,
+  ).map((itinerary) => itinerary.id), selected.map((itinerary) => itinerary.id),
+  'page selection is deterministic regardless of candidate insertion order');
 });

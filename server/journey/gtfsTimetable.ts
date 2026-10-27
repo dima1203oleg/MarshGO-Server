@@ -532,6 +532,47 @@ function rankGtfsItinerariesForStrategySampling(
     .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
 }
 
+/** Keep objective winners while reserving response-page slots for longer feasible chains. */
+export function selectGtfsResponseItineraries(
+  rankedResults: readonly GtfsItinerary[],
+  rankings: readonly (readonly GtfsItinerary[])[],
+  limit: number,
+): GtfsItinerary[] {
+  if (!Number.isInteger(limit) || limit < 1) throw new TypeError('itinerary response limit must be positive');
+  const orderedResults = [...rankedResults].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
+    || a.transfers - b.transfers || compareStableId(a.id, b.id));
+  const legCounts = [...new Set(orderedResults.map((itinerary) => itinerary.segments.length))].sort((a, b) => a - b);
+  // Preserve at least one slot for each of the five existing objective rankings.
+  const diversitySlots = Math.min(legCounts.length, Math.max(0, limit - 5));
+  const objectiveLimit = limit - diversitySlots;
+  const perObjective = Math.max(1, Math.floor(objectiveLimit / 5));
+  const selected = new Map<string, GtfsItinerary>();
+  for (const ranking of rankings) {
+    for (const itinerary of ranking.slice(0, perObjective)) {
+      if (selected.size >= objectiveLimit) break;
+      selected.set(itinerary.id, itinerary);
+    }
+  }
+
+  // The candidate pool already contains only feasible itineraries. Prefer the
+  // balanced ranking when filling a missing leg-count witness.
+  const diversityRanking = rankings.at(-1) ?? orderedResults;
+  const diversityLegCounts = diversitySlots > 0 ? legCounts.slice(-diversitySlots).reverse() : [];
+  for (const legCount of diversityLegCounts) {
+    if ([...selected.values()].some((itinerary) => itinerary.segments.length === legCount)) continue;
+    if (selected.size >= limit) break;
+    const candidate = diversityRanking.find((itinerary) => itinerary.segments.length === legCount)
+      ?? orderedResults.find((itinerary) => itinerary.segments.length === legCount);
+    if (candidate) selected.set(candidate.id, candidate);
+  }
+  for (const itinerary of orderedResults) {
+    if (selected.size >= limit) break;
+    selected.set(itinerary.id, itinerary);
+  }
+  return [...selected.values()].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
+    || a.transfers - b.transfers || compareStableId(a.id, b.id));
+}
+
 /** Keep a deterministic bounded overflow sample; rank retained candidates after collection. */
 export function retainGtfsDeterministicOverflowSample(
   existing: readonly GtfsItinerary[], candidate: GtfsItinerary, maximum: number,
@@ -3493,20 +3534,10 @@ export function findGtfsItinerariesWithStats(
   // the fastest alternatives. The API scores these candidates again together
   // with carpool and other providers, so the GTFS stage must not discard its
   // only known-cheapest or low-transfer option just because it arrives later.
-  const selected = new Map<string, GtfsItinerary>();
-  const perObjective = Math.max(1, Math.floor(limit / 5));
-  for (const ranking of [byDuration, byComparableFare, byTransfers, byWalking, balanced]) {
-    for (const itinerary of ranking.slice(0, perObjective)) {
-      if (selected.size >= limit) break;
-      selected.set(itinerary.id, itinerary);
-    }
-  }
-  for (const itinerary of rankedResults) {
-    if (selected.size >= limit) break;
-    selected.set(itinerary.id, itinerary);
-  }
-  const itineraries = [...selected.values()]
-    .sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
+  // Protect the objective witnesses while reserving coverage for otherwise-hidden chains.
+  const itineraries = selectGtfsResponseItineraries(
+    rankedResults, [byDuration, byComparableFare, byTransfers, byWalking, balanced], limit,
+  );
   for (const itinerary of itineraries) {
     for (const segment of itinerary.segments) {
       const indexes = shapeIndexesBySegment.get(segment);
