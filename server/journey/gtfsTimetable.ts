@@ -2967,7 +2967,7 @@ export function findGtfsItinerariesWithStats(
   // Once a leg-count pool is full, keep searching a bounded window so late
   // objective improvements can enter the reservoirs without scanning the
   // entire dense feed. Any remaining work is still reported as truncated.
-  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 50_000;
+  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 25_000;
   let candidatePoolReachedAtStep: number | null = null;
   const objectiveCandidateSamples = new Map<string, GtfsItinerary[]>();
   const objectiveSampleLimit = Math.max(1, Math.floor(limit / 5));
