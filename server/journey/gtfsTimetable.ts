@@ -2439,6 +2439,10 @@ export function findGtfsItinerariesWithStats(
           pathway.walkingSeconds, rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
         if (availableSeconds < requiredSeconds || event.journeyArrivalAt === undefined) continue;
         earliestArrival = Math.min(earliestArrival, event.journeyArrivalAt);
+        // Events are ordered by departure time. The earliest feasible event
+        // at a reachable stop is a bounded proxy for onward quality; scanning
+        // every later trip here makes dense-feed connector ranking quadratic.
+        break;
       }
     }
     const result = Number.isFinite(earliestArrival) ? earliestArrival : null;
@@ -2665,7 +2669,7 @@ export function findGtfsItinerariesWithStats(
         const connectorOverflow = overflowConnectorsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(Math.min(MAX_ROUTE_OVERFLOW_CONNECTORS, graphSegmentLimitPerRoute), compareTripSegments);
         let temporallyConnectsQueryEnds = false;
-        const feasibleConnectors: RetainedGtfsSegment[] = [];
+        let bestConnector: { segment: RetainedGtfsSegment; arrivalAt: number } | undefined;
         for (const candidate of tripCandidates) {
           const canCatchOrigin = canBoardOriginCandidate(candidate);
           const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
@@ -2674,18 +2678,27 @@ export function findGtfsItinerariesWithStats(
           // Keep one temporally feasible through-connector per trip group in
           // the bounded overflow reservoir too. Endpoint-only overflow could
           // leave redistributed graph capacity unused on connector routes.
-          if (hasPriorEvent(candidate, minimumTransferBufferSeconds)
-            && hasNextEvent(candidate, minimumTransferBufferSeconds)) {
-            temporallyConnectsQueryEnds = true;
-            if (!servesQueryEndpoint) feasibleConnectors.push(candidate);
+          if (servesQueryEndpoint) {
+            if (!temporallyConnectsQueryEnds && hasPriorEvent(candidate, minimumTransferBufferSeconds)
+              && hasNextEvent(candidate, minimumTransferBufferSeconds)) temporallyConnectsQueryEnds = true;
+            continue;
+          }
+          // A continuation cannot arrive before this segment itself. Once a
+          // better onward arrival is known, skip candidates that cannot beat it.
+          if (bestConnector && candidate.arrivalAt.getTime() > bestConnector.arrivalAt) continue;
+          if (hasPriorEvent(candidate, minimumTransferBufferSeconds)) {
+            const onwardArrival = earliestQueryArrivalAfterSegment(candidate, minimumTransferBufferSeconds);
+            if (onwardArrival !== null) {
+              temporallyConnectsQueryEnds = true;
+              if (!bestConnector || onwardArrival < bestConnector.arrivalAt
+                || (onwardArrival === bestConnector.arrivalAt
+                  && compareTripSegments(candidate, bestConnector.segment) < 0)) {
+                bestConnector = { segment: candidate, arrivalAt: onwardArrival };
+              }
+            }
           }
         }
-        feasibleConnectors.sort((left, right) => {
-          const leftArrival = earliestQueryArrivalAfterSegment(left, minimumTransferBufferSeconds) ?? Infinity;
-          const rightArrival = earliestQueryArrivalAfterSegment(right, minimumTransferBufferSeconds) ?? Infinity;
-          return leftArrival - rightArrival || compareTripSegments(left, right);
-        });
-        if (feasibleConnectors[0]) connectorOverflow.consider(feasibleConnectors[0]);
+        if (bestConnector) connectorOverflow.consider(bestConnector.segment);
         overflowSegmentsByRoute.set(trip.routeId, overflow);
         overflowConnectorsByRoute.set(trip.routeId, connectorOverflow);
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
