@@ -1828,7 +1828,7 @@ test('retains the late cheapest transfer after the bounded candidate pool fills'
   const rules = new Map<string, Array<{ fareId: string; routeId: string }>>();
   products.set('bus-fare', { id: 'bus-fare', priceMinor: 1000, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
   rules.set('bus-fare', [{ fareId: 'bus-fare', routeId: 'bus' }]);
-  for (let index = 1; index <= 520; index++) {
+  for (let index = 1; index <= 751; index++) {
     const suffix = String(index).padStart(3, '0');
     const routeId = `alt-${suffix}`;
     const tripId = `alt-trip-${suffix}`;
@@ -1841,7 +1841,7 @@ test('retains the late cheapest transfer after the bounded candidate pool fills'
     ]);
     timetable.stopTimesByStop.set('hub', [...(timetable.stopTimesByStop.get('hub') ?? []), { tripId, index: 0 }]);
     timetable.stopTimesByStop.set('finish', [...(timetable.stopTimesByStop.get('finish') ?? []), { tripId, index: 1 }]);
-    products.set(fareId, { id: fareId, priceMinor: index === 520 ? 100 : 1000, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
+    products.set(fareId, { id: fareId, priceMinor: index === 751 ? 100 : 1000, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
     rules.set(fareId, [{ fareId, routeId }]);
   }
   timetable.fareProducts = products;
@@ -1853,9 +1853,11 @@ test('retains the late cheapest transfer after the bounded candidate pool fills'
     maximumTransferWalkingMeters: 200, maximumTransfers: 1, limit: 100,
   });
 
-  const cheapestLateLine = result.itineraries.find((journey) => journey.segments.at(-1)?.routeId === 'alt-520');
-  assert.ok(cheapestLateLine, 'the 520th feasible transfer candidate is the lowest-fare route and must survive the 500-item candidate cap');
+  const cheapestLateLine = result.itineraries.find((journey) => journey.segments.at(-1)?.routeId === 'alt-751');
+  assert.ok(cheapestLateLine, 'the late lowest-fare transfer must survive the 750-item per-leg candidate cap');
   assert.equal(cheapestLateLine.fare?.priceMinor, 1100);
+  assert.equal(result.truncation.candidateSampling, true, 'the per-leg cap must be reported as sampled search');
+  assert.equal(result.searchTruncated, true, 'omitting candidates beyond the cap must remain visible');
 });
 
 test('keeps the cheapest three-leg option after a dense two-leg candidate pool fills', () => {
@@ -1921,7 +1923,7 @@ test('keeps a globally cheapest direct route discovered after the bounded candid
   timetable.stopTimesByStop.clear();
   const products = new Map<string, { id: string; priceMinor: number; currency: string; transfers: number; transferDurationSeconds: null }>();
   const rules = new Map<string, Array<{ fareId: string; routeId: string }>>();
-  const directRoutes = Array.from({ length: 500 }, (_, index) => `line-${String(index).padStart(3, '0')}`);
+  const directRoutes = Array.from({ length: 750 }, (_, index) => `line-${String(index).padStart(3, '0')}`);
   directRoutes.push('zz-cheapest-line');
   for (const routeId of directRoutes) {
     const tripId = `trip-${routeId}`;
@@ -1950,8 +1952,10 @@ test('keeps a globally cheapest direct route discovered after the bounded candid
   });
 
   const cheapest = result.itineraries.find((journey) => journey.segments[0]?.routeId === 'zz-cheapest-line');
-  assert.ok(cheapest, 'the CHEAPEST strategy candidate must survive the internal 500-itinerary sample cap');
+  assert.ok(cheapest, 'the CHEAPEST strategy candidate must survive the 750-item per-leg candidate cap');
   assert.equal(cheapest.fare?.priceMinor, 100);
+  assert.equal(result.truncation.candidateSampling, true, 'the per-leg cap must be reported as candidate sampling');
+  assert.equal(result.searchTruncated, true, 'discarded candidates beyond the per-leg cap must be disclosed');
   assert.equal(result.resultLimitReached, true, 'the response must still report that candidate sampling omitted alternatives');
   assert.equal(result.candidateGraphTruncated, false, 'the test exhausts a complete route graph but exceeds the retained candidate sample');
   assert.equal(result.truncation.candidateGraph, false);
