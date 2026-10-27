@@ -1352,14 +1352,25 @@ export type GtfsTripLegProjection =
   | { kind: 'leg'; fromCursor: number; toCursor: number; fromEvent: EligibleTripInstanceStopEvent; toEvent: EligibleTripInstanceStopEvent }
   | { kind: 'omitted-beyond-window' };
 
+function hasDifferentOnwardTripAtStop(
+  tripIdsByStopId: ReadonlyMap<string, ReadonlySet<string>> | undefined,
+  stopId: string,
+  currentTripId: string,
+): boolean {
+  for (const tripId of tripIdsByStopId?.get(stopId) ?? []) if (tripId !== currentTripId) return true;
+  return false;
+}
+
 /** Shared, deterministic stop-pair eligibility projection for graph and event searches. */
 export function* materializeTripInstanceLegs(
   events: readonly EligibleTripInstanceStopEvent[],
   options: {
+    tripId: string;
     maximumTransfers: number;
     earliestDeparture: Date;
     journeyEnd: Date;
     destinationStopIds: ReadonlySet<string>;
+    queryReachableTransferTripIdsByStopId?: ReadonlyMap<string, ReadonlySet<string>>;
     canBelongToDirectOnlyJourney: (fromStopId: string, toStopId: string) => boolean;
     boardingStopIndex?: number;
   },
@@ -1377,8 +1388,12 @@ export function* materializeTripInstanceLegs(
     for (let toCursor = fromCursor + 1; toCursor < events.length; toCursor++) {
       const toEvent = events[toCursor]!;
       const to = toEvent.stopTime;
+      const hasDifferentOnwardTrip = hasDifferentOnwardTripAtStop(
+        options.queryReachableTransferTripIdsByStopId, to.stopId, options.tripId,
+      );
       if (options.maximumTransfers > 0 && toCursor > fromCursor + 20
-        && !options.destinationStopIds.has(to.stopId)) {
+        && !options.destinationStopIds.has(to.stopId)
+        && !hasDifferentOnwardTrip) {
         const omittedArrivalAt = toEvent.scheduledArrivalAt;
         if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
           && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
@@ -1909,6 +1924,7 @@ export function findGtfsItinerariesWithStats(
   // transfer trips that can actually join a first/last leg. These are only a
   // retention signal: the normal transferDecision remains the final authority
   // for GTFS rules, pathway topology, walking distance and buffers.
+  const candidatePairDemandByTrip = new Map<string, number>();
   type QueryReachabilityEvent = {
     key: string;
     at: number;
@@ -2039,25 +2055,10 @@ export function findGtfsItinerariesWithStats(
     }
     if (pairOpportunities === 0) continue;
     const boundedPairOpportunities = Math.min(maximumGraphSegmentsPerRoute, pairOpportunities);
+    candidatePairDemandByTrip.set(tripId, boundedPairOpportunities);
     candidateDemandByRoute.set(trip.routeId,
       (candidateDemandByRoute.get(trip.routeId) ?? 0) + boundedPairOpportunities);
   }
-  const graphSegmentBudgetByRoute = allocateBoundedGraphBudgets(
-    candidateDemandByRoute, maximumGraphSegments, maximumGraphSegmentsPerRoute,
-  );
-  const candidateRouteCount = graphSegmentBudgetByRoute.size;
-  const estimatedGraphDemand = [...candidateDemandByRoute.values()].reduce((sum, value) => sum + value, 0);
-  const graphRoutesBudgetLimited = [...candidateDemandByRoute].filter(([routeId, demand]) =>
-    demand > (graphSegmentBudgetByRoute.get(routeId) ?? 0)).length;
-  const graphRoutesAtPerRouteCap = [...graphSegmentBudgetByRoute.values()]
-    .filter((budget) => budget === maximumGraphSegmentsPerRoute).length;
-  const globalGraphBudgetBinding = estimatedGraphDemand > maximumGraphSegments;
-  // Route budgets are allocated from bounded graph demand estimates. If a
-  // route's estimated demand exceeds its share, the search is incomplete even
-  // when that route happens not to materialize a segment before filtering.
-  // Surface the bounded result as partial instead of reporting an empty graph
-  // as a complete no-route answer.
-  let segmentGraphTruncated = graphRoutesBudgetLimited > 0;
   // A national feed can produce a very large number of stop-pair candidates.
   // Keep only the stop-time indexes during graph construction and materialize
   // route shapes for the small set of itineraries that will actually be shown.
@@ -2146,6 +2147,82 @@ export function findGtfsItinerariesWithStats(
     || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId));
   for (const events of destinationRetentionEventsByReachableStop.values()) events.sort((a, b) => a.at - b.at
     || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId));
+  // Long in-vehicle legs to an interchange are normally omitted after the
+  // bounded local stop-pair window. Preserve only interchange stops already
+  // indexed with a feasible onward path toward the query destination; the
+  // exact transfer rule and schedule are still validated during route search.
+  const queryReachableTransferTripIdsByStopId = new Map<string, ReadonlySet<string>>(
+    [...destinationRetentionEventsByReachableStop].map(([stopId, events]) => [stopId, new Set(events.map((event) => event.tripId))]),
+  );
+  // Keep graph-budget demand aligned with the expanded, query-reachable leg
+  // set. The first bounded demand pass intentionally counts only nearby pairs
+  // and direct destinations; add a capped per-trip allowance for longer legs
+  // ending at an indexed transfer hub before dividing the global graph budget.
+  for (const [tripId, trip] of feed.trips) {
+    if ((candidateStopCountByRoute.get(trip.routeId) ?? 0) < 2) continue;
+    const remainingTripDemand = maximumGraphSegmentsPerRoute - (candidatePairDemandByTrip.get(tripId) ?? 0);
+    if (remainingTripDemand <= 0) continue;
+    const stops = feed.stopTimes.get(tripId);
+    if (!stops || stops.length < 2) continue;
+    const providerCity = feed.providersByRoute?.get(trip.routeId)?.city ?? input.providerCity;
+    const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
+      ? localCityCatchmentStops : corridorStops;
+    const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
+      && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
+    if (eligibleIndexes.length < 2) continue;
+    let addedTripDemand = 0;
+    for (const serviceDate of serviceDates) {
+      const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes, serviceTimeToUtc);
+      if (!tripEvents) continue;
+      const targetCursors = tripEvents.events.flatMap((event, cursor) =>
+        hasDifferentOnwardTripAtStop(queryReachableTransferTripIdsByStopId, event.stopTime.stopId, tripId)
+          && !destinationStopIds.has(event.stopTime.stopId) ? [cursor] : []);
+      if (targetCursors.length === 0) continue;
+      let firstLongTarget = 0;
+      for (let fromCursor = 0; fromCursor < tripEvents.events.length - 1; fromCursor++) {
+        const fromEvent = tripEvents.events[fromCursor]!;
+        const from = fromEvent.stopTime;
+        const departureAt = fromEvent.departureAt;
+        if (!fromEvent.canBoard || !departureAt || departureAt < input.earliestDeparture || departureAt > journeyEnd) continue;
+        while (firstLongTarget < targetCursors.length && targetCursors[firstLongTarget]! <= fromCursor + 20) {
+          firstLongTarget++;
+        }
+        for (let targetIndex = firstLongTarget; targetIndex < targetCursors.length; targetIndex++) {
+          const toEvent = tripEvents.events[targetCursors[targetIndex]!]!;
+          const to = toEvent.stopTime;
+          const arrivalAt = toEvent.arrivalAt;
+          if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds
+            || !arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
+            || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000
+            || !canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
+          addedTripDemand++;
+          if (addedTripDemand >= remainingTripDemand) break;
+        }
+        if (addedTripDemand >= remainingTripDemand) break;
+      }
+      if (addedTripDemand >= remainingTripDemand) break;
+    }
+    if (addedTripDemand > 0) {
+      candidateDemandByRoute.set(trip.routeId,
+        (candidateDemandByRoute.get(trip.routeId) ?? 0) + addedTripDemand);
+    }
+  }
+  const graphSegmentBudgetByRoute = allocateBoundedGraphBudgets(
+    candidateDemandByRoute, maximumGraphSegments, maximumGraphSegmentsPerRoute,
+  );
+  const candidateRouteCount = graphSegmentBudgetByRoute.size;
+  const estimatedGraphDemand = [...candidateDemandByRoute.values()].reduce((sum, value) => sum + value, 0);
+  const graphRoutesBudgetLimited = [...candidateDemandByRoute].filter(([routeId, demand]) =>
+    demand > (graphSegmentBudgetByRoute.get(routeId) ?? 0)).length;
+  const graphRoutesAtPerRouteCap = [...graphSegmentBudgetByRoute.values()]
+    .filter((budget) => budget === maximumGraphSegmentsPerRoute).length;
+  const globalGraphBudgetBinding = estimatedGraphDemand > maximumGraphSegments;
+  // Route budgets are allocated from bounded graph demand estimates. If a
+  // route's estimated demand exceeds its share, the search is incomplete even
+  // when that route happens not to materialize a segment before filtering.
+  // Surface the bounded result as partial instead of reporting an empty graph
+  // as a complete no-route answer.
+  let segmentGraphTruncated = graphRoutesBudgetLimited > 0;
   const hasPriorEvent = (segment: Pick<RetainedGtfsSegment,
     'departureAt' | 'originContext' | 'tripId' | 'routeId'>, minimumGapSeconds: number) => {
     const latestAllowed = segment.departureAt.getTime() - minimumGapSeconds * 1000;
@@ -2386,7 +2463,8 @@ export function findGtfsItinerariesWithStats(
       // retained alongside the graph.
       const seenTripSegments = new Set<string>();
       for (const projection of materializeTripInstanceLegs(tripEvents.events, {
-        maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
+        tripId, maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
+        queryReachableTransferTripIdsByStopId,
         canBelongToDirectOnlyJourney,
       })) {
         if (projection.kind === 'omitted-beyond-window') {

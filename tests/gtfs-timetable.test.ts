@@ -753,6 +753,102 @@ test('keeps a direct GTFS segment whose destination lies beyond twenty interchan
     'the long direct segment is preserved, while omitted beyond-window transfer alternatives remain disclosed');
 });
 
+test('keeps and budgets a long first leg to a query-reachable transfer hub', () => {
+  const timetable = feed();
+  timetable.trips.delete('t1');
+  timetable.stopTimes.delete('t1');
+  for (const [stopId, entries] of timetable.stopTimesByStop) {
+    const retained = entries.filter((entry) => entry.tripId !== 't1');
+    if (retained.length) timetable.stopTimesByStop.set(stopId, retained);
+    else timetable.stopTimesByStop.delete(stopId);
+  }
+  const routeStops = Array.from({ length: 22 }, (_, index) => {
+    const stopId = `transfer-corridor-${index}`;
+    const stop = { id: stopId, name: `Transfer corridor ${index}`, lon: 24.02 + index * 0.0052, lat: 49.84 };
+    timetable.stops.set(stopId, stop);
+    return { stopId, sequence: index + 1, seconds: 8 * 3600 + index * 2 * 60 };
+  });
+  for (let index = 1; index < routeStops.length - 1; index += 1) {
+    const routeId = `transfer-branch-route-${index}`;
+    const tripId = `transfer-branch-trip-${index}`;
+    const terminalId = `transfer-branch-terminal-${index}`;
+    timetable.routes.set(routeId, { name: `Branch ${index}`, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Remote terminal' });
+    timetable.stops.set(terminalId, { id: terminalId, name: terminalId, lon: 24.02 + index * 0.0052, lat: 50.1 });
+    const branchTimes = [
+      { stopId: routeStops[index].stopId, sequence: 1, arrivalSeconds: routeStops[index].seconds, departureSeconds: routeStops[index].seconds, pickupType: 0, dropOffType: 0 },
+      { stopId: terminalId, sequence: 2, arrivalSeconds: routeStops[index].seconds + 20 * 60, departureSeconds: routeStops[index].seconds + 20 * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, branchTimes);
+    for (const [stopIndex, stopTime] of branchTimes.entries()) {
+      timetable.stopTimesByStop.set(stopTime.stopId, [
+        ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index: stopIndex },
+      ]);
+    }
+  }
+
+  const firstTripId = 'long-transfer-first';
+  timetable.trips.set(firstTripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Long transfer hub' });
+  timetable.stopTimes.set(firstTripId, routeStops.map((stop) => ({
+    stopId: stop.stopId, sequence: stop.sequence, arrivalSeconds: stop.seconds, departureSeconds: stop.seconds,
+    pickupType: 0, dropOffType: 0,
+  })));
+  for (const [index, stop] of routeStops.entries()) {
+    timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: firstTripId, index },
+    ]);
+  }
+
+  const onwardRouteId = 'long-transfer-onward-route';
+  const onwardTripId = 'long-transfer-onward';
+  const destinationId = 'long-transfer-destination';
+  const hub = routeStops.at(-1)!;
+  const destination = { id: destinationId, name: 'Long transfer destination', lon: 24.02 + 21 * 0.0052 + 0.0015, lat: 49.84 };
+  timetable.routes.set(onwardRouteId, { name: 'Onward bus', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.set(onwardTripId, { routeId: onwardRouteId, serviceId: 'weekday', headsign: 'Destination' });
+  timetable.stops.set(destinationId, destination);
+  const onwardTimes = [
+    { stopId: hub.stopId, sequence: 1, arrivalSeconds: 8 * 3600 + 48 * 60, departureSeconds: 8 * 3600 + 48 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: destinationId, sequence: 2, arrivalSeconds: 9 * 3600, departureSeconds: 9 * 3600, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.stopTimes.set(onwardTripId, onwardTimes);
+  for (const [index, stopTime] of onwardTimes.entries()) {
+    timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId: onwardTripId, index },
+    ]);
+  }
+
+  const diagnosticRows: Array<Record<string, unknown>> = [];
+  const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const originalInfo = console.info;
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: unknown[]) => { diagnosticRows.push(JSON.parse(String(args[0])) as Record<string, unknown>); };
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    result = findGtfsItinerariesWithStats(timetable, {
+      providerId: 'test', providerName: 'Test Transit', providerCity: 'Львів',
+      origin: [24.02, 49.84], destination: [destination.lon, destination.lat],
+      earliestDeparture: new Date('2026-10-12T04:55:00Z'),
+      latestDeparture: new Date('2026-10-12T05:30:00Z'),
+      now: new Date('2026-10-12T04:00:00Z'),
+      limit: 20, maximumTransfers: 1, maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+    }, { totalSegments: 231, segmentsPerRoute: 500 });
+  } finally {
+    console.info = originalInfo;
+    if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+  }
+
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',')
+    === `${firstTripId},${onwardTripId}`),
+  'a feasible onward trip keeps the first-leg hub reachable even when it is more than twenty interchange stops away');
+  const graphStats = diagnosticRows.find((row) => row.stage === 'segments-built');
+  assert.equal(graphStats?.estimatedGraphDemand, 232,
+    'graph demand includes the long transfer leg before the hard global budget is allocated');
+  assert.equal(graphStats?.globalGraphBudgetBinding, 1,
+    'the corrected demand estimate truthfully reports that the 231-segment graph cap binds');
+});
+
 test('limits duplicate stop-pair alternatives for the same scheduled trip chain', () => {
   const timetable = feed({ withIntermediate: true });
   const stops = [
