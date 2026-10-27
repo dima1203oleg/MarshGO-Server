@@ -35,6 +35,8 @@ const MAX_ROUTE_GEOMETRY_POINTS = 500;
 // preserves a fair slice for each line and makes truncation explicit.
 const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
+const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
+const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
 export const MAX_GTFS_TRANSFERS = 4;
 export const DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS = 180;
 export const DEFAULT_MAXIMUM_WAIT_SECONDS = 4 * 60 * 60;
@@ -2086,6 +2088,25 @@ export function findGtfsItinerariesWithStats(
     const signatures = new Set(best.map((rule) => `${rule.transferType}:${rule.minTransferTimeSeconds ?? ''}`));
     return signatures.size > 1 ? { rule: null, ambiguous: true } : { rule: best[0]!, ambiguous: false };
   };
+  const retentionTransportType = (routeId: string): GtfsTransportType | undefined => {
+    const route = feed.routes.get(routeId);
+    const providerCity = feed.providersByRoute?.get(routeId)?.city ?? input.providerCity;
+    return route?.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route?.transportType;
+  };
+  const retentionRequiredTransferSeconds = (previousRouteId: string, nextRouteId: string,
+    walkingSeconds: number, minimumGapSeconds: number, rule: GtfsTransferRule | null) => {
+    if (rule?.transferType === 4) return 0;
+    const previousType = retentionTransportType(previousRouteId);
+    const nextType = retentionTransportType(nextRouteId);
+    const modeBuffer = previousType === 'train' || previousType === 'intercity_bus'
+      || nextType === 'train' || nextType === 'intercity_bus' ? MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS
+      : previousType === 'suburban_train' || nextType === 'suburban_train' ? MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS
+        : minimumGapSeconds;
+    const requiredWithWalking = Math.max(minimumGapSeconds, modeBuffer) + walkingSeconds;
+    return rule?.transferType === 2
+      ? Math.max(requiredWithWalking, rule.minTransferTimeSeconds ?? 0)
+      : requiredWithWalking;
+  };
   for (const [tripId, trip] of feed.trips) {
     const candidateStops = candidateStopCountByRoute.get(trip.routeId) ?? 0;
     if (candidateStops < 2) continue;
@@ -2329,8 +2350,8 @@ export function findGtfsItinerariesWithStats(
           || (nearby !== null && nearby <= transferRadius
             ? { walkingMeters: nearby, walkingSeconds: Math.ceil(nearby / 1.25) } : false);
       if (!pathway || pathway.walkingMeters > transferRadius) return null;
-      return Math.max(minimumGapSeconds, pathway ? pathway.walkingSeconds : 0,
-        rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
+      return retentionRequiredTransferSeconds(event.routeId, segment.routeId,
+        pathway ? pathway.walkingSeconds : 0, minimumGapSeconds, rule);
     };
     for (const nodeId of segmentNodes) {
       const events = originRetentionEventsByReachableStop.get(nodeId) ?? [];
@@ -2371,8 +2392,8 @@ export function findGtfsItinerariesWithStats(
           || (nearby !== null && nearby <= transferRadius
             ? { walkingMeters: nearby, walkingSeconds: Math.ceil(nearby / 1.25) } : false);
       if (!pathway || pathway.walkingMeters > transferRadius) return null;
-      return Math.max(minimumGapSeconds, pathway ? pathway.walkingSeconds : 0,
-        rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
+      return retentionRequiredTransferSeconds(segment.routeId, event.routeId,
+        pathway ? pathway.walkingSeconds : 0, minimumGapSeconds, rule);
     };
     const reachableDestinationStops = new Set([segment.destinationContext.details.id,
       ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
@@ -2435,8 +2456,8 @@ export function findGtfsItinerariesWithStats(
             || (nearby !== null && nearby <= transferRadius
               ? { walkingMeters: nearby, walkingSeconds: Math.ceil(nearby / 1.25) } : false);
         if (!pathway || pathway.walkingMeters > transferRadius) continue;
-        const requiredSeconds = rule?.transferType === 4 ? 0 : Math.max(minimumGapSeconds,
-          pathway.walkingSeconds, rule?.transferType === 2 ? rule.minTransferTimeSeconds ?? 0 : 0);
+        const requiredSeconds = retentionRequiredTransferSeconds(segment.routeId, event.routeId,
+          pathway.walkingSeconds, minimumGapSeconds, rule);
         if (availableSeconds < requiredSeconds || event.journeyArrivalAt === undefined) continue;
         earliestArrival = Math.min(earliestArrival, event.journeyArrivalAt);
         // Events are ordered by departure time. The earliest feasible event
@@ -2726,17 +2747,31 @@ export function findGtfsItinerariesWithStats(
             || (candidateEndsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds));
         });
         const retentionPriorityTier = retentionTier === 0 ? 0
-          : retentionTier < 3 ? connectsOppositeQueryFrontier ? 1 : 3
-            : temporallyConnectsQueryEnds ? 2 : 4;
+          : connectsOppositeQueryFrontier ? 1
+            : retentionTier === 1 ? 2
+              : retentionTier === 2 ? 3
+                : temporallyConnectsQueryEnds ? 4 : 5;
         const routeCandidates = segmentsByRoute.get(trip.routeId) ?? [];
+        // When a bounded route budget cannot retain every origin-serving trip,
+        // prefer earlier arrivals at query-relevant corridor stops. A direct
+        // destination look-ahead cannot recognize a feeder that needs two or
+        // more transfers, so hash-only tie-breaking can keep a later trip that
+        // misses the only feasible downstream connection.
+        const earliestOriginArrivalMs = retentionTier === 1 && canBoardFromOrigin
+          ? Math.min(...tripCandidates.filter(canBoardOriginCandidate).map((candidate) => candidate.arrivalAt.getTime()))
+          : null;
+        const originArrivalMinute = earliestOriginArrivalMs === null ? 0
+          : Math.min(4095, Math.max(0, Math.floor((earliestOriginArrivalMs - input.earliestDeparture.getTime()) / 60_000)));
+        const stableRetentionHash = gtfsSegmentRetentionPriority(tripKey);
         const retained = retainBoundedTripGroup(routeCandidates, {
           key: tripKey,
           // Keep both-endpoint trips first, then one-endpoint trips that
           // connect to the opposite query frontier, then scheduled connectors.
           // Only after those feasible candidates should unconnected endpoint
           // trips consume a bounded route graph.
-          priority: retentionPriorityTier * 0x2_0000_0000
-            + gtfsSegmentRetentionPriority(tripKey),
+          priority: retentionPriorityTier * GTFS_RETENTION_PRIORITY_TIER_STRIDE
+            + originArrivalMinute * GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE
+            + stableRetentionHash,
           segments: tripCandidates,
         }, retainedSegmentCountByRoute.get(trip.routeId) ?? 0, graphSegmentLimitPerRoute);
         if (retained.retained) {

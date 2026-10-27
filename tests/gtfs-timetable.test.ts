@@ -1331,6 +1331,86 @@ test('query-time retention keeps a feasible multi-leg chain under an injected gr
     'skipped boarding stops are excluded from temporal retention and returned itineraries');
 });
 
+test('keeps exhaustive strategy winners under a tight graph budget with a disconnected route', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.fareProducts = new Map([
+    ['access-fare', { id: 'access-fare', priceMinor: 300, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+    ['middle-fare', { id: 'middle-fare', priceMinor: 200, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+    ['egress-fare', { id: 'egress-fare', priceMinor: 400, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+  ]);
+  timetable.fareRules = new Map([
+    ['access-fare', [{ fareId: 'access-fare', routeId: 'access' }]],
+    ['middle-fare', [{ fareId: 'middle-fare', routeId: 'middle' }]],
+    ['egress-fare', [{ fareId: 'egress-fare', routeId: 'egress' }]],
+  ]);
+  const addTrip = (tripId: string, routeId: string, stopIds: string[], times: number[]) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    const entries = stopIds.map((stopId, index) => ({
+      stopId, sequence: index + 1, arrivalSeconds: times[index]!, departureSeconds: times[index]!, pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+  addTrip('access-too-late-trip', 'access', ['origin', 'hub-a'], [8 * 3600 + 20 * 60, 8 * 3600 + 30 * 60]);
+  timetable.routes.set('slack-route', { name: 'Slack connector', mode: 'BUS', transportType: 'bus' });
+  addTrip('slack-loop-trip', 'slack-route', ['hub-a', 'hub-b', 'hub-a', 'hub-b'],
+    [9 * 3600 + 20 * 60, 9 * 3600 + 30 * 60, 9 * 3600 + 40 * 60, 9 * 3600 + 50 * 60]);
+
+  const searchInput = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+    maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 10 * 60,
+  };
+  const exhaustive = findGtfsItinerariesWithStats(timetable, searchInput,
+    { totalSegments: 100, segmentsPerRoute: 100 });
+  const diagnostics: Array<Record<string, unknown>> = [];
+  const boundedGraphs: GtfsCandidateGraphSnapshot[] = [];
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousInfo = console.info;
+  let bounded: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+    console.info = (...args: unknown[]) => {
+      try { diagnostics.push(JSON.parse(String(args[0])) as Record<string, unknown>); } catch { /* unrelated logs */ }
+    };
+    bounded = findGtfsItinerariesWithStats(timetable, searchInput, { totalSegments: 4, segmentsPerRoute: 3 },
+      (snapshot) => boundedGraphs.push(snapshot));
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+  }
+
+  const targetChain = `access-trip,${targetTripId},egress-trip`;
+  const chainId = (journey: GtfsItinerary) => journey.segments.map((segment) => segment.tripId).join(',');
+  assert.equal(exhaustive.searchTruncated, false, 'the all-segment run is a complete oracle for this feed');
+  assert.deepEqual(exhaustive.itineraries.map(chainId), [targetChain], 'the oracle has one feasible complete journey');
+  assert.equal(bounded.truncation.candidateGraph, true, 'the deliberately small global graph is reported partial');
+  const graph = diagnostics.find((entry) => entry.stage === 'segments-built');
+  assert.ok(graph, 'the bounded graph emits allocation diagnostics');
+  assert.ok((graph.estimatedGraphDemand as number) > (graph.graphSegmentBudgetTotal as number),
+    'the deliberately constrained graph is below its estimated demand');
+  assert.equal(graph.globalGraphBudgetBinding, 1);
+  assert.ok(bounded.itineraries.some((journey) => chainId(journey) === targetChain),
+    `bounded graph lost the exhaustive feasible trip chain; candidates=${JSON.stringify(bounded.itineraries.map(chainId))}; `
+    + `segments=${JSON.stringify(boundedGraphs[0]?.segments.map(({ journey }) => ({ tripId: journey.tripId,
+      routeId: journey.routeId, from: journey.originStop.id, to: journey.destinationStop.id })))}; diagnostic=${JSON.stringify(graph)}`);
+  for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+    const toScorable = (journey: GtfsItinerary) => ({
+      id: chainId(journey), durationSeconds: journey.durationSeconds,
+      priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+      transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+      transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+      legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+    });
+    assert.equal(scoreJourneys(bounded.itineraries.map(toScorable), strategy)[0]?.journey.id,
+      scoreJourneys(exhaustive.itineraries.map(toScorable), strategy)[0]?.journey.id,
+      `${strategy} winner matches the exhaustive oracle after cross-route redistribution`);
+  }
+});
+
 test('bounded connector overflow preserves the fastest onward stop from one middle trip', () => {
   const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
   timetable.stops.set('hub-b', { id: 'hub-b', name: 'Hub B', lon: 24.031, lat: 49.847 });
