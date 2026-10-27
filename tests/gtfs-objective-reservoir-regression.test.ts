@@ -109,12 +109,35 @@ test('four-slot trip-chain sample retains FASTEST, CHEAPEST, BALANCED, and least
     transfers: 0, fare: { priceMinor: 900, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
   const leastWalking = { ...base, id: 'least-walking', durationSeconds: 4_000, walkingMeters: 0,
     transfers: 0, fare: { priceMinor: 500, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
-  const candidates = [fastest, cheapest, balanced, leastWalking];
+  const decoys = Array.from({ length: 28 }, (_, index) => ({
+    ...base,
+    id: `decoy-${String(index).padStart(2, '0')}`,
+    durationSeconds: 3_500 + index * 10,
+    walkingMeters: 350 + index,
+    transfers: 1,
+    fare: { priceMinor: 950 + index * 5, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const },
+  }));
+  const candidates = [fastest, cheapest, balanced, leastWalking, ...decoys];
   assert.equal(rankGtfsItinerariesForCandidateSampling(candidates)[0]?.id, balanced.id,
     'the shared scorer must recognize the intended BALANCED witness');
 
-  const sample = sampleGtfsTripChainCandidates(candidates, 4);
-  assert.deepEqual(new Set(sample.map((candidate) => candidate.id)),
-    new Set([fastest.id, cheapest.id, balanced.id, leastWalking.id]),
-    'the four-slot cap must preserve the distinct routing objective witnesses');
+  const expectedWitnesses = new Set([fastest.id, cheapest.id, balanced.id, leastWalking.id]);
+  const assertWitnessesSurvive = (ordered: typeof candidates, orderLabel: string) => {
+    const sample = sampleGtfsTripChainCandidates(ordered, 4);
+    assert.deepEqual(new Set(sample.map((candidate) => candidate.id)), expectedWitnesses,
+      `the four-slot cap must preserve all four distinct objective witnesses (${orderLabel})`);
+  };
+  for (let offset = 0; offset < candidates.length; offset++) {
+    assertWitnessesSurvive([...candidates.slice(offset), ...candidates.slice(0, offset)], `cyclic ${offset}`);
+  }
+  let seed = 0x4d47524f;
+  for (let iteration = 0; iteration < 64; iteration++) {
+    const shuffled = [...candidates];
+    for (let index = shuffled.length - 1; index > 0; index--) {
+      seed = (seed * 1_664_525 + 1_013_904_223) >>> 0;
+      const swapIndex = seed % (index + 1);
+      [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex]!, shuffled[index]!];
+    }
+    assertWitnessesSurvive(shuffled, `seeded shuffle ${iteration}`);
+  }
 });
