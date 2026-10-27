@@ -789,7 +789,7 @@ test('limits duplicate stop-pair alternatives for the same scheduled trip chain'
   }
 
   assert.ok(result.itineraries.length > 0);
-  assert.ok([...countsByTripChain.values()].every((count) => count <= 2),
+  assert.ok([...countsByTripChain.values()].every((count) => count <= 3),
     'a bounded number of stop-pair choices should share the same scheduled vehicle chain');
   assert.equal(result.resultLimitReached, true,
     'suppressing additional stop-pair variants must be visible as candidate sampling');

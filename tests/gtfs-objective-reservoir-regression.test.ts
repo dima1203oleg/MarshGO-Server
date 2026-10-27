@@ -39,7 +39,7 @@ function createFeedTest() {
   return parseGtfsTimetable(files);
 }
 
-test('objective reservoir preserves global least-walking witness when same-trip sample cap of 2 is filled by fastest and cheapest variants', () => {
+test('bounded three-variant trip-chain sample preserves fastest, cheapest, and least-walking witnesses', () => {
   const timetable = createFeedTest();
 
   // Search from exact stop-b to exact stop-c coordinates:
@@ -69,8 +69,8 @@ test('objective reservoir preserves global least-walking witness when same-trip 
   assert.ok(cheapest, 'cheapest variant (stop-b -> stop-d) must be retained');
   assert.equal(result.truncation.candidateSampling, true,
     'fixture must exercise a bounded candidate sampler for this to be a meaningful regression');
-  // Assert that the global least-walking witness (stop-b -> stop-c with 0m walking)
-  // is preserved via the objective reservoir rather than being dropped at the 2-variant trip-chain cap
+  // The production cap admits one distinct winner for each key routing objective
+  // while keeping the number of alternatives for this scheduled vehicle chain bounded.
   const leastWalking = result.itineraries.find((itinerary) => itinerary.walkingMeters === 0);
   assert.ok(
     leastWalking,
@@ -84,7 +84,8 @@ test('objective reservoir preserves global least-walking witness when same-trip 
     'the reservoir-retained itinerary must keep its exact ordered GTFS stop calls');
   assert.equal(retainedSegment.routeGeometry, undefined,
     'without a supplied GTFS shape, the router must not invent route geometry');
-  const localSample = sampleGtfsTripChainCandidates([fastest, cheapest, leastWalking], 2);
-  assert.deepEqual(new Set(localSample.map((itinerary) => itinerary.id)), new Set([fastest.id, cheapest.id]),
-    'the local two-slot trip-chain sample must reject the distinct least-walking witness');
+  const boundedSample = sampleGtfsTripChainCandidates([fastest, cheapest, leastWalking], 3);
+  assert.deepEqual(new Set(boundedSample.map((itinerary) => itinerary.id)),
+    new Set([fastest.id, cheapest.id, leastWalking.id]),
+    'the bounded three-slot trip-chain sample must preserve all three distinct objective witnesses');
 });

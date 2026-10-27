@@ -2784,7 +2784,7 @@ export function findGtfsItinerariesWithStats(
   const MAX_RESULTS_PER_ROUTE_CHAIN = 8;
   // Keep a few useful boarding/alighting variants for the same scheduled
   // vehicles, selected across time, fare, transfer, and walking objectives.
-  const MAX_RESULTS_PER_TRIP_CHAIN = 2;
+  const MAX_RESULTS_PER_TRIP_CHAIN = 3;
   const maxTransitLegs = maximumTransfers + 1;
   // Keep the per-leg sampling cap independent of the caller's response-page
   // size so later cross-provider ranking receives a consistent diverse pool.
@@ -3229,7 +3229,7 @@ export function findGtfsItinerariesWithStats(
   }
 
   const allCandidateIds = new Set(results.keys());
-  const rankedResults = [...results.values()];
+  let rankedResults = [...results.values()];
   for (const sample of objectiveCandidateSamples.values()) {
     for (const candidate of sample) {
       if (allCandidateIds.has(candidate.id)) continue;
@@ -3237,6 +3237,32 @@ export function findGtfsItinerariesWithStats(
       rankedResults.push(candidate);
     }
   }
+  // Objective reservoirs are independent bounded samples. Their union can
+  // exceed the per-chain limits even though the general result pool cannot;
+  // reapply both limits before ranking the public response candidates.
+  const candidatesByTripChain = new Map<string, GtfsItinerary[]>();
+  for (const candidate of rankedResults) {
+    const tripChain = candidate.segments.map((segment) =>
+      `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+    const group = candidatesByTripChain.get(tripChain) ?? [];
+    group.push(candidate);
+    candidatesByTripChain.set(tripChain, group);
+  }
+  const boundedTripCandidates = [...candidatesByTripChain.values()].flatMap((group) =>
+    sampleGtfsTripChainCandidates(group, MAX_RESULTS_PER_TRIP_CHAIN));
+  const candidatesByRouteChain = new Map<string, GtfsItinerary[]>();
+  for (const candidate of boundedTripCandidates) {
+    const routeChain = candidate.segments.filter((segment, index) => index === 0
+      || candidate.segments[index - 1]?.providerId !== segment.providerId
+      || candidate.segments[index - 1]?.routeId !== segment.routeId)
+      .map((segment) => `${segment.providerId}:${segment.routeId}`).join('>');
+    const group = candidatesByRouteChain.get(routeChain) ?? [];
+    group.push(candidate);
+    candidatesByRouteChain.set(routeChain, group);
+  }
+  rankedResults = [...candidatesByRouteChain.values()].flatMap((group) =>
+    sampleGtfsRouteChainCandidates(group, MAX_RESULTS_PER_ROUTE_CHAIN));
+  if (rankedResults.length < allCandidateIds.size) candidateSamplingTruncated = true;
   rankedResults.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byDuration = [...rankedResults].sort((a, b) => a.durationSeconds - b.durationSeconds
     || a.transfers - b.transfers || compareStableId(a.id, b.id));
