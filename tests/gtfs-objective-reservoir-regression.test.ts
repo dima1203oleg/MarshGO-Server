@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findGtfsItinerariesWithStats, parseGtfsTimetable, sampleGtfsTripChainCandidates } from '../server/journey/gtfsTimetable';
+import { findGtfsItinerariesWithStats, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, sampleGtfsTripChainCandidates } from '../server/journey/gtfsTimetable';
 
 function createFeedTest() {
   const encode = (text: string) => new TextEncoder().encode(text);
@@ -88,4 +88,33 @@ test('bounded three-variant trip-chain sample preserves fastest, cheapest, and l
   assert.deepEqual(new Set(boundedSample.map((itinerary) => itinerary.id)),
     new Set([fastest.id, cheapest.id, leastWalking.id]),
     'the bounded three-slot trip-chain sample must preserve all three distinct objective witnesses');
+});
+
+test('three-slot trip-chain sample retains the shared BALANCED winner beside fastest and cheapest', () => {
+  const timetable = createFeedTest();
+  const base = findGtfsItinerariesWithStats(timetable, {
+    providerId: 'p1', providerName: 'Test Transit',
+    origin: [24.0200, 49.8400], destination: [24.0300, 49.8500],
+    earliestDeparture: new Date('2026-10-12T04:55:00Z'),
+    latestDeparture: new Date('2026-10-12T05:30:00Z'),
+    now: new Date('2026-10-08T00:00:00Z'),
+    maximumAccessWalkingMeters: 500, maximumEgressWalkingMeters: 500,
+    maximumTransfers: 0, limit: 5,
+  }).itineraries[0];
+  assert.ok(base);
+  const fastest = { ...base, id: 'fastest', durationSeconds: 1_800, walkingMeters: 800,
+    transfers: 1, fare: { priceMinor: 2_000, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const cheapest = { ...base, id: 'cheapest', durationSeconds: 5_000, walkingMeters: 800,
+    transfers: 1, fare: { priceMinor: 100, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const balanced = { ...base, id: 'balanced', durationSeconds: 3_000, walkingMeters: 300,
+    transfers: 0, fare: { priceMinor: 900, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const leastWalking = { ...base, id: 'least-walking', durationSeconds: 4_000, walkingMeters: 0,
+    transfers: 0, fare: { priceMinor: 500, currency: 'UAH', allocations: [], source: 'gtfs-v1' as const } };
+  const candidates = [fastest, cheapest, balanced, leastWalking];
+  assert.equal(rankGtfsItinerariesForCandidateSampling(candidates)[0]?.id, balanced.id,
+    'the shared scorer must recognize the intended BALANCED witness');
+
+  const sample = sampleGtfsTripChainCandidates(candidates, 3);
+  assert.deepEqual(new Set(sample.map((candidate) => candidate.id)), new Set([fastest.id, cheapest.id, balanced.id]),
+    'the three-slot cap must preserve FASTEST, CHEAPEST, and BALANCED winners');
 });

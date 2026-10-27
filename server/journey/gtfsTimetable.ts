@@ -609,6 +609,10 @@ export function sampleGtfsTripChainCandidates(
     && (fastest?.fare?.currency !== 'UAH' || cheapest.fare!.priceMinor < fastest.fare.priceMinor)) {
     selected.set(cheapest.id, cheapest);
   }
+  // The production three-slot sample backs the three visible strategies.
+  // Keep the shared BALANCED winner before adding a standalone low-walking
+  // fallback, which can otherwise crowd out the user's Optimal option.
+  if (maximum >= 3) take(rankGtfsItinerariesForCandidateSampling(itineraries), maximum - selected.size);
   take(byWalking, maximum - selected.size);
   take(rankGtfsItinerariesForCandidateSampling(itineraries), maximum - selected.size);
   take(byDuration, maximum - selected.size);
