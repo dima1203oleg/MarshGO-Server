@@ -2693,7 +2693,15 @@ test('reports the bounded per-leg objective-reservoir cutoff while search work r
   const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
   assert.ok(ranked, 'the bounded-search diagnostic is captured');
   const reachedByLeg = JSON.parse(String(ranked.candidatePoolReachedAtStepByLegCount)) as Record<string, number>;
+  const returnedByLeg = JSON.parse(String(ranked.returnedByLegCount)) as Record<string, number>;
   assert.ok((ranked.candidatesWith2Legs as number) >= 750, 'the two-leg candidate pool reached its bound');
+  assert.deepEqual(returnedByLeg, result.itineraries.reduce<Record<string, number>>((counts, itinerary) => {
+    const legCount = String(itinerary.segments.length);
+    counts[legCount] = (counts[legCount] ?? 0) + 1;
+    return counts;
+  }, {}), 'the opt-in diagnostic reports final response counts by actual transit-leg count');
+  assert.equal(Object.values(returnedByLeg).reduce((sum, count) => sum + count, 0), result.itineraries.length,
+    'returned leg-count diagnostics account for every selected itinerary exactly once');
   assert.equal((ranked.searchSteps as number) - reachedByLeg['2'], 25_000,
     'the objective reservoir scans exactly its bounded window after pool saturation');
   assert.ok((ranked.maxQueuedSearchWork as number) < 10_000, 'the queue frontier cap did not trigger');
