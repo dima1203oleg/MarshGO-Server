@@ -1624,6 +1624,61 @@ test('query-time retention keeps a scheduled connector ahead of dense irrelevant
   'the exact scheduled connector survives even when irrelevant stops have more connected routes');
 });
 
+test('query-time retention ranks a middle connector by its complete onward arrival', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.stops.set('branch-a', { id: 'branch-a', name: 'Early branch A', lon: 24.0260, lat: 49.8460 });
+
+  const middleStops = [
+    ['hub-a', 8 * 3600 + 18 * 60],
+    ['branch-a', 8 * 3600 + 20 * 60],
+    ['hub-b', 8 * 3600 + 25 * 60],
+  ] as const;
+  timetable.stopTimes.set(targetTripId, middleStops.map(([stopId, time], index) => ({
+    stopId, sequence: index + 1, arrivalSeconds: time, departureSeconds: time, pickupType: 0, dropOffType: 0,
+  })));
+  // The earlier intermediate stop has a valid but slower continuation. The
+  // later hub-b stop connects to the existing egress trip and arrives first.
+  timetable.routes.set('branch-egress-a', { name: 'Branch egress A', mode: 'BUS', transportType: 'bus' });
+  const addTrip = (tripId: string, routeId: string, from: string, fromTime: number, toTime: number) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    const stops = [from, 'destination'].map((stopId, index) => ({
+      stopId, sequence: index + 1,
+      arrivalSeconds: index === 0 ? fromTime : toTime,
+      departureSeconds: index === 0 ? fromTime : toTime,
+      pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, stops);
+  };
+  addTrip('branch-egress-trip-a', 'branch-egress-a', 'branch-a', 8 * 3600 + 30 * 60, 9 * 3600 + 10 * 60);
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, entries] of timetable.stopTimes) entries.forEach((entry, index) => {
+    const atStop = timetable.stopTimesByStop.get(entry.stopId) ?? [];
+    atStop.push({ tripId, index });
+    timetable.stopTimesByStop.set(entry.stopId, atStop);
+  });
+
+  const search = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400], destination: [24.0300, 49.8500],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+  };
+  const expectedTripChain = `access-trip,${targetTripId},egress-trip`;
+  const exhaustive = findGtfsItinerariesWithStats(timetable, search, { totalSegments: 100, segmentsPerRoute: 100 });
+  assert.ok(exhaustive.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',') === expectedTripChain),
+    'the exact chain is feasible without graph-retention limits');
+
+  let graph: GtfsCandidateGraphSnapshot | undefined;
+  const result = findGtfsItinerariesWithStats(timetable, search, { totalSegments: 4, segmentsPerRoute: 1 },
+    (snapshot) => { graph = snapshot; });
+
+  assert.ok(graph, 'the bounded candidate graph is observable');
+  assert.ok(graph.segments.some(({ journey }) => journey.tripId === targetTripId
+    && journey.originStop.id === 'hub-a' && journey.destinationStop.id === 'hub-b'),
+  'the bounded connector reservoir must preserve the transfer to hub-b alongside the earlier branch');
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.map((segment) => segment.tripId).join(',') === expectedTripChain),
+  'earlier feasible branches must not crowd out the exact two-transfer journey');
+});
+
 test('query-time retention preserves a feasible connector across nearby stop IDs', () => {
   const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
   timetable.stops.set('hub-a-near', { id: 'hub-a-near', name: 'Hub A nearby platform', lon: 24.0255, lat: 49.8450 });
