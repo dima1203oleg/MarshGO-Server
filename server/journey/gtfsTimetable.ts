@@ -2385,8 +2385,19 @@ export function findGtfsItinerariesWithStats(
     priorEventCache.set(segment, false);
     return false;
   };
-  const hasNextEvent = (segment: Pick<RetainedGtfsSegment,
-    'arrivalAt' | 'destinationContext' | 'tripId' | 'routeId'>, minimumGapSeconds: number) => {
+  const nextEventCache = new WeakMap<RetainedGtfsSegment, boolean>();
+  const nextEventByTripStopCache = new Map<string, boolean>();
+  const MAX_CACHED_NEXT_EVENT_TRIP_STOPS = 16_384;
+  const hasNextEvent = (segment: RetainedGtfsSegment, minimumGapSeconds: number) => {
+    const cached = nextEventCache.get(segment);
+    if (cached !== undefined) return cached;
+    const stopKey = `${segment.providerId}\u0000${segment.serviceDate}\u0000${segment.tripId}`
+      + `\u0000${segment.routeId}\u0000${segment.toIndex}\u0000${minimumGapSeconds}`;
+    const cachedByStop = nextEventByTripStopCache.get(stopKey);
+    if (cachedByStop !== undefined) {
+      nextEventCache.set(segment, cachedByStop);
+      return cachedByStop;
+    }
     // Type-4 rules allow zero-buffer continuations, so retain the short-gap
     // events until their exact transfer rule has been resolved.
     const earliestAllowed = segment.arrivalAt.getTime();
@@ -2429,8 +2440,18 @@ export function findGtfsItinerariesWithStats(
         const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
         if (availableSeconds > maximumWaitSeconds) break;
         const requiredSeconds = minimumGapForEvent(event);
-        if (requiredSeconds !== null && availableSeconds >= requiredSeconds) return true;
+        if (requiredSeconds !== null && availableSeconds >= requiredSeconds) {
+          nextEventCache.set(segment, true);
+          if (nextEventByTripStopCache.size < MAX_CACHED_NEXT_EVENT_TRIP_STOPS) {
+            nextEventByTripStopCache.set(stopKey, true);
+          }
+          return true;
+        }
       }
+    }
+    nextEventCache.set(segment, false);
+    if (nextEventByTripStopCache.size < MAX_CACHED_NEXT_EVENT_TRIP_STOPS) {
+      nextEventByTripStopCache.set(stopKey, false);
     }
     return false;
   };
