@@ -583,6 +583,8 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.ok(depthCounts['1'] && depthCounts['2'], 'each permitted maximum leg count is measured separately');
   assert.equal(Object.values(depthCounts).reduce((sum, counts) => sum + counts.paths + counts.children, 0), ranked.searchSteps,
     'per-depth path and child work exactly accounts for the existing searchSteps counter');
+  assert.equal(typeof ranked.transferChoiceStartIndexCacheHits, 'number');
+  assert.equal(typeof ranked.transferChoiceStartIndexComparisons, 'number');
   assert.equal(ranked.debugTripChainPresence, undefined, 'exact graph tracing stays absent without target IDs');
 });
 
