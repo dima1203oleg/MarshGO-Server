@@ -2820,9 +2820,11 @@ export function findGtfsItinerariesWithStats(
               && hasNextEvent(candidate, minimumTransferBufferSeconds)) temporallyConnectsQueryEnds = true;
             continue;
           }
-          // Keep connector work bounded when the route's initial projection
-          // fits its budget and was never ranked by BoundedBestK.
-          if (feasibleConnectorEvaluations >= 2) continue;
+          // Keep connector work bounded while allowing the route-level
+          // reservoir to inspect its full capacity. One additional feasible
+          // candidate is needed to prove that the bounded reservoir omitted
+          // work and report graph truncation accurately.
+          if (feasibleConnectorEvaluations >= Math.max(2, connectorOverflowCapacity + 1)) continue;
           if (bestConnector && candidate.arrivalAt.getTime() > bestConnector.arrivalAt) continue;
           if (hasPriorEvent(candidate, minimumTransferBufferSeconds)) {
             const onwardArrival = earliestQueryArrivalAfterSegment(candidate, minimumTransferBufferSeconds);
