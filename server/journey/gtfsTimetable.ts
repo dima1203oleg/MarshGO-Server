@@ -2681,6 +2681,7 @@ export function findGtfsItinerariesWithStats(
     retainedTripCandidates: RetainedGtfsSegment[];
     boundedTripProjectionUsed: boolean;
     graphSegmentLimitPerRoute: number;
+    connectorEvaluationCap: number;
     retentionTier: number | null;
     retentionPriorityTier: number | null;
     endpointArrivalMinute: number | null;
@@ -2817,6 +2818,8 @@ export function findGtfsItinerariesWithStats(
             canonicalTransferHubKey,
             retainedCandidateKey,
           );
+        const evaluatedConnectorHubs = new Set<string>();
+        const diverseConnectorProbeHubs = new Set<string>();
         let temporallyConnectsQueryEnds = false;
         let bestConnector: { segment: RetainedGtfsSegment; arrivalAt: number } | undefined;
         let feasibleConnectorEvaluations = 0;
@@ -2833,15 +2836,26 @@ export function findGtfsItinerariesWithStats(
             continue;
           }
           // Keep connector work bounded while allowing the route-level
-          // reservoir to inspect its full capacity. One additional feasible
-          // candidate is needed to prove that the bounded reservoir omitted
-          // work and report graph truncation accurately.
-          if (feasibleConnectorEvaluations >= Math.max(2, connectorOverflowCapacity + 1)) continue;
-          if (bestConnector && candidate.arrivalAt.getTime() > bestConnector.arrivalAt) continue;
+          // reservoir to inspect its full capacity. Once full plus one
+          // overflow probe, allow at most two unseen-hub probes so earlier
+          // candidates from one hub cannot hide a distinct transfer location.
+          const connectorEvaluationLimit = Math.max(2, connectorOverflowCapacity + 1);
+          const maximumDiverseConnectorProbes = Math.min(connectorOverflowCapacity, 2);
+          let isDiverseConnectorProbe = false;
+          if (feasibleConnectorEvaluations >= connectorEvaluationLimit) {
+            const hubKey = canonicalTransferHubKey(candidate);
+            if (evaluatedConnectorHubs.has(hubKey) || diverseConnectorProbeHubs.has(hubKey)
+              || diverseConnectorProbeHubs.size >= maximumDiverseConnectorProbes) continue;
+            diverseConnectorProbeHubs.add(hubKey);
+            isDiverseConnectorProbe = true;
+          }
+          if (!isDiverseConnectorProbe && bestConnector
+            && candidate.arrivalAt.getTime() > bestConnector.arrivalAt) continue;
           if (hasPriorEvent(candidate, minimumTransferBufferSeconds)) {
             const onwardArrival = earliestQueryArrivalAfterSegment(candidate, minimumTransferBufferSeconds);
             if (onwardArrival !== null) {
               feasibleConnectorEvaluations++;
+              evaluatedConnectorHubs.add(canonicalTransferHubKey(candidate));
               debugConnectorEvalIndex?.set(candidate, feasibleConnectorEvaluations);
               temporallyConnectsQueryEnds = true;
               const retainedConnectors = connectorOverflow.toSortedArray();
@@ -2933,6 +2947,7 @@ export function findGtfsItinerariesWithStats(
             retainedTripCandidates: [...tripCandidates],
             boundedTripProjectionUsed: Boolean(boundedTripCandidates),
             graphSegmentLimitPerRoute,
+            connectorEvaluationCap: Math.max(2, Math.min(maximumRouteOverflowConnectors, graphSegmentLimitPerRoute) + 1),
             retentionTier,
             retentionPriorityTier,
             endpointArrivalMinute,
@@ -2958,6 +2973,7 @@ export function findGtfsItinerariesWithStats(
           retainedTripCandidates: [],
           boundedTripProjectionUsed: Boolean(boundedTripCandidates),
           graphSegmentLimitPerRoute,
+          connectorEvaluationCap: Math.max(2, Math.min(maximumRouteOverflowConnectors, graphSegmentLimitPerRoute) + 1),
           retentionTier: null,
           retentionPriorityTier: null,
           endpointArrivalMinute: null,
@@ -3186,7 +3202,7 @@ export function findGtfsItinerariesWithStats(
           survivedTripProjection,
           connectorScanIndex,
           connectorEvalIndex,
-          connectorEvalCap: 2,
+          connectorEvalCap: instance.connectorEvaluationCap,
           retentionTier: instance.retentionTier,
           retentionPriorityTier: instance.retentionPriorityTier,
           survivesFinalGraph,
@@ -3208,7 +3224,7 @@ export function findGtfsItinerariesWithStats(
         traceSampledNextTrueCount: nextTrueCount,
         traceSampledOnwardNonNullCount: onwardNonNullCount,
         feasibleConnectorEvaluations: instance.feasibleConnectorEvaluations,
-        feasibleConnectorEvaluationCap: 2,
+        feasibleConnectorEvaluationCap: instance.connectorEvaluationCap,
         bestConnector: instance.bestConnector,
         retentionTier: instance.retentionTier,
         retentionPriorityTier: instance.retentionPriorityTier,
