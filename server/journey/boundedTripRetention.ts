@@ -24,6 +24,14 @@ export class BoundedBestK<T> {
     return true;
   }
 
+  get size(): number {
+    return this.heap.length;
+  }
+
+  some(predicate: (candidate: T) => boolean): boolean {
+    return this.heap.some(predicate);
+  }
+
   toSortedArray(): T[] {
     return [...this.heap].sort(this.compare);
   }

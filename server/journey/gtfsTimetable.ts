@@ -1708,6 +1708,16 @@ export function findGtfsItinerariesWithStats(
     : [];
   const debugTraceCandidateTripSet = debugTraceCandidateTrips.length > 0 ? new Set(debugTraceCandidateTrips) : undefined;
   const debugCandidateTraceTargetPairs = new Set(['30617_0_1:4767:4768', '30617_0_1:44250:4595']);
+  const debugSearch = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1';
+  let debugEarliestQueryArrivalCalls = 0;
+  let debugOnwardArrivalWeakMapHits = 0;
+  let debugOnwardArrivalStringCacheHits = 0;
+  let debugReachableStopSetBuilds = 0;
+  let debugReachableStopSetCacheHits = 0;
+  let debugDestinationEventsScanned = 0;
+  let debugConnectorCandidatesInspected = 0;
+  const debugConnectorReservoirSorts = 0;
+  let debugConnectorReservoirItemsInspected = 0;
   const debugTripChainsIn = (candidates: readonly GtfsItinerary[]) => {
     const found = new Set<string>();
     if (!debugTraceTripChainSet) return found;
@@ -2400,6 +2410,21 @@ export function findGtfsItinerariesWithStats(
   const nextEventCache = new WeakMap<RetainedGtfsSegment, boolean>();
   const nextEventByTripStopCache = new Map<string, boolean>();
   const MAX_CACHED_NEXT_EVENT_TRIP_STOPS = 16_384;
+  const reachableDestinationStopsByContext = new WeakMap<GtfsStopContext, ReadonlySet<string>>();
+  const reachableDestinationStopsFor = (context: GtfsStopContext): ReadonlySet<string> => {
+    const cached = reachableDestinationStopsByContext.get(context);
+    if (cached) {
+      if (debugSearch) debugReachableStopSetCacheHits++;
+      return cached;
+    }
+    const reachable = new Set([context.details.id]);
+    for (const nodeId of context.transferNodeIds) {
+      for (const stopId of reachablePathwayNodes(nodeId)) reachable.add(stopId);
+    }
+    reachableDestinationStopsByContext.set(context, reachable);
+    if (debugSearch) debugReachableStopSetBuilds++;
+    return reachable;
+  };
   const hasNextEvent = (segment: RetainedGtfsSegment, minimumGapSeconds: number) => {
     const cached = nextEventCache.get(segment);
     if (cached !== undefined) return cached;
@@ -2433,8 +2458,7 @@ export function findGtfsItinerariesWithStats(
       return retentionRequiredTransferSeconds(segment.routeId, event.routeId,
         pathway ? pathway.walkingSeconds : 0, minimumGapSeconds, rule);
     };
-    const reachableDestinationStops = new Set([segment.destinationContext.details.id,
-      ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
+    const reachableDestinationStops = reachableDestinationStopsFor(segment.destinationContext);
     // Each reachable-stop event list is already time sorted. The predicate
     // only asks whether any feasible continuation exists, so merging and
     // sorting all lists for every segment is unnecessary; scan each indexed
@@ -2472,19 +2496,23 @@ export function findGtfsItinerariesWithStats(
   const onwardArrivalCache = new WeakMap<RetainedGtfsSegment, number | null>();
   const onwardArrivalByTripStopCache = new Map<string, number | null>();
   const earliestQueryArrivalAfterSegment = (segment: RetainedGtfsSegment, minimumGapSeconds: number) => {
+    if (debugSearch) debugEarliestQueryArrivalCalls++;
     const cached = onwardArrivalCache.get(segment);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      if (debugSearch) debugOnwardArrivalWeakMapHits++;
+      return cached;
+    }
     const stopKey = `${segment.tripId}\u0000${segment.serviceDate}\u0000${segment.toIndex}\u0000${minimumGapSeconds}`;
     const cachedByStop = onwardArrivalByTripStopCache.get(stopKey);
     if (cachedByStop !== undefined) {
+      if (debugSearch) debugOnwardArrivalStringCacheHits++;
       onwardArrivalCache.set(segment, cachedByStop);
       return cachedByStop;
     }
     const earliestAllowed = segment.arrivalAt.getTime();
     const eventStopId = segment.destinationContext.details.id;
     const segmentProviderId = feed.providersByRoute?.get(segment.routeId)?.id ?? input.providerId;
-    const reachableDestinationStops = new Set([eventStopId,
-      ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
+    const reachableDestinationStops = reachableDestinationStopsFor(segment.destinationContext);
     let earliestArrival = Infinity;
     for (const stopId of reachableDestinationStops) {
       const events = destinationRetentionEventsByReachableStop.get(stopId) ?? [];
@@ -2497,6 +2525,7 @@ export function findGtfsItinerariesWithStats(
       let foundFeasibleAtStop = false;
       let postFeasibleScanned = 0;
       for (let index = low; index < events.length; index++) {
+        if (debugSearch) debugDestinationEventsScanned++;
         const event = events[index]!;
         if (event.at >= earliestArrival) break;
         const availableSeconds = (event.at - earliestAllowed) / 1000;
@@ -2820,6 +2849,7 @@ export function findGtfsItinerariesWithStats(
               && hasNextEvent(candidate, minimumTransferBufferSeconds)) temporallyConnectsQueryEnds = true;
             continue;
           }
+          if (debugSearch) debugConnectorCandidatesInspected++;
           // Keep connector work bounded while allowing the route-level
           // reservoir to inspect its full capacity. One additional feasible
           // candidate is needed to prove that the bounded reservoir omitted
@@ -2832,10 +2862,11 @@ export function findGtfsItinerariesWithStats(
               feasibleConnectorEvaluations++;
               debugConnectorEvalIndex?.set(candidate, feasibleConnectorEvaluations);
               temporallyConnectsQueryEnds = true;
-              const retainedConnectors = connectorOverflow.toSortedArray();
-              const connectorReservoirWasFull = retainedConnectors.length >= connectorOverflowCapacity;
-              const candidateAlreadyRetained = retainedConnectors.some((retained) =>
-                retainedCandidateKey(retained) === retainedCandidateKey(candidate));
+              const connectorReservoirWasFull = connectorOverflow.size >= connectorOverflowCapacity;
+              const candidateAlreadyRetained = connectorOverflow.some((retained) => {
+                if (debugSearch) debugConnectorReservoirItemsInspected++;
+                return retainedCandidateKey(retained) === retainedCandidateKey(candidate);
+              });
               connectorOverflow.consider(candidate);
               // A bounded connector sample can omit a feasible alternative even
               // when the estimated graph budget itself is not exhausted. Only
@@ -3233,6 +3264,17 @@ export function findGtfsItinerariesWithStats(
     overflowConnectorReservoirsAtCap: overflowConnectorReservoirs.filter(({ retained, capacity }) =>
       capacity > 0 && retained >= capacity).length,
     overflowSegmentsRedistributed: redistributed.added,
+    ...(debugSearch ? {
+      earliestQueryArrivalCalls: debugEarliestQueryArrivalCalls,
+      onwardArrivalWeakMapHits: debugOnwardArrivalWeakMapHits,
+      onwardArrivalStringCacheHits: debugOnwardArrivalStringCacheHits,
+      reachableStopSetBuilds: debugReachableStopSetBuilds,
+      reachableStopSetCacheHits: debugReachableStopSetCacheHits,
+      destinationEventsScanned: debugDestinationEventsScanned,
+      connectorCandidatesInspected: debugConnectorCandidatesInspected,
+      connectorReservoirSorts: debugConnectorReservoirSorts,
+      connectorReservoirItemsInspected: debugConnectorReservoirItemsInspected,
+    } : {}),
     ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
     ...(debugCandidateTripTrace ? { debugCandidateTripTrace: JSON.stringify(debugCandidateTripTrace) } : {}),
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
