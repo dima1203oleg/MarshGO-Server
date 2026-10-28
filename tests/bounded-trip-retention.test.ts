@@ -58,6 +58,23 @@ test('bounded segment sample tracks size and predicate membership through insert
   assert.deepEqual(best.toSortedArray().map((i) => i.id), ['better', 'low', 'mid']);
 });
 
+test('bounded segment sample exposes its worst item without changing heap retention', () => {
+  const compare = (left: { id: string; cost: number }, right: { id: string; cost: number }) => left.cost - right.cost;
+  const best = new BoundedBestK(2, compare);
+
+  assert.equal(best.peekWorst(), undefined);
+  best.consider({ id: 'best', cost: 10 });
+  best.consider({ id: 'worst', cost: 30 });
+  assert.deepEqual(best.peekWorst(), { id: 'worst', cost: 30 });
+
+  assert.equal(best.consider({ id: 'rejected', cost: 40 }), false);
+  assert.deepEqual(best.peekWorst(), { id: 'worst', cost: 30 }, 'rejected candidates leave the heap root intact');
+
+  assert.equal(best.consider({ id: 'replacement', cost: 5 }), true);
+  assert.deepEqual(best.peekWorst(), { id: 'best', cost: 10 }, 'accepted insertion evicts the prior root');
+  assert.deepEqual(best.toSortedArray().map(({ id }) => id), ['replacement', 'best']);
+});
+
 test('bounded GTFS retention evicts whole lower-priority trip groups', () => {
   const retained: BoundedTripGroup<string>[] = [
     { key: 'trip-a', priority: 1, segments: ['a-1', 'a-2', 'a-3'] },

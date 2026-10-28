@@ -28,6 +28,11 @@ export class BoundedBestK<T> {
     return this.heap.length;
   }
 
+  /** Return the comparator-worst retained item without changing heap order. */
+  peekWorst(): T | undefined {
+    return this.heap[0];
+  }
+
   some(predicate: (candidate: T) => boolean): boolean {
     return this.heap.some(predicate);
   }
