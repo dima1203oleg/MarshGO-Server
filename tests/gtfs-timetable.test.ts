@@ -1594,6 +1594,137 @@ test('bounded connector overflow preserves the fastest onward stop from one midd
   assert.equal(returnedWinner.arrivalAt.getTime(), oracleWinner.arrival);
 });
 
+test('connector reservoir keeps a CHEAPEST winner behind faster fare-diverse continuations', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  for (const [id, name, lon, lat] of [
+    ['origin', 'Origin', 24.0200, 49.8400],
+    ['hub-a', 'Hub A', 24.0250, 49.8450],
+    ['hub-b', 'Hub B', 24.0270, 49.8470],
+    ['hub-c', 'Hub C', 24.0340, 49.8520],
+    ['hub-d', 'Hub D', 24.0360, 49.8540],
+    ['destination', 'Destination', 24.0300, 49.8500],
+    ['dead-end-stop', 'Dead end', 24.0370, 49.8550],
+  ] as const) timetable.stops.set(id, { id, name, lon, lat });
+  for (const [id, name] of [
+    ['access', 'Access'], ['middle', 'Middle'], ['egress-cheap', 'Cheap onward'],
+    ['egress-fast', 'Fast onward'], ['slack-route', 'Slack route'], ['dead-end-route', 'Dead end'],
+  ] as const) timetable.routes.set(id, { name, mode: 'BUS', transportType: 'bus' });
+  const addTrip = (tripId: string, routeId: string, stops: Array<[string, number]>) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    timetable.stopTimes.set(tripId, stops.map(([stopId, seconds], index) => ({
+      stopId, sequence: index + 1, arrivalSeconds: seconds, departureSeconds: seconds, pickupType: 0, dropOffType: 0,
+    })));
+  };
+  addTrip('access-trip', 'access', [['origin', 8 * 3600], ['hub-a', 8 * 3600 + 10 * 60]]);
+  // This feasible origin-serving group has higher retention priority and uses
+  // one of the middle route's three graph slots, leaving two for overflow.
+  addTrip('middle-primary-trip', 'middle', [['origin', 8 * 3600 + 60], ['hub-d', 8 * 3600 + 9 * 60]]);
+  // The next vehicle is a dead end: it makes the preceding origin-serving
+  // trip a valid connector candidate but cannot produce a destination route.
+  addTrip('dead-end-trip', 'dead-end-route', [['hub-d', 8 * 3600 + 12 * 60], ['dead-end-stop', 8 * 3600 + 22 * 60]]);
+  addTrip('middle-choice-trip', 'middle', [
+    ['hub-a', 8 * 3600 + 18 * 60], ['hub-c', 8 * 3600 + 24 * 60], ['hub-b', 8 * 3600 + 26 * 60],
+  ]);
+  addTrip('egress-cheap-trip', 'egress-cheap', [['hub-b', 8 * 3600 + 35 * 60], ['destination', 8 * 3600 + 50 * 60]]);
+  addTrip('egress-fast-trip', 'egress-fast', [['hub-c', 8 * 3600 + 28 * 60], ['destination', 8 * 3600 + 40 * 60]]);
+  // Scheduled after the useful journey: it contributes a slack route without a result-path substitute.
+  addTrip('slack-loop-trip', 'slack-route', [['hub-a', 9 * 3600 + 20 * 60], ['hub-b', 9 * 3600 + 30 * 60]]);
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, stops] of timetable.stopTimes) stops.forEach((stopTime, index) => {
+    timetable.stopTimesByStop.set(stopTime.stopId,
+      [...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index }]);
+  });
+  timetable.fareProducts = new Map([
+    ['access-fare', { id: 'access-fare', priceMinor: 300, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+    ['middle-fare', { id: 'middle-fare', priceMinor: 200, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+    ['cheap-fare', { id: 'cheap-fare', priceMinor: 100, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+    ['fast-fare', { id: 'fast-fare', priceMinor: 1_000, currency: 'UAH', transfers: 0, transferDurationSeconds: null }],
+  ]);
+  timetable.fareRules = new Map([
+    ['access-fare', [{ fareId: 'access-fare', routeId: 'access' }]],
+    ['middle-fare', [{ fareId: 'middle-fare', routeId: 'middle' }]],
+    ['cheap-fare', [{ fareId: 'cheap-fare', routeId: 'egress-cheap' }]],
+    ['fast-fare', [{ fareId: 'fast-fare', routeId: 'egress-fast' }]],
+  ]);
+
+  const input = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+    maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 2 * 60 * 60,
+  };
+  const chainId = (journey: GtfsItinerary) => journey.segments.map((segment) => segment.tripId).join(',');
+  const cheapestChain = 'access-trip,middle-choice-trip,egress-cheap-trip';
+  const fastestChain = 'access-trip,middle-choice-trip,egress-fast-trip';
+  const toScorable = (journey: GtfsItinerary) => ({
+    id: chainId(journey), durationSeconds: journey.durationSeconds,
+    priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+    transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+    transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+    legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+  });
+  const exhaustive = findGtfsItinerariesWithStats(timetable, input, { totalSegments: 100, segmentsPerRoute: 100 });
+  assert.equal(exhaustive.searchTruncated, false, 'the exhaustive fare oracle is complete');
+  assert.ok(exhaustive.itineraries.some((journey) => chainId(journey) === cheapestChain));
+  assert.ok(exhaustive.itineraries.some((journey) => chainId(journey) === fastestChain));
+  assert.equal(scoreJourneys(exhaustive.itineraries.map(toScorable), 'CHEAPEST')[0]?.journey.id, cheapestChain);
+  assert.equal(scoreJourneys(exhaustive.itineraries.map(toScorable), 'FASTEST')[0]?.journey.id, fastestChain);
+
+  const runBounded = (maxRouteOverflowConnectors: number) => {
+    const diagnostics: Array<Record<string, unknown>> = [];
+    const snapshots: GtfsCandidateGraphSnapshot[] = [];
+    const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    const previousInfo = console.info;
+    let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+    try {
+      process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+      console.info = (...args: unknown[]) => {
+        try { diagnostics.push(JSON.parse(String(args[0])) as Record<string, unknown>); } catch { /* unrelated logs */ }
+      };
+      result = findGtfsItinerariesWithStats(timetable, input, {
+        totalSegments: 8, segmentsPerRoute: 3, maxRouteOverflowConnectors,
+      }, (snapshot) => snapshots.push(snapshot));
+    } finally {
+      console.info = previousInfo;
+      if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+      else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+    }
+    const graph = diagnostics.find((entry) => entry.stage === 'segments-built');
+    assert.ok(graph, 'bounded search reports reservoir and allocation diagnostics');
+    assert.equal(snapshots.length, 1, 'the bounded graph snapshot is captured exactly once');
+    return { result, graph, snapshot: snapshots[0]! };
+  };
+  const constrained = runBounded(1);
+  const recovered = runBounded(2);
+  assert.ok(Number(constrained.graph.overflowConnectorReservoirsAtCap) >= 1,
+    'the low connector cap is observably saturated');
+  assert.equal(constrained.result.truncation.candidateGraph, true);
+  assert.equal(constrained.graph.globalGraphBudgetBinding, 1, 'estimated demand exceeds the unchanged global graph budget');
+  const middleUnderfill = JSON.parse(String(constrained.graph.routeBudgetUnderfillSample)) as Array<{
+    routeId: string; budget: number; estimatedDemand: number; wholeTripSegments: number;
+    overflowCandidates: number; unused: number; overflowAdded: number;
+  }>;
+  assert.deepEqual(middleUnderfill.find(({ routeId }) => routeId === 'middle'),
+    { routeId: 'middle', budget: 3, estimatedDemand: 4, wholeTripSegments: 1,
+      overflowCandidates: 2, overflowAdded: 1, unused: 1 },
+    'the primary group occupies one of three route slots and the small reservoir leaves one unused');
+  const hasConnector = (snapshot: GtfsCandidateGraphSnapshot, destinationStopId: string) =>
+    snapshot.segments.some(({ journey }) => journey.tripId === 'middle-choice-trip'
+      && journey.originStop.id === 'hub-a' && journey.destinationStop.id === destinationStopId);
+  assert.equal(hasConnector(constrained.snapshot, 'hub-c'), true, 'the faster connector remains in the small reservoir');
+  assert.equal(hasConnector(constrained.snapshot, 'hub-b'), false, 'the cheaper connector is evicted at capacity one');
+  assert.equal(hasConnector(recovered.snapshot, 'hub-b'), true, 'capacity two retains both fare-diverse connectors');
+  assert.ok(!constrained.result.itineraries.some((journey) => chainId(journey) === cheapestChain),
+    'the constrained connector reservoir omits the exhaustive cheapest chain');
+  assert.ok(recovered.result.itineraries.some((journey) => chainId(journey) === cheapestChain),
+    'a wider connector reservoir restores the exhaustive cheapest chain');
+});
+
 test('query-time retention keeps a scheduled connector ahead of dense irrelevant interchanges', () => {
   const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips({ denseIrrelevantInterchange: true });
   const searchInput = {

@@ -416,6 +416,8 @@ export interface GtfsItinerarySearchResult {
 export interface GtfsGraphBudgetLimits {
   totalSegments?: number;
   segmentsPerRoute?: number;
+  /** Test-only override for exercising bounded intermediate-connector retention. */
+  maxRouteOverflowConnectors?: number;
   /** Test-only override for verifying bounded search-frontier behavior. */
   maxQueuedSearchWork?: number;
   /** Test-only override for verifying weighted depth-pass search truncation. */
@@ -1723,6 +1725,10 @@ export function findGtfsItinerariesWithStats(
   const maximumWaitSeconds = input.maximumWaitSeconds ?? 4 * 60 * 60;
   const maximumGraphSegments = graphLimits.totalSegments ?? MAX_GTFS_GRAPH_SEGMENTS;
   const maximumGraphSegmentsPerRoute = graphLimits.segmentsPerRoute ?? MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
+  const maximumRouteOverflowConnectors = graphLimits.maxRouteOverflowConnectors ?? MAX_ROUTE_OVERFLOW_CONNECTORS;
+  if (!Number.isSafeInteger(maximumRouteOverflowConnectors) || maximumRouteOverflowConnectors < 1) {
+    throw new RangeError('maxRouteOverflowConnectors must be a positive safe integer');
+  }
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
@@ -2794,8 +2800,9 @@ export function findGtfsItinerariesWithStats(
         const overflowCapacity = Math.min(MAX_ROUTE_OVERFLOW_SEGMENTS, graphSegmentLimitPerRoute);
         const overflow = overflowSegmentsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
+        const connectorOverflowCapacity = Math.min(maximumRouteOverflowConnectors, graphSegmentLimitPerRoute);
         const connectorOverflow = overflowConnectorsByRoute.get(trip.routeId)
-          ?? new BoundedBestK<RetainedGtfsSegment>(Math.min(MAX_ROUTE_OVERFLOW_CONNECTORS, graphSegmentLimitPerRoute), compareTripSegments);
+          ?? new BoundedBestK<RetainedGtfsSegment>(connectorOverflowCapacity, compareTripSegments);
         let temporallyConnectsQueryEnds = false;
         let bestConnector: { segment: RetainedGtfsSegment; arrivalAt: number } | undefined;
         let feasibleConnectorEvaluations = 0;
@@ -3020,7 +3027,11 @@ export function findGtfsItinerariesWithStats(
   const graphRoutesUnderfilled = perRouteBudgetUsage.filter(({ budget, retained }) => retained < budget).length;
   const graphRouteBudgetMaxUnused = Math.max(0, ...perRouteBudgetUsage.map(({ budget, retained }) => budget - retained));
   const overflowReservoirSizes = [...overflowCandidatesByRoute.values()].map((reservoir) => reservoir.length);
-  const overflowConnectorReservoirSizes = [...overflowConnectorsByRoute.values()].map((reservoir) => reservoir.toSortedArray().length);
+  const overflowConnectorReservoirs = [...overflowConnectorsByRoute].map(([routeId, reservoir]) => ({
+    retained: reservoir.toSortedArray().length,
+    capacity: Math.min(maximumRouteOverflowConnectors, graphSegmentBudgetByRoute.get(routeId) ?? 0),
+  }));
+  const overflowConnectorReservoirSizes = overflowConnectorReservoirs.map(({ retained }) => retained);
   const routeBudgetUnderfillSample = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
     ? [...graphSegmentBudgetByRoute].map(([routeId, budget]) => {
       const retainedSegments = selectedSegmentsByRoute.get(routeId)?.length ?? 0;
@@ -3208,7 +3219,8 @@ export function findGtfsItinerariesWithStats(
     overflowReservoirRetained: overflowReservoirSizes.reduce((sum, size) => sum + size, 0),
     overflowReservoirsAtCap: overflowReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_SEGMENTS).length,
     overflowConnectorReservoirRetained: overflowConnectorReservoirSizes.reduce((sum, size) => sum + size, 0),
-    overflowConnectorReservoirsAtCap: overflowConnectorReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_CONNECTORS).length,
+    overflowConnectorReservoirsAtCap: overflowConnectorReservoirs.filter(({ retained, capacity }) =>
+      capacity > 0 && retained >= capacity).length,
     overflowSegmentsRedistributed: redistributed.added,
     ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
     ...(debugCandidateTripTrace ? { debugCandidateTripTrace: JSON.stringify(debugCandidateTripTrace) } : {}),
