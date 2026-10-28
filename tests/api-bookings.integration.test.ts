@@ -515,7 +515,9 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.equal(composedSearch.status, 200);
       const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partial: boolean; partialReasons: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated: boolean; candidateGenerationTruncated: boolean; resultSamplingTruncated: boolean; gtfsTruncation: Record<string, boolean>; journeys: Array<{
         id: string; offerId: string | null; source?: string; state: string;
-        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string }>;
+        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string;
+          driver?: { id: string; name: string; averageRating: number | null; reviewCount: number } | null;
+          vehicle?: { id: string; make: string; model: string } | null }>;
       }> } });
       const composedData = composedPayload.data;
       assert.equal(typeof composedData.partial, 'boolean');
@@ -536,6 +538,9 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.deepEqual(composedJourney.legs.map((leg) => leg.mode), ['BUS','COMMUNITY','TRAM']);
       assert.equal(composedJourney.legs[1]!.offerId, ids.transitCompositionOffer);
       assert.equal(composedJourney.legs[1]!.availabilityStatus, 'AVAILABLE');
+      assert.equal(composedJourney.legs[1]!.driver?.id, ids.driver, 'community-transit response follows the canonical driver contract');
+      assert.ok(composedJourney.legs[1]!.driver?.name, 'published driver name is exposed for the rideshare leg');
+      assert.equal(composedJourney.legs[1]!.vehicle?.id, ids.vehicle, 'rideshare leg exposes its canonical vehicle summary');
 
       const transferLimitedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },

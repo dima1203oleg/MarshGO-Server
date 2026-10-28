@@ -3582,6 +3582,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const prefix = composition.prefix as SearchItinerary | null;
         const suffix = composition.suffix as SearchItinerary | null;
         if (prefix) await insertTransitPath(prefix, search.origin, offer.origin);
+        const driverName = typeof offer.metadata.driverName === 'string' ? offer.metadata.driverName.trim() : '';
+        const driverRating = typeof offer.metadata.rating === 'number' && Number.isFinite(offer.metadata.rating)
+          ? offer.metadata.rating : null;
+        const driverReviewCount = typeof offer.metadata.reviewCount === 'number'
+          && Number.isSafeInteger(offer.metadata.reviewCount) && offer.metadata.reviewCount >= 0
+          ? offer.metadata.reviewCount : 0;
+        const vehicleId = typeof offer.metadata.vehicleId === 'string' ? offer.metadata.vehicleId : '';
+        const vehicleMake = typeof offer.metadata.vehicleMake === 'string' ? offer.metadata.vehicleMake.trim() : '';
+        const vehicleModel = typeof offer.metadata.vehicleModel === 'string' ? offer.metadata.vehicleModel.trim() : '';
         const communityPriceMinor = offer.pricePerSeatMinor * search.passengers;
         const safeCommunityPriceMinor = Number.isSafeInteger(communityPriceMinor) && communityPriceMinor >= 0 ? communityPriceMinor : null;
         const communityInserted = await client.query<{ id: string }>(
@@ -3604,7 +3613,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           priceStatus: offer.currency === 'UAH' && safeCommunityPriceMinor !== null ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'AVAILABLE',
           source: 'community-offer', routeGeometry: offer.routeGeometry, lastUpdatedAt: offer.snapshotAt,
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshotAt.getTime()) / 1000)),
-          liveStatus: 'SCHEDULED', availableSeats: offer.availableSeats, driver: offer.metadata });
+          liveStatus: 'SCHEDULED', availableSeats: offer.availableSeats,
+          driver: driverName ? { id: offer.driverId, name: driverName, averageRating: driverRating, reviewCount: driverReviewCount } : null,
+          vehicle: vehicleId && vehicleMake && vehicleModel ? { id: vehicleId, make: vehicleMake, model: vehicleModel } : null });
         if (suffix) await insertTransitPath(suffix, offer.destination, search.destination);
         if (firstServiceLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstServiceLegId]);
         journeys.push({ id: journeyId, offerId: offer.id, origin: search.origin, destination: search.destination, strategy: representative.strategy,
