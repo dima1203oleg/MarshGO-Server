@@ -185,6 +185,34 @@ const strategyRecommendations = selectStrategyAlternatives(rankedCandidates, ava
 const winnerFor = (strategy: typeof userFacingStrategies[number]) =>
   strategyRecommendations.find((candidate) => candidate.strategyRanks?.[strategy] === 1)?.journey;
 const signature = (item: typeof rankedCandidates[number] | undefined) => item?.id ?? null;
+const winnerDetailsFor = (strategy: typeof userFacingStrategies[number]) => {
+  const winner = winnerFor(strategy);
+  if (!winner) return null;
+  const itinerary = result.itineraries.find((candidate) => candidate.id === winner.id);
+  if (!itinerary) return null;
+  return {
+    id: winner.id,
+    departureAt: itinerary.departureAt.toISOString(),
+    arrivalAt: itinerary.arrivalAt.toISOString(),
+    durationSeconds: winner.durationSeconds,
+    transfers: winner.transfers,
+    walkingMeters: winner.walkingMeters,
+    fare: itinerary.fare ? {
+      priceMinor: itinerary.fare.priceMinor,
+      currency: itinerary.fare.currency,
+    } : null,
+    tripChain: itinerary.segments.map((segment) => ({
+      providerId: segment.providerId,
+      serviceDate: segment.serviceDate,
+      tripId: segment.tripId,
+      routeId: segment.routeId,
+      fromStopId: segment.originStop.id,
+      toStopId: segment.destinationStop.id,
+      departureAt: segment.departureAt.toISOString(),
+      arrivalAt: segment.arrivalAt.toISOString(),
+    })),
+  };
+};
 const details = result as typeof result & Record<string, unknown>;
 console.log(JSON.stringify({
   comparisonGroup: process.env.REPLAY_GROUP ?? null,
@@ -211,6 +239,11 @@ console.log(JSON.stringify({
     balanced: signature(winnerFor('BALANCED')),
     fastest: signature(winnerFor('FASTEST')),
     cheapest: signature(winnerFor('CHEAPEST')),
+  },
+  strategyWinnerDetails: {
+    balanced: winnerDetailsFor('BALANCED'),
+    fastest: winnerDetailsFor('FASTEST'),
+    cheapest: winnerDetailsFor('CHEAPEST'),
   },
   searchTruncated: details.searchTruncated,
   candidateGraphTruncated: details.candidateGraphTruncated,

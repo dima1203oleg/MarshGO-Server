@@ -19,7 +19,7 @@ if set(by_revision) != expected_revisions or any(len(items) != 3 for items in by
 
 stable_fields = (
     "origin", "destination", "departureWindow", "idHash", "uniqueTripChains", "uniqueRouteChains", "rankingMethod", "rankingScope", "availableStrategies", "strategyCandidates",
-    "tripChainIds", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
+    "tripChainIds", "strategyWinnerDetails", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
 )
 for revision, items in by_revision.items():
     for field in stable_fields:
@@ -57,6 +57,24 @@ print(f"- OD: `{baseline[0]['origin']}` → `{baseline[0]['destination']}`")
 print(f"- Departure window (UTC): `{baseline[0]['departureWindow'][0]}` → `{baseline[0]['departureWindow'][1]}`")
 print(f"- Ordered result identity parity: **{'YES' if same_hash else 'NO'}**")
 print(f"- FASTEST/CHEAPEST/BALANCED winner parity: **{'YES' if same_winners else 'NO'}**")
+for strategy in ("fastest", "cheapest", "balanced"):
+    before = baseline[0].get("strategyWinnerDetails", {}).get(strategy)
+    after = candidate[0].get("strategyWinnerDetails", {}).get(strategy)
+    if not before or not after:
+        print(f"- `{strategy.upper()}` winner metrics: unavailable in one or both artifacts")
+        continue
+
+    def describe_winner(winner):
+        fare = winner.get("fare")
+        fare_text = "unknown fare" if not fare or fare.get("priceMinor") is None else (
+            f"{fare['priceMinor']} {fare.get('currency') or 'unknown currency'} minor units"
+        )
+        return (
+            f"`{winner.get('id')}`; arrives `{winner.get('arrivalAt')}`; "
+            f"{winner.get('transfers')} transfers; {winner.get('walkingMeters')} m walking; {fare_text}"
+        )
+
+    print(f"- `{strategy.upper()}` winner metrics: baseline {describe_winner(before)} → candidate {describe_winner(after)}")
 print(f"- Added trip-chain identities: `{json.dumps(sorted(candidate_chains - baseline_chains))}`")
 print(f"- Removed trip-chain identities: `{json.dumps(sorted(baseline_chains - candidate_chains))}`")
 print(f"- Median search time: {baseline_median:.2f} ms → {candidate_median:.2f} ms ({delta:+.2f}%)")
