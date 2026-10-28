@@ -2370,6 +2370,26 @@ test('applies separate conservative first-mile and last-mile walking limits', ()
   }).itineraries.length, 1, 'a caller may explicitly request a wider egress walk shed');
 });
 
+test('uses exact origin-walk seconds instead of rounded display distance at the boarding boundary', () => {
+  const accessDistanceMeters = 10.1;
+  const origin: [number, number] = [
+    24.0200,
+    49.8400 + accessDistanceMeters / 6_371_000 * (180 / Math.PI),
+  ];
+  const results = findGtfsItinerariesWithStats(feed(), {
+    ...request('2026-10-12T04:59:52Z', '2026-10-12T05:00:05Z'),
+    origin,
+    destination: [24.0301, 49.8501],
+    maximumAccessWalkingMeters: 100,
+    maximumEgressWalkingMeters: 100,
+    maximumTransfers: 0,
+  });
+
+  assert.equal(Math.round(accessDistanceMeters), 10);
+  assert.equal(Math.ceil(accessDistanceMeters / 1.25), 9);
+  assert.deepEqual(results.itineraries, [], 'a trip 8 seconds after earliest departure cannot be boarded when exact access walk takes 9 seconds');
+});
+
 test('finds service after midnight when GTFS uses a 24-hour stop time', () => {
   const timetable = feed({ departure: '24:15:00', arrival: '24:55:00', monday: '0', exceptionDate: '20261012' });
   const journeys = findDirectGtfsJourneys(timetable, request('2026-10-12T21:10:00Z', '2026-10-12T21:30:00Z'));

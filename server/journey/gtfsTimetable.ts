@@ -440,6 +440,7 @@ export type GtfsCandidateGraphObserver = (snapshot: GtfsCandidateGraphSnapshot) 
 type GtfsStopContext = {
   details: { id: string; name: string; coordinates: [number, number] };
   transferNodeIds: string[];
+  exactDistanceToOriginStopMeters: number;
   distanceToOriginStopMeters: number;
   distanceFromDestinationStopMeters: number;
 };
@@ -2176,6 +2177,7 @@ export function findGtfsItinerariesWithStats(
   // Keep only the stop-time indexes during graph construction and materialize
   // route shapes for the small set of itineraries that will actually be shown.
   const shapeIndexesBySegment = new WeakMap<GtfsDirectJourney, { fromIndex: number; toIndex: number; serviceDate: string }>();
+  const firstLegAccessSecondsBySegment = new WeakMap<GtfsDirectJourney, number>();
   const sortedRetentionEvents = (events: Map<string, QueryReachabilityEvent[]>) => new Map([...events]
     .map(([nodeId, values]) => [nodeId, values.sort((a, b) => a.at - b.at
       || compareStableId(a.tripId, b.tripId) || compareStableId(a.stopId, b.stopId))] as const));
@@ -2547,13 +2549,15 @@ export function findGtfsItinerariesWithStats(
     const key = `${entry.stopId}\u0000${entry.sourceStopId ?? ''}\u0000${name}\u0000${coordinates[0]}\u0000${coordinates[1]}`;
     const cached = stopContextCache.get(key);
     if (cached) return cached;
+    const exactDistanceToOriginStopMeters = distanceMeters(input.origin, coordinates);
     const value = {
       details: stopDetails(stop.id, name, coordinates),
       transferNodeIds: transferNodeList(entry),
       // These distances are fixed for the queried OD pair. Calculate once per
       // stop context instead of once for every possible boarding/alighting
       // pair on every trip serving this stop.
-      distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, coordinates)),
+      exactDistanceToOriginStopMeters,
+      distanceToOriginStopMeters: Math.round(exactDistanceToOriginStopMeters),
       distanceFromDestinationStopMeters: Math.round(distanceMeters(input.destination, coordinates)),
     };
     stopContextCache.set(key, value);
@@ -2565,7 +2569,7 @@ export function findGtfsItinerariesWithStats(
     originStopIds.has(candidate.originContext.details.id)
     && candidate.departureAt.getTime() <= maxFirstDeparture
     && candidate.departureAt.getTime() >= input.earliestDeparture.getTime()
-      + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
+      + Math.ceil(candidate.originContext.exactDistanceToOriginStopMeters / 1.25) * 1000;
   const compareTripSegments = (left: RetainedGtfsSegment, right: RetainedGtfsSegment) => {
     const rank = (candidate: RetainedGtfsSegment): [number, number, number, number, number, number] => {
       if (candidate.sampleRank) return candidate.sampleRank;
@@ -2988,6 +2992,7 @@ export function findGtfsItinerariesWithStats(
       traveledZoneIds: emptyTraveledZoneIds,
     };
     shapeIndexesBySegment.set(segment, { fromIndex: candidate.fromIndex, toIndex: candidate.toIndex, serviceDate: candidate.serviceDate });
+    firstLegAccessSecondsBySegment.set(segment, Math.ceil(candidate.originContext.exactDistanceToOriginStopMeters / 1.25));
     const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(candidate.tripId, candidate.serviceDate));
     if (update?.stops.length) {
       const dated = datedTripStops(feed, candidate.tripId, candidate.serviceDate);
@@ -3653,13 +3658,14 @@ export function findGtfsItinerariesWithStats(
   // trips before it reached an earlier departure. Search feasible first legs
   // in passenger-ready order so the bounded candidate set is useful even when
   // the graph still needs a stronger search strategy to become exhaustive.
+  const firstLegAccessSeconds = (segment: GtfsDirectJourney) => firstLegAccessSecondsBySegment.get(segment)!;
   const firstLegs = segments.filter((segment) => originStopIds.has(segment.originStop.id)
     && segment.departureAt.getTime() <= maxFirstDeparture
     && segment.departureAt.getTime() >= input.earliestDeparture.getTime()
-      + walkingSeconds(segment.distanceToOriginStopMeters) * 1000)
+      + firstLegAccessSeconds(segment) * 1000)
     .sort((a, b) => {
-      const aReadyAt = a.departureAt.getTime() - walkingSeconds(a.distanceToOriginStopMeters) * 1000;
-      const bReadyAt = b.departureAt.getTime() - walkingSeconds(b.distanceToOriginStopMeters) * 1000;
+      const aReadyAt = a.departureAt.getTime() - firstLegAccessSeconds(a) * 1000;
+      const bReadyAt = b.departureAt.getTime() - firstLegAccessSeconds(b) * 1000;
       return aReadyAt - bReadyAt
         || a.departureAt.getTime() - b.departureAt.getTime()
         || a.distanceToOriginStopMeters - b.distanceToOriginStopMeters
