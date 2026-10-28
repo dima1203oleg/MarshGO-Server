@@ -568,6 +568,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(passengerConsent.status, 200);
     const passengerConsented = await passengerConsent.json() as { data: { currentParticipantConsent: boolean; locationSharingEnabled: boolean } };
     assert.deepEqual({ consent: passengerConsented.data.currentParticipantConsent, sharing: passengerConsented.data.locationSharingEnabled }, { consent: true, sharing: false });
+    const oneSidedApproaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: passengerHeaders });
+    assert.equal(oneSidedApproaches.status, 409, 'approach details stay hidden until both participants consent');
 
     const driverBeforeConsent = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/location`, {
       method: 'POST', headers: driverHeaders,
@@ -607,6 +609,30 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       body: JSON.stringify({ longitude: 24.0001, latitude: 49, accuracyMeters: 8, capturedAt: driverCapturedAt }),
     });
     assert.equal(driverLocation.status, 200);
+    const approachesResponse = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: passengerHeaders });
+    assert.equal(approachesResponse.status, 200);
+    const approaches = await approachesResponse.json() as { data: {
+      rendezvousId: string; pickup: { coordinates: number[] };
+      driver: { location: { coordinates: number[]; freshness: string } | null; approach: { status: string; geometry: unknown; distanceMeters: number | null; durationSeconds: number | null } };
+      passenger: { location: { coordinates: number[]; freshness: string } | null; approach: { status: string; geometry: unknown; distanceMeters: number | null; durationSeconds: number | null } };
+    } };
+    assert.equal(approaches.data.rendezvousId, initial.data.id);
+    assert.deepEqual(approaches.data.pickup.coordinates, [24, 49]);
+    assert.deepEqual(approaches.data.driver.location?.coordinates, [24.0001, 49]);
+    assert.deepEqual(approaches.data.passenger.location?.coordinates, [24, 49]);
+    assert.equal(approaches.data.driver.location?.freshness, 'LIVE');
+    assert.equal(approaches.data.passenger.location?.freshness, 'LIVE');
+    assert.ok(['ROUTED', 'ROUTING_UNAVAILABLE'].includes(approaches.data.driver.approach.status));
+    assert.ok(['ROUTED', 'ROUTING_UNAVAILABLE'].includes(approaches.data.passenger.approach.status));
+    for (const approach of [approaches.data.driver.approach, approaches.data.passenger.approach]) {
+      if (approach.status === 'ROUTING_UNAVAILABLE') {
+        assert.equal(approach.geometry, null);
+        assert.equal(approach.distanceMeters, null);
+        assert.equal(approach.durationSeconds, null);
+      }
+    }
+    const outsiderApproaches = await fetch(`${apiUrl}/api/v1/rendezvous/${initial.data.id}/approaches`, { headers: { 'x-dev-user-id': passengerB } });
+    assert.equal(outsiderApproaches.status, 404, 'approach details are participant-only');
     const passengerView = await fetch(`${apiUrl}/api/v1/bookings/${booking.data.id}/rendezvous`, { headers: passengerHeaders });
     const passengerState = await passengerView.json() as { data: { locations: { driver: { freshness: string; coordinates: number[] } | null } } };
     assert.deepEqual(passengerState.data.locations.driver?.coordinates, [24.0001, 49]);

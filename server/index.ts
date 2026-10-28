@@ -4757,6 +4757,78 @@ app.get('/api/v1/bookings/:bookingId/rendezvous', requireAuth, asyncHandler(asyn
   res.json({ data: await rendezvousResponse(rendezvous, req.userId!) });
 }));
 
+app.get('/api/v1/rendezvous/:id/approaches', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.id)) throw new ApiError(400, 'invalid rendezvous ID');
+  const { rows } = await pool.query<{
+    id: string; pickup_lon: number; pickup_lat: number; pickup_label: string; state: RendezvousState;
+    location_sharing_enabled: boolean; booking_status: string;
+    driver_location_consent_at: Date | null; passenger_location_consent_at: Date | null;
+  }>(
+    `SELECT r.id,ST_X(r.pickup_point::geometry) AS pickup_lon,ST_Y(r.pickup_point::geometry) AS pickup_lat,
+       r.pickup_label,r.state,r.location_sharing_enabled,b.status AS booking_status,
+       r.driver_location_consent_at,r.passenger_location_consent_at
+      FROM rendezvous_sessions r JOIN bookings b ON b.id=r.booking_id JOIN offers o ON o.id=b.offer_id
+     WHERE r.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2)`, [req.params.id, req.userId],
+  );
+  const session = rows[0];
+  if (!session) throw new ApiError(404, 'rendezvous unavailable');
+  if (!session.location_sharing_enabled || !session.driver_location_consent_at || !session.passenger_location_consent_at
+      || !['confirmed', 'boarding', 'in_progress'].includes(session.booking_status)
+      || ['CANCELLED', 'EXPIRED', 'COMPLETED', 'BOARDING'].includes(session.state)) {
+    throw new ApiError(409, 'both participants must consent to active rendezvous sharing', 'rendezvous_consent_required');
+  }
+  if (!realtimeRedis?.isReady) throw new ApiError(503, 'ephemeral location service is unavailable', 'location_service_unavailable');
+
+  const [driverRaw, passengerRaw] = await Promise.all([
+    realtimeRedis.get(rendezvousLocationKey(session.id, 'driver')),
+    realtimeRedis.get(rendezvousLocationKey(session.id, 'passenger')),
+  ]);
+  const now = Date.now();
+  const sharingStartedAt = Math.max(session.driver_location_consent_at.getTime(), session.passenger_location_consent_at.getTime());
+  const parseFresh = (raw: string | null) => {
+    if (!raw) return null;
+    try {
+      const sample = JSON.parse(raw) as { coordinates?: unknown; capturedAt?: unknown; accuracyMeters?: unknown };
+      const capturedAt = typeof sample.capturedAt === 'string' ? Date.parse(sample.capturedAt) : NaN;
+      if (!Array.isArray(sample.coordinates) || sample.coordinates.length !== 2
+          || !sample.coordinates.every((value) => typeof value === 'number' && Number.isFinite(value))
+          || Math.abs(sample.coordinates[0] as number) > 180 || Math.abs(sample.coordinates[1] as number) > 90
+          || !Number.isFinite(capturedAt) || capturedAt < sharingStartedAt || now - capturedAt < -30_000 || now - capturedAt > 90_000
+          || typeof sample.accuracyMeters !== 'number' || !Number.isFinite(sample.accuracyMeters)) return null;
+      return { coordinates: sample.coordinates as [number, number], accuracyMeters: sample.accuracyMeters,
+        capturedAt: new Date(capturedAt).toISOString(), freshness: 'LIVE' as const };
+    } catch { return null; }
+  };
+  const driverLocation = parseFresh(driverRaw);
+  const passengerLocation = parseFresh(passengerRaw);
+  const pickup: [number, number] = [Number(session.pickup_lon), Number(session.pickup_lat)];
+  const driverApproach = async () => {
+    if (!driverLocation) return { status: 'LOCATION_UNAVAILABLE' as const, geometry: null, distanceMeters: null, durationSeconds: null };
+    try {
+      const route = await getRoadRoute(driverLocation.coordinates, pickup);
+      return { status: 'ROUTED' as const, geometry: route.geometry, distanceMeters: route.distanceMeters,
+        durationSeconds: route.durationSeconds, calculatedAt: new Date().toISOString() };
+    } catch {
+      return { status: 'ROUTING_UNAVAILABLE' as const, geometry: null, distanceMeters: null, durationSeconds: null };
+    }
+  };
+  const passengerApproach = async () => {
+    if (!passengerLocation) return { status: 'LOCATION_UNAVAILABLE' as const, geometry: null, distanceMeters: null, durationSeconds: null };
+    const route = await routePedestrianPath(passengerLocation.coordinates, pickup);
+    return route
+      ? { status: 'ROUTED' as const, geometry: route.geometry, distanceMeters: route.distanceMeters,
+        durationSeconds: route.durationSeconds, calculatedAt: new Date().toISOString() }
+      : { status: 'ROUTING_UNAVAILABLE' as const, geometry: null, distanceMeters: null, durationSeconds: null };
+  };
+  const [driver, passenger] = await Promise.all([driverApproach(), passengerApproach()]);
+  res.json({ data: {
+    rendezvousId: session.id, pickup: { label: session.pickup_label, coordinates: pickup },
+    driver: { location: driverLocation, approach: driver },
+    passenger: { location: passengerLocation, approach: passenger },
+    updatedAt: new Date().toISOString(),
+  } });
+}));
+
 app.post('/api/v1/bookings/:bookingId/rendezvous/activate', requireAuth, asyncHandler(async (req, res) => {
   const rendezvous = await getOrCreateRendezvous(req.params.bookingId, req.userId!);
   if (rendezvous.state === 'CANCELLED' || rendezvous.state === 'EXPIRED' || rendezvous.state === 'COMPLETED') {
