@@ -575,6 +575,8 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.equal(typeof graph.overflowReservoirsAtCap, 'number');
   assert.equal(typeof graph.routeBudgetUnderfillSample, 'string');
   assert.ok(Array.isArray(JSON.parse(String(graph.routeBudgetUnderfillSample))));
+  assert.equal(typeof graph.reachableStopSetBuilds, 'number');
+  assert.equal(typeof graph.reachableStopSetCacheHits, 'number');
   assert.equal(typeof ranked.searchStepLimit, 'number');
   assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
   assert.equal(ranked.debugTripChainPresence, undefined, 'exact graph tracing stays absent without target IDs');
