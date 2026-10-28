@@ -51,6 +51,106 @@ export class BoundedBestK<T> {
   }
 }
 
+/**
+ * Retain up to K items partitioned by a diversity key in O(K) memory, ensuring
+ * distinct partitions are represented before retaining extras, and ranking extras
+ * deterministically with the provided comparator.
+ */
+export class BoundedDiverseBestK<T> {
+  private readonly items: T[] = [];
+
+  constructor(
+    private readonly limit: number,
+    private readonly compare: (left: T, right: T) => number,
+    private readonly partitionKey: (candidate: T) => string,
+    private readonly candidateKey?: (candidate: T) => string,
+  ) {
+    if (!Number.isSafeInteger(limit) || limit < 1) {
+      throw new TypeError('sample limit must be a positive safe integer');
+    }
+  }
+
+  get length(): number {
+    return this.items.length;
+  }
+
+  consider(candidate: T): boolean {
+    if (this.candidateKey) {
+      const key = this.candidateKey(candidate);
+      if (this.items.some((item) => this.candidateKey!(item) === key)) {
+        return false;
+      }
+    }
+
+    if (this.items.length < this.limit) {
+      this.items.push(candidate);
+      return true;
+    }
+
+    const all = [...this.items, candidate];
+    const rankMap = this.computeDiversityRanks(all);
+
+    let worstCandidate = all[0]!;
+    for (let index = 1; index < all.length; index++) {
+      const current = all[index]!;
+      if (this.compareCandidates(current, worstCandidate, rankMap) > 0) {
+        worstCandidate = current;
+      }
+    }
+
+    if (worstCandidate === candidate) {
+      return false;
+    }
+
+    const worstIndex = this.items.indexOf(worstCandidate);
+    if (worstIndex >= 0) {
+      this.items.splice(worstIndex, 1);
+    }
+    this.items.push(candidate);
+    return true;
+  }
+
+  toSortedArray(): T[] {
+    const rankMap = this.computeDiversityRanks(this.items);
+    return [...this.items].sort((left, right) => this.compareCandidates(left, right, rankMap));
+  }
+
+  private computeDiversityRanks(candidates: T[]): Map<T, number> {
+    const byPartition = new Map<string, T[]>();
+    for (const item of candidates) {
+      const key = this.partitionKey(item);
+      let group = byPartition.get(key);
+      if (!group) {
+        group = [];
+        byPartition.set(key, group);
+      }
+      group.push(item);
+    }
+
+    const rankMap = new Map<T, number>();
+    for (const group of byPartition.values()) {
+      group.sort(this.compare);
+      for (let rank = 0; rank < group.length; rank++) {
+        rankMap.set(group[rank]!, rank);
+      }
+    }
+    return rankMap;
+  }
+
+  private compareCandidates(left: T, right: T, rankMap: Map<T, number>): number {
+    const rankDifference = (rankMap.get(left) ?? 0) - (rankMap.get(right) ?? 0);
+    if (rankDifference !== 0) return rankDifference;
+    const comparison = this.compare(left, right);
+    if (comparison !== 0) return comparison;
+    if (this.candidateKey) {
+      const keyLeft = this.candidateKey(left);
+      const keyRight = this.candidateKey(right);
+      if (keyLeft !== keyRight) return keyLeft < keyRight ? -1 : 1;
+    }
+    return 0;
+  }
+}
+
 function compareTripGroups<T>(a: Pick<BoundedTripGroup<T>, 'key' | 'priority'>,
   b: Pick<BoundedTripGroup<T>, 'key' | 'priority'>): number {
   const priorityDifference = a.priority - b.priority;
