@@ -309,7 +309,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       }),
     });
     assert.equal(multiResponse.status, 200);
-    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; strategyRanks?: Record<string, number>; legs: Array<{
+    const multiData = (await multiResponse.json() as { data: { availableStrategies: string[]; blockedProviders: string[]; returnedCount: number; journeys: Array<{ offerId: string | null; totalDurationSeconds: number; totalPriceMinor: number | null; strategyRanks?: Record<string, number>; legs: Array<{
       mode: string; transportType?: string; routeGeometry?: [number, number][];
       origin?: { coordinates: [number, number] }; destination?: { coordinates: [number, number] };
       stops?: Array<{ coordinates: [number, number]; arrivalAt: string }>;
@@ -317,8 +317,29 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(multiData.returnedCount, multiData.journeys.length, 'response metadata matches persisted alternatives');
     if (healthyLvivGtfsEnabled) {
       assert.ok(multiData.availableStrategies.includes('BALANCED'));
+      assert.ok(multiData.availableStrategies.includes('FASTEST'),
+        'a real scheduled transit candidate makes FASTEST available');
       assert.ok(multiData.journeys.some((journey) => typeof journey.strategyRanks?.BALANCED === 'number'),
         'each returned result exposes its place in the selected strategy ranking');
+      for (const strategy of multiData.availableStrategies) {
+        const ranks = multiData.journeys
+          .map((journey) => journey.strategyRanks?.[strategy])
+          .filter((rank): rank is number => typeof rank === 'number');
+        assert.ok(ranks.includes(1), `${strategy} exposes its top-ranked route through the search API`);
+      }
+      const fastest = multiData.journeys.find((journey) => journey.strategyRanks?.FASTEST === 1);
+      assert.ok(fastest, 'FASTEST exposes its top-ranked route through the search API');
+      assert.ok(multiData.journeys.every((journey) => journey.totalDurationSeconds >= fastest.totalDurationSeconds),
+        'the FASTEST rank-1 route has the least elapsed time among returned alternatives');
+      if (multiData.availableStrategies.includes('CHEAPEST')) {
+        const cheapest = multiData.journeys.find((journey) => journey.strategyRanks?.CHEAPEST === 1);
+        const cheapestPriceMinor = cheapest?.totalPriceMinor;
+        assert.ok(typeof cheapestPriceMinor === 'number',
+          'CHEAPEST exposes a route with a known total price');
+        assert.ok(multiData.journeys.every((journey) => journey.totalPriceMinor !== null
+          && journey.totalPriceMinor >= cheapestPriceMinor),
+        'the CHEAPEST rank-1 route has the lowest known price among returned alternatives');
+      }
       const realBusTramChain = multiData.journeys.find((journey) => {
         const modes = new Set(journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.transportType));
         return modes.has('bus') && modes.has('tram');
