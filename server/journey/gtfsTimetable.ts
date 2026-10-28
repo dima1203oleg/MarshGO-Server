@@ -2926,12 +2926,19 @@ export function findGtfsItinerariesWithStats(
         // destination look-ahead cannot recognize a feeder that needs two or
         // more transfers, so hash-only tie-breaking can keep a later trip that
         // misses the only feasible downstream connection.
-        const earliestEndpointArrivalMs = retentionTier === 1 && canBoardFromOrigin
-          ? Math.min(...tripCandidates.filter(canBoardOriginCandidate).map((candidate) => candidate.arrivalAt.getTime()))
-          : retentionTier === 2 && canAlightAtDestination
-            ? Math.min(...tripCandidates.filter((candidate) => destinationStopIds.has(candidate.destinationContext.details.id))
-              .map((candidate) => candidate.arrivalAt.getTime()))
-            : null;
+        let earliestEndpointArrivalMs: number | null = null;
+        if ((retentionTier === 1 && canBoardFromOrigin) || (retentionTier === 2 && canAlightAtDestination)) {
+          for (const candidate of tripCandidates) {
+            const servesRelevantEndpoint = retentionTier === 1
+              ? canBoardOriginCandidate(candidate)
+              : destinationStopIds.has(candidate.destinationContext.details.id);
+            if (!servesRelevantEndpoint) continue;
+            const arrivalMs = candidate.arrivalAt.getTime();
+            if (earliestEndpointArrivalMs === null || arrivalMs < earliestEndpointArrivalMs) {
+              earliestEndpointArrivalMs = arrivalMs;
+            }
+          }
+        }
         const endpointArrivalMinute = earliestEndpointArrivalMs === null ? 0
           : Math.min(4095, Math.max(0, Math.floor((earliestEndpointArrivalMs - input.earliestDeparture.getTime()) / 60_000)));
         const stableRetentionHash = gtfsSegmentRetentionPriority(tripKey);
