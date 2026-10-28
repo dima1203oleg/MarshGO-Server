@@ -88,7 +88,8 @@ describe('Journey strategy scoring', () => {
     assert.equal(new Set(selected.map((item) => item.journey.diversityKey)).size, 1);
   });
 
-  it('preserves strategy winners beyond an arrival-first GTFS cap and remembers dropped unknown fares', () => {
+  it('preserves strategy winners after UTC candidates from timezone groups exceed the GTFS cap', () => {
+    // Each provider group is normalized to absolute UTC Dates before aggregation.
     const denseArrivals: Array<JourneyOption & { arrivalAt: Date; departureAt: Date }> = Array.from({ length: 100 }, (_, index) => {
       const arrivalAt = new Date(Date.parse('2026-10-28T08:40:00Z') + index * 10_000);
       return {
@@ -113,7 +114,11 @@ describe('Journey strategy scoring', () => {
       departureAt: new Date('2026-10-28T08:00:00Z'),
     };
 
-    const allScheduled = [...denseArrivals, fastestAndCheaper, cheapestSlow, droppedUnknownFare];
+    const groupedCandidates = new Map<string, Array<JourneyOption & { arrivalAt: Date; departureAt: Date }>>([
+      ['Europe/Kyiv', denseArrivals],
+      ['Europe/Warsaw', [fastestAndCheaper, cheapestSlow, droppedUnknownFare]],
+    ]);
+    const allScheduled = [...groupedCandidates.values()].flat();
     const pool = retainStrategyCandidatePool(
       allScheduled, 100,
       ['BALANCED', 'FASTEST', 'CHEAPEST'],
