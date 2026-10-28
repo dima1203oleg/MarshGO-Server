@@ -35,6 +35,8 @@ export function strategiesWithComparablePrices<T extends JourneyOption>(
 
 type Metric = 'durationSeconds' | 'priceMinor' | 'transfers' | 'walkingMeters' | 'risk' | 'comfortPenalty';
 
+const BALANCED_TRANSFER_PENALTY_SECONDS = 8 * 60;
+
 function riskMetric(journey: JourneyOption): number {
   return Math.max(journey.transferRisk, journey.reliability === null ? 1 : 1 - journey.reliability);
 }
@@ -199,7 +201,10 @@ export function scoreJourneys<T extends JourneyOption>(
   }
 
   const metrics: Record<Metric, (journey: T) => number> = {
-    durationSeconds: (journey) => journey.durationSeconds,
+    // BALANCED models the passenger's perceived door-to-door time, including
+    // the inconvenience of changing vehicles. FASTEST remains strict elapsed time.
+    durationSeconds: (journey) => journey.durationSeconds
+      + (strategy === 'BALANCED' ? journey.transfers * BALANCED_TRANSFER_PENALTY_SECONDS : 0),
     priceMinor: (journey) => journey.priceMinor ?? Number.MAX_SAFE_INTEGER,
     transfers: (journey) => journey.transfers,
     walkingMeters: (journey) => journey.walkingMeters,
@@ -214,7 +219,7 @@ export function scoreJourneys<T extends JourneyOption>(
 
   const scored = journeys.map((journey) => {
     const values: Record<Metric, number> = {
-      durationSeconds: journey.durationSeconds,
+      durationSeconds: metrics.durationSeconds(journey),
       priceMinor: metrics.priceMinor(journey),
       transfers: journey.transfers,
       walkingMeters: journey.walkingMeters,
