@@ -2797,11 +2797,14 @@ export function findGtfsItinerariesWithStats(
         // destination look-ahead cannot recognize a feeder that needs two or
         // more transfers, so hash-only tie-breaking can keep a later trip that
         // misses the only feasible downstream connection.
-        const earliestOriginArrivalMs = retentionTier === 1 && canBoardFromOrigin
+        const earliestEndpointArrivalMs = retentionTier === 1 && canBoardFromOrigin
           ? Math.min(...tripCandidates.filter(canBoardOriginCandidate).map((candidate) => candidate.arrivalAt.getTime()))
-          : null;
-        const originArrivalMinute = earliestOriginArrivalMs === null ? 0
-          : Math.min(4095, Math.max(0, Math.floor((earliestOriginArrivalMs - input.earliestDeparture.getTime()) / 60_000)));
+          : retentionTier === 2 && canAlightAtDestination
+            ? Math.min(...tripCandidates.filter((candidate) => destinationStopIds.has(candidate.destinationContext.details.id))
+              .map((candidate) => candidate.arrivalAt.getTime()))
+            : null;
+        const endpointArrivalMinute = earliestEndpointArrivalMs === null ? 0
+          : Math.min(4095, Math.max(0, Math.floor((earliestEndpointArrivalMs - input.earliestDeparture.getTime()) / 60_000)));
         const stableRetentionHash = gtfsSegmentRetentionPriority(tripKey);
         const retained = retainBoundedTripGroup(routeCandidates, {
           key: tripKey,
@@ -2810,7 +2813,7 @@ export function findGtfsItinerariesWithStats(
           // connectors (including multi-transfer legs). Unconnected endpoint
           // trips consume a bounded route graph only after feasible service.
           priority: retentionPriorityTier * GTFS_RETENTION_PRIORITY_TIER_STRIDE
-            + originArrivalMinute * GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE
+            + endpointArrivalMinute * GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE
             + stableRetentionHash,
           segments: tripCandidates,
         }, retainedSegmentCountByRoute.get(trip.routeId) ?? 0, graphSegmentLimitPerRoute);
