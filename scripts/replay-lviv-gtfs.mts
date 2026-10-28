@@ -45,6 +45,14 @@ const departureWindowMinutes = Number(process.env.GTFS_REPLAY_DEPARTURE_WINDOW_M
 if (!Number.isInteger(departureWindowMinutes) || departureWindowMinutes < 1 || departureWindowMinutes > 180) {
   throw new Error('GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES must be an integer from 1 to 180.');
 }
+const objectiveReservoirSearchStepsValue = process.env.GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
+const objectiveReservoirSearchSteps = objectiveReservoirSearchStepsValue === undefined || objectiveReservoirSearchStepsValue === ''
+  ? undefined
+  : Number(objectiveReservoirSearchStepsValue);
+if (objectiveReservoirSearchSteps !== undefined
+  && (!Number.isSafeInteger(objectiveReservoirSearchSteps) || objectiveReservoirSearchSteps < 1 || objectiveReservoirSearchSteps > 200_000)) {
+  throw new Error('GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS must be an integer from 1 to 200000.');
+}
 const latestDeparture = new Date(earliestDeparture.getTime() + departureWindowMinutes * 60_000);
 const traceRouteIds = new Set((process.env.GTFS_REPLAY_TRACE_ROUTE_IDS ?? '')
   .split(',').map((routeId) => routeId.trim()).filter(Boolean));
@@ -162,7 +170,9 @@ try {
     maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
     maximumWaitSeconds: 4 * 60 * 60, limit: 100,
     now: new Date('2026-10-22T08:00:00.000Z'),
-  }, {}, graphObserver);
+  }, objectiveReservoirSearchSteps === undefined
+    ? {}
+    : { maxObjectiveReservoirSearchSteps: objectiveReservoirSearchSteps }, graphObserver);
 } finally {
   console.info = originalConsoleInfo;
   if (previousDebugSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
@@ -206,6 +216,7 @@ console.log(JSON.stringify({
   uniqueRouteChains: new Set(result.itineraries.map((item) => item.segments.map((segment) => segment.routeId).join(','))).size,
   rankingMethod: 'production-paretoFrontier+selectStrategyAlternatives',
   rankingScope: 'gtfs-only-candidates; shared with API projection and scorer',
+  objectiveReservoirSearchSteps: objectiveReservoirSearchSteps ?? 25_000,
   availableStrategies,
   strategyCandidates: {
     balanced: signature(winnerFor('BALANCED')),

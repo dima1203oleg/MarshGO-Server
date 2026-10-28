@@ -60,6 +60,11 @@ on:
         required: false
         type: string
         default: ''
+      objective_reservoir_search_steps:
+        description: Optional diagnostic override for objective-reservoir search steps (1-200000); omit to use the production default
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -85,6 +90,7 @@ jobs:
       GTFS_REPLAY_TRACE_ROUTE_IDS: ${{ inputs.trace_route_ids || '' }}
       GTFS_REPLAY_TRACE_TRIP_IDS: ${{ inputs.trace_trip_ids || '' }}
       GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS: ${{ inputs.trace_candidate_trip_ids || '' }}
+      GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS: ${{ inputs.objective_reservoir_search_steps || '' }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@v4
@@ -143,6 +149,7 @@ jobs:
                 GTFS_REPLAY_TRACE_ROUTE_IDS="$GTFS_REPLAY_TRACE_ROUTE_IDS" \
                 GTFS_REPLAY_TRACE_TRIP_IDS="$GTFS_REPLAY_TRACE_TRIP_IDS" \
                 GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS="$GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS" \
+                GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS="$GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS" \
                 ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
               ) | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))' >> replay-results.jsonl
             done
