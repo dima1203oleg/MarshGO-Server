@@ -3732,9 +3732,6 @@ export function findGtfsItinerariesWithStats(
   // budget before later lines contribute candidates to fastest/cheapest/balanced.
   let searchSteps = 0;
   const searchStepsByDepthPass = debugSearch ? new Map<number, { paths: number; children: number }>() : undefined;
-  const transferChoiceStartIndexBySegment = new WeakMap<GtfsDirectJourney, Map<number, number>>();
-  let debugTransferChoiceStartIndexCacheHits = 0;
-  let debugTransferChoiceStartIndexComparisons = 0;
   // Dense urban feeds can require hundreds of thousands of bounded cursor
   // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
   // but do not cut off ordinary city results at the first-route frontier.
@@ -3913,27 +3910,11 @@ export function findGtfsItinerariesWithStats(
     visitedStops.add(last.destinationStop.id);
     const choices = transferCandidatesWithin(last, remainingLegs);
     const latestNext = Math.min(last.arrivalAt.getTime() + maximumWaitSeconds * 1000, journeyEnd.getTime());
-    let startIndexByLegDepth = transferChoiceStartIndexBySegment.get(last);
-    if (!startIndexByLegDepth) {
-      startIndexByLegDepth = new Map<number, number>();
-      transferChoiceStartIndexBySegment.set(last, startIndexByLegDepth);
-    }
-    const cachedLow = startIndexByLegDepth.get(remainingLegs);
-    let low: number;
-    if (cachedLow === undefined) {
-      let computedLow = 0;
-      let high = choices.length;
-      while (computedLow < high) {
-        const middle = (computedLow + high) >>> 1;
-        if (debugSearch) debugTransferChoiceStartIndexComparisons++;
-        if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) computedLow = middle + 1;
-        else high = middle;
-      }
-      low = computedLow;
-      startIndexByLegDepth.set(remainingLegs, computedLow);
-    } else {
-      low = cachedLow;
-      if (debugSearch) debugTransferChoiceStartIndexCacheHits++;
+    let low = 0, high = choices.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) low = middle + 1;
+      else high = middle;
     }
     if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
     enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
@@ -4111,8 +4092,6 @@ export function findGtfsItinerariesWithStats(
   debugStage('itineraries-ranked', { searchSteps, firstLegs: firstLegs.length, candidateResults: rankedResults.length,
     ...(searchStepsByDepthPass ? { searchStepsByDepthPass: JSON.stringify(Object.fromEntries(
       [...searchStepsByDepthPass].sort(([left], [right]) => left - right))) } : {}),
-    ...(debugSearch ? { transferChoiceStartIndexCacheHits: debugTransferChoiceStartIndexCacheHits,
-      transferChoiceStartIndexComparisons: debugTransferChoiceStartIndexComparisons } : {}),
     ...Object.fromEntries(Array.from({ length: maxTransitLegs }, (_, index) =>
       [`candidatesWith${index + 1}Legs`, resultCountByLegCount.get(index + 1) ?? 0])),
     returnedByLegCount: JSON.stringify(itineraries.reduce<Record<number, number>>((counts, itinerary) => {
