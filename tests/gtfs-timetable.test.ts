@@ -3470,6 +3470,26 @@ test('graph-relative lazy search matches production itinerary materialization, c
   const observedProduction = findGtfsItinerariesWithStats(timetable, query, {}, (snapshot) => { capturedGraph = snapshot; });
   assert.deepEqual(observedProduction, production, 'the optional candidate graph observer does not alter production output');
   assert.ok(capturedGraph);
+  let repeatedGraph: GtfsCandidateGraphSnapshot | undefined;
+  const repeatedObservedProduction = findGtfsItinerariesWithStats(timetable, query, {}, (snapshot) => { repeatedGraph = snapshot; });
+  assert.deepEqual(repeatedObservedProduction, observedProduction,
+    'the extracted production graph provider preserves exact ordered itineraries, costs, and truncation flags');
+  assert.ok(repeatedGraph);
+  const graphSignature = (snapshot: GtfsCandidateGraphSnapshot) => {
+    const segmentIds = snapshot.segments.map(({ id }) => id);
+    const successors = segmentIds.map((id) => [id, ...snapshot.successors(id, 1)] as const);
+    return {
+      segmentIds,
+      firstLegIds: [...snapshot.firstLegIds],
+      originStopIds: [...snapshot.originStopIds],
+      destinationStopIds: [...snapshot.destinationStopIds],
+      successors,
+      transferDecisions: successors.flatMap(([previousId, ...nextIds]) => nextIds.map((nextId) =>
+        [previousId, nextId, snapshot.transferDecision(previousId, nextId)] as const)),
+    };
+  };
+  assert.deepEqual(graphSignature(repeatedGraph), graphSignature(capturedGraph),
+    'the graph observer exposes the same deterministic materialized nodes, endpoints, first legs, and successors');
   assert.ok(Object.isFrozen(capturedGraph) && Object.isFrozen(capturedGraph.segments)
     && Object.isFrozen(capturedGraph.firstLegIds), 'the observer exposes frozen graph collections');
   const expectedFirstLegs = capturedGraph.segments.filter(({ journey }) => capturedGraph!.originStopIds.includes(journey.originStop.id)

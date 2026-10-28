@@ -444,6 +444,21 @@ export interface GtfsCandidateGraphSnapshot {
 
 export type GtfsCandidateGraphObserver = (snapshot: GtfsCandidateGraphSnapshot) => void;
 
+/**
+ * Private production search boundary. The current implementation is the sole
+ * provider: it wraps the already-materialized segments and the authoritative
+ * endpoint, transfer, and reachability decisions built by this function.
+ * Keeping the traversal dependent on this narrow contract makes a future
+ * alternate provider possible without moving or duplicating routing policy.
+ */
+type GtfsProductionSearchGraph = {
+  readonly firstLegs: readonly GtfsDirectJourney[];
+  readonly destinationStopIds: ReadonlySet<string>;
+  successors(previous: GtfsDirectJourney, remainingLegs: number): GtfsDirectJourney[];
+  canReachDestination(stopId: string, remainingLegs: number): boolean;
+  transferDecision(previous: GtfsDirectJourney, next: GtfsDirectJourney): GtfsTransferDecision;
+};
+
 type GtfsStopContext = {
   details: { id: string; name: string; coordinates: [number, number] };
   transferNodeIds: string[];
@@ -3828,6 +3843,19 @@ export function findGtfsItinerariesWithStats(
     observeCandidateGraph(snapshot);
   }
 
+  // The current, materialized graph is deliberately the only provider. Keep
+  // endpoint filtering, transfer feasibility, and bounded reachability behind
+  // this private interface so the traversal does not depend on how successors
+  // are indexed. This is an extraction seam only; it preserves the exact
+  // closures and ordering used by the previous search loop.
+  const searchGraph: GtfsProductionSearchGraph = {
+    firstLegs,
+    destinationStopIds,
+    successors: (previous, remainingLegs) => transferCandidatesWithin(previous, remainingLegs),
+    canReachDestination: (stopId, remainingLegs) => reachableWithin[remainingLegs]?.has(stopId) ?? false,
+    transferDecision,
+  };
+
   type PathWork = { kind: 'path'; path: GtfsDirectJourney[] };
   type ChildWork = {
     kind: 'children';
@@ -3900,15 +3928,15 @@ export function findGtfsItinerariesWithStats(
       searchStepsByDepthPass.set(maximumLegsForPass, counts);
     }
     const last = path.at(-1)!;
-    if (destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
+    if (searchGraph.destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
       addPath(path, maximumLegsForPass);
     }
     const remainingLegs = maximumLegsForPass - path.length;
-    if (remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return;
+    if (remainingLegs <= 0 || !searchGraph.canReachDestination(last.destinationStop.id, remainingLegs)) return;
     const previousIds = new Set(path.map((segment) => segment.tripId));
     const visitedStops = new Set(path.map((segment) => segment.originStop.id));
     visitedStops.add(last.destinationStop.id);
-    const choices = transferCandidatesWithin(last, remainingLegs);
+    const choices = searchGraph.successors(last, remainingLegs);
     const latestNext = Math.min(last.arrivalAt.getTime() + maximumWaitSeconds * 1000, journeyEnd.getTime());
     let low = 0, high = choices.length;
     while (low < high) {
@@ -3937,7 +3965,7 @@ export function findGtfsItinerariesWithStats(
     }
     const next = work.choices[work.nextIndex++];
     if (!work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
-      && transferDecision(work.last, next).feasible) {
+      && searchGraph.transferDecision(work.last, next).feasible) {
       enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
     }
     if (work.nextIndex < work.endIndex) enqueueWork(queue, work);
@@ -3978,7 +4006,7 @@ export function findGtfsItinerariesWithStats(
       : Math.min(MAX_SEARCH_STEPS, searchSteps + Math.max(1,
         Math.floor((MAX_SEARCH_STEPS - searchSteps) * depthWeights[depthIndex] / remainingWeight)));
     const firstLegGroups = new Map<string, GtfsDirectJourney[]>();
-    for (const segment of firstLegs) {
+    for (const segment of searchGraph.firstLegs) {
       const key = `${segment.providerId}:${segment.routeId}`;
       const group = firstLegGroups.get(key) ?? [];
       group.push(segment);
