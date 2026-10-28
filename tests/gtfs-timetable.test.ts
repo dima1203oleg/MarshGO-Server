@@ -3720,6 +3720,70 @@ test('graph-relative lazy search matches production itinerary materialization, c
     'a transfer departing one second beyond the maximum-wait boundary remains excluded');
 });
 
+test('incremental successor cache preserves feasible transfer chains and three ranking winners', () => {
+  const timetable = connectingFeed({ secondRouteType: '3' });
+  const firstTrip = timetable.trips.get('b1');
+  const firstTripStopTimes = timetable.stopTimes.get('b1');
+  assert.ok(firstTrip && firstTripStopTimes);
+  timetable.trips.set('b2', { ...firstTrip });
+  timetable.stopTimes.set('b2', firstTripStopTimes.map((stopTime) => ({ ...stopTime })));
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, stopTimes] of timetable.stopTimes) stopTimes.forEach((stopTime, index) => {
+    timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+    ]);
+  });
+  timetable.fareProducts = new Map([
+    ['fare-bus', { id: 'fare-bus', priceMinor: 250, currency: 'UAH', transfers: 1, transferDurationSeconds: 3600 }],
+    ['fare-rail', { id: 'fare-rail', priceMinor: 180, currency: 'UAH', transfers: null, transferDurationSeconds: null }],
+  ]);
+  timetable.fareRules = new Map([
+    ['fare-bus', [{ fareId: 'fare-bus', routeId: 'bus' }]],
+    ['fare-rail', [{ fareId: 'fare-rail', routeId: 'rail' }]],
+  ]);
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    origin: [24.0201, 49.8401] as [number, number],
+    destination: [24.0301, 49.8501] as [number, number],
+    maximumTransfers: 1, maximumAccessWalkingMeters: 300, maximumEgressWalkingMeters: 300,
+    maximumTransferWalkingMeters: 500, minimumTransferBufferSeconds: 180, maximumWaitSeconds: 4 * 60 * 60,
+  };
+  const eager = findGtfsItinerariesWithStats(timetable, query);
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousInfo = console.info;
+  const diagnostics: Record<string, unknown>[] = [];
+  let incremental: ReturnType<typeof findGtfsItinerariesWithStats>;
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: Parameters<typeof console.info>) => {
+    if (typeof args[0] !== 'string') return;
+    try {
+      const event = JSON.parse(args[0]) as Record<string, unknown>;
+      if (event.event === 'gtfs.search.debug' && event.stage === 'incremental-reachability-built') diagnostics.push(event);
+    } catch { /* Ignore unrelated log lines. */ }
+  };
+  try {
+    incremental = findGtfsItinerariesWithStats(timetable, query, { candidateSource: 'incremental-event-index' });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+  }
+  assert.deepEqual(incremental, eager, 'memoized successor lookup preserves ordered itineraries and feasible transfer chains');
+  const reachability = diagnostics[0];
+  assert.ok(reachability, 'incremental search emits completed reachability diagnostics');
+  assert.ok(Number(reachability.successorCacheHits) > 0, 'repeated exact transfer queries reuse cached successor calls');
+  for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+    const winnerId = (itineraries: GtfsItinerary[]) => scoreJourneys(itineraries.map((journey) => ({
+      id: journey.id, durationSeconds: journey.durationSeconds,
+      priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+      transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+      transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+      legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+    })), strategy)[0]?.journey.id ?? null;
+    assert.equal(winnerId(incremental.itineraries), winnerId(eager.itineraries), `${strategy} winner is unchanged`);
+  }
+});
+
 test('matches a deterministic exhaustive oracle for pathways, transfer rules, loops, and realtime overlays', () => {
   const query = {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),

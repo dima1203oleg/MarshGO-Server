@@ -2440,9 +2440,29 @@ export function findGtfsItinerariesWithStats(
         if (include(call)) candidates.add(call);
       }
     };
+    const successorLookupCache = new Map<string, IncrementalBoardingCall[]>();
+    const maximumSuccessorCacheEntries = 1_024;
+    const maximumCachedSuccessorResults = 256;
+    let successorLookupRequests = 0;
+    let successorCacheHits = 0;
     const candidateCallsFor = (previous: GtfsDirectJourney): IncrementalBoardingCall[] => {
-      const candidates = new Set<IncrementalBoardingCall>();
       const earliestDepartureMs = previous.arrivalAt.getTime();
+      const [destinationLongitude, destinationLatitude] = previous.destinationStop.coordinates;
+      const cacheKey = JSON.stringify([
+        [...previous.destinationTransferNodeIds].sort(compareStableId),
+        destinationLongitude,
+        destinationLatitude,
+        earliestDepartureMs,
+      ]);
+      successorLookupRequests++;
+      const cached = successorLookupCache.get(cacheKey);
+      if (cached) {
+        successorCacheHits++;
+        successorLookupCache.delete(cacheKey);
+        successorLookupCache.set(cacheKey, cached);
+        return cached;
+      }
+      const candidates = new Set<IncrementalBoardingCall>();
       const latestDepartureMs = Math.min(earliestDepartureMs + maximumWaitSeconds * 1000, journeyEnd.getTime());
       for (const nodeId of previous.destinationTransferNodeIds) {
         addCallsInDepartureWindow(callsByNode.get(nodeId) ?? [], candidates, earliestDepartureMs, latestDepartureMs);
@@ -2462,7 +2482,15 @@ export function findGtfsItinerariesWithStats(
         addCallsInDepartureWindow(cellCalls, candidates, earliestDepartureMs, latestDepartureMs,
           (call) => distanceMeters(previous.destinationStop.coordinates, call.coordinates) <= transferRadius);
       }
-      return [...candidates].sort(compareBoardingCalls);
+      const orderedCandidates = [...candidates].sort(compareBoardingCalls);
+      if (orderedCandidates.length <= maximumCachedSuccessorResults) {
+        if (successorLookupCache.size >= maximumSuccessorCacheEntries) {
+          const oldestKey = successorLookupCache.keys().next().value;
+          if (oldestKey !== undefined) successorLookupCache.delete(oldestKey);
+        }
+        successorLookupCache.set(cacheKey, orderedCandidates);
+      }
+      return orderedCandidates;
     };
     const maxTransitLegsForIndex = maximumTransfers + 1;
     const queued: Array<{ call: IncrementalBoardingCall; segmentsUsed: number }> = [];
@@ -2491,7 +2519,8 @@ export function findGtfsItinerariesWithStats(
     for (let cursor = 0; cursor < queued.length && !incrementalSourceFallbackRequired; cursor++) {
       if (process.env.MARSHGO_GTFS_SEARCH_PROGRESS === '1' && cursor > 0 && cursor % 5000 === 0) {
         debugStage('incremental-reachability-progress', { searchCursor: cursor, queuedStates: queued.length,
-          projectedLegs, reachableBoardingCalls: incrementalReachableBoardingKeys.size });
+          projectedLegs, reachableBoardingCalls: incrementalReachableBoardingKeys.size,
+          successorLookupRequests, successorCacheHits, successorCacheEntries: successorLookupCache.size });
       }
       const { call, segmentsUsed } = queued[cursor]!;
       incrementalReachableBoardingKeys.add(call.key);
@@ -2549,7 +2578,8 @@ export function findGtfsItinerariesWithStats(
       }
     }
     debugStage('incremental-reachability-built', { reachableStates: visitedStates.size, projectedLegs,
-      reachableBoardingCalls: incrementalReachableBoardingKeys.size });
+      reachableBoardingCalls: incrementalReachableBoardingKeys.size, successorLookupRequests,
+      successorCacheHits, successorCacheEntries: successorLookupCache.size });
     if (incrementalSourceFallbackRequired) return eagerFallback();
 
     // Rebase graph demand on the event-reachable boarding calls. This keeps
