@@ -19,7 +19,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, findGtfsStopArrivals, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, findGtfsStopArrivals, findGtfsItinerariesWithStats, mergeGtfsTimetableSourcesByTimezone, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg } from './journey/liveVehicles';
@@ -2679,20 +2679,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerErrors.push(`Київське метро: ${metroResult?.reason instanceof Error ? metroResult.reason.message : 'відкриті дані тимчасово недоступні'}`);
     }
   }
-  const sourcesByTimezone = new Map<string, GtfsTimetableSource[]>();
-  for (const source of feedSources) {
-    const sources = sourcesByTimezone.get(source.feed.timezone) ?? [];
-    sources.push(source); sourcesByTimezone.set(source.feed.timezone, sources);
-  }
   type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary, 'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified'>>;
   const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
     if (!itinerary.fare || search.passengers === 1) return itinerary;
     return { ...itinerary, fare: scaleGtfsFareForPassengers(itinerary.fare, search.passengers) };
   };
-  const mergedFeedGroups = [...sourcesByTimezone.values()].flatMap((sources) => {
-    const feed = mergeGtfsTimetables(sources);
-    return feed ? [{ sources, feed }] : [];
-  });
+  const mergedFeedGroups = mergeGtfsTimetableSourcesByTimezone(feedSources);
   let scheduledCandidates: SearchItinerary[] = [];
   let pedestrianRoutesUnavailable = false;
   let pedestrianCandidatesRejected = false;

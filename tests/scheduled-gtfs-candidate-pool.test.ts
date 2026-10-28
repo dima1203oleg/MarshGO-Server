@@ -82,6 +82,8 @@ describe('scheduled GTFS API candidate projection', () => {
     assert.equal(pool.candidates.length, 100);
     assert.equal(pool.candidates[0].id, 'kyiv-0', 'the bounded result is ordered by absolute UTC arrival');
     assert.ok(pool.candidates.some(({ id }) => id === 'warsaw-express'));
+    assert.equal(pool.candidates.some(({ id }) => id === 'warsaw-unpriced'), false,
+      'the unpriced candidate falls beyond the cap in this fixture');
     assert.ok(pricedPool.candidates.some(({ id }) => id === 'warsaw-cheap'));
     assert.equal(pool.hasUnknownFare, true);
     assert.deepEqual(

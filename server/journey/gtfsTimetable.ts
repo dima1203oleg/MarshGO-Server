@@ -543,6 +543,28 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
   return feed;
 }
 
+export interface MergedGtfsTimezoneGroup {
+  sources: GtfsTimetableSource[];
+  feed: GtfsTimetableFeed;
+}
+
+/** Merge compatible provider feeds without ever combining different agency timezones. */
+export function mergeGtfsTimetableSourcesByTimezone(
+  sources: readonly GtfsTimetableSource[],
+): MergedGtfsTimezoneGroup[] {
+  const sourcesByTimezone = new Map<string, GtfsTimetableSource[]>();
+  for (const source of sources) {
+    const group = sourcesByTimezone.get(source.feed.timezone) ?? [];
+    group.push(source);
+    sourcesByTimezone.set(source.feed.timezone, group);
+  }
+
+  return [...sourcesByTimezone.values()].flatMap((group) => {
+    const feed = mergeGtfsTimetables(group);
+    return feed ? [{ sources: group, feed }] : [];
+  });
+}
+
 function isValidTimezone(timezone: string): boolean {
   try { new Intl.DateTimeFormat('en', { timeZone: timezone }).format(0); return true; } catch { return false; }
 }
