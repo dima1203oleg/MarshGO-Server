@@ -416,6 +416,10 @@ export interface GtfsItinerarySearchResult {
 export interface GtfsGraphBudgetLimits {
   totalSegments?: number;
   segmentsPerRoute?: number;
+  /** Opt-in candidate source for bounded query-reachable boarding experiments. */
+  candidateSource?: 'production' | 'query-directed-boardings';
+  /** Test-only override for exercising query-directed boarding frontier truncation. */
+  maxQueryDirectedBoardingStops?: number;
   /** Test-only override for exercising bounded intermediate-connector retention. */
   maxRouteOverflowConnectors?: number;
   /** Test-only override for verifying bounded search-frontier behavior. */
@@ -1736,6 +1740,12 @@ export function findGtfsItinerariesWithStats(
   const maximumGraphSegments = graphLimits.totalSegments ?? MAX_GTFS_GRAPH_SEGMENTS;
   const maximumGraphSegmentsPerRoute = graphLimits.segmentsPerRoute ?? MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
   const maximumRouteOverflowConnectors = graphLimits.maxRouteOverflowConnectors ?? MAX_ROUTE_OVERFLOW_CONNECTORS;
+  const candidateSource = graphLimits.candidateSource ?? 'production';
+  const maximumQueryDirectedBoardingStops = graphLimits.maxQueryDirectedBoardingStops ?? 20_000;
+  if (!['production', 'query-directed-boardings'].includes(candidateSource)
+    || !Number.isSafeInteger(maximumQueryDirectedBoardingStops) || maximumQueryDirectedBoardingStops < 1) {
+    throw new RangeError('GTFS candidate source bounds are invalid');
+  }
   if (!Number.isSafeInteger(maximumRouteOverflowConnectors) || maximumRouteOverflowConnectors < 1) {
     throw new RangeError('maxRouteOverflowConnectors must be a positive safe integer');
   }
@@ -1993,6 +2003,99 @@ export function findGtfsItinerariesWithStats(
   debugStage('corridor-selected', { corridorStops: corridorStops.size, interchangeStops: interchangeStopIds.size,
     corridorWidthMeters: Math.round(corridorWidth) });
 
+  // The opt-in source walks a conservative stop/trip reachability superset
+  // from the selected origins. It ignores clock time and transfer prohibitions
+  // here on purpose; the normal transferDecision remains the only feasibility
+  // authority when the retained candidate graph is searched.
+  const queryDirectedBoardingStopIds = new Set<string>();
+  let queryDirectedBoardingFrontierTruncated = false;
+  if (candidateSource === 'query-directed-boardings') {
+    const stopIdsByTransferNode = new Map<string, Set<string>>();
+    const stopsByParentStation = new Map<string, Set<string>>();
+    const tripIdsByRoute = new Map<string, string[]>();
+    const transferRulesByFromStop = new Map<string, GtfsTransferRule[]>();
+    for (const [stopId, entries] of feed.stopTimesByStop) {
+      for (const entry of entries) {
+        const stopTime = feed.stopTimes.get(entry.tripId)?.[entry.index];
+        const nodes = new Set([stopId, stopTime?.sourceStopId, stopTime?.sourceParentStationId,
+          feed.stops.get(stopId)?.parentStation].filter((value): value is string => Boolean(value)));
+        for (const node of nodes) {
+          const stops = stopIdsByTransferNode.get(node) ?? new Set<string>();
+          stops.add(stopId);
+          stopIdsByTransferNode.set(node, stops);
+        }
+      }
+      const parent = feed.stops.get(stopId)?.parentStation;
+      if (parent) {
+        const stops = stopsByParentStation.get(parent) ?? new Set<string>();
+        stops.add(stopId);
+        stopsByParentStation.set(parent, stops);
+      }
+    }
+    for (const [tripId, trip] of feed.trips) {
+      const trips = tripIdsByRoute.get(trip.routeId) ?? [];
+      trips.push(tripId);
+      tripIdsByRoute.set(trip.routeId, trips);
+    }
+    for (const rule of feed.transfers ?? []) {
+      const rules = transferRulesByFromStop.get(rule.fromStopId) ?? [];
+      rules.push(rule);
+      transferRulesByFromStop.set(rule.fromStopId, rules);
+    }
+    const pendingStops: string[] = [];
+    const enqueueReachableStop = (stopId: string) => {
+      if (!feed.stopTimesByStop.has(stopId) || !interchangeStopIds.has(stopId)
+        || queryDirectedBoardingStopIds.has(stopId)) return;
+      if (queryDirectedBoardingStopIds.size >= maximumQueryDirectedBoardingStops) {
+        queryDirectedBoardingFrontierTruncated = true;
+        return;
+      }
+      queryDirectedBoardingStopIds.add(stopId);
+      pendingStops.push(stopId);
+    };
+    originStopIds.forEach(enqueueReachableStop);
+    for (let cursor = 0; cursor < pendingStops.length; cursor++) {
+      const stopId = pendingStops[cursor]!;
+      for (const routeId of routesByStop.get(stopId) ?? []) {
+        for (const tripId of tripIdsByRoute.get(routeId) ?? []) {
+          for (const stopTime of feed.stopTimes.get(tripId) ?? []) enqueueReachableStop(stopTime.stopId);
+        }
+      }
+      const stop = feed.stops.get(stopId);
+      if (stop?.parentStation) {
+        for (const siblingId of stopsByParentStation.get(stop.parentStation) ?? []) enqueueReachableStop(siblingId);
+      }
+      const transferNodes = new Set([stopId]);
+      for (const entry of feed.stopTimesByStop.get(stopId) ?? []) {
+        const stopTime = feed.stopTimes.get(entry.tripId)?.[entry.index];
+        if (stopTime?.sourceStopId) transferNodes.add(stopTime.sourceStopId);
+        if (stopTime?.sourceParentStationId) transferNodes.add(stopTime.sourceParentStationId);
+      }
+      for (const nodeId of transferNodes) {
+        for (const reachableNode of reachablePathwayNodes(nodeId)) {
+          for (const candidateStopId of stopIdsByTransferNode.get(reachableNode) ?? []) enqueueReachableStop(candidateStopId);
+        }
+        for (const rule of transferRulesByFromStop.get(nodeId) ?? []) {
+          for (const candidateStopId of stopIdsByTransferNode.get(rule.toStopId) ?? []) enqueueReachableStop(candidateStopId);
+        }
+      }
+      const stopDetails = feed.stops.get(stopId);
+      if (stopDetails) {
+        const [cellX, cellY] = transferCell([stopDetails.lon, stopDetails.lat]);
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+          for (const nearbyStopId of stopIdsByTransferCell.get(`${cellX + dx}:${cellY + dy}`) ?? []) {
+            const nearby = feed.stops.get(nearbyStopId);
+            if (nearby && distanceMeters([stopDetails.lon, stopDetails.lat], [nearby.lon, nearby.lat]) <= transferRadius) {
+              enqueueReachableStop(nearbyStopId);
+            }
+          }
+        }
+      }
+    }
+  }
+  const canBoardFromCandidateSource = (stopId: string) => candidateSource !== 'query-directed-boardings'
+    || queryDirectedBoardingStopIds.has(stopId);
+
   const segmentsByRoute = new Map<string, RetainedGtfsTrip[]>();
   const retainedSegmentCountByRoute = new Map<string, number>();
   const overflowSegmentsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
@@ -2002,7 +2105,7 @@ export function findGtfsItinerariesWithStats(
     `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
   const candidateStopCountByRoute = new Map<string, number>();
   for (const [stopId, routeIds] of routesByStop) {
-    if (!interchangeStopIds.has(stopId)) continue;
+    if (!interchangeStopIds.has(stopId) || !canBoardFromCandidateSource(stopId)) continue;
     for (const routeId of routeIds) {
       const route = feed.routes.get(routeId);
       if (!route || (input.allowedModes && !input.allowedModes.includes(route.mode))) continue;
@@ -2134,7 +2237,7 @@ export function findGtfsItinerariesWithStats(
     const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
       ? localCityCatchmentStops : corridorStops;
     const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
-      && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
+      && interchangeStopIds.has(stopTime.stopId) && canBoardFromCandidateSource(stopTime.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
     let pairOpportunities = 0;
     for (const serviceDate of serviceDates) {
@@ -2293,7 +2396,7 @@ export function findGtfsItinerariesWithStats(
     const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
       ? localCityCatchmentStops : corridorStops;
     const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
-      && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
+      && interchangeStopIds.has(stopTime.stopId) && canBoardFromCandidateSource(stopTime.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
     let addedTripDemand = 0;
     for (const serviceDate of serviceDates) {
@@ -2347,7 +2450,7 @@ export function findGtfsItinerariesWithStats(
   // when that route happens not to materialize a segment before filtering.
   // Surface the bounded result as partial instead of reporting an empty graph
   // as a complete no-route answer.
-  let segmentGraphTruncated = graphRoutesBudgetLimited > 0;
+  let segmentGraphTruncated = graphRoutesBudgetLimited > 0 || queryDirectedBoardingFrontierTruncated;
   const priorEventCache = new WeakMap<RetainedGtfsSegment, boolean>();
   const priorEventByTripStopCache = new Map<string, boolean>();
   const hasPriorEvent = (segment: RetainedGtfsSegment, minimumGapSeconds: number) => {
@@ -2730,7 +2833,7 @@ export function findGtfsItinerariesWithStats(
     const localFeedInIntercitySearch = intercitySearch && providerCity !== undefined && providerCity !== 'Україна';
     const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : corridorStops;
     const eligibleIndexes = stops.flatMap((stop, index) => eligibleStopIds.has(stop.stopId)
-      && interchangeStopIds.has(stop.stopId) ? [index] : []);
+      && interchangeStopIds.has(stop.stopId) && canBoardFromCandidateSource(stop.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
     tripsWithEligibleStops++;
     // A trip's stop metadata is shared across its service dates and all
@@ -2752,11 +2855,20 @@ export function findGtfsItinerariesWithStats(
       // this trip instance so a citywide set of every candidate key is not
       // retained alongside the graph.
       const seenTripSegments = new Set<string>();
-      for (const projection of materializeTripInstanceLegs(tripEvents.events, {
-        tripId, maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
-        queryReachableTransferTripIdsByStopId,
-        canBelongToDirectOnlyJourney,
-      })) {
+      const tripLegProjections = function* (): Generator<GtfsTripLegProjection> {
+        const sharedOptions = {
+          tripId, maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
+          queryReachableTransferTripIdsByStopId, canBelongToDirectOnlyJourney,
+        };
+        if (candidateSource !== 'query-directed-boardings') {
+          yield* materializeTripInstanceLegs(tripEvents.events, sharedOptions);
+          return;
+        }
+        for (const boardingIndex of eligibleIndexes) {
+          yield* materializeTripInstanceLegs(tripEvents.events, { ...sharedOptions, boardingStopIndex: boardingIndex });
+        }
+      }();
+      for (const projection of tripLegProjections) {
         if (projection.kind === 'omitted-beyond-window') {
           // Preserve the partial-search signal for omitted, potentially useful legs.
           segmentGraphTruncated = true;

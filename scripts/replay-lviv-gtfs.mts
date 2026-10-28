@@ -151,6 +151,9 @@ console.info = (...args: unknown[]) => {
   originalConsoleInfo(...args);
 };
 let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+const candidateGraphLimits = process.env.REPLAY_GROUP === 'candidate'
+  && process.env.GTFS_REPLAY_CANDIDATE_SOURCE === 'query-directed-boardings'
+  ? { candidateSource: 'query-directed-boardings' as const } : {};
 try {
   result = findGtfsItinerariesWithStats(feed, {
     providerId: 'lviv-frozen-replay', providerName: 'Lviv frozen GTFS', providerCity: 'Львів',
@@ -162,7 +165,7 @@ try {
     maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
     maximumWaitSeconds: 4 * 60 * 60, limit: 100,
     now: new Date('2026-10-22T08:00:00.000Z'),
-  }, {}, graphObserver);
+  }, candidateGraphLimits, graphObserver);
 } finally {
   console.info = originalConsoleInfo;
   if (previousDebugSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;

@@ -3594,6 +3594,123 @@ test('graph-relative lazy search matches production itinerary materialization, c
     'a transfer departing one second beyond the maximum-wait boundary remains excluded');
 });
 
+test('opt-in query-directed boarding source preserves exhaustive small-feed winners and reports frontier cuts', () => {
+  const directFeed = feed({ withArrivalAlternatives: true });
+  directFeed.fareProducts = new Map([
+    ['fare-r', { id: 'fare-r', priceMinor: 250, currency: 'UAH', transfers: null, transferDurationSeconds: null }],
+    ['fare-r2', { id: 'fare-r2', priceMinor: 90, currency: 'UAH', transfers: null, transferDurationSeconds: null }],
+  ]);
+  directFeed.fareRules = new Map([
+    ['fare-r', [{ fareId: 'fare-r', routeId: 'r' }]],
+    ['fare-r2', [{ fareId: 'fare-r2', routeId: 'r2' }]],
+  ]);
+  const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 2 * 60 * 60, maximumTransfers: 0, limit: 100 };
+  const source = { candidateSource: 'query-directed-boardings' as const,
+    totalSegments: 100, segmentsPerRoute: 100 };
+  const production = findGtfsItinerariesWithStats(directFeed, query, { totalSegments: 100, segmentsPerRoute: 100 });
+  const directed = findGtfsItinerariesWithStats(directFeed, query, source);
+  assert.equal(directed.searchTruncated, false);
+  assert.deepEqual(directed.itineraries, production.itineraries,
+    'query-directed boarding projection preserves segment identity, fare and public metadata on an exhaustive direct feed');
+  const winner = (itineraries: readonly GtfsItinerary[], strategy: 'FASTEST' | 'CHEAPEST' | 'BALANCED') =>
+    scoreJourneys(itineraries.map((journey) => ({ id: journey.id, durationSeconds: journey.durationSeconds,
+      priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+      transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+      transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+      legs: journey.segments.map((segment) => ({ mode: segment.mode })) })), strategy)[0]?.journey.id ?? null;
+  const assertSourceParity = (fixture: GtfsTimetableFeed, fixtureQuery: typeof query, label: string) => {
+    const expected = findGtfsItinerariesWithStats(fixture, fixtureQuery,
+      { totalSegments: 100, segmentsPerRoute: 100 });
+    const actual = findGtfsItinerariesWithStats(fixture, fixtureQuery, source);
+    assert.equal(actual.searchTruncated, false, `${label}: exhaustive fixture fits the opt-in bounds`);
+    assert.deepEqual(actual.itineraries, expected.itineraries, `${label}: identities, fares and metadata match`);
+    for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+      assert.equal(winner(actual.itineraries, strategy), winner(expected.itineraries, strategy), `${label}: ${strategy} winner`);
+    }
+  };
+  for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+    assert.equal(winner(directed.itineraries, strategy), winner(production.itineraries, strategy),
+      `${strategy} winner agrees for the exhaustive fare-bearing direct feed`);
+  }
+
+  for (const transferFeed of [
+    connectingFeed(),
+    connectingFeed({ transferType: '3' }),
+    connectingFeed({ sameRoute: true, transferType: '4', inSeat: true }),
+    connectingFeed({ transferType: '2', minimumTransferTime: '240' }),
+  ]) {
+    const transferQuery = { ...query, maximumTransfers: 1 };
+    const expected = findGtfsItinerariesWithStats(transferFeed, transferQuery,
+      { totalSegments: 100, segmentsPerRoute: 100 });
+    const actual = findGtfsItinerariesWithStats(transferFeed, transferQuery, source);
+    assert.equal(actual.searchTruncated, false, 'small transfer fixture fits the opt-in frontier and graph bounds');
+    assert.deepEqual(actual.itineraries, expected.itineraries,
+      'the exact transfer authority preserves forbidden, in-seat, and minimum-buffer behavior');
+  }
+
+  assertSourceParity(feed({ tuesday: '1' }), { ...query,
+    earliestDeparture: new Date('2026-10-13T04:55:00Z'), latestDeparture: new Date('2026-10-13T05:12:00Z'),
+    now: new Date('2026-10-08T00:00:00Z') }, 'Tuesday Europe/Kyiv service-date instance');
+  const extendedServiceFeed = feed({ departure: '24:30:00', arrival: '24:45:00', monday: '0', exceptionDate: '20261024' });
+  const extendedServiceQuery = { ...request('2026-10-24T21:20:00Z', '2026-10-24T21:40:00Z'), maximumTransfers: 0 };
+  const extendedServiceExpected = findGtfsItinerariesWithStats(extendedServiceFeed, extendedServiceQuery,
+    { totalSegments: 100, segmentsPerRoute: 100 });
+  const extendedServiceActual = findGtfsItinerariesWithStats(extendedServiceFeed, extendedServiceQuery, source);
+  assert.deepEqual(extendedServiceActual.itineraries, extendedServiceExpected.itineraries,
+    'query-directed boarding preserves prior-service-date 24:30 GTFS trips');
+  assert.equal(extendedServiceActual.itineraries[0]?.segments[0]?.serviceDate, '20261024');
+  assert.equal(extendedServiceActual.itineraries[0]?.segments[0]?.departureAt.toISOString(), '2026-10-24T21:30:00.000Z');
+  assertSourceParity(feed({ withIntermediate: true, pickup: '1' }), query, 'pickup restriction');
+  assertSourceParity(feed({ withIntermediate: true, dropoff: '1' }), query, 'drop-off restriction');
+  const realtimeFeed = feed({ withIntermediate: true });
+  realtimeFeed.realtimeTripUpdates = new Map([['t1\u000020261012', {
+    tripId: 't1', startDate: '20261012', relationship: 'SCHEDULED',
+    stops: [
+      { stopSequence: 1, relationship: 'SCHEDULED', arrival: { delaySeconds: 60 }, departure: { delaySeconds: 120 } },
+      { stopSequence: 2, relationship: 'SKIPPED' },
+      { stopSequence: 3, relationship: 'SCHEDULED', arrival: { delaySeconds: 300 }, departure: { delaySeconds: 360 } },
+    ], updatedAt: new Date('2026-10-12T04:59:00Z'), feedTimestamp: new Date('2026-10-12T04:59:00Z'),
+  }]]);
+  assertSourceParity(realtimeFeed, query, 'realtime delays and skipped stop');
+  const canceledFeed = structuredClone(realtimeFeed);
+  canceledFeed.realtimeTripUpdates!.set('t1\u000020261012', { tripId: 't1', startDate: '20261012',
+    relationship: 'CANCELED', stops: [], updatedAt: new Date('2026-10-12T04:59:00Z'),
+    feedTimestamp: new Date('2026-10-12T04:59:00Z') });
+  assertSourceParity(canceledFeed, query, 'realtime cancellation');
+  const repeatedCallFeed = connectingFeed();
+  const repeatedTripCalls = repeatedCallFeed.stopTimes.get('b1')!;
+  repeatedTripCalls.splice(2, 0, { ...repeatedTripCalls[1]!, sequence: 3, arrivalSeconds: 8 * 3600 + 25 * 60,
+    departureSeconds: 8 * 3600 + 25 * 60 });
+  repeatedCallFeed.stopTimesByStop = new Map();
+  for (const [tripId, calls] of repeatedCallFeed.stopTimes) calls.forEach((call, index) => {
+    repeatedCallFeed.stopTimesByStop.set(call.stopId,
+      [...(repeatedCallFeed.stopTimesByStop.get(call.stopId) ?? []), { tripId, index }]);
+  });
+  assertSourceParity(repeatedCallFeed, { ...query, maximumTransfers: 1 }, 'repeated stop calls on one trip');
+  const pathwayFeed = connectingFeed({ withPathway: true });
+  pathwayFeed.stopTimes.get('r1')![0]!.stopId = 'walkway';
+  pathwayFeed.stopTimesByStop = new Map();
+  for (const [tripId, calls] of pathwayFeed.stopTimes) calls.forEach((call, index) => {
+    pathwayFeed.stopTimesByStop.set(call.stopId, [...(pathwayFeed.stopTimesByStop.get(call.stopId) ?? []), { tripId, index }]);
+  });
+  assertSourceParity(pathwayFeed, { ...query, maximumTransfers: 1 }, 'directed pathway platform transfer');
+  const unknownFareFeed = structuredClone(directFeed);
+  unknownFareFeed.fareProducts = new Map();
+  unknownFareFeed.fareRules = new Map();
+  assertSourceParity(unknownFareFeed, query, 'unknown fare remains null');
+  assert.equal(findGtfsItinerariesWithStats(unknownFareFeed, query, source).itineraries
+    .find((journey) => journey.segments[0]?.routeId === 'r')?.fare, null,
+  'a query-directed segment without fare coverage remains unknown rather than free');
+
+  const bounded = findGtfsItinerariesWithStats(connectingFeed(), { ...query, maximumTransfers: 1 },
+    { ...source, maxQueryDirectedBoardingStops: 1 });
+  assert.equal(bounded.truncation.candidateGraph, true,
+    'the bounded query-directed boarding frontier reports candidate graph truncation');
+  assert.equal(bounded.searchTruncated, true,
+    'a cut query-directed boarding frontier is never presented as exhaustive');
+});
+
 test('matches a deterministic exhaustive oracle for pathways, transfer rules, loops, and realtime overlays', () => {
   const query = {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),

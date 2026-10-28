@@ -16,6 +16,14 @@ on:
         required: false
         type: string
         default: ''
+      candidate_source:
+        description: Optional candidate-only GTFS graph source for controlled experiments
+        required: false
+        type: choice
+        options:
+          - production
+          - query-directed-boardings
+        default: production
       baseline_sha:
         description: Exact baseline Server commit to compare with the candidate SHA
         required: true
@@ -81,6 +89,7 @@ jobs:
       GTFS_REPLAY_DESTINATION: ${{ inputs.destination || '24.0175835,49.8013165' }}
       GTFS_REPLAY_DEPARTURE_START_UTC: ${{ inputs.departure_start_utc || '2026-10-23T05:00:00.000Z' }}
       GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES: ${{ inputs.departure_window_minutes || '30' }}
+      GTFS_REPLAY_CANDIDATE_SOURCE: ${{ inputs.candidate_source || 'production' }}
       GTFS_REPLAY_TRACE_TRIP_CHAINS: ${{ inputs.trace_trip_chains || '' }}
       GTFS_REPLAY_TRACE_ROUTE_IDS: ${{ inputs.trace_route_ids || '' }}
       GTFS_REPLAY_TRACE_TRIP_IDS: ${{ inputs.trace_trip_ids || '' }}
@@ -140,6 +149,7 @@ jobs:
                 GTFS_REPLAY_EXPECTED_SHA256="$GTFS_REPLAY_EXPECTED_SHA256" \
                 GTFS_REPLAY_DEPARTURE_START_UTC="$GTFS_REPLAY_DEPARTURE_START_UTC" \
                 GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES="$GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES" \
+                GTFS_REPLAY_CANDIDATE_SOURCE="$GTFS_REPLAY_CANDIDATE_SOURCE" \
                 GTFS_REPLAY_TRACE_ROUTE_IDS="$GTFS_REPLAY_TRACE_ROUTE_IDS" \
                 GTFS_REPLAY_TRACE_TRIP_IDS="$GTFS_REPLAY_TRACE_TRIP_IDS" \
                 GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS="$GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS" \
