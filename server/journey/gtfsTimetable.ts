@@ -9,6 +9,7 @@ import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealti
 import { BoundedBestK, redistributeBoundedCandidates, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
 import { scoreJourneys } from './scoring';
+import { toRankedGtfsItinerary } from './gtfsRanking';
 import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
 import { BoundedPromiseCache } from './boundedPromiseCache';
 
@@ -498,20 +499,13 @@ export function rankGtfsItinerariesForCandidateSampling(
   // Use the same scorer as the final cross-provider BALANCED ranking. A
   // separate proxy can discard the route that the user would ultimately see
   // as optimal (for example, a slightly slower direct service vs a transfer).
-  const candidates = itineraries.map((itinerary) => ({
-    id: itinerary.id,
-    durationSeconds: itinerary.durationSeconds,
-    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
-    transfers: itinerary.transfers,
-    walkingMeters: itinerary.walkingMeters,
-    reliability: null,
-    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
-    comfort: null,
-    legs: [],
-    itinerary,
-  } satisfies JourneyOption & { itinerary: GtfsItinerary }));
+  const candidates = itineraries.map(toRankedGtfsItinerary);
+  const itinerariesById = new Map(candidates.map((candidate) => [candidate.id, candidate.itinerary] as const));
   return scoreJourneys([...candidates, ...rankingContext], 'BALANCED')
-    .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
+    .flatMap(({ journey }) => {
+      const itinerary = itinerariesById.get(journey.id);
+      return itinerary ? [itinerary] : [];
+    });
 }
 
 function rankGtfsItinerariesForStrategySampling(
@@ -519,20 +513,13 @@ function rankGtfsItinerariesForStrategySampling(
   strategy: 'FASTEST' | 'CHEAPEST' | 'BALANCED',
   rankingContext: readonly JourneyOption[],
 ): GtfsItinerary[] {
-  const candidates = itineraries.map((itinerary) => ({
-    id: itinerary.id,
-    durationSeconds: itinerary.durationSeconds,
-    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
-    transfers: itinerary.transfers,
-    walkingMeters: itinerary.walkingMeters,
-    reliability: null,
-    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
-    comfort: null,
-    legs: [],
-    itinerary,
-  } satisfies JourneyOption & { itinerary: GtfsItinerary }));
+  const candidates = itineraries.map(toRankedGtfsItinerary);
+  const itinerariesById = new Map(candidates.map((candidate) => [candidate.id, candidate.itinerary] as const));
   return scoreJourneys([...candidates, ...rankingContext], strategy)
-    .flatMap(({ journey }) => 'itinerary' in journey ? [journey.itinerary] : []);
+    .flatMap(({ journey }) => {
+      const itinerary = itinerariesById.get(journey.id);
+      return itinerary ? [itinerary] : [];
+    });
 }
 
 /** Keep objective winners while preserving space for novel feasible trip chains. */

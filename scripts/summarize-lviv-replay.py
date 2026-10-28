@@ -18,7 +18,7 @@ if set(by_revision) != expected_revisions or any(len(items) != 3 for items in by
     raise SystemExit("Expected exactly three serialized runs for baseline and candidate.")
 
 stable_fields = (
-    "origin", "destination", "departureWindow", "idHash", "uniqueTripChains", "uniqueRouteChains", "strategyCandidates",
+    "origin", "destination", "departureWindow", "idHash", "uniqueTripChains", "uniqueRouteChains", "rankingMethod", "rankingScope", "availableStrategies", "strategyCandidates",
     "tripChainIds", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
 )
 for revision, items in by_revision.items():

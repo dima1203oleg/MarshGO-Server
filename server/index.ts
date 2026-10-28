@@ -23,6 +23,7 @@ import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNE
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { toRankedGtfsItinerary } from './journey/gtfsRanking';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
@@ -3247,39 +3248,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...micromobilityCandidates,
   ];
   scheduledCandidates = selectGtfsCandidatesForCrossProviderSearch(scheduledCandidates, 100, crossProviderRankingContext);
-  const transitRouteChainKey = (itinerary: GtfsItinerary) => {
-    const routes: string[] = [];
-    for (const segment of itinerary.segments) {
-      const key = `${segment.providerId}:${segment.routeId}`;
-      if (routes.at(-1) !== key) routes.push(key);
-    }
-    return routes.join('>');
-  };
   const rankedCandidates = [
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
     ...micromobilityCandidates.map((candidate) => ({ ...candidate })),
-    ...scheduledCandidates.map((itinerary) => ({
-      id: itinerary.id,
-      diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
-      durationSeconds: itinerary.durationSeconds,
-      priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
-      transfers: itinerary.transfers,
-      walkingMeters: itinerary.walkingMeters,
-      reliability: null,
-      transferRisk: itinerary.transfers ? 0.3 : 0,
-      comfort: null,
-      legs: [
-        ...(itinerary.segments[0].distanceToOriginStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
-        ...itinerary.segments.flatMap((segment, index) => [
-          ...(index > 0 && itinerary.transferWalkingMeters[index - 1] > 0 ? [{ mode: 'WALK' as const }] : []),
-          { mode: segment.mode, providerId: segment.providerId },
-        ]),
-        ...(itinerary.segments.at(-1)!.distanceFromDestinationStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
-      ],
-      kind: 'gtfs' as const,
-      itinerary,
-    })),
+    ...scheduledCandidates.map(toRankedGtfsItinerary),
   ];
   const availableStrategies = strategiesWithComparablePrices(rankedCandidates, strategies);
   const alternativeLimitPerStrategy = 12;

@@ -8,8 +8,12 @@ const zipPath = process.env.GTFS_REPLAY_ZIP;
 if (!zipPath) throw new Error('Set GTFS_REPLAY_ZIP to a frozen Lviv GTFS archive.');
 const require = createRequire(resolve(process.cwd(), 'package.json'));
 const { unzipSync } = require('fflate');
-const { parseGtfsTimetable, findGtfsItinerariesWithStats, rankGtfsItinerariesForCandidateSampling } =
+const { parseGtfsTimetable, findGtfsItinerariesWithStats } =
   await import(pathToFileURL(resolve(process.cwd(), 'server/journey/gtfsTimetable.ts')).href);
+const { toRankedGtfsItinerary } =
+  await import(pathToFileURL(resolve(process.cwd(), 'server/journey/gtfsRanking.ts')).href);
+const { selectStrategyAlternatives, strategiesWithComparablePrices } =
+  await import(pathToFileURL(resolve(process.cwd(), 'server/journey/scoring.ts')).href);
 const archive = readFileSync(zipPath);
 const archiveSha256 = createHash('sha256').update(archive).digest('hex');
 const expectedSha256 = process.env.GTFS_REPLAY_EXPECTED_SHA256;
@@ -165,11 +169,13 @@ if (process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS && process.env.REPLAY_GROUP
     throw new Error('Candidate trip trace was requested but no candidate trace was emitted.');
   }
 }
-const fastest = [...result.itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id))[0];
-const cheapest = [...result.itineraries].filter((item) => item.fare?.currency === 'UAH')
-  .sort((a, b) => a.fare!.priceMinor - b.fare!.priceMinor || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id))[0];
-const balanced = rankGtfsItinerariesForCandidateSampling(result.itineraries)[0];
-const signature = (item: typeof result.itineraries[number] | undefined) => item?.id ?? null;
+const rankedCandidates = result.itineraries.map(toRankedGtfsItinerary);
+const userFacingStrategies = ['BALANCED', 'FASTEST', 'CHEAPEST'] as const;
+const availableStrategies = strategiesWithComparablePrices(rankedCandidates, userFacingStrategies);
+const strategyRecommendations = selectStrategyAlternatives(rankedCandidates, availableStrategies, 1);
+const winnerFor = (strategy: typeof userFacingStrategies[number]) =>
+  strategyRecommendations.find((candidate) => candidate.strategyRanks?.[strategy] === 1)?.journey;
+const signature = (item: typeof rankedCandidates[number] | undefined) => item?.id ?? null;
 const details = result as typeof result & Record<string, unknown>;
 console.log(JSON.stringify({
   comparisonGroup: process.env.REPLAY_GROUP ?? null,
@@ -189,7 +195,14 @@ console.log(JSON.stringify({
   tripChainIds: [...new Set(result.itineraries.map((item) => item.segments
     .map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>')))].sort(),
   uniqueRouteChains: new Set(result.itineraries.map((item) => item.segments.map((segment) => segment.routeId).join(','))).size,
-  strategyCandidates: { balanced: signature(balanced), fastest: signature(fastest), cheapest: signature(cheapest) },
+  rankingMethod: 'production-paretoFrontier+selectStrategyAlternatives',
+  rankingScope: 'gtfs-only-candidates; shared with API projection and scorer',
+  availableStrategies,
+  strategyCandidates: {
+    balanced: signature(winnerFor('BALANCED')),
+    fastest: signature(winnerFor('FASTEST')),
+    cheapest: signature(winnerFor('CHEAPEST')),
+  },
   searchTruncated: details.searchTruncated,
   candidateGraphTruncated: details.candidateGraphTruncated,
   truncation: result.truncation,
