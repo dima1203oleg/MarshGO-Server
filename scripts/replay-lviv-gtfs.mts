@@ -106,10 +106,14 @@ const searchTimingsByStage: Record<string, { elapsedMs?: number; heapUsedBytes?:
 let searchCandidateTrace: unknown;
 let searchCandidateTraceError: string | undefined;
 const originalConsoleInfo = console.info.bind(console);
+const originalConsoleError = console.error.bind(console);
 const previousDebugSetting = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+const previousProgressSetting = process.env.MARSHGO_GTFS_SEARCH_PROGRESS;
 const previousTraceSetting = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
 const previousCandidateTraceSetting = process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
 process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+if (candidateSource === 'incremental-event-index') process.env.MARSHGO_GTFS_SEARCH_PROGRESS = '1';
+else delete process.env.MARSHGO_GTFS_SEARCH_PROGRESS;
 if (process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS) {
   process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS;
 } else {
@@ -126,7 +130,8 @@ console.info = (...args: unknown[]) => {
       const record = JSON.parse(args[0]) as Record<string, unknown>;
       if (record.event === 'gtfs.search.debug') {
         if (typeof record.stage === 'string' && ['segments-built', 'reachability-built', 'itineraries-ranked',
-          'incremental-index-built', 'incremental-reachability-built'].includes(record.stage)) {
+          'incremental-index-built', 'incremental-reachability-built', 'incremental-index-progress',
+          'incremental-reachability-progress'].includes(record.stage)) {
           const timing = {
             ...(typeof record.elapsedMs === 'number' ? { elapsedMs: record.elapsedMs } : {}),
             ...(typeof record.heapUsedBytes === 'number' ? { heapUsedBytes: record.heapUsedBytes } : {}),
@@ -135,6 +140,10 @@ console.info = (...args: unknown[]) => {
           if (Object.keys(timing).length > 0) searchTimingsByStage[record.stage] = timing;
           const { elapsedMs: _elapsedMs, heapUsedBytes: _heapUsedBytes, rssBytes: _rssBytes, ...stable } = record;
           searchDiagnosticsByStage[record.stage] = stable;
+          if (record.stage.endsWith('-progress') || record.stage === 'incremental-index-built'
+            || record.stage === 'incremental-reachability-built') {
+            originalConsoleError(JSON.stringify({ ...stable, ...timing }));
+          }
           if (record.stage === 'segments-built' && typeof record.debugCandidateTripTrace === 'string') {
             try {
               const trace = JSON.parse(record.debugCandidateTripTrace) as Record<string, unknown>;
@@ -173,6 +182,8 @@ try {
   console.info = originalConsoleInfo;
   if (previousDebugSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
   else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugSetting;
+  if (previousProgressSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_PROGRESS;
+  else process.env.MARSHGO_GTFS_SEARCH_PROGRESS = previousProgressSetting;
   if (previousTraceSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
   else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTraceSetting;
   if (previousCandidateTraceSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;

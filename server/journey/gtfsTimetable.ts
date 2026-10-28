@@ -2335,6 +2335,7 @@ export function findGtfsItinerariesWithStats(
     const callsByNode = new Map<string, IncrementalBoardingCall[]>();
     const transferRulesByFrom = new Map<string, string[]>();
     let indexedEventCalls = 0;
+    let scannedTrips = 0;
     const transferNodesForEvent = (event: IncrementalTripEvents['events'][number]) => {
       const primary = event.stopTime.sourceStopId ?? event.stopTime.stopId;
       return event.stopTime.sourceParentStationId && event.stopTime.sourceParentStationId !== primary
@@ -2365,6 +2366,10 @@ export function findGtfsItinerariesWithStats(
       transferRulesByFrom.set(rule.fromStopId, targets);
     }
     for (const [tripId, trip] of [...feed.trips].sort(([left], [right]) => compareStableId(left, right))) {
+      scannedTrips++;
+      if (process.env.MARSHGO_GTFS_SEARCH_PROGRESS === '1' && scannedTrips % 5000 === 0) {
+        debugStage('incremental-index-progress', { scannedTrips, indexedEventCalls, boardingCalls: calls.length });
+      }
       const info = tripInfoFor(tripId);
       if (!info || info.indexes.length < 2) continue;
       for (const serviceDate of serviceDates) {
@@ -2484,6 +2489,10 @@ export function findGtfsItinerariesWithStats(
     let projectedLegs = 0;
     const projectedLegsByCall = new Set<string>();
     for (let cursor = 0; cursor < queued.length && !incrementalSourceFallbackRequired; cursor++) {
+      if (process.env.MARSHGO_GTFS_SEARCH_PROGRESS === '1' && cursor > 0 && cursor % 5000 === 0) {
+        debugStage('incremental-reachability-progress', { searchCursor: cursor, queuedStates: queued.length,
+          projectedLegs, reachableBoardingCalls: incrementalReachableBoardingKeys.size });
+      }
       const { call, segmentsUsed } = queued[cursor]!;
       incrementalReachableBoardingKeys.add(call.key);
       if (projectedLegsByCall.has(call.key)) continue;
