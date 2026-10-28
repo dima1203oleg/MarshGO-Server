@@ -1516,7 +1516,7 @@ test('retains hash-ranked middle groups needed only by a four-leg chain under a 
     }
     return { result, graphs, diagnostics };
   };
-  const bounded = runBounded(timetable, targetTripId);
+  const bounded = runBounded(timetable, `${targetTripId},second-middle-trip`);
   const boundedIds = bounded.result.itineraries.map(identify);
   assert.equal(bounded.result.truncation.candidateGraph, true, 'the bounded graph reports truncation');
   assert.ok(bounded.graphs[0]!.segments.length <= 4, 'the global graph cap is respected');
@@ -1532,6 +1532,11 @@ test('retains hash-ranked middle groups needed only by a four-leg chain under a 
   assert.equal(targetTrace.retentionTier, 3, 'the middle trip is not an endpoint-serving trip');
   assert.equal(targetTrace.retentionPriorityTier, 3,
     'one-sided origin-frontier feasibility ranks this multi-hop middle trip ahead of hash-only groups');
+  const secondMiddleTrace = trace.trips.find((trip) => trip.tripId === 'second-middle-trip');
+  assert.ok(secondMiddleTrace, 'debug trace contains the destination-side middle trip');
+  assert.equal(secondMiddleTrace.retentionTier, 3, 'the destination-side middle trip is not an endpoint-serving trip');
+  assert.equal(secondMiddleTrace.retentionPriorityTier, 3,
+    'one-sided destination-frontier feasibility ranks this multi-hop middle trip ahead of hash-only groups');
   assert.ok(bounded.graphs[0]!.segments.some((segment) => segment.journey.tripId === targetTripId),
     'the bounded graph keeps the query-reachable middle trip instead of the hash-only decoy');
 
