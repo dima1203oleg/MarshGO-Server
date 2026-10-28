@@ -129,7 +129,8 @@ export function retainStrategyCandidatePool<T extends JourneyOption & { arrivalA
   }
 
   const selected = new Map<string, T>();
-  const rankedByStrategy = [...new Set(strategies)].map((strategy) =>
+  const poolStrategies = [...new Set(strategies)].filter((strategy) => !hasUnknownFare || strategy !== 'CHEAPEST');
+  const rankedByStrategy = poolStrategies.map((strategy) =>
     scoreJourneys(journeys, strategy).map(({ journey }) => journey));
   for (let rank = 0; selected.size < maximumCandidates; rank += 1) {
     let foundAtRank = false;

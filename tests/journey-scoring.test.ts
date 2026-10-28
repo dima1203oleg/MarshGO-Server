@@ -114,31 +114,40 @@ describe('Journey strategy scoring', () => {
       departureAt: new Date('2026-10-28T08:00:00Z'),
     };
 
-    const groupedCandidates = new Map<string, Array<JourneyOption & { arrivalAt: Date; departureAt: Date }>>([
+    const groupedPricedCandidates = new Map<string, Array<JourneyOption & { arrivalAt: Date; departureAt: Date }>>([
+      ['Europe/Kyiv', denseArrivals],
+      ['Europe/Warsaw', [fastestAndCheaper, cheapestSlow]],
+    ]);
+    const allPricedScheduled = [...groupedPricedCandidates.values()].flat();
+    const pool = retainStrategyCandidatePool(
+      allPricedScheduled, 100,
+      ['BALANCED', 'FASTEST', 'CHEAPEST'],
+    );
+    const fullWinners = selectStrategyRecommendations(allPricedScheduled, ['BALANCED', 'FASTEST']);
+    const boundedWinners = selectStrategyRecommendations(pool.candidates, ['BALANCED', 'FASTEST']);
+    const groupedCandidatesWithUnknown = new Map<string, Array<JourneyOption & { arrivalAt: Date; departureAt: Date }>>([
       ['Europe/Kyiv', denseArrivals],
       ['Europe/Warsaw', [fastestAndCheaper, cheapestSlow, droppedUnknownFare]],
     ]);
-    const allScheduled = [...groupedCandidates.values()].flat();
-    const pool = retainStrategyCandidatePool(
-      allScheduled, 100,
+    const poolWithUnknownFare = retainStrategyCandidatePool(
+      [...groupedCandidatesWithUnknown.values()].flat(), 100,
       ['BALANCED', 'FASTEST', 'CHEAPEST'],
     );
-    const fullWinners = selectStrategyRecommendations(allScheduled, ['BALANCED', 'FASTEST']);
-    const boundedWinners = selectStrategyRecommendations(pool.candidates, ['BALANCED', 'FASTEST']);
 
     assert.equal(pool.truncated, true);
     assert.equal(pool.candidates.length, 100);
     assert.ok(pool.candidates.some((journey) => journey.id === 'express'), 'the globally fastest and cheaper route must survive');
     assert.ok(pool.candidates.some((journey) => journey.id === 'cheap-slow'), 'the globally cheapest route must survive');
+    assert.equal(scoreJourneys(pool.candidates, 'CHEAPEST')[0]?.journey.id, scoreJourneys(allPricedScheduled, 'CHEAPEST')[0]?.journey.id);
     assert.deepEqual(
       boundedWinners.map(({ strategy, journey }) => [strategy, journey.id]),
       fullWinners.map(({ strategy, journey }) => [strategy, journey.id]),
       'the final BALANCED and FASTEST winners must match the complete scheduled pool',
     );
-    assert.equal(pool.hasUnknownFare, true, 'fare completeness must include candidates omitted from the bounded pool');
+    assert.equal(poolWithUnknownFare.hasUnknownFare, true, 'fare completeness must include candidates omitted from the bounded pool');
     assert.deepEqual(
-      strategiesWithComparablePrices(pool.candidates, ['BALANCED', 'FASTEST', 'CHEAPEST'])
-        .filter((strategy) => strategy !== 'CHEAPEST' || !pool.hasUnknownFare),
+      strategiesWithComparablePrices(poolWithUnknownFare.candidates, ['BALANCED', 'FASTEST', 'CHEAPEST'])
+        .filter((strategy) => strategy !== 'CHEAPEST' || !poolWithUnknownFare.hasUnknownFare),
       ['BALANCED', 'FASTEST'],
     );
   });
