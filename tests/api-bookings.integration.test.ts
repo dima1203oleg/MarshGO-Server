@@ -302,6 +302,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         blockedProviders: string[];
         journeys: Array<{ offerId: string | null; origin: { name: string; coordinates: [number, number] }; destination: { name: string; coordinates: [number, number] }; legs: Array<{
           mode: string; transportType?: string; source?: string; providerId?: string; routeId?: string; headsign?: string;
+          routeGeometry?: [number, number][];
           origin?: { name: string; coordinates: [number, number] };
           destination?: { name: string; coordinates: [number, number] };
           stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string }>;
@@ -324,7 +325,16 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       for (const journey of modeData.journeys) {
         assert.deepEqual(journey.origin, modeSearch.origin, 'the journey keeps the requested origin instead of the first nearby transport stop');
         assert.deepEqual(journey.destination, modeSearch.destination, 'the journey keeps the requested destination instead of the last nearby transport stop');
-        if (journey.offerId) assert.equal(transportType, 'carpool', `${transportType} must not leak a carpool offer`);
+        if (journey.offerId) {
+          assert.equal(transportType, 'carpool', `${transportType} must not leak a carpool offer`);
+          const carpoolLeg = journey.legs.find((leg) => leg.mode === 'COMMUNITY');
+          assert.ok((carpoolLeg?.routeGeometry?.length ?? 0) >= 2,
+            'direct carpool results preserve their published road geometry for route-map rendering');
+          assert.deepEqual(carpoolLeg!.routeGeometry![0], carpoolLeg!.origin?.coordinates,
+            'direct carpool route geometry starts at the published pickup');
+          assert.deepEqual(carpoolLeg!.routeGeometry!.at(-1), carpoolLeg!.destination?.coordinates,
+            'direct carpool route geometry ends at the published dropoff');
+        }
         for (const leg of journey.legs) {
           if (leg.mode === 'WALK') continue;
           if (leg.mode === 'COMMUNITY') {

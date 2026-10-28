@@ -3619,6 +3619,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       }
       if (candidate.kind !== 'community') continue;
       const offer = candidate.offer;
+      const routeGeometry = parseOfferGeometry(offer.route_geojson);
       const stored = await client.query<{ id: string }>(
         `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
          VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$11,$11,$11,$12,0,0,NULL,NULL)
@@ -3649,7 +3650,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           candidate.totalPriceMinor, offer.currency, offer.offer_id, offer.snapshot_at,
           JSON.stringify({ driverId: offer.driver_id, driverName: offer.driver_name, vehicleId: offer.vehicle_id,
             vehicleMake: offer.vehicle_make, vehicleModel: offer.vehicle_model, rating: offer.average_rating,
-            reviewCount: offer.review_count, availableSeatsAtSearch: offer.available_seats, offerCreatedAt: offer.created_at })],
+            reviewCount: offer.review_count, availableSeatsAtSearch: offer.available_seats, offerCreatedAt: offer.created_at,
+            ...(routeGeometry ? { routeGeometry } : {}) })],
       );
       await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, leg.rows[0].id]);
       journeys.push({
@@ -3668,6 +3670,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           distanceMeters: offer.distance_m, priceMinor: candidate.totalPriceMinor, priceStatus: 'ESTIMATED',
           availabilityStatus: 'AVAILABLE', source: 'community-offer', lastUpdatedAt: offer.snapshot_at,
           transportType: 'carpool', liveStatus: 'SCHEDULED',
+          ...(routeGeometry ? { routeGeometry } : {}),
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshot_at.getTime()) / 1000)),
           driver: { id: offer.driver_id, name: offer.driver_name,
             averageRating: offer.average_rating === null ? null : Number(offer.average_rating), reviewCount: offer.review_count },
