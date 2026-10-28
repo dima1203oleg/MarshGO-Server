@@ -1,0 +1,3 @@
+trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type
+ny-bus-trip,08:00:00,08:00:00,ny-origin,1,0,0
+ny-bus-trip,08:25:00,08:25:00,ny-destination,2,0,0

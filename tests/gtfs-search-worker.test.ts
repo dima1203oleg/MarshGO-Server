@@ -84,6 +84,74 @@ test('test-only GTFS URL loads the checked-in fixture through the worker and com
   }
 });
 
+test('GTFS fixture allowlist loads multi-timezone fixtures and respects Europe/Kyiv vs America/New_York schedule instants', async () => {
+  const fixtureDirectory = fileURLToPath(new URL('./fixtures/gtfs-http/', import.meta.url));
+  const client = new GtfsSearchWorkerClient(fixtureDirectory);
+  const lvivProvider = {
+    id: 'fixture-lviv',
+    name: 'Fixture Lviv',
+    city: 'Львів',
+    feedUrl: 'https://gtfs-api-fixture.invalid/lviv.zip',
+  };
+  const nyProvider = {
+    id: 'fixture-ny',
+    name: 'Fixture New York',
+    city: 'New York',
+    feedUrl: 'https://gtfs-api-fixture.invalid/newyork.zip',
+  };
+  try {
+    const searchResult = await client.search({
+      providerId: 'multi-tz-search',
+      providerName: 'multi-tz',
+      origin: [24.0029933, 49.8681678],
+      destination: [24.057585, 49.794117],
+      now: new Date('2026-10-15T04:00:00.000Z'),
+      earliestDeparture: new Date('2026-10-15T04:30:00.000Z'),
+      latestDeparture: new Date('2026-10-15T14:00:00.000Z'),
+      limit: 10,
+      maximumJourneySeconds: 4 * 3600,
+      maximumTransfers: 1,
+      maximumWaitSeconds: 3600,
+      allowedModes: ['BUS'],
+    }, [lvivProvider, nyProvider]);
+
+    assert.deepEqual(searchResult.errors, []);
+    assert.equal(searchResult.descriptors.length, 2);
+
+    const timezones = new Set(searchResult.descriptors.map((d) => d.timezone));
+    assert.ok(timezones.has('Europe/Kyiv'), 'descriptors contain Europe/Kyiv search group');
+    assert.ok(timezones.has('America/New_York'), 'descriptors contain America/New_York search group');
+
+    // Both feeds publish departure 08:00:00 on weekday service.
+    // In Europe/Kyiv (UTC+3 in October), 08:00:00 corresponds to 05:00:00Z.
+    // In America/New_York (UTC-4 in October), 08:00:00 corresponds to 12:00:00Z.
+    const lvivArrivals = await client.stopArrivals(lvivProvider, 'origin', new Date('2026-10-15T04:00:00.000Z'), 5);
+    const nyArrivals = await client.stopArrivals(nyProvider, 'ny-origin', new Date('2026-10-15T11:00:00.000Z'), 5);
+
+    assert.ok(lvivArrivals.arrivals.length > 0, 'Lviv fixture returns stop arrivals');
+    assert.ok(nyArrivals.arrivals.length > 0, 'New York fixture returns stop arrivals');
+
+    const lvivDepartureInstant = lvivArrivals.arrivals[0].scheduledArrivalAt.toISOString();
+    const nyDepartureInstant = nyArrivals.arrivals[0].scheduledArrivalAt.toISOString();
+
+    assert.equal(lvivDepartureInstant, '2026-10-15T05:00:00.000Z', '08:00:00 local in Europe/Kyiv maps to 05:00:00Z');
+    assert.equal(nyDepartureInstant, '2026-10-15T12:00:00.000Z', '08:00:00 local in America/New_York maps to 12:00:00Z');
+
+    // Reject unallowlisted URLs even when pointing to .invalid
+    await assert.rejects(
+      client.stopArrivals({
+        id: 'other',
+        name: 'Other',
+        city: 'Other',
+        feedUrl: 'https://gtfs-api-fixture.invalid/other.zip',
+      }, 'origin', new Date('2026-10-15T04:00:00.000Z'), 1),
+      /Unrecognized GTFS test fixture URL/,
+    );
+  } finally {
+    await client.close();
+  }
+});
+
 test('GTFS worker applies a hard bound to active plus queued requests', async () => {
   const client = new GtfsSearchWorkerClient();
   try {

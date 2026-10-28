@@ -16,15 +16,23 @@ const [{ cachedGtfsTimetable, mergeGtfsTimetables, getCachedGtfsTimetableStats, 
 // An opt-in, exact-URL test seam lets API integration tests exercise the real
 // worker/parser/planner without a public feed or any relaxation of safeFetch.
 // Production never receives the directory, and no other URL can use the seam.
-const GTFS_TEST_FIXTURE_URL = 'https://gtfs-api-fixture.invalid/lviv.zip';
+const GTFS_TEST_FIXTURE_SEAMS = new Map([
+  ['https://gtfs-api-fixture.invalid/lviv.zip', ''],
+  ['https://gtfs-api-fixture.invalid/newyork.zip', 'newyork'],
+]);
 const GTFS_TEST_FILES = ['agency.txt', 'routes.txt', 'stops.txt', 'trips.txt', 'stop_times.txt', 'calendar.txt', 'shapes.txt'];
 const testFixtureDirectory = typeof workerData?.testFixtureDirectory === 'string'
   ? workerData.testFixtureDirectory : undefined;
 
 async function loadProviderTimetable(provider) {
-  if (testFixtureDirectory && provider.feedUrl === GTFS_TEST_FIXTURE_URL) {
+  if (testFixtureDirectory) {
+    if (!GTFS_TEST_FIXTURE_SEAMS.has(provider.feedUrl)) {
+      throw new Error('Unrecognized GTFS test fixture URL');
+    }
+    const subDirectory = GTFS_TEST_FIXTURE_SEAMS.get(provider.feedUrl);
+    const fixtureDir = subDirectory ? join(testFixtureDirectory, subDirectory) : testFixtureDirectory;
     const entries = await Promise.all(GTFS_TEST_FILES.map(async (name) => [name,
-      new Uint8Array(await readFile(join(testFixtureDirectory, name)))
+      new Uint8Array(await readFile(join(fixtureDir, name)))
     ]));
     return parseGtfsTimetable(Object.fromEntries(entries));
   }
