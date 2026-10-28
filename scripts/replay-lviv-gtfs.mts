@@ -58,6 +58,8 @@ const traceRouteIds = new Set((process.env.GTFS_REPLAY_TRACE_ROUTE_IDS ?? '')
   .split(',').map((routeId) => routeId.trim()).filter(Boolean));
 const traceTripIds = new Set((process.env.GTFS_REPLAY_TRACE_TRIP_IDS ?? '')
   .split(',').map((tripId) => tripId.trim()).filter(Boolean));
+const traceTripChains = (process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS ?? '')
+  .split(',').map((tripChain) => tripChain.trim()).filter(Boolean);
 const traceCandidateTripIds = new Set((process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS ?? '')
   .split(',').map((tripId) => tripId.trim()).filter(Boolean));
 if (traceCandidateTripIds.size > 2) {
@@ -73,12 +75,64 @@ const retainedSegmentsByTripId = new Map<string, Map<string, {
   departureAt: string;
   arrivalAt: string;
 }>>();
+let targetChainGraphTrace: Record<string, unknown> | undefined;
 const graphObserver = traceRouteIds.size > 0 || traceTripIds.size > 0
   ? (graph: { segments: readonly { id: string; journey: {
-    routeId: string; serviceDate: string; tripId: string;
+    providerId: string; routeId: string; serviceDate: string; tripId: string;
     originStop: { id: string }; destinationStop: { id: string };
     departureAt: Date; arrivalAt: Date;
-  } }[] }) => {
+  } }[]; firstLegIds: readonly string[];
+    successors(previousId: string, remainingLegs: number): readonly string[];
+    transferDecision(previousId: string, nextId: string): { feasible: boolean; requiredSeconds: number;
+      minimumBufferSeconds: number; measure: { walkingMeters: number; walkingSeconds: number } };
+  }) => {
+    if (traceTripChains.length > 0) {
+      const tripKey = (journey: { providerId: string; serviceDate: string; tripId: string }) =>
+        `${journey.providerId}:${journey.serviceDate}:${journey.tripId}`;
+      const byId = new Map(graph.segments.map((segment) => [segment.id, segment]));
+      targetChainGraphTrace = Object.fromEntries(traceTripChains.map((tripChain) => {
+        const targetTrips = tripChain.split('>');
+        const targetSegments = targetTrips.map((key) => graph.segments
+          .filter((segment) => tripKey(segment.journey) === key));
+        const firstLegIds = new Set(graph.firstLegIds);
+        const firstCandidates = targetSegments[0]?.filter((segment) => firstLegIds.has(segment.id)) ?? [];
+        let paths = firstCandidates.map((segment) => [segment.id]);
+        const transitions = [];
+        for (let index = 0; index < targetTrips.length - 1; index++) {
+          const nextIds = new Set((targetSegments[index + 1] ?? []).map((segment) => segment.id));
+          const matchingEdges: Array<Record<string, unknown>> = [];
+          const nextPaths: string[][] = [];
+          for (const path of paths) {
+            const previousId = path.at(-1)!;
+            const previous = byId.get(previousId)!;
+            for (const nextId of graph.successors(previousId, targetTrips.length - index - 1)) {
+              if (!nextIds.has(nextId)) continue;
+              const next = byId.get(nextId)!;
+              const availableSeconds = Math.floor((next.journey.departureAt.getTime()
+                - previous.journey.arrivalAt.getTime()) / 1000);
+              const decision = graph.transferDecision(previousId, nextId);
+              matchingEdges.push({ previous: previousId, next: nextId,
+                fromStopId: previous.journey.destinationStop.id, toStopId: next.journey.originStop.id,
+                previousArrivalAt: previous.journey.arrivalAt.toISOString(),
+                nextDepartureAt: next.journey.departureAt.toISOString(), availableSeconds,
+                withinWaitHorizon: availableSeconds >= 0 && availableSeconds <= 4 * 60 * 60,
+                transferFeasible: decision.feasible, requiredSeconds: decision.requiredSeconds,
+                minimumBufferSeconds: decision.minimumBufferSeconds,
+                walkingMeters: decision.measure.walkingMeters, walkingSeconds: decision.measure.walkingSeconds });
+              if (availableSeconds >= 0 && availableSeconds <= 4 * 60 * 60 && decision.feasible) {
+                nextPaths.push([...path, nextId]);
+              }
+            }
+          }
+          transitions.push({ fromTrip: targetTrips[index], toTrip: targetTrips[index + 1],
+            predecessorStates: paths.length, matchingSuccessorEdges: matchingEdges.length, edges: matchingEdges });
+          paths = nextPaths;
+        }
+        return [tripChain, { retainedSegmentCounts: targetSegments.map((segments) => segments.length),
+          firstLegCandidateCount: firstCandidates.length, feasiblePathCount: paths.length,
+          paths: paths.slice(0, 16), transitions }];
+      }));
+    }
     for (const { id, journey } of graph.segments) {
       if (traceRouteIds.has(journey.routeId)) {
         const routeGroups = retainedTripGroupsByRoute.get(journey.routeId) ?? new Map();
@@ -235,6 +289,7 @@ console.log(JSON.stringify({
       .sort((left, right) => left.departureAt.localeCompare(right.departureAt)
         || left.originStopId.localeCompare(right.originStopId)
         || left.destinationStopId.localeCompare(right.destinationStopId))])) } : {}),
+  ...(targetChainGraphTrace ? { targetChainGraphTrace } : {}),
   ...(searchCandidateTrace !== undefined ? { searchCandidateTrace } : {}),
   searchDiagnosticsByStage,
   searchTimingsByStage,
