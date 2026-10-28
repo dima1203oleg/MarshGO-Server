@@ -420,6 +420,10 @@ export interface GtfsGraphBudgetLimits {
   maxQueuedSearchWork?: number;
   /** Test-only override for verifying weighted depth-pass search truncation. */
   maxSearchSteps?: number;
+  /** Test-only override for exercising candidate-pool saturation with small fixtures. */
+  maxCandidatesPerLegCount?: number;
+  /** Test-only override for exercising post-pool search truncation with small fixtures. */
+  maxObjectiveReservoirSearchSteps?: number;
 }
 
 /** Internal, read-only snapshot for alternate GTFS search experiments in tests. */
@@ -3392,7 +3396,10 @@ export function findGtfsItinerariesWithStats(
   // Once a leg-count pool is full, keep searching a bounded window so late
   // objective improvements can enter the reservoirs without scanning the
   // entire dense feed. Any remaining work is still reported as truncated.
-  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 25_000;
+  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = graphLimits.maxObjectiveReservoirSearchSteps ?? 25_000;
+  if (!Number.isSafeInteger(MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS) || MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS < 0) {
+    throw new RangeError('maxObjectiveReservoirSearchSteps must be a non-negative safe integer');
+  }
   let candidatePoolReachedAtStep: number | null = null;
   const objectiveCandidateSamples = new Map<string, GtfsItinerary[]>();
   const objectiveSampleLimit = Math.max(1, Math.floor(limit / 5));
@@ -3436,7 +3443,10 @@ export function findGtfsItinerariesWithStats(
   // Keep the per-leg sampling cap independent of the caller's response-page
   // size so later cross-provider ranking receives a consistent diverse pool.
   // The separate global result cap below still bounds retained path objects.
-  const MAX_CANDIDATES_PER_LEG_COUNT = 750;
+  const MAX_CANDIDATES_PER_LEG_COUNT = graphLimits.maxCandidatesPerLegCount ?? 750;
+  if (!Number.isSafeInteger(MAX_CANDIDATES_PER_LEG_COUNT) || MAX_CANDIDATES_PER_LEG_COUNT < 1) {
+    throw new RangeError('maxCandidatesPerLegCount must be a positive safe integer');
+  }
   // Most city-feed stops cannot lead to this destination. Exclude those dead
   // ends before enumerating timed transfer combinations.
   const reachableWithin = [destinationStopIds];

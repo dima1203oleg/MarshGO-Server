@@ -3008,6 +3008,21 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
     assert.equal(scoreJourneys(boundedScoringOptions, strategy as 'FASTEST' | 'CHEAPEST' | 'BALANCED')[0]?.journey.id, winnerId,
       `bounded graph keeps the exhaustive ${strategy} winner ranked first`);
   }
+
+  const deliberatelyTightSearch = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 100, maximumTransfers: 2,
+  }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 5 });
+  const deliberatelyTightChains = new Set(deliberatelyTightSearch.itineraries.map((journey) =>
+    journey.segments.map((segment) => segment.tripId).join('>')));
+  assert.equal(deliberatelyTightSearch.truncation.searchBudget, true,
+    'a deliberately reduced test-only pool and reservoir window report partial search');
+  assert.equal(deliberatelyTightSearch.searchTruncated, true);
+  assert.ok([...expected.keys()].some((chain) => !deliberatelyTightChains.has(chain)),
+    'the exhaustive oracle identifies a feasible chain omitted by the deliberately tight bounds');
+  assert.ok(Object.values(exhaustiveWinnerIds).some((winnerId) => !deliberatelyTightChains.has(winnerId)),
+    'the fixture demonstrates why a truncated search cannot claim exhaustive strategy winners');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
@@ -3040,9 +3055,9 @@ test('reports the bounded per-leg objective-reservoir cutoff while search work r
 
   addRoute('origin-route');
   addTrip('origin-trip', 'origin-route', 'origin', 'hub', 8 * 3600, 8 * 3600 + 10 * 60);
-  const earlyRouteCount = 94;
+  const earlyRouteCount = 3;
   const onwardRouteCount = earlyRouteCount + 1;
-  const lateTripsPerRoute = 132;
+  const lateTripsPerRoute = 6;
   for (let routeIndex = 0; routeIndex < onwardRouteCount; routeIndex++) {
     const routeId = `onward-route-${routeIndex}`;
     addRoute(routeId);
@@ -3072,7 +3087,7 @@ test('reports the bounded per-leg objective-reservoir cutoff while search work r
       ...request('2026-10-12T04:55:00Z', '2026-10-12T05:20:00Z'),
       maximumAccessWalkingMeters: 1000, maximumEgressWalkingMeters: 1000,
       maximumTransferWalkingMeters: 100, maximumTransfers: 1, limit: 100,
-    });
+    }, { maxCandidatesPerLegCount: 8, maxObjectiveReservoirSearchSteps: 20 });
   } finally {
     console.info = previousInfo;
     if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
@@ -3084,7 +3099,7 @@ test('reports the bounded per-leg objective-reservoir cutoff while search work r
   assert.ok(ranked, 'the bounded-search diagnostic is captured');
   const reachedByLeg = JSON.parse(String(ranked.candidatePoolReachedAtStepByLegCount)) as Record<string, number>;
   const returnedByLeg = JSON.parse(String(ranked.returnedByLegCount)) as Record<string, number>;
-  assert.ok((ranked.candidatesWith2Legs as number) >= 750, 'the two-leg candidate pool reached its bound');
+  assert.ok((ranked.candidatesWith2Legs as number) >= 8, 'the two-leg candidate pool reached its configured test bound');
   assert.deepEqual(returnedByLeg, result.itineraries.reduce<Record<string, number>>((counts, itinerary) => {
     const legCount = String(itinerary.segments.length);
     counts[legCount] = (counts[legCount] ?? 0) + 1;
@@ -3092,8 +3107,8 @@ test('reports the bounded per-leg objective-reservoir cutoff while search work r
   }, {}), 'the opt-in diagnostic reports final response counts by actual transit-leg count');
   assert.equal(Object.values(returnedByLeg).reduce((sum, count) => sum + count, 0), result.itineraries.length,
     'returned leg-count diagnostics account for every selected itinerary exactly once');
-  assert.equal((ranked.searchSteps as number) - reachedByLeg['2'], 25_000,
-    'the objective reservoir scans exactly its bounded window after pool saturation');
+  assert.equal((ranked.searchSteps as number) - reachedByLeg['2'], 20,
+    'the objective reservoir scans exactly its configured test window after pool saturation');
   assert.ok((ranked.maxQueuedSearchWork as number) < 10_000, 'the queue frontier cap did not trigger');
   assert.equal(ranked.searchStepLimitReached, 0, 'the global search-step cap did not trigger');
   assert.equal(ranked.candidateResultLimitReached, 0, 'the global retained-candidate cap did not trigger');
