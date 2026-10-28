@@ -50,6 +50,11 @@ on:
         required: false
         type: string
         default: ''
+      trace_candidate_trip_ids:
+        description: Optional comma-separated trip IDs for bounded candidate-retention diagnostics (max 2 trips, 64 rows)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -74,6 +79,7 @@ jobs:
       GTFS_REPLAY_TRACE_TRIP_CHAINS: ${{ inputs.trace_trip_chains || '' }}
       GTFS_REPLAY_TRACE_ROUTE_IDS: ${{ inputs.trace_route_ids || '' }}
       GTFS_REPLAY_TRACE_TRIP_IDS: ${{ inputs.trace_trip_ids || '' }}
+      GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS: ${{ inputs.trace_candidate_trip_ids || '' }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@v4
@@ -125,6 +131,7 @@ jobs:
                 GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES="$GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES" \
                 GTFS_REPLAY_TRACE_ROUTE_IDS="$GTFS_REPLAY_TRACE_ROUTE_IDS" \
                 GTFS_REPLAY_TRACE_TRIP_IDS="$GTFS_REPLAY_TRACE_TRIP_IDS" \
+                GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS="$GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS" \
                 ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
               ) | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))' >> replay-results.jsonl
             done

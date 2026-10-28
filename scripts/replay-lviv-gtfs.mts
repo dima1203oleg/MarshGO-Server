@@ -44,6 +44,11 @@ const traceRouteIds = new Set((process.env.GTFS_REPLAY_TRACE_ROUTE_IDS ?? '')
   .split(',').map((routeId) => routeId.trim()).filter(Boolean));
 const traceTripIds = new Set((process.env.GTFS_REPLAY_TRACE_TRIP_IDS ?? '')
   .split(',').map((tripId) => tripId.trim()).filter(Boolean));
+const traceCandidateTripIds = new Set((process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS ?? '')
+  .split(',').map((tripId) => tripId.trim()).filter(Boolean));
+if (traceCandidateTripIds.size > 2) {
+  throw new Error('GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS accepts at most two trip IDs.');
+}
 const retainedTripGroupsByRoute = new Map<string, Map<string, { serviceDate: string; tripId: string; segments: number }>>();
 const retainedSegmentsByTripId = new Map<string, Map<string, {
   routeId: string;
@@ -86,14 +91,22 @@ const graphObserver = traceRouteIds.size > 0 || traceTripIds.size > 0
   : undefined;
 const startedAt = performance.now();
 const searchDiagnosticsByStage: Record<string, Record<string, unknown>> = {};
+let searchCandidateTrace: unknown;
+let searchCandidateTraceError: string | undefined;
 const originalConsoleInfo = console.info.bind(console);
 const previousDebugSetting = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
 const previousTraceSetting = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+const previousCandidateTraceSetting = process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
 process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
 if (process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS) {
   process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS;
 } else {
   delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+}
+if (process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS) {
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS;
+} else {
+  delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
 }
 console.info = (...args: unknown[]) => {
   if (typeof args[0] === 'string') {
@@ -103,6 +116,18 @@ console.info = (...args: unknown[]) => {
         if (typeof record.stage === 'string' && ['segments-built', 'reachability-built', 'itineraries-ranked'].includes(record.stage)) {
           const { elapsedMs: _elapsedMs, heapUsedBytes: _heapUsedBytes, rssBytes: _rssBytes, ...stable } = record;
           searchDiagnosticsByStage[record.stage] = stable;
+          if (record.stage === 'segments-built' && typeof record.debugCandidateTripTrace === 'string') {
+            try {
+              const trace = JSON.parse(record.debugCandidateTripTrace) as Record<string, unknown>;
+              if (!Array.isArray(trace.candidates) || trace.candidates.length > 64) {
+                searchCandidateTraceError = 'Candidate trace must contain at most 64 candidate rows.';
+              } else {
+                searchCandidateTrace = trace;
+              }
+            } catch (error) {
+              searchCandidateTraceError = error instanceof Error ? error.message : String(error);
+            }
+          }
         }
         return;
       }
@@ -131,6 +156,14 @@ try {
   else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugSetting;
   if (previousTraceSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
   else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTraceSetting;
+  if (previousCandidateTraceSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+  else process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = previousCandidateTraceSetting;
+}
+if (process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS && process.env.REPLAY_GROUP === 'candidate') {
+  if (searchCandidateTraceError) throw new Error(`Invalid candidate trip trace: ${searchCandidateTraceError}`);
+  if (searchCandidateTrace === undefined) {
+    throw new Error('Candidate trip trace was requested but no candidate trace was emitted.');
+  }
 }
 const fastest = [...result.itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id))[0];
 const cheapest = [...result.itineraries].filter((item) => item.fare?.currency === 'UAH')
@@ -169,5 +202,6 @@ console.log(JSON.stringify({
       .sort((left, right) => left.departureAt.localeCompare(right.departureAt)
         || left.originStopId.localeCompare(right.originStopId)
         || left.destinationStopId.localeCompare(right.destinationStopId))])) } : {}),
+  ...(searchCandidateTrace !== undefined ? { searchCandidateTrace } : {}),
   searchDiagnosticsByStage,
 }, null, 2));

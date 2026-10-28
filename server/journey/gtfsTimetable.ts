@@ -1707,6 +1707,13 @@ export function findGtfsItinerariesWithStats(
   const debugTraceTripChainSet = debugTraceTripChains.length > 0 ? new Set(debugTraceTripChains) : undefined;
   const debugCompletedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
   const debugGeneratedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
+  const debugTraceCandidateTrips = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
+    ? [...new Set((process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS ?? '')
+      .split(',').map((tripId) => tripId.trim())
+      .filter((tripId) => tripId.length > 0 && tripId.length <= 128))].slice(0, 2)
+    : [];
+  const debugTraceCandidateTripSet = debugTraceCandidateTrips.length > 0 ? new Set(debugTraceCandidateTrips) : undefined;
+  const debugCandidateTraceTargetPairs = new Set(['30617_0_1:4767:4768', '30617_0_1:44250:4595']);
   const debugTripChainsIn = (candidates: readonly GtfsItinerary[]) => {
     const found = new Set<string>();
     if (!debugTraceTripChainSet) return found;
@@ -2631,6 +2638,28 @@ export function findGtfsItinerariesWithStats(
     }
     return compareStableId(left.sampleKey ?? '', right.sampleKey ?? '');
   };
+  type DebugTracedTripInstance = {
+    tripId: string;
+    routeId: string;
+    serviceDate: string;
+    eligibleStopCount: number;
+    materializedCandidates: RetainedGtfsSegment[];
+    materializedCandidateCount: number;
+    materializedCandidateTraceOmitted: number;
+    omittedBeyondWindow: number;
+    retainedTripCandidates: RetainedGtfsSegment[];
+    boundedTripProjectionUsed: boolean;
+    graphSegmentLimitPerRoute: number;
+    retentionTier: number | null;
+    retentionPriorityTier: number | null;
+    endpointArrivalMinute: number | null;
+    retainedWholeTripGroup: boolean;
+    feasibleConnectorEvaluations: number;
+    bestConnector: string | null;
+    connectorEvalIndexByCandidate: Map<RetainedGtfsSegment, number>;
+    connectorScanIndexByCandidate: Map<RetainedGtfsSegment, number>;
+  };
+  const debugTracedTripInstances: DebugTracedTripInstance[] = [];
   // Feed trip insertion order is not a stable selection policy. Keep graph
   // retention and any bounded overflow fill reproducible across feed encodings.
   for (const [tripId, trip] of [...feed.trips].sort(([left], [right]) => compareStableId(left, right))) {
@@ -2655,11 +2684,16 @@ export function findGtfsItinerariesWithStats(
     // pairs rather than repeating map lookups, string keys, and haversine
     // calculations for every edge.
     const eligibleContexts = eligibleIndexes.map((index) => stopContext(stops[index]));
+    const traceThisTrip = debugTraceCandidateTripSet?.has(tripId) ?? false;
     for (const serviceDate of serviceDates) {
       const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes, serviceTimeToUtc);
       if (!tripEvents) continue;
       let tripCandidates: RetainedGtfsSegment[] = [];
       let boundedTripCandidates: BoundedBestK<RetainedGtfsSegment> | undefined;
+      const debugMaterializedCandidates = traceThisTrip ? ([] as RetainedGtfsSegment[]) : undefined;
+      let debugMaterializedCandidateCount = 0;
+      let debugMaterializedCandidateTraceOmitted = 0;
+      let debugOmittedBeyondWindow = 0;
       // Duplicate stop IDs can occur in loop routes; deduplicate only within
       // this trip instance so a citywide set of every candidate key is not
       // retained alongside the graph.
@@ -2672,6 +2706,7 @@ export function findGtfsItinerariesWithStats(
         if (projection.kind === 'omitted-beyond-window') {
           // Preserve the partial-search signal for omitted, potentially useful legs.
           segmentGraphTruncated = true;
+          if (traceThisTrip) debugOmittedBeyondWindow++;
           continue;
         }
         const { fromCursor, toCursor, fromEvent, toEvent } = projection;
@@ -2711,6 +2746,17 @@ export function findGtfsItinerariesWithStats(
             ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
             ...(to.sourceZoneId ? { destinationZoneId: to.sourceZoneId } : {}),
           };
+          if (traceThisTrip && debugMaterializedCandidates) {
+            debugMaterializedCandidateCount++;
+            const isTargetPair = debugCandidateTraceTargetPairs.has(
+              `${candidate.tripId}:${from.stopId}:${to.stopId}`,
+            );
+            if (debugMaterializedCandidates.length < 1024 || isTargetPair) {
+              debugMaterializedCandidates.push(candidate);
+            } else {
+              debugMaterializedCandidateTraceOmitted++;
+            }
+          }
           if (!boundedTripCandidates && tripCandidates.length < graphSegmentLimitPerRoute) {
             tripCandidates.push(candidate);
             continue;
@@ -2726,6 +2772,8 @@ export function findGtfsItinerariesWithStats(
         tripCandidates = boundedTripCandidates.toSortedArray();
         segmentGraphTruncated = true;
       }
+      const debugConnectorEvalIndex = traceThisTrip ? new Map<RetainedGtfsSegment, number>() : undefined;
+      const debugConnectorScanIndex = traceThisTrip ? new Map<RetainedGtfsSegment, number>() : undefined;
       if (tripCandidates.length) {
         const overflowCapacity = Math.min(MAX_ROUTE_OVERFLOW_SEGMENTS, graphSegmentLimitPerRoute);
         const overflow = overflowSegmentsByRoute.get(trip.routeId)
@@ -2735,7 +2783,9 @@ export function findGtfsItinerariesWithStats(
         let temporallyConnectsQueryEnds = false;
         let bestConnector: { segment: RetainedGtfsSegment; arrivalAt: number } | undefined;
         let feasibleConnectorEvaluations = 0;
+        let connectorScanCursor = 0;
         for (const candidate of tripCandidates) {
+          debugConnectorScanIndex?.set(candidate, connectorScanCursor++);
           const canCatchOrigin = canBoardOriginCandidate(candidate);
           const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
           const servesQueryEndpoint = canCatchOrigin || endsAtDestination;
@@ -2753,6 +2803,7 @@ export function findGtfsItinerariesWithStats(
             const onwardArrival = earliestQueryArrivalAfterSegment(candidate, minimumTransferBufferSeconds);
             if (onwardArrival !== null) {
               feasibleConnectorEvaluations++;
+              debugConnectorEvalIndex?.set(candidate, feasibleConnectorEvaluations);
               temporallyConnectsQueryEnds = true;
               if (!bestConnector || onwardArrival < bestConnector.arrivalAt
                 || (onwardArrival === bestConnector.arrivalAt
@@ -2821,6 +2872,53 @@ export function findGtfsItinerariesWithStats(
           segmentsByRoute.set(trip.routeId, routeCandidates);
           retainedSegmentCountByRoute.set(trip.routeId, retained.segments);
         }
+        if (traceThisTrip && debugMaterializedCandidates && debugConnectorEvalIndex && debugConnectorScanIndex) {
+          debugTracedTripInstances.push({
+            tripId,
+            routeId: trip.routeId,
+            serviceDate,
+            eligibleStopCount: eligibleIndexes.length,
+            materializedCandidates: debugMaterializedCandidates,
+            materializedCandidateCount: debugMaterializedCandidateCount,
+            materializedCandidateTraceOmitted: debugMaterializedCandidateTraceOmitted,
+            omittedBeyondWindow: debugOmittedBeyondWindow,
+            retainedTripCandidates: [...tripCandidates],
+            boundedTripProjectionUsed: Boolean(boundedTripCandidates),
+            graphSegmentLimitPerRoute,
+            retentionTier,
+            retentionPriorityTier,
+            endpointArrivalMinute,
+            retainedWholeTripGroup: retained.retained,
+            feasibleConnectorEvaluations,
+            bestConnector: bestConnector
+              ? `${bestConnector.segment.originContext.details.id}->${bestConnector.segment.destinationContext.details.id}`
+              : null,
+            connectorEvalIndexByCandidate: debugConnectorEvalIndex,
+            connectorScanIndexByCandidate: debugConnectorScanIndex,
+          });
+        }
+      } else if (traceThisTrip && debugMaterializedCandidates && debugConnectorEvalIndex && debugConnectorScanIndex) {
+        debugTracedTripInstances.push({
+          tripId,
+          routeId: trip.routeId,
+          serviceDate,
+          eligibleStopCount: eligibleIndexes.length,
+          materializedCandidates: debugMaterializedCandidates,
+          materializedCandidateCount: debugMaterializedCandidateCount,
+          materializedCandidateTraceOmitted: debugMaterializedCandidateTraceOmitted,
+          omittedBeyondWindow: debugOmittedBeyondWindow,
+          retainedTripCandidates: [],
+          boundedTripProjectionUsed: Boolean(boundedTripCandidates),
+          graphSegmentLimitPerRoute,
+          retentionTier: null,
+          retentionPriorityTier: null,
+          endpointArrivalMinute: null,
+          retainedWholeTripGroup: false,
+          feasibleConnectorEvaluations: 0,
+          bestConnector: null,
+          connectorEvalIndexByCandidate: debugConnectorEvalIndex,
+          connectorScanIndexByCandidate: debugConnectorScanIndex,
+        });
       }
     }
   }
@@ -2921,6 +3019,167 @@ export function findGtfsItinerariesWithStats(
       .sort((left, right) => right.unused - left.unused || compareStableId(left.routeId, right.routeId))
       .slice(0, 10)
     : undefined;
+  const debugCandidateTripTrace = debugTraceCandidateTripSet ? (() => {
+    const finalGraphKeys = new Set(segments.map((segment) =>
+      `${segment.providerId}\u0000${segment.serviceDate}\u0000${segment.tripId}\u0000${segment.originStop.id}\u0000${segment.destinationStop.id}\u0000${segment.departureAt.getTime()}\u0000${segment.arrivalAt.getTime()}`));
+    const computeNonMutatingRank = (candidate: RetainedGtfsSegment,
+      prior: boolean, next: boolean, onwardArrival: number | null): [number, number, number, number, number, number] => {
+      if (candidate.sampleRank) return [...candidate.sampleRank] as [number, number, number, number, number, number];
+      const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
+      const canCatchOrigin = canBoardOriginCandidate(candidate);
+      const duration = candidate.arrivalAt.getTime() - candidate.departureAt.getTime();
+      const direct = canCatchOrigin && endsAtDestination;
+      const joinsOppositeFrontier = !direct && (canCatchOrigin ? next : endsAtDestination && prior);
+      const rankValue: [number, number, number, number, number, number] = direct
+        ? [0, 0, candidate.originContext.distanceToOriginStopMeters + candidate.destinationContext.distanceFromDestinationStopMeters,
+          duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
+        : joinsOppositeFrontier
+          ? [1, 0, canCatchOrigin ? candidate.originContext.distanceToOriginStopMeters
+            : candidate.destinationContext.distanceFromDestinationStopMeters,
+          canCatchOrigin ? duration : candidate.arrivalAt.getTime() - input.earliestDeparture.getTime(),
+          candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
+        : canCatchOrigin
+          ? [2, 0, candidate.originContext.distanceToOriginStopMeters, duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
+          : endsAtDestination
+            ? [3, 0, candidate.destinationContext.distanceFromDestinationStopMeters, duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()]
+            : [4, 1, 0, duration, candidate.departureAt.getTime(), candidate.arrivalAt.getTime()];
+      if (rankValue[0] === 4) {
+        if (onwardArrival !== null || (prior && next)) {
+          rankValue[0] = 1;
+          rankValue[1] = 0;
+          rankValue[2] = (onwardArrival ?? candidate.arrivalAt.getTime()) - input.earliestDeparture.getTime();
+        } else {
+          const connectedRoutes = new Set<string>();
+          for (const stopId of [...candidate.originContext.transferNodeIds, candidate.destinationContext.details.id,
+            ...candidate.destinationContext.transferNodeIds]) {
+            for (const routeId of routesByStop.get(stopId) ?? []) connectedRoutes.add(routeId);
+            const stop = feed.stops.get(stopId);
+            if (stop?.parentStation) {
+              for (const routeId of routesByParentStation.get(stop.parentStation) ?? []) connectedRoutes.add(routeId);
+            }
+          }
+          connectedRoutes.delete(candidate.routeId);
+          rankValue[1] = 1;
+          rankValue[2] = -connectedRoutes.size;
+        }
+      }
+      return rankValue;
+    };
+    const allRows: Array<{
+      priorityBucket: number;
+      tripId: string;
+      serviceDate: string;
+      routeId: string;
+      fromStopId: string;
+      toStopId: string;
+      fromIndex: number;
+      toIndex: number;
+      departureAtMs: number;
+      arrivalAtMs: number;
+      hasPriorEvent: boolean;
+      hasNextEvent: boolean;
+      earliestQueryArrivalAfterSegment: number | null;
+      rank: [number, number, number, number, number, number];
+      survivedTripProjection: boolean;
+      connectorScanIndex: number | null;
+      connectorEvalIndex: number | null;
+      connectorEvalCap: number;
+      retentionTier: number | null;
+      retentionPriorityTier: number | null;
+      survivesFinalGraph: boolean;
+    }> = [];
+    const trips = debugTracedTripInstances.map((instance) => {
+      const projectedSet = new Set(instance.retainedTripCandidates);
+      let priorTrueCount = 0;
+      let nextTrueCount = 0;
+      let onwardNonNullCount = 0;
+      let finalGraphSurvivingCount = 0;
+      for (const candidate of instance.materializedCandidates) {
+        const fromStopId = candidate.originContext.details.id;
+        const toStopId = candidate.destinationContext.details.id;
+        const prior = hasPriorEvent(candidate, minimumTransferBufferSeconds);
+        const next = hasNextEvent(candidate, minimumTransferBufferSeconds);
+        const onward = prior ? earliestQueryArrivalAfterSegment(candidate, minimumTransferBufferSeconds) : null;
+        if (prior) priorTrueCount++;
+        if (next) nextTrueCount++;
+        if (onward !== null) onwardNonNullCount++;
+        const survivesFinalGraph = finalGraphKeys.has(retainedCandidateKey(candidate));
+        if (survivesFinalGraph) finalGraphSurvivingCount++;
+        const survivedTripProjection = projectedSet.has(candidate);
+        const connectorScanIndex = instance.connectorScanIndexByCandidate.get(candidate) ?? null;
+        const connectorEvalIndex = instance.connectorEvalIndexByCandidate.get(candidate) ?? null;
+        const rank = computeNonMutatingRank(candidate, prior, next, onward);
+        const isTargetPair = debugCandidateTraceTargetPairs.has(`${candidate.tripId}:${fromStopId}:${toStopId}`);
+        const priorityBucket = isTargetPair ? 0
+          : survivesFinalGraph ? 1
+            : connectorEvalIndex !== null ? 2
+              : survivedTripProjection ? 3
+                : onward !== null ? 4
+                  : (prior && next) ? 5
+                    : prior || next ? 6 : 7;
+        allRows.push({
+          priorityBucket,
+          tripId: candidate.tripId,
+          serviceDate: candidate.serviceDate,
+          routeId: candidate.routeId,
+          fromStopId,
+          toStopId,
+          fromIndex: candidate.fromIndex,
+          toIndex: candidate.toIndex,
+          departureAtMs: candidate.departureAt.getTime(),
+          arrivalAtMs: candidate.arrivalAt.getTime(),
+          hasPriorEvent: prior,
+          hasNextEvent: next,
+          earliestQueryArrivalAfterSegment: onward,
+          rank,
+          survivedTripProjection,
+          connectorScanIndex,
+          connectorEvalIndex,
+          connectorEvalCap: 2,
+          retentionTier: instance.retentionTier,
+          retentionPriorityTier: instance.retentionPriorityTier,
+          survivesFinalGraph,
+        });
+      }
+      return {
+        tripId: instance.tripId,
+        routeId: instance.routeId,
+        serviceDate: instance.serviceDate,
+        eligibleStopCount: instance.eligibleStopCount,
+        materializedPairCount: instance.materializedCandidateCount,
+        candidateRowsOmittedByTraceMemoryBound: instance.materializedCandidateTraceOmitted,
+        omittedBeyondWindowCount: instance.omittedBeyondWindow,
+        retainedInTripProjectionCount: instance.retainedTripCandidates.length,
+        boundedTripProjectionUsed: instance.boundedTripProjectionUsed,
+        graphSegmentLimitPerRoute: instance.graphSegmentLimitPerRoute,
+        traceSampledPairCount: instance.materializedCandidates.length,
+        traceSampledPriorTrueCount: priorTrueCount,
+        traceSampledNextTrueCount: nextTrueCount,
+        traceSampledOnwardNonNullCount: onwardNonNullCount,
+        feasibleConnectorEvaluations: instance.feasibleConnectorEvaluations,
+        feasibleConnectorEvaluationCap: 2,
+        bestConnector: instance.bestConnector,
+        retentionTier: instance.retentionTier,
+        retentionPriorityTier: instance.retentionPriorityTier,
+        endpointArrivalMinute: instance.endpointArrivalMinute,
+        retainedWholeTripGroup: instance.retainedWholeTripGroup,
+        traceSampledFinalGraphSurvivingCount: finalGraphSurvivingCount,
+      };
+    });
+    allRows.sort((left, right) => {
+      if (left.priorityBucket !== right.priorityBucket) return left.priorityBucket - right.priorityBucket;
+      for (let index = 0; index < left.rank.length; index++) {
+        if (left.rank[index] !== right.rank[index]) return left.rank[index] - right.rank[index];
+      }
+      return compareStableId(left.tripId, right.tripId)
+        || compareStableId(left.serviceDate, right.serviceDate)
+        || left.fromIndex - right.fromIndex
+        || left.toIndex - right.toIndex;
+    });
+    const candidates = allRows.slice(0, 64).map(({ priorityBucket: _bucket, ...row }) => row);
+    return { requestedTrips: debugTraceCandidateTrips, trips, candidates };
+  })() : undefined;
+  debugTracedTripInstances.length = 0;
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
     serviceDates: serviceDates.size, corridorStops: corridorStops.size,
     candidateRouteCount, graphRoutesWithCandidates: segmentsByRoute.size,
@@ -2935,6 +3194,7 @@ export function findGtfsItinerariesWithStats(
     overflowConnectorReservoirsAtCap: overflowConnectorReservoirSizes.filter((size) => size >= MAX_ROUTE_OVERFLOW_CONNECTORS).length,
     overflowSegmentsRedistributed: redistributed.added,
     ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
+    ...(debugCandidateTripTrace ? { debugCandidateTripTrace: JSON.stringify(debugCandidateTripTrace) } : {}),
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
     globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
     segmentGraphTruncated: Number(segmentGraphTruncated) });
