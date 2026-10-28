@@ -1686,7 +1686,10 @@ test('connector reservoir keeps a CHEAPEST winner behind faster fare-diverse con
   assert.ok(exhaustive.itineraries.some((journey) => chainId(journey) === cheapestChain));
   assert.ok(exhaustive.itineraries.some((journey) => chainId(journey) === slowestCheapestChain));
   assert.ok(exhaustive.itineraries.some((journey) => chainId(journey) === fastestChain));
-  assert.equal(scoreJourneys(exhaustive.itineraries.map(toScorable), 'CHEAPEST')[0]?.journey.id, slowestCheapestChain);
+  const cheapestWinner = (result: ReturnType<typeof findGtfsItinerariesWithStats>) =>
+    scoreJourneys(result.itineraries.map(toScorable), 'CHEAPEST')[0]?.journey.id;
+  const exhaustiveCheapestWinner = cheapestWinner(exhaustive);
+  assert.equal(exhaustiveCheapestWinner, slowestCheapestChain);
   assert.equal(scoreJourneys(exhaustive.itineraries.map(toScorable), 'FASTEST')[0]?.journey.id, fastestChain);
 
   const runBounded = (maxRouteOverflowConnectors: number, segmentsPerRoute = 3) => {
@@ -1735,11 +1738,16 @@ test('connector reservoir keeps a CHEAPEST winner behind faster fare-diverse con
   assert.ok(!constrained.result.itineraries.some((journey) => chainId(journey) === cheapestChain),
     'the constrained connector reservoir omits the exhaustive cheapest chain');
   assert.ok(recovered.result.itineraries.some((journey) => chainId(journey) === cheapestChain),
-    'a wider connector reservoir restores the exhaustive cheapest chain');
+    'a wider connector reservoir restores the cheaper fare-diverse chain');
+  assert.ok(constrained.result.itineraries.length > 0, 'the constrained search still returns a partial journey');
+  assert.notEqual(cheapestWinner(constrained.result), exhaustiveCheapestWinner,
+    'CHEAPEST on the saturated reservoir must be observably worse than the exhaustive oracle');
   assert.ok(expanded.result.itineraries.some((journey) => chainId(journey) === slowestCheapestChain),
     `a third feasible connector on the same middle trip must remain available to CHEAPEST; graph=${JSON.stringify(
       expanded.snapshot.segments.map(({ journey }) => [journey.tripId, journey.originStop.id, journey.destinationStop.id]))}; `
       + `results=${JSON.stringify(expanded.result.itineraries.map(chainId))}; stats=${JSON.stringify(expanded.graph)}`);
+  assert.equal(cheapestWinner(expanded.result), exhaustiveCheapestWinner,
+    'the expanded connector and per-route budgets must restore the exact exhaustive CHEAPEST winner');
 });
 
 test('query-time retention keeps a scheduled connector ahead of dense irrelevant interchanges', () => {
