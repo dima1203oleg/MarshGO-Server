@@ -1987,6 +1987,8 @@ export function findGtfsItinerariesWithStats(
   const retainedSegmentCountByRoute = new Map<string, number>();
   const overflowSegmentsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
   const overflowConnectorsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
+  const retainedCandidateKey = (candidate: RetainedGtfsSegment) =>
+    `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
   const candidateStopCountByRoute = new Map<string, number>();
   for (const [stopId, routeIds] of routesByStop) {
     if (!interchangeStopIds.has(stopId)) continue;
@@ -2828,7 +2830,16 @@ export function findGtfsItinerariesWithStats(
               feasibleConnectorEvaluations++;
               debugConnectorEvalIndex?.set(candidate, feasibleConnectorEvaluations);
               temporallyConnectsQueryEnds = true;
+              const retainedConnectors = connectorOverflow.toSortedArray();
+              const connectorReservoirWasFull = retainedConnectors.length >= connectorOverflowCapacity;
+              const candidateAlreadyRetained = retainedConnectors.some((retained) =>
+                retainedCandidateKey(retained) === retainedCandidateKey(candidate));
               connectorOverflow.consider(candidate);
+              // A bounded connector sample can omit a feasible alternative even
+              // when the estimated graph budget itself is not exhausted. Only
+              // mark a unique candidate beyond the full reservoir: duplicates
+              // do not make the candidate graph incomplete.
+              if (connectorReservoirWasFull && !candidateAlreadyRetained) segmentGraphTruncated = true;
               if (!bestConnector || onwardArrival < bestConnector.arrivalAt
                 || (onwardArrival === bestConnector.arrivalAt
                   && compareTripSegments(candidate, bestConnector.segment) < 0)) {
@@ -2945,8 +2956,6 @@ export function findGtfsItinerariesWithStats(
       }
     }
   }
-  const retainedCandidateKey = (candidate: RetainedGtfsSegment) =>
-    `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
   const overflowCandidatesByRoute = new Map<string, RetainedGtfsSegment[]>();
   const overflowRouteIds = new Set([...overflowSegmentsByRoute.keys(), ...overflowConnectorsByRoute.keys()]);
   for (const routeId of overflowRouteIds) {
