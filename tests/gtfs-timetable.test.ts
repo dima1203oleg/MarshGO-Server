@@ -1601,10 +1601,12 @@ test('connector reservoir keeps a CHEAPEST winner behind faster fare-diverse con
   timetable.stopTimes.clear();
   timetable.stopTimesByStop.clear();
   timetable.stops.clear();
+  // Keep hub-b over the default 400 m transfer radius from hub-a. Otherwise
+  // the cheap egress is reachable by walking and bypasses the middle trip.
   for (const [id, name, lon, lat] of [
     ['origin', 'Origin', 24.0200, 49.8400],
     ['hub-a', 'Hub A', 24.0250, 49.8450],
-    ['hub-b', 'Hub B', 24.0270, 49.8470],
+    ['hub-b', 'Hub B', 24.0300, 49.8490],
     ['hub-c', 'Hub C', 24.0340, 49.8520],
     ['hub-d', 'Hub D', 24.0360, 49.8540],
     ['destination', 'Destination', 24.0300, 49.8500],

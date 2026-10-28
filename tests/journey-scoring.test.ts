@@ -41,6 +41,16 @@ describe('Journey strategy scoring', () => {
       'FASTEST remains strictly ordered by real duration');
   });
 
+  it('prefers a direct BALANCED route when one transfer saves only five actual minutes', () => {
+    const direct: JourneyOption = { ...candidates[0]!, id: 'direct', durationSeconds: 3_000,
+      priceMinor: 10_000, transfers: 0 };
+    const connection: JourneyOption = { ...candidates[0]!, id: 'one-transfer', durationSeconds: 2_700,
+      priceMinor: 10_000, transfers: 1 };
+
+    assert.equal(scoreJourneys([direct, connection], 'BALANCED')[0]?.journey.id, 'direct');
+    assert.equal(scoreJourneys([direct, connection], 'FASTEST')[0]?.journey.id, 'one-transfer');
+  });
+
   it('keeps the Pareto frontier and never treats an unknown fare as zero', () => {
     const fast = { ...candidates[2], id: 'fast' };
     const cheap = { ...candidates[0], id: 'cheap' };
