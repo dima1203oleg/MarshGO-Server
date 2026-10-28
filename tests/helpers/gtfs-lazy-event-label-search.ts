@@ -16,7 +16,8 @@ function haversineMeters(a: [number, number], b: [number, number]) {
   const rad = (n: number) => n * Math.PI / 180;
   const dLat = rad(b[1] - a[1]), dLon = rad(b[0] - a[0]);
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a[1])) * Math.cos(rad(b[1])) * Math.sin(dLon / 2) ** 2;
-  return 6_371_000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  // Match the production distance helper so rounded access/egress costs agree.
+  return 2 * 6_371_000 * Math.asin(Math.sqrt(h));
 }
 
 /**
@@ -28,6 +29,10 @@ function haversineMeters(a: [number, number], b: [number, number]) {
 export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
   originStopIds: readonly string[];
   destinationStopIds: readonly string[];
+  originCoordinates: [number, number];
+  destinationCoordinates: [number, number];
+  maximumAccessWalkingMeters: number;
+  maximumEgressWalkingMeters: number;
   serviceDates: readonly string[];
   earliestDeparture: Date;
   latestDeparture: Date;
@@ -41,6 +46,7 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
   providerName?: string;
   providerCity?: string;
   maximumExpandedLabels?: number;
+  maximumIndexedBoardingCalls?: number;
 }) {
   const journeyEnd = options.journeyEndAt?.getTime()
     ?? (options.latestDeparture.getTime() + options.maximumJourneySeconds * 1000);
@@ -63,15 +69,26 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
     return event.stopTime.sourceParentStationId && event.stopTime.sourceParentStationId !== primary
       ? [primary, event.stopTime.sourceParentStationId] : [primary];
   };
+  const maximumIndexedBoardingCalls = options.maximumIndexedBoardingCalls ?? 100_000;
+  if (!Number.isSafeInteger(maximumIndexedBoardingCalls) || maximumIndexedBoardingCalls < 1) {
+    throw new RangeError('maximumIndexedBoardingCalls must be a positive safe integer');
+  }
   const calls: BoardingCall[] = [];
-  for (const serviceDate of options.serviceDates) for (const [tripId, stopTimes] of feed.stopTimes) {
+  let eventIndexTruncated = false;
+  indexLoop: for (const serviceDate of options.serviceDates) for (const [tripId, stopTimes] of feed.stopTimes) {
     const projection = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, stopTimes.map((_, index) => index));
     if (!projection) continue;
+    const eligibleCalls = projection.events.filter((event) => event.canBoard && event.departureAt
+      && event.departureAt.getTime() <= journeyEnd);
+    if (eligibleCalls.length === 0) continue;
+    const availableSlots = Math.max(0, maximumIndexedBoardingCalls - calls.length);
+    if (eligibleCalls.length > availableSlots) eventIndexTruncated = true;
+    const retainedCalls = eligibleCalls.slice(0, availableSlots);
+    if (retainedCalls.length === 0) break indexLoop;
     projections.set(`${tripId}\u0000${serviceDate}`, projection);
-    for (const event of projection.events) {
-      if (!event.canBoard || !event.departureAt || event.departureAt.getTime() > journeyEnd) continue;
+    for (const event of retainedCalls) {
       const call: BoardingCall = { tripId, serviceDate, stopIndex: event.stopIndex,
-        departureMs: event.departureAt.getTime(), nodeIds: nodeIdsAtStop(event) };
+        departureMs: event.departureAt!.getTime(), nodeIds: nodeIdsAtStop(event) };
       calls.push(call);
       const byStop = boardingsByStop.get(event.stopTime.stopId) ?? [];
       byStop.push(call); boardingsByStop.set(event.stopTime.stopId, byStop);
@@ -83,6 +100,7 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
       const coordinates = event.stopTime.sourceStopCoordinates ?? (stop ? [stop.lon, stop.lat] as [number, number] : undefined);
       if (coordinates) stopCoordinates.set(event.stopTime.stopId, coordinates);
     }
+    if (eventIndexTruncated) break indexLoop;
   }
   const eventOrder = (a: BoardingCall, b: BoardingCall) => a.departureMs - b.departureMs
     || a.tripId.localeCompare(b.tripId) || a.serviceDate.localeCompare(b.serviceDate) || a.stopIndex - b.stopIndex;
@@ -142,6 +160,7 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
     if (!stop || !coordinates) return null;
     const provider = feed.providersByRoute?.get(trip.routeId);
     const providerCity = provider?.city ?? options.providerCity;
+    const distanceToOriginStopMeters = Math.round(haversineMeters(options.originCoordinates, coordinates));
     return {
       providerId: provider?.id ?? options.providerId ?? 'lazy-event-test',
       tripId: call.tripId,
@@ -149,6 +168,7 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
       originStop: { id: stopTime.stopId, name: stopTime.sourceStopName ?? stop.name, coordinates },
       originTransferNodeIds: nodeIdsAtStop(event),
       departureAt: event.departureAt,
+      distanceToOriginStopMeters,
       transportType: route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType,
     };
   };
@@ -198,7 +218,8 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
         scheduledDepartureAt: from.scheduledDepartureAt, scheduledArrivalAt: to.scheduledArrivalAt,
         departureAt: from.departureAt, arrivalAt: to.arrivalAt, sourceFreshAt: provider?.fetchedAt ?? feed.fetchedAt,
         ...(from.updated || to.updated ? { realtimeUpdatedAt: projection.realtimeUpdate?.updatedAt } : {}),
-        distanceToOriginStopMeters: 0, distanceFromDestinationStopMeters: 0,
+        distanceToOriginStopMeters: Math.round(haversineMeters(options.originCoordinates, originCoordinates)),
+        distanceFromDestinationStopMeters: Math.round(haversineMeters(options.destinationCoordinates, destinationCoordinates)),
         ...(origin.sourceZoneId ? { originZoneId: origin.sourceZoneId } : {}),
         ...(destination.sourceZoneId ? { destinationZoneId: destination.sourceZoneId } : {}),
         traveledZoneIds: projection.events.slice(call.stopIndex, toIndex + 1)
@@ -212,11 +233,15 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
 
   const identities = new Map<string, { identity: string; tripIds: string[]; serviceDates: string[];
     segmentIndexes: Array<[number, number]>; segmentIdentities: string[]; fareMinor: number | null; fareAllocations: unknown;
-    path: LazyLeg[] }>();
+    path: LazyLeg[]; arrivalAt: Date; durationSeconds: number; transfers: number; walkingMeters: number;
+    originAccessMeters: number; destinationEgressMeters: number }>();
   const originIds = new Set(options.originStopIds), destinationIds = new Set(options.destinationStopIds);
   const maxLegs = options.maximumTransfers + 1;
   const maxWaitMs = options.maximumWaitSeconds * 1000;
   const maximumExpandedLabels = options.maximumExpandedLabels ?? 100_000;
+  if (!Number.isSafeInteger(maximumExpandedLabels) || maximumExpandedLabels < 1) {
+    throw new RangeError('maximumExpandedLabels must be a positive safe integer');
+  }
   let expandedLabels = 0;
   let searchTruncated = false;
   const visit = (path: LazyLeg[]) => {
@@ -225,23 +250,38 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
     expandedLabels++;
     const last = path.at(-1)!;
     if (destinationIds.has(last.journey.destinationStop.id)) {
-      const segments = path.map((leg) => leg.journey);
-      const fare = calculateGtfsItineraryFare({ products: feed.fareProducts ?? new Map(),
-        rules: feed.fareRules ?? new Map(), faresV2Present: feed.faresV2Present === true },
-      segments.map((segment) => ({ providerId: segment.providerId, routeId: segment.routeId,
-        ...(feed.routes.get(segment.routeId)?.agencyId ? { agencyId: feed.routes.get(segment.routeId)!.agencyId } : {}),
-        departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
-        ...(segment.originZoneId ? { originZoneId: segment.originZoneId } : {}),
-        ...(segment.destinationZoneId ? { destinationZoneId: segment.destinationZoneId } : {}),
-        traveledZoneIds: segment.traveledZoneIds }))) ?? null;
-      const identity = path.map((leg) => `${leg.journey.providerId}:${leg.journey.serviceDate}:${leg.journey.tripId}:${leg.fromIndex}:${leg.toIndex}:${leg.journey.departureAt.getTime()}:${leg.journey.arrivalAt.getTime()}`).join('|');
-      identities.set(identity, { identity, tripIds: segments.map((segment) => segment.tripId),
-        serviceDates: segments.map((segment) => segment.serviceDate),
-        segmentIndexes: path.map((leg) => [leg.fromIndex, leg.toIndex]),
-        segmentIdentities: path.map((leg) => `${leg.journey.tripId}:${leg.journey.originStop.id}@${leg.journey.departureAt.getTime()}>${leg.journey.destinationStop.id}@${leg.journey.arrivalAt.getTime()}`),
-        fareMinor: fare?.priceMinor ?? null,
-        path,
-        fareAllocations: fare?.allocations ?? null });
+      const first = path[0]!;
+      const accessMeters = first.journey.distanceToOriginStopMeters;
+      const egressMeters = last.journey.distanceFromDestinationStopMeters;
+      const egressSeconds = Math.ceil(egressMeters / 1.25);
+      const arrivalAt = new Date(last.journey.arrivalAt.getTime() + egressSeconds * 1000);
+      const durationSeconds = Math.ceil((arrivalAt.getTime() - options.earliestDeparture.getTime()) / 1000);
+      if (accessMeters <= options.maximumAccessWalkingMeters && egressMeters <= options.maximumEgressWalkingMeters
+        && durationSeconds <= options.maximumJourneySeconds) {
+        const transferDecisions = path.slice(1).map((leg, index) => transferContext.decide(path[index]!.journey, leg.journey));
+        if (transferDecisions.some((decision) => !decision.feasible)) return;
+        const segments = path.map((leg) => leg.journey);
+        const fare = calculateGtfsItineraryFare({ products: feed.fareProducts ?? new Map(),
+          rules: feed.fareRules ?? new Map(), faresV2Present: feed.faresV2Present === true },
+        segments.map((segment) => ({ providerId: segment.providerId, routeId: segment.routeId,
+          ...(feed.routes.get(segment.routeId)?.agencyId ? { agencyId: feed.routes.get(segment.routeId)!.agencyId } : {}),
+          departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
+          ...(segment.originZoneId ? { originZoneId: segment.originZoneId } : {}),
+          ...(segment.destinationZoneId ? { destinationZoneId: segment.destinationZoneId } : {}),
+          traveledZoneIds: segment.traveledZoneIds }))) ?? null;
+        const identity = path.map((leg) => `${leg.journey.providerId}:${leg.journey.serviceDate}:${leg.journey.tripId}:${leg.fromIndex}:${leg.toIndex}:${leg.journey.departureAt.getTime()}:${leg.journey.arrivalAt.getTime()}`).join('|');
+        identities.set(identity, { identity, tripIds: segments.map((segment) => segment.tripId),
+          serviceDates: segments.map((segment) => segment.serviceDate),
+          segmentIndexes: path.map((leg) => [leg.fromIndex, leg.toIndex]),
+          segmentIdentities: path.map((leg) => `${leg.journey.tripId}:${leg.journey.originStop.id}@${leg.journey.departureAt.getTime()}>${leg.journey.destinationStop.id}@${leg.journey.arrivalAt.getTime()}`),
+          fareMinor: fare?.priceMinor ?? null,
+          path,
+          fareAllocations: fare?.allocations ?? null, arrivalAt, durationSeconds,
+          transfers: transferDecisions.filter((decision) => !decision.measure.inSeat).length,
+          walkingMeters: accessMeters + egressMeters
+            + transferDecisions.reduce((sum, decision) => sum + decision.measure.walkingMeters, 0),
+          originAccessMeters: accessMeters, destinationEgressMeters: egressMeters });
+      }
     }
     if (path.length >= maxLegs) return;
     const prior = last.journey;
@@ -260,10 +300,21 @@ export function lazyEventLabelSearch(feed: GtfsTimetableFeed, options: {
     }
   };
   for (const call of calls.filter((candidate) => originIds.has(feed.stopTimes.get(candidate.tripId)?.[candidate.stopIndex]?.stopId ?? '')
-    && candidate.departureMs >= options.earliestDeparture.getTime() && candidate.departureMs <= options.latestDeparture.getTime()).sort(eventOrder)) {
+    && (boardingProjection(candidate)?.distanceToOriginStopMeters ?? Infinity) <= options.maximumAccessWalkingMeters
+    && candidate.departureMs >= options.earliestDeparture.getTime()
+      + Math.ceil((boardingProjection(candidate)?.distanceToOriginStopMeters ?? Infinity) / 1.25) * 1000
+    && candidate.departureMs <= options.latestDeparture.getTime()).sort(eventOrder)) {
     for (const first of materializeFrom(call)) visit([first]);
   }
-  return { identities, expandedLabels, searchTruncated,
+  const overallSearchTruncated = searchTruncated || eventIndexTruncated;
+  const strategyCandidates = [...identities.values()].map((entry) => ({ id: entry.identity,
+    durationSeconds: entry.durationSeconds, priceMinor: entry.fareMinor, transfers: entry.transfers,
+    walkingMeters: entry.walkingMeters, reliability: null, transferRisk: entry.transfers > 0 ? 0.3 : 0,
+    comfort: null, legs: entry.path.map((leg) => ({ mode: leg.journey.mode })) }));
+  const winners = Object.fromEntries((['FASTEST', 'CHEAPEST', 'BALANCED'] as const).map((strategy) =>
+    [strategy, scoreJourneys(strategyCandidates, strategy)[0]?.journey.id ?? null]));
+  return { identities, expandedLabels, searchTruncated: overallSearchTruncated, eventIndexTruncated,
+    indexedBoardingCalls: calls.length, winners,
     materializedBoardingExpansions: legCache.size,
     materializedLegs: [...legCache.values()].reduce((sum, legs) => sum + legs.length, 0) };
 }

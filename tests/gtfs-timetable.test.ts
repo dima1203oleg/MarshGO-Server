@@ -291,6 +291,21 @@ const request = (earliest: string, latest: string) => ({
   earliestDeparture: new Date(earliest), latestDeparture: new Date(latest), now: new Date('2026-10-08T00:00:00Z'),
 });
 
+const lazyEndpointOptions = (feed: GtfsTimetableFeed, originStopId: string, destinationStopId: string,
+  overrides: { origin?: [number, number]; destination?: [number, number];
+    originCoordinates?: [number, number]; destinationCoordinates?: [number, number];
+    maximumAccessWalkingMeters?: number; maximumEgressWalkingMeters?: number } = {}) => {
+  const originStop = feed.stops.get(originStopId);
+  const destinationStop = feed.stops.get(destinationStopId);
+  assert.ok(originStop && destinationStop, 'lazy endpoint fixture stops exist');
+  return {
+    originCoordinates: overrides.originCoordinates ?? overrides.origin ?? [originStop.lon + 0.0001, originStop.lat + 0.0001] as [number, number],
+    destinationCoordinates: overrides.destinationCoordinates ?? overrides.destination ?? [destinationStop.lon + 0.0001, destinationStop.lat + 0.0001] as [number, number],
+    maximumAccessWalkingMeters: overrides.maximumAccessWalkingMeters ?? 100,
+    maximumEgressWalkingMeters: overrides.maximumEgressWalkingMeters ?? 100,
+  };
+};
+
 /**
  * Deliberately small independent oracle for the one-transfer fixtures below.
  * It independently enumerates every origin-to-interchange and
@@ -3063,6 +3078,7 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
 
   const lazyOracle = lazyEventLabelSearch(timetable, {
     originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    ...lazyEndpointOptions(timetable, 'start', 'finish'),
     earliestDeparture: new Date('2026-10-12T04:55:00Z'), latestDeparture: new Date('2026-10-12T05:12:00Z'),
     maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 2, maximumWaitSeconds: 2 * 60 * 60,
     transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
@@ -3367,6 +3383,7 @@ test('keeps type-4 event labels and fare-v1 coverage/zones separate from passeng
 
   const lazyFareLabels = lazyEventLabelSearch(timetable, {
     originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    ...lazyEndpointOptions(timetable, 'start', 'finish', query),
     earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
     maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 2 * 60 * 60,
     transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
@@ -3418,6 +3435,7 @@ test('keeps type-4 event labels and fare-v1 coverage/zones separate from passeng
     'unknown fare does not prune a feasible event-label chain');
   const unknownLazyLabels = lazyEventLabelSearch(unknownFareFeed, {
     originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    ...lazyEndpointOptions(unknownFareFeed, 'start', 'finish', query),
     earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
     maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 2 * 60 * 60,
     transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
@@ -3463,6 +3481,9 @@ test('graph-relative lazy search matches production itinerary materialization, c
   const lazy = lazyEventLabelSearchForRequest(timetable, query);
   assert.equal(lazy.searchTruncated, false, 'tiny lazy request remains complete');
   assert.equal(production.searchTruncated, false, 'tiny production request remains complete');
+  assert.ok(production.itineraries.some((journey) => journey.segments[0]!.distanceToOriginStopMeters > 0
+    && journey.segments.at(-1)!.distanceFromDestinationStopMeters > 0),
+  'the compared production fixture includes nonzero origin-access and destination-egress walking');
   const boundedProduction = findGtfsItinerariesWithStats(connectingFeed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 1,
   }, { maxQueuedSearchWork: 0 });
@@ -3495,6 +3516,58 @@ test('graph-relative lazy search matches production itinerary materialization, c
     })), strategy)[0]?.journey.id ?? null;
     assert.equal(lazy.winners[strategy], expected, `${strategy} winner agrees for the exact request shape`);
   }
+
+  const eventLabels = lazyEventLabelSearch(timetable, {
+    originStopIds: capturedGraph.originStopIds, destinationStopIds: capturedGraph.destinationStopIds,
+    ...lazyEndpointOptions(timetable, 'origin', 'destination', query), serviceDates: ['20261012'],
+    earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
+    maximumJourneySeconds: query.maximumJourneySeconds, maximumTransfers: 0,
+    maximumWaitSeconds: query.maximumWaitSeconds, transferRadiusMeters: query.maximumTransferWalkingMeters,
+    minimumTransferBufferSeconds: query.minimumTransferBufferSeconds,
+    providerId: query.providerId, providerName: query.providerName,
+  });
+  assert.equal(eventLabels.searchTruncated, false, 'event index and label caps do not truncate the tiny endpoint fixture');
+  const productionChainIdentities = production.itineraries.map((journey) => journey.segments.map((segment) =>
+    `${segment.tripId}:${segment.originStop.id}@${segment.departureAt.getTime()}>${segment.destinationStop.id}@${segment.arrivalAt.getTime()}`).join('|')).sort();
+  const eventLabelChainIdentities = [...eventLabels.identities.values()].map((entry) => entry.segmentIdentities.join('|')).sort();
+  assert.deepEqual(eventLabelChainIdentities, productionChainIdentities,
+    'event labels enumerate the complete production chain set with its exact selected endpoint stops');
+  assert.ok([...eventLabels.identities.values()].some((entry) => entry.originAccessMeters > 0 && entry.destinationEgressMeters > 0),
+    'event-label itineraries include nonzero endpoint walking distances');
+  for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+    const expectedWinnerId = scoreJourneys(production.itineraries.map((journey) => ({
+      id: journey.id, durationSeconds: journey.durationSeconds,
+      priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+      transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+      transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+      legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+    })), strategy)[0]?.journey.id ?? null;
+    const expectedWinner = production.itineraries.find((journey) => journey.id === expectedWinnerId);
+    const actualWinner = [...eventLabels.identities.values()].find((entry) => entry.identity === eventLabels.winners[strategy]);
+    assert.deepEqual(actualWinner?.segmentIdentities,
+      expectedWinner?.segments.map((segment) => `${segment.tripId}:${segment.originStop.id}@${segment.departureAt.getTime()}>${segment.destinationStop.id}@${segment.arrivalAt.getTime()}`) ?? null,
+      `lazy event-label ${strategy} winner includes production access and egress walking`);
+  }
+  const eventCap = lazyEventLabelSearch(timetable, {
+    originStopIds: capturedGraph.originStopIds, destinationStopIds: capturedGraph.destinationStopIds,
+    ...lazyEndpointOptions(timetable, 'origin', 'destination', query), serviceDates: ['20261012'],
+    earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
+    maximumJourneySeconds: query.maximumJourneySeconds, maximumTransfers: 0,
+    maximumWaitSeconds: query.maximumWaitSeconds, transferRadiusMeters: query.maximumTransferWalkingMeters,
+    minimumTransferBufferSeconds: query.minimumTransferBufferSeconds,
+    maximumIndexedBoardingCalls: 1,
+  });
+  assert.equal(eventCap.eventIndexTruncated, true, 'an event-index cap reports that eligible boarding calls were omitted');
+  assert.equal(eventCap.searchTruncated, true, 'event-index truncation is surfaced as a partial lazy result');
+  const labelCap = lazyEventLabelSearch(timetable, {
+    originStopIds: capturedGraph.originStopIds, destinationStopIds: capturedGraph.destinationStopIds,
+    ...lazyEndpointOptions(timetable, 'origin', 'destination', query), serviceDates: ['20261012'],
+    earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
+    maximumJourneySeconds: query.maximumJourneySeconds, maximumTransfers: 0,
+    maximumWaitSeconds: query.maximumWaitSeconds, transferRadiusMeters: query.maximumTransferWalkingMeters,
+    minimumTransferBufferSeconds: query.minimumTransferBufferSeconds, maximumExpandedLabels: 1,
+  });
+  assert.equal(labelCap.searchTruncated, true, 'a label-frontier cap remains truthfully reported');
 
   const transferFeed = connectingFeed({ secondDeparture: '08:35:00' });
   transferFeed.fareProducts = new Map([
@@ -3564,6 +3637,7 @@ test('graph-relative lazy search matches production itinerary materialization, c
     'GTFS transfer_type=3 stays forbidden');
   const forbiddenBoardingLabels = lazyEventLabelSearch(forbiddenFeed, {
     originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    ...lazyEndpointOptions(forbiddenFeed, 'start', 'finish', transferQuery),
     earliestDeparture: transferQuery.earliestDeparture, latestDeparture: transferQuery.latestDeparture,
     maximumJourneySeconds: 6 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 4 * 60 * 60,
     transferRadiusMeters: transferQuery.maximumTransferWalkingMeters!,
@@ -3610,6 +3684,7 @@ test('matches a deterministic exhaustive oracle for pathways, transfer rules, lo
     });
     const lazyLabels = lazyEventLabelSearch(timetable, {
       originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+      ...lazyEndpointOptions(timetable, 'start', 'finish', query),
       earliestDeparture: query.earliestDeparture, latestDeparture: query.latestDeparture,
       maximumJourneySeconds: 6 * 60 * 60, maximumTransfers: query.maximumTransfers,
       maximumWaitSeconds: 4 * 60 * 60, transferRadiusMeters: query.maximumTransferWalkingMeters,
@@ -3884,9 +3959,12 @@ test('independent lazy event labels preserve service dates and repeated trip-cal
       ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
     ]);
   });
-  const start = new Date('2026-10-12T04:55:00Z');
+  const start = new Date('2026-10-12T05:00:00Z');
   const end = new Date('2026-10-19T05:12:00Z');
   const options = { originStopIds: ['start'], destinationStopIds: ['finish'],
+    ...lazyEndpointOptions(timetable, 'start', 'finish', {
+      originCoordinates: [24.0200, 49.8400], destinationCoordinates: [24.0300, 49.8500],
+    }),
     serviceDates: ['20261012', '20261019'], earliestDeparture: start, latestDeparture: end,
     maximumJourneySeconds: 7 * 24 * 60 * 60 + 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 4 * 60 * 60,
     transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
@@ -3921,6 +3999,7 @@ test('independent lazy event labels preserve service dates and repeated trip-cal
   afterMidnight.stopTimes.get('r1')![1]!.departureSeconds = 26 * 3600;
   const overnight = lazyEventLabelSearch(afterMidnight, {
     originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    ...lazyEndpointOptions(afterMidnight, 'start', 'finish'),
     earliestDeparture: new Date('2026-10-12T21:55:00Z'), latestDeparture: new Date('2026-10-12T22:05:00Z'),
     maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 60 * 60,
     transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
@@ -3934,6 +4013,7 @@ test('independent lazy event labels preserve service dates and repeated trip-cal
   warsaw.timezone = 'Europe/Warsaw';
   const warsawLabels = lazyEventLabelSearch(warsaw, {
     originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
+    ...lazyEndpointOptions(warsaw, 'start', 'finish'),
     earliestDeparture: new Date('2026-10-12T05:55:00Z'), latestDeparture: new Date('2026-10-12T06:12:00Z'),
     maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 60 * 60,
     transferRadiusMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
