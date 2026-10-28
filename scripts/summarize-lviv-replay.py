@@ -23,7 +23,10 @@ stable_fields = (
 )
 for revision, items in by_revision.items():
     for field in stable_fields:
-        if len({json.dumps(item[field], sort_keys=True) for item in items}) != 1:
+        # Older baseline revisions may not emit newer diagnostic fields. Treat
+        # an absent field as null so the paired report can show that schema gap
+        # instead of failing before it compares the routing results.
+        if len({json.dumps(item.get(field), sort_keys=True) for item in items}) != 1:
             raise SystemExit(f"{revision} is not repeat-stable for {field}; inspect the uploaded JSONL.")
 
 baseline = by_revision["baseline"]
@@ -61,8 +64,8 @@ print(f"- Added trip-chain identities: `{json.dumps(sorted(candidate_chains - ba
 print(f"- Removed trip-chain identities: `{json.dumps(sorted(baseline_chains - candidate_chains))}`")
 print(f"- Median search time: {baseline_median:.2f} ms → {candidate_median:.2f} ms ({delta:+.2f}%)")
 print(f"- Peak sampled RSS: {max(item['rssBytes'] for item in baseline) / 1_048_576:.1f} MiB → {max(item['rssBytes'] for item in candidate) / 1_048_576:.1f} MiB")
-print(f"- Truncated: baseline `{baseline[0]['searchTruncated']}` / candidate `{candidate[0]['searchTruncated']}`; graph truncated: baseline `{baseline[0]['candidateGraphTruncated']}` / candidate `{candidate[0]['candidateGraphTruncated']}`")
-print(f"- Truncation causes: baseline `{json.dumps(baseline[0]['truncation'], sort_keys=True)}`; candidate `{json.dumps(candidate[0]['truncation'], sort_keys=True)}`")
+print(f"- Truncated: baseline `{baseline[0].get('searchTruncated')}` / candidate `{candidate[0].get('searchTruncated')}`; graph truncated: baseline `{baseline[0].get('candidateGraphTruncated')}` / candidate `{candidate[0].get('candidateGraphTruncated')}`")
+print(f"- Truncation causes: baseline `{json.dumps(baseline[0].get('truncation'), sort_keys=True)}`; candidate `{json.dumps(candidate[0].get('truncation'), sort_keys=True)}`")
 for stage, previous_stage in (("segments-built", None), ("reachability-built", "segments-built"), ("itineraries-ranked", "reachability-built")):
     print(f"- `{stage}` counters: baseline `{json.dumps(baseline[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`; candidate `{json.dumps(candidate[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`")
     baseline_times = stage_duration_samples(baseline, stage, previous_stage)
