@@ -2911,9 +2911,9 @@ export function findGtfsItinerariesWithStats(
         const retentionPriorityTier = retentionTier === 0 ? 0
           : connectsOppositeQueryFrontier ? 1
             : temporallyConnectsQueryEnds ? 2
-              : connectsOneQueryFrontier ? 3
-                : retentionTier === 1 ? 4
-                  : retentionTier === 2 ? 5 : 6;
+              : retentionTier === 1 ? 3
+                : retentionTier === 2 ? 4
+                  : connectsOneQueryFrontier ? 5 : 6;
         const routeCandidates = segmentsByRoute.get(trip.routeId) ?? [];
         // When a bounded route budget cannot retain every origin-serving trip,
         // prefer earlier arrivals at query-relevant corridor stops. A direct
