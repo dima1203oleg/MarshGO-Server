@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { projectScheduledGtfsCandidatePool } from '../server/journey/scheduledGtfsCandidatePool';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean } = {}) {
@@ -234,6 +235,18 @@ test('preserves shape identifiers and geometry when compatible GTFS providers ar
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
   });
   assert.equal(result.itineraries[0]?.segments[0]?.routeGeometry?.length, 3);
+});
+
+test('reuses a merged timetable briefly and invalidates it when a source snapshot changes', () => {
+  const source = { providerId: 'merge-cache-reuse', providerName: 'Test Transit', providerCity: 'Львів', feed: feed({ withShape: true }) };
+  const first = mergeGtfsTimetables([source]);
+  const reused = mergeGtfsTimetables([source]);
+  assert.ok(first);
+  assert.strictEqual(reused, first);
+
+  const updated = mergeGtfsTimetables([{ ...source, feed: feed({ withShape: true }) }]);
+  assert.ok(updated);
+  assert.notStrictEqual(updated, first);
 });
 
 test('reports when the itinerary result limit hides additional route chains', () => {
@@ -484,6 +497,39 @@ test('keeps valid shorter and longer chain lengths in one multi-transfer search'
 
   assert.ok(results.itineraries.some((itinerary) => itinerary.segments.length === 1), 'direct route remains available');
   assert.ok(results.itineraries.some((itinerary) => itinerary.segments.length === 2), 'one-transfer route remains available');
+});
+
+test('BALANCED prefers a direct journey when a feasible transfer saves only five minutes', () => {
+  const timetable = connectingFeed();
+  timetable.routes.set('direct', { name: 'Direct bus', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.set('direct-trip', { routeId: 'direct', serviceId: 'weekday', headsign: 'Finish' });
+  const directStops = [
+    { stopId: 'start', sequence: 1, arrivalSeconds: 8 * 3600 + 10 * 60, departureSeconds: 8 * 3600 + 10 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: 'finish', sequence: 2, arrivalSeconds: 9 * 3600 + 5 * 60, departureSeconds: 9 * 3600 + 5 * 60, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.stopTimes.set('direct-trip', directStops);
+  for (const [index, stop] of directStops.entries()) {
+    timetable.stopTimesByStop.set(stop.stopId, [
+      ...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId: 'direct-trip', index },
+    ]);
+  }
+
+  const results = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 300,
+    maximumTransfers: 1,
+  });
+  const projected = projectScheduledGtfsCandidatePool(results.itineraries, 10, ['BALANCED', 'FASTEST']);
+  const direct = results.itineraries.find(({ segments }) => segments.length === 1);
+  const transfer = results.itineraries.find(({ segments }) => segments.length === 2);
+
+  assert.ok(direct && transfer, 'both direct and one-transfer options must be feasible');
+  assert.equal(direct.durationSeconds - transfer.durationSeconds, 5 * 60);
+  assert.equal(scoreJourneys(projected.candidates, 'BALANCED')[0]?.journey.id, direct.id);
+  assert.equal(scoreJourneys(projected.candidates, 'FASTEST')[0]?.journey.id, transfer.id);
+  const equallyPriced = projected.candidates.map((journey) => ({ ...journey, priceMinor: 1000 }));
+  assert.equal(scoreJourneys(equallyPriced, 'CHEAPEST')[0]?.journey.id, transfer.id,
+    'CHEAPEST keeps actual elapsed time as its secondary preference when fares tie');
 });
 
 test('counts initial schedule wait in door-to-door time so fastest ranking favors earliest arrival', () => {

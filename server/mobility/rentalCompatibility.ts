@@ -29,6 +29,7 @@ export interface RentalNetworkRule {
   providerIds: string[];
   status: 'CONFIRMED' | 'UNKNOWN' | 'DISABLED';
   returnRule: RentalReturnRule;
+  returnRuleSource: 'OWNER_ATTESTED' | 'PROVIDER_API' | 'PROVIDER_DOCUMENTATION' | 'UNKNOWN';
   crossProviderReturnConfirmed: boolean;
   maximumSnapshotAgeSeconds: number | null;
 }
@@ -54,6 +55,7 @@ export interface RentalCompatibilityResult {
   providerId: string;
   networkId: string | null;
   returnRule: RentalReturnRule;
+  returnRuleSource: 'OWNER_ATTESTED' | 'PROVIDER_API' | 'PROVIDER_DOCUMENTATION' | 'UNKNOWN';
   availabilityStatus: RentalAvailability;
   availabilityCheckedAt: string | null;
 }
@@ -67,6 +69,7 @@ const result = (input: CanRentInput, allowed: boolean, confirmationLevel: Confir
   providerId: input.pickup.providerId,
   networkId: input.networkRule?.networkId ?? null,
   returnRule: input.networkRule?.returnRule ?? 'UNKNOWN',
+  returnRuleSource: input.networkRule?.returnRuleSource ?? 'UNKNOWN',
   availabilityStatus: input.pickup.availability === 'AVAILABLE' && input.dropoff.availability === 'AVAILABLE' ? 'AVAILABLE'
     : input.pickup.availability === 'UNAVAILABLE' || input.dropoff.availability === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'UNKNOWN',
   availabilityCheckedAt: [input.pickup.availabilityCheckedAt, input.dropoff.availabilityCheckedAt]

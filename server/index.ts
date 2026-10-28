@@ -19,7 +19,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, findGtfsStopArrivals, findGtfsItinerariesWithStats, mergeGtfsTimetables, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, findGtfsStopArrivals, findGtfsItinerariesWithStats, mergeGtfsTimetableSourcesByTimezone, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, type GtfsItinerary, type GtfsTimetableFeed, type GtfsTimetableSource, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg } from './journey/liveVehicles';
@@ -27,17 +27,21 @@ import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePrices } from './journey/scoring';
-import { journeyTransportTypeSelected, type JourneyOption, type JourneyStrategy } from './journey/types';
+import { projectScheduledGtfsCandidatePool } from './journey/scheduledGtfsCandidatePool';
+import { journeyTransportTypeSelected, type JourneyLegMode, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
 import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
 import { buildTransportCities } from './mobility/cities';
+import { buildTransportLayerAvailability } from './mobility/transportLayerAvailability';
 import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
 import { cachedKyivMetroTimetable } from './mobility/kyivMetroTimetable';
 import { getTransportFareCatalog } from './mobility/transportTariffs';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
+import { buildBicycleRouteEstimates, buildScooterRouteEstimates, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
+import { micromobilityJourneyFareMinor } from './journey/micromobilityFare';
 import { buildMicromobilityGeofenceFeatures, buildMicromobilityPointFeatures, buildStaticRentalPointFeature } from './mobility/micromobilityFeatures';
 import { buildKiwitaxiAffiliateUrl, intuiTravelStatus, kiwitaxiStatus } from './mobility/transferAdapters';
 import { normalizePlate } from './vehiclePlate';
@@ -61,6 +65,9 @@ app.set('trust proxy', getTrustedProxyHops(process.env));
 const rendezvousSettings = getRendezvousSettings(process.env);
 if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 12, idleTimeoutMillis: 30_000 });
+pool.on('error', (error: Error) => {
+  console.error(JSON.stringify({ level: 'error', event: 'database.pool_idle_client_error', message: error.message }));
+});
 type RealtimeTicket = { userId: string; sessionId: string; expiresAt: number };
 type RealtimeMessage = { id: string; conversation_id: string; sender_id: string; sender_name: string; body: string; created_at: Date };
 const realtimeTickets = new Map<string, RealtimeTicket>();
@@ -380,9 +387,15 @@ const rentalTypeMap: Record<string, { providerTypes: string[]; assetTypes: Mobil
 app.get('/api/v1/mobility/availability', requireAuth, asyncHandler(async (_req, res) => {
   const { rows } = await pool.query<{ provider_type: string; source_type: string; city: string; last_report: { counts?: Record<string, number> } }>(
     `SELECT provider_type,source_type,city,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') AND source_type IN ('gbfs','gtfs','gtfs_rt','json','geojson')`);
+  const { rows: staticBikeRows } = await pool.query<{ city: string }>(
+    `SELECT DISTINCT r.city FROM rental_locations r JOIN mobility_networks n ON n.network_id=r.network_id
+      WHERE r.mode='BICYCLE' AND r.source IN ('OSM','MANUAL') AND r.city IS NOT NULL
+        AND n.compatibility_status='CONFIRMED' AND n.return_rule='ANY_NETWORK_LOCATION'
+        AND n.return_rule_source='OWNER_ATTESTED' AND r.provider_id=ANY(n.provider_ids)`);
   const modes = Object.entries(rentalTypeMap).map(([mode, config]) => {
     const matching = rows.filter((row) => row.source_type === 'gbfs' && config.providerTypes.includes(row.provider_type));
-    return { mode, available: matching.length > 0, cities: [...new Set(matching.map((row) => row.city))].sort() };
+    const cities = [...new Set([...matching.map((row) => row.city), ...(mode === 'bike' ? staticBikeRows.map((row) => row.city) : [])])].sort();
+    return { mode, available: cities.length > 0, cities, ...(mode === 'bike' ? { availability: 'UNKNOWN' as const, bookingAvailable: false } : {}) };
   });
   const transit: Record<string, { available: boolean; cities: string[] }> = {};
   for (const type of ['bus', 'marshrutka', 'tram', 'trolleybus', 'metro', 'train', 'suburban', 'city_train', 'funicular', 'ferry']) {
@@ -417,6 +430,48 @@ app.get('/api/v1/mobility/providers', requireAuth, asyncHandler(async (req, res)
   const servicesOf = (report: { counts?: Record<string, number> }) => new Set(Object.entries(report?.counts ?? {}).filter(([key, count]) => count > 0 && /^(routes|vehicles)_(bus|marshrutka|tram|trolleybus|metro|suburban|train|city_train|funicular|ferry)$/.test(key)).map(([key]) => key.slice(key.indexOf('_') + 1)));
   const data = transportTiles.map((tile) => {
     if (tile.id === 'carpool') return { transportType: tile.id, providers: [{ id: 'carpool:MARSHGO', name: 'MARSHGO Community', available: true, cities: [], sources: ['marshgo'], services: [] }] };
+    // Only advertise rental providers that have the same confirmed network
+    // rules consumed by the journey estimator. Static bicycles are routable as
+    // estimates; scooters require a connected GBFS source and return geofence.
+    if (tile.id === 'bike') {
+      return pool.query<{ provider_id: string; provider_name: string; cities: string[] }>(
+        `SELECT mo.provider_id,mo.provider_name,array_remove(array_agg(DISTINCT r.city),NULL) AS cities
+           FROM rental_locations r
+           JOIN mobility_operators mo ON mo.provider_id=r.provider_id
+           JOIN mobility_networks n ON n.network_id=r.network_id
+          WHERE r.mode='BICYCLE' AND r.source IN ('OSM','MANUAL')
+            AND n.compatibility_status='CONFIRMED' AND n.return_rule='ANY_NETWORK_LOCATION'
+            AND n.return_rule_source='OWNER_ATTESTED' AND r.provider_id=ANY(n.provider_ids)
+            AND ($1::double precision IS NULL OR $2::double precision IS NULL OR ST_DWithin(r.geom::geography,ST_SetSRID(ST_MakePoint($2,$1),4326)::geography,25000))
+          GROUP BY mo.provider_id,mo.provider_name ORDER BY mo.provider_name`, [lat, lon],
+      ).then(({ rows: bikeRows }) => ({ transportType: tile.id, providers: bikeRows.map((row) => ({
+        id: `${tile.id}:${row.provider_id}`, name: row.provider_name, available: true as const,
+        cities: row.cities, sources: ['static-bike-network-estimate'], services: ['bike'],
+      })) }));
+    }
+    if (tile.id === 'scooter') {
+      return pool.query<{ provider_id: string; provider_name: string; city: string; bbox: [number, number, number, number] | null }>(
+        `SELECT DISTINCT mo.provider_id,mo.provider_name,mp.city,mp.last_report->'bbox' AS bbox
+           FROM mobility_providers mp
+           JOIN mobility_operators mo ON mo.provider_id=mp.operator_id
+           JOIN mobility_networks n ON mo.provider_id=ANY(n.provider_ids)
+          WHERE mp.provider_type='scooter' AND mp.source_type='gbfs'
+            AND mp.status='enabled' AND mp.health IN ('healthy','degraded')
+            AND n.compatibility_status='CONFIRMED' AND n.return_rule='FREE_FLOATING_ZONE'
+          ORDER BY mo.provider_name,mp.city`,
+      ).then(({ rows: scooterRows }) => {
+        const entries = new Map<string, { id: string; name: string; available: true; cities: Set<string>; sources: Set<string>; services: Set<string> }>();
+        for (const row of scooterRows.filter((item) => lat === null || lon === null || item.city === 'Україна'
+          || Boolean(item.bbox && bboxContains(item.bbox, lon, lat)))) {
+          const entry = entries.get(row.provider_id) ?? { id: `${tile.id}:${row.provider_id}`, name: row.provider_name,
+            available: true as const, cities: new Set<string>(), sources: new Set<string>(), services: new Set<string>() };
+          if (row.city) entry.cities.add(row.city);
+          entry.sources.add('gbfs'); entry.services.add('scooter'); entries.set(row.provider_id, entry);
+        }
+        return { transportType: tile.id, providers: [...entries.values()].map((entry) => ({ ...entry,
+          cities: [...entry.cities], sources: [...entry.sources], services: [...entry.services] })) };
+      });
+    }
     const entries = new Map<string, { id: string; name: string; available: true; cities: Set<string>; sources: Set<string>; services: Set<string> }>();
     for (const row of rows) {
       if (!tile.providerTypes.includes(row.provider_type)) continue;
@@ -433,7 +488,7 @@ app.get('/api/v1/mobility/providers', requireAuth, asyncHandler(async (req, res)
     }
     return { transportType: tile.id, providers: [...entries.values()].map((entry) => ({ id: entry.id, name: entry.name, available: entry.available, cities: [...entry.cities], sources: [...entry.sources], services: [...entry.services] })) };
   });
-  res.json({ data });
+  res.json({ data: await Promise.all(data) });
 }));
 
 app.get('/api/v1/mobility/nearby', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
@@ -545,7 +600,7 @@ app.post('/api/v1/mobility/rental-compatibility', requireAuth, placeSearchLimite
             r.pickup_allowed AS "pickupAllowed",r.dropoff_allowed AS "dropoffAllowed",r.geofence_allows_pickup AS "geofenceAllowsPickup",
             r.geofence_allows_dropoff AS "geofenceAllowsDropoff",r.availability,r.available_vehicles AS "availableVehicles",r.available_docks AS "availableDocks",
             r.vehicle_types AS "vehicleTypes",r.availability_checked_at AS "availabilityCheckedAt",r.opening_hours AS "openingHours",
-            n.return_rule AS "returnRule",n.compatibility_status AS "compatibilityStatus",n.cross_provider_return_confirmed AS "crossProviderReturnConfirmed",
+            n.return_rule AS "returnRule",n.return_rule_source AS "returnRuleSource",n.compatibility_status AS "compatibilityStatus",n.cross_provider_return_confirmed AS "crossProviderReturnConfirmed",
             n.provider_ids AS "providerIds",n.maximum_snapshot_age_seconds AS "maximumSnapshotAgeSeconds"
      FROM rental_locations r LEFT JOIN mobility_networks n ON n.network_id=r.network_id WHERE r.id=ANY($1::uuid[])`,
     [[pickupId, dropoffId]],
@@ -575,6 +630,7 @@ app.post('/api/v1/mobility/rental-compatibility', requireAuth, placeSearchLimite
     networkId: pickupRow.networkId, providerIds: Array.isArray(pickupRow.providerIds) ? pickupRow.providerIds.filter((item): item is string => typeof item === 'string') : [],
     status: pickupRow.compatibilityStatus === 'CONFIRMED' ? 'CONFIRMED' : pickupRow.compatibilityStatus === 'DISABLED' ? 'DISABLED' : 'UNKNOWN',
     returnRule: ['SAME_LOCATION','ANY_NETWORK_LOCATION','FREE_FLOATING_ZONE','ONE_WAY_CONFIRMED'].includes(String(pickupRow.returnRule)) ? pickupRow.returnRule as RentalNetworkRule['returnRule'] : 'UNKNOWN',
+    returnRuleSource: ['OWNER_ATTESTED','PROVIDER_API','PROVIDER_DOCUMENTATION'].includes(String(pickupRow.returnRuleSource)) ? pickupRow.returnRuleSource as RentalNetworkRule['returnRuleSource'] : 'UNKNOWN',
     crossProviderReturnConfirmed: pickupRow.crossProviderReturnConfirmed === true,
     maximumSnapshotAgeSeconds: typeof pickupRow.maximumSnapshotAgeSeconds === 'number' ? pickupRow.maximumSnapshotAgeSeconds : null,
   } : null;
@@ -642,19 +698,14 @@ const layerFetch = <T>(task: Promise<T>) => task.then((value) => ({ ok: true as 
 app.get('/api/v1/transport/layers', requireAuth, asyncHandler(async (_req, res) => {
   const { rows } = await pool.query<{ provider_type: string; source_type: string; last_report: { counts?: Record<string, number> } }>(
     `SELECT provider_type,source_type,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded')`);
+  const { rows: rentalRows } = await pool.query<{ available: boolean }>(
+    `SELECT EXISTS(SELECT 1 FROM rental_locations WHERE mode='BICYCLE' AND source IN ('OSM','MANUAL')) AS available`);
   const lines = new Set<string>(); const micro = new Set<string>(); let stationsAvailable = false;
   for (const row of rows) {
     if (row.provider_type === 'public_transit') for (const [key, count] of Object.entries(row.last_report?.counts ?? {})) { const match = /^(routes|vehicles)_(\w+)$/.exec(key); if (match && count > 0) lines.add(match[2]); }
     else { micro.add(row.provider_type); if ((row.last_report?.counts?.stations ?? 0) > 0) stationsAvailable = true; }
   }
-  const publicTransport = ['bus', 'marshrutka', 'trolleybus', 'tram'].some((type) => lines.has(type));
-  res.json({ data: [
-    { id: 'PUBLIC_TRANSPORT', available: publicTransport }, { id: 'METRO', available: lines.has('metro') }, { id: 'BUS', available: lines.has('bus') || lines.has('marshrutka') },
-    { id: 'TRAM', available: lines.has('tram') }, { id: 'TROLLEYBUS', available: lines.has('trolleybus') }, { id: 'STOPS', available: publicTransport || lines.has('train') || lines.has('metro') },
-    { id: 'MINIBUS', available: lines.has('marshrutka') }, { id: 'CITY_TRAIN', available: lines.has('city_train') }, { id: 'FUNICULAR', available: lines.has('funicular') },
-    { id: 'BICYCLE', available: micro.has('bike') || micro.has('ebike') }, { id: 'SCOOTER', available: micro.has('scooter') },
-    { id: 'CARSHARING', available: micro.has('carsharing') }, { id: 'RENTAL_POINTS', available: stationsAvailable },
-  ] });
+  res.json({ data: buildTransportLayerAvailability({ lines, micro, stationsAvailable, staticBikeLocationsAvailable: rentalRows[0]?.available ?? false }) });
 }));
 
 /** Cities are discovered from healthy enabled GTFS providers and their validated coverage, not hardcoded in the client. */
@@ -729,9 +780,19 @@ app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) =>
   const box = parseBbox(req.query.bbox, 0.5); const types = typesParam(req.query.types);
   if (!box || types.length === 0) throw new ApiError(400, 'bbox (west,south,east,north, at most 0.5 degree) and types are required; zoom in to see stops', 'invalid_transport_query');
   const { settled, loaded } = await loadRoutes(box, types);
+  const metroStationProviders = types.includes('metro')
+    ? (await layerProviders(['geojson'], ['public_transit'])).filter((row) => row.city === 'Київ'
+      && row.name.toLocaleLowerCase('uk-UA').includes('метро (станції)') && providerTouches(row, box)) : [];
+  const metroStationSettled = await Promise.all(metroStationProviders.map((row) => layerFetch(
+    cachedGeoJsonNetwork(row.id, row.feed_url, 'metro').then((network) => ({ row, network })),
+  )));
+  const metroStationNetworks = metroStationSettled.flatMap((item) => item.ok ? [item.value] : []);
   const features = loaded.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat) && stop.types.some((type) => types.includes(type)))
     .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: stop.types.join(','), provider: row.name.split(' — ')[0] }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } })));
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 2500) }, meta: { failedProviders: settled.length - loaded.length, truncated: features.length > 2500 } });
+  features.push(...metroStationNetworks.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat))
+    .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: 'metro', provider: row.name.split(' — ')[0], station: true }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } }))));
+  const failedProviders = settled.length - loaded.length + metroStationSettled.length - metroStationNetworks.length;
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 2500) }, meta: { failedProviders, truncated: features.length > 2500 } });
 }));
 
 /**
@@ -2618,20 +2679,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerErrors.push(`Київське метро: ${metroResult?.reason instanceof Error ? metroResult.reason.message : 'відкриті дані тимчасово недоступні'}`);
     }
   }
-  const sourcesByTimezone = new Map<string, GtfsTimetableSource[]>();
-  for (const source of feedSources) {
-    const sources = sourcesByTimezone.get(source.feed.timezone) ?? [];
-    sources.push(source); sourcesByTimezone.set(source.feed.timezone, sources);
-  }
   type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary, 'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified'>>;
   const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
     if (!itinerary.fare || search.passengers === 1) return itinerary;
     return { ...itinerary, fare: scaleGtfsFareForPassengers(itinerary.fare, search.passengers) };
   };
-  const mergedFeedGroups = [...sourcesByTimezone.values()].flatMap((sources) => {
-    const feed = mergeGtfsTimetables(sources);
-    return feed ? [{ sources, feed }] : [];
-  });
+  const mergedFeedGroups = mergeGtfsTimetableSourcesByTimezone(feedSources);
   let scheduledCandidates: SearchItinerary[] = [];
   let pedestrianRoutesUnavailable = false;
   let pedestrianCandidatesRejected = false;
@@ -2692,7 +2745,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       allowedModes: allowedTransitModes,
       allowedTransportTypes: search.preferences.allowedTransportTypes,
     });
-    candidateGenerationTruncated ||= itinerarySearch.searchTruncated || itinerarySearch.resultLimitReached;
+    // Reaching the requested top-N result count is normal ranking behavior;
+    // only a hard search budget/step cap means candidate generation was cut short.
+    candidateGenerationTruncated ||= itinerarySearch.searchTruncated;
     const itineraries = itinerarySearch.itineraries.map(fareForPassengerCount);
     const feasibleItineraries = itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
       && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes))
@@ -2741,6 +2796,207 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
   }
 
+  type MicromobilityCandidate = JourneyOption & {
+    kind: 'micromobility' | 'micromobility-transit';
+    estimate: MicromobilityRouteEstimate;
+    itinerary?: SearchItinerary;
+    microPosition?: 'before-transit' | 'after-transit';
+    departureAt: Date;
+    arrivalAt: Date;
+    waitingSeconds: number;
+    totalPriceMinor: number | null;
+  };
+  const micromobilityCandidates: MicromobilityCandidate[] = [];
+  let hasUnpricedMicromobilityCandidates = false;
+  const wantsBike = search.preferences.allowBicycle !== false && journeyTransportTypeSelected('bike', search.preferences.allowedTransportTypes);
+  const wantsScooter = search.preferences.allowScooter !== false && journeyTransportTypeSelected('scooter', search.preferences.allowedTransportTypes);
+  const micromobilityOptions = {
+    departureAt: search.departureAt,
+    maxWalkToRentalMeters: search.preferences.maxWalkToRentalMeters ?? 900,
+    ...(search.preferences.maxWalkingMeters !== undefined ? { maxWalkingMeters: search.preferences.maxWalkingMeters } : {}),
+    maxRentalDurationSeconds: search.preferences.maxRentalDurationSeconds ?? 2 * 60 * 60,
+    maxCandidates: 6,
+    ...(search.preferences.allowedProviderIds ? { allowedProviderIds: search.preferences.allowedProviderIds } : {}),
+    ...(search.preferences.blockedProviderIds ? { blockedProviderIds: search.preferences.blockedProviderIds } : {}),
+  };
+  const microPoints: RentalRoutePoint[] = [];
+  const microNetworks = new Map<string, RentalRouteNetwork>();
+  if (wantsBike) {
+    const bikeRows = await pool.query<{
+      id: string; provider_id: string; provider_name: string; network_id: string; compatibility_status: RentalRouteNetwork['compatibilityStatus'];
+      return_rule: RentalRouteNetwork['returnRule']; return_rule_source: RentalRouteNetwork['returnRuleSource']; provider_ids: string[];
+      name: string | null; lon: number; lat: number; pickup_allowed: boolean | null; dropoff_allowed: boolean | null; availability: RentalRoutePoint['availability']; source: string;
+    }>(
+      `SELECT r.id::text,r.provider_id,mo.provider_name,n.network_id,n.compatibility_status,n.return_rule,n.return_rule_source,n.provider_ids,
+              r.name,ST_X(ST_PointOnSurface(r.geom)::geometry) AS lon,ST_Y(ST_PointOnSurface(r.geom)::geometry) AS lat,
+              r.pickup_allowed,r.dropoff_allowed,r.availability,r.source
+         FROM rental_locations r JOIN mobility_operators mo ON mo.provider_id=r.provider_id
+         JOIN mobility_networks n ON n.network_id=r.network_id
+        WHERE r.mode='BICYCLE' AND r.source IN ('OSM','MANUAL') AND n.compatibility_status='CONFIRMED'
+          AND n.return_rule='ANY_NETWORK_LOCATION' AND n.return_rule_source='OWNER_ATTESTED'
+          AND r.provider_id=ANY(n.provider_ids)
+          AND ST_DWithin(r.geom::geography,ST_MakeLine(ST_SetSRID(ST_MakePoint($1,$2),4326),ST_SetSRID(ST_MakePoint($3,$4),4326))::geography,$5)
+        ORDER BY ST_Distance(r.geom::geography,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography) LIMIT 2000`,
+      [originLon, originLat, destinationLon, destinationLat, Math.max(15_000, corridorWidthMeters)],
+    );
+    for (const row of bikeRows.rows) {
+      microNetworks.set(row.network_id, { networkId: row.network_id, providerIds: row.provider_ids,
+        compatibilityStatus: row.compatibility_status, returnRule: row.return_rule, returnRuleSource: row.return_rule_source });
+      microPoints.push({ id: row.id, providerId: row.provider_id, providerName: row.provider_name, networkId: row.network_id,
+        name: row.name ?? row.provider_name, coordinates: [Number(row.lon), Number(row.lat)], mode: 'BICYCLE',
+        pickupAllowed: row.pickup_allowed, dropoffAllowed: row.dropoff_allowed, availability: row.availability, source: row.source });
+    }
+  }
+  const scooterRouteProviders: ScooterRouteProvider[] = [];
+  if (wantsScooter) {
+    const { rows: scooterProviders } = await pool.query<{
+      id: string; provider_id: string; provider_name: string; feed_url: string; network_id: string;
+      provider_ids: string[]; compatibility_status: RentalRouteNetwork['compatibilityStatus']; return_rule: RentalRouteNetwork['returnRule'];
+    }>(
+      `SELECT mp.id,mo.provider_id,mo.provider_name,mp.feed_url,n.network_id,n.provider_ids,n.compatibility_status,n.return_rule
+         FROM mobility_providers mp JOIN mobility_operators mo ON mo.provider_id=mp.operator_id
+         JOIN mobility_networks n ON mo.provider_id=ANY(n.provider_ids)
+        WHERE mp.provider_type='scooter' AND mp.source_type='gbfs' AND mp.city IN ('Київ','Україна')
+          AND mp.status='enabled' AND mp.health IN ('healthy','degraded')
+          AND n.compatibility_status='CONFIRMED' AND n.return_rule='FREE_FLOATING_ZONE'
+        ORDER BY mp.priority,mp.name LIMIT 30`,
+    );
+    const snapshots = await Promise.allSettled(scooterProviders.map(async (provider) => ({ provider, snapshot: await cachedSnapshot(provider.id, provider.feed_url) })));
+    snapshots.forEach((result, index) => {
+      const provider = scooterProviders[index];
+      if (result.status === 'rejected') {
+        providerErrors.push(`${provider?.provider_name ?? 'Самокати'}: зони завершення поїздки тимчасово недоступні`);
+        return;
+      }
+      const snapshot = result.value.snapshot;
+      scooterRouteProviders.push({ providerId: result.value.provider.provider_id, providerName: result.value.provider.provider_name,
+        networkId: result.value.provider.network_id, snapshot: {
+          geofences: snapshot.geofences ?? [], globalRules: snapshot.globalRules ?? [],
+          lastUpdated: snapshot.lastUpdated ?? null, staleAfterSeconds: snapshot.staleAfterSeconds ?? 60,
+        } });
+    });
+  }
+  const transitPreferenceAllowed = (itinerary: GtfsItinerary) => itinerary.segments.every((segment) =>
+    transitAllowed(segment.mode) && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes)
+      && transitProviderAllowed(search.preferences, segment.transportType, segment.providerName));
+  const estimateMicromobility = (mode: 'BICYCLE' | 'SCOOTER', origin: { name: string; coordinates: [number, number] }, destination: { name: string; coordinates: [number, number] }, departureAt: Date) => {
+    const options = { ...micromobilityOptions, departureAt };
+    return mode === 'BICYCLE'
+      ? buildBicycleRouteEstimates({ origin, destination, points: microPoints, networks: microNetworks, options })
+      : buildScooterRouteEstimates({ origin, destination, providers: scooterRouteProviders, options });
+  };
+  const pushMicromobilityCandidate = (estimate: MicromobilityRouteEstimate, itinerary?: SearchItinerary,
+    microPosition?: 'before-transit' | 'after-transit') => {
+    const arrivalAt = microPosition === 'before-transit' && itinerary ? itinerary.arrivalAt : estimate.arrivalAt;
+    const departureAt = microPosition === 'after-transit' && itinerary ? itinerary.departureAt : search.departureAt;
+    const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
+    const transitFareMinor = itinerary?.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
+    const priceMinor = itinerary
+      ? micromobilityJourneyFareMinor(transitFareMinor, null)
+      : null;
+    const walkingMeters = estimate.walkingMeters + (itinerary?.walkingMeters ?? 0);
+    const transfers = (itinerary?.transfers ?? 0) + (itinerary ? 1 : 0);
+    const waitingSeconds = itinerary
+      ? itinerary.waitingSeconds + configuredTransferBufferSeconds
+      : 0;
+    if (durationSeconds <= 0 || (search.preferences.maxTotalDurationSeconds !== undefined && durationSeconds > search.preferences.maxTotalDurationSeconds)
+      || (search.preferences.maxWalkingMeters !== undefined && walkingMeters > search.preferences.maxWalkingMeters)
+      || (search.preferences.maxTransfers !== undefined && transfers > search.preferences.maxTransfers)) return;
+    if (search.preferences.maxPriceMinor !== undefined) {
+      if (priceMinor === null) { hasUnpricedMicromobilityCandidates = true; return; }
+      if (priceMinor > search.preferences.maxPriceMinor) return;
+    }
+    const microLegs = estimate.legs.map((leg) => ({ mode: leg.mode as JourneyLegMode, ...(leg.providerId ? { providerId: leg.providerId } : {}) }));
+    const transitLegs = itinerary?.segments.map((segment) => ({ mode: segment.mode as JourneyLegMode, providerId: segment.providerId })) ?? [];
+    const legs = microPosition === 'after-transit' ? [...transitLegs, ...microLegs] : [...microLegs, ...transitLegs];
+    const transitKey = itinerary?.segments.map((segment) => `${segment.providerId}:${segment.routeId}`).join('>') ?? '';
+    micromobilityCandidates.push({
+      id: `${estimate.id}${itinerary ? `|${microPosition}|${itinerary.id}` : ''}`,
+      diversityKey: `${estimate.diversityKey}${transitKey ? `|${transitKey}` : ''}`,
+      durationSeconds, priceMinor, transfers, walkingMeters, reliability: null, transferRisk: transfers ? 0.4 : 0,
+      comfort: null, legs, kind: itinerary ? 'micromobility-transit' : 'micromobility', estimate,
+      ...(itinerary ? { itinerary, microPosition } : {}), departureAt, arrivalAt, waitingSeconds, totalPriceMinor: priceMinor,
+    });
+  };
+  const requestedMicromobilityModes = [
+    ...(wantsBike ? ['BICYCLE' as const] : []), ...(wantsScooter ? ['SCOOTER' as const] : []),
+  ];
+  for (const mode of requestedMicromobilityModes) {
+    const estimates = estimateMicromobility(mode, search.origin, search.destination, search.departureAt);
+    for (const estimate of estimates) pushMicromobilityCandidate(estimate);
+  }
+
+  // For a real bike/scooter + metro chain, route the rental leg to/from an actual
+  // timetable station and ask the same metro feed for the connecting service.
+  if (requestedMicromobilityModes.length && allowedTransitModes.includes('METRO')) {
+    const stationPathSearch = (feed: GtfsTimetableFeed, providerId: string, providerName: string,
+      origin: [number, number], destination: [number, number], earliestDeparture: Date) => findGtfsItinerariesWithStats(feed, {
+      providerId, providerName, origin, destination, earliestDeparture,
+      latestDeparture: new Date(search.departureAt.getTime() + 120 * 60_000), limit: 18,
+      maximumJourneySeconds: Math.max(60, maximumSearchDurationSeconds - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000))),
+      maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS), maximumWaitSeconds: 4 * 60 * 60,
+      minimumTransferBufferSeconds: configuredTransferBufferSeconds,
+      maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS, maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+      maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS, allowedModes: ['METRO'],
+      allowedTransportTypes: search.preferences.allowedTransportTypes,
+    });
+    for (const group of mergedFeedGroups.filter(({ feed }) => [...feed.routes.values()].some((route) => route.mode === 'METRO'))) {
+      const metroStops = new Map<string, { name: string; coordinates: [number, number] }>();
+      for (const [tripId, trip] of group.feed.trips) {
+        if (group.feed.routes.get(trip.routeId)?.mode !== 'METRO') continue;
+        for (const call of group.feed.stopTimes.get(tripId) ?? []) {
+          const stop = group.feed.stops.get(call.stopId);
+          if (stop) metroStops.set(stop.id, { name: stop.name, coordinates: [stop.lon, stop.lat] });
+        }
+      }
+      const stations = [...metroStops.values()];
+      const closestStations = (place: { coordinates: [number, number] }) => stations
+        .map((station) => ({ station, distance: Math.hypot((station.coordinates[0] - place.coordinates[0]) * 70_000, (station.coordinates[1] - place.coordinates[1]) * 111_000) }))
+        .filter((item) => item.distance <= 18_000).sort((a, b) => a.distance - b.distance).slice(0, 10).map((item) => item.station);
+      const providerId = group.sources[0]?.providerId;
+      const providerName = group.sources[0]?.providerName ?? 'Київ — метро';
+      if (!providerId) continue;
+
+      const originStations = closestStations(search.origin);
+      for (const station of originStations) {
+        const stationPlace = { name: station.name, coordinates: station.coordinates };
+        for (const mode of requestedMicromobilityModes) {
+          const estimates = estimateMicromobility(mode, search.origin, stationPlace, search.departureAt);
+          for (const estimate of estimates) {
+            const earliest = new Date(estimate.arrivalAt.getTime() + configuredTransferBufferSeconds * 1000);
+            if (earliest.getTime() > search.departureAt.getTime() + 120 * 60_000) continue;
+            const found = stationPathSearch(group.feed, providerId, providerName, station.coordinates, search.destination.coordinates, earliest);
+            for (const itinerary of found.itineraries) {
+              if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
+              const routed = await routeTransitItinerary(itinerary, station.coordinates, search.destination.coordinates, walkingRouteBudget, false);
+              if (routed) pushMicromobilityCandidate(estimate, fareForPassengerCount(routed), 'before-transit');
+            }
+          }
+        }
+      }
+
+      const destinationStations = closestStations(search.destination);
+      for (const station of destinationStations) {
+        const stationPlace = { name: station.name, coordinates: station.coordinates };
+        const found = stationPathSearch(group.feed, providerId, providerName, search.origin.coordinates, station.coordinates, search.departureAt);
+        for (const itinerary of found.itineraries) {
+          if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
+          const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, station.coordinates, walkingRouteBudget, false);
+          if (!routed) continue;
+          for (const mode of requestedMicromobilityModes) {
+            const estimateDeparture = new Date(routed.arrivalAt.getTime() + configuredTransferBufferSeconds * 1000);
+            const estimates = estimateMicromobility(mode, stationPlace, search.destination, estimateDeparture);
+            for (const estimate of estimates) pushMicromobilityCandidate(estimate, fareForPassengerCount(routed), 'after-transit');
+          }
+        }
+      }
+    }
+  }
+  if (walkingRouteBudget.exhausted && micromobilityCandidates.some((candidate) => candidate.itinerary)) {
+    candidateGenerationTruncated = true;
+    providerErrors.push(`Пішохідний маршрутизатор обмежив перевірку мікромобільних пересадок ${walkingRouteBudget.limit} шляхами.`);
+  }
+
   const MAX_COMMUNITY_COMPOSITION_OFFERS = 6;
   const MAX_COMMUNITY_TRANSIT_PATHS_PER_SIDE = 2;
   const MAX_COMMUNITY_TRANSIT_CANDIDATES = 24;
@@ -2784,7 +3040,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         allowedModes: allowedTransitModes,
         allowedTransportTypes: search.preferences.allowedTransportTypes,
       });
-      candidateGenerationTruncated ||= searchResult.searchTruncated || searchResult.resultLimitReached;
+      candidateGenerationTruncated ||= searchResult.searchTruncated;
       const allowedPaths = searchResult.itineraries.map(fareForPassengerCount).filter((itinerary) => itinerary.segments.every((segment) =>
         transitAllowed(segment.mode)
         && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes)
@@ -2871,49 +3127,31 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerErrors.push(`Пішохідний маршрутизатор обмежив перевірку комбінацій ${communityWalkingBudget.limit} шляхами; частину варіантів не перевірено.`);
     }
   }
-  scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
-  if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
-  scheduledCandidates.splice(100);
-  const transitRouteChainKey = (itinerary: GtfsItinerary) => {
-    const routes: string[] = [];
-    for (const segment of itinerary.segments) {
-      const key = `${segment.providerId}:${segment.routeId}`;
-      if (routes.at(-1) !== key) routes.push(key);
-    }
-    return routes.join('>');
-  };
+  const scheduledCandidatePool = projectScheduledGtfsCandidatePool(scheduledCandidates, 100, strategies);
+  candidateGenerationTruncated ||= scheduledCandidatePool.truncated;
+  hasUnpricedTransitCandidates ||= scheduledCandidatePool.hasUnknownFare;
+  scheduledCandidates = scheduledCandidatePool.candidates.map(({ itinerary }) => itinerary);
   const rankedCandidates = [
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
-    ...scheduledCandidates.map((itinerary) => ({
-      id: itinerary.id,
-      diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
-      durationSeconds: itinerary.durationSeconds,
-      priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
-      transfers: itinerary.transfers,
-      walkingMeters: itinerary.walkingMeters,
-      reliability: null,
-      transferRisk: itinerary.transfers ? 0.3 : 0,
-      comfort: null,
-      legs: [
-        ...(itinerary.segments[0].distanceToOriginStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
-        ...itinerary.segments.flatMap((segment, index) => [
-          ...(index > 0 && itinerary.transferWalkingMeters[index - 1] > 0 ? [{ mode: 'WALK' as const }] : []),
-          { mode: segment.mode, providerId: segment.providerId },
-        ]),
-        ...(itinerary.segments.at(-1)!.distanceFromDestinationStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
-      ],
+    ...micromobilityCandidates.map((candidate) => ({ ...candidate })),
+    ...scheduledCandidatePool.candidates.map(({ arrivalAt: _arrivalAt, departureAt: _departureAt, ...candidate }) => ({
+      ...candidate,
       kind: 'gtfs' as const,
-      itinerary,
     })),
   ];
   const availableStrategies = strategiesWithComparablePrices(rankedCandidates, strategies)
-    .filter((strategy) => strategy !== 'CHEAPEST' || !hasUnpricedTransitCandidates);
+    .filter((strategy) => strategy !== 'CHEAPEST' || (!hasUnpricedTransitCandidates && !hasUnpricedMicromobilityCandidates));
   const alternativeLimitPerStrategy = 12;
   const paretoCandidates = paretoFrontier(rankedCandidates);
   const representatives = selectStrategyAlternatives(rankedCandidates, availableStrategies, alternativeLimitPerStrategy);
   const selectedCandidateIds = new Set(representatives.map(({ journey }) => journey.id));
   const routePlannerTypes = new Set<string>(['carpool']);
+  // A mode is supported when its adapter has usable provider data in the search
+  // corridor, even if this particular origin/destination pair has no feasible leg.
+  // Do not report “not in route engine” just because no rental pair was found.
+  if (wantsBike && microPoints.length > 0) routePlannerTypes.add('bike');
+  if (wantsScooter && scooterRouteProviders.length > 0) routePlannerTypes.add('scooter');
   for (const source of feedSources) {
     for (const route of source.feed.routes.values()) {
       // Provider inventory is not permission to expand the canonical route
@@ -2943,6 +3181,164 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     await client.query('BEGIN');
     for (const representative of representatives) {
       const candidate = representative.journey;
+      if (candidate.kind === 'micromobility' || candidate.kind === 'micromobility-transit') {
+        const route = candidate as MicromobilityCandidate;
+        const stored = await client.query<{ id: string }>(
+          `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
+           VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$11,$11,$11,$12,$13,$14,NULL,NULL) RETURNING id`,
+          [req.userId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
+            search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
+            search.departureAt, representative.strategy, search.passengers, route.totalPriceMinor, route.durationSeconds,
+            route.walkingMeters, route.transfers],
+        );
+        const journeyId = stored.rows[0].id;
+        await client.query(
+          `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
+          [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
+            preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
+            preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
+            preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
+            preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
+            configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
+            preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+            JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
+        );
+
+        const responseLegs: Array<Record<string, unknown>> = [];
+        let ordinal = 0;
+        let firstServiceLegId: string | null = null;
+        const insertEstimatedLeg = async (input: {
+          mode: 'WALK' | 'BICYCLE' | 'SCOOTER'; from: { name: string; coordinates: [number, number] };
+          to: { name: string; coordinates: [number, number] }; departureAt: Date; durationSeconds: number;
+          distanceMeters: number; providerId?: string | null; providerName?: string | null;
+          source: string; routeGeometry: Array<[number, number]>; metadata: Record<string, unknown>;
+        }) => {
+          const arrivalAt = new Date(input.departureAt.getTime() + input.durationSeconds * 1000);
+          const isWalk = input.mode === 'WALK';
+          const inserted = await client.query<{ id: string }>(
+            `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_status,availability_status,provider_id,provider_type,state,data_source,data_freshness_seconds,last_updated_at,metadata)
+             VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,'UAH','UNKNOWN',$15,
+               (SELECT id FROM mobility_providers WHERE operator_id=$16 ORDER BY (status='enabled') DESC,priority,id LIMIT 1),
+               $17,'SUGGESTED',$18,NULL,$19,$20::jsonb) RETURNING id`,
+            [journeyId, ordinal++, input.mode, input.from.coordinates[0], input.from.coordinates[1], input.from.name,
+              input.to.coordinates[0], input.to.coordinates[1], input.to.name, input.departureAt, arrivalAt,
+              input.durationSeconds, input.distanceMeters, isWalk ? input.distanceMeters : 0,
+              isWalk ? 'AVAILABLE' : 'UNKNOWN', input.providerId ?? null,
+              isWalk ? 'walking' : input.mode === 'BICYCLE' ? 'bike' : 'scooter', input.source,
+              input.metadata.geofenceSnapshotUpdatedAt ? new Date(String(input.metadata.geofenceSnapshotUpdatedAt)) : null,
+              JSON.stringify({ ...input.metadata, routeGeometry: input.routeGeometry })],
+          );
+          if (!isWalk) firstServiceLegId ??= inserted.rows[0].id;
+          responseLegs.push({ id: inserted.rows[0].id, mode: input.mode,
+            transportType: isWalk ? 'walk' : input.mode === 'BICYCLE' ? 'bike' : 'scooter',
+            origin: input.from, destination: input.to, departureAt: input.departureAt, arrivalAt,
+            durationSeconds: input.durationSeconds, distanceMeters: input.distanceMeters,
+            priceMinor: null, currency: null, priceStatus: 'UNKNOWN', availabilityStatus: isWalk ? 'AVAILABLE' : 'UNKNOWN',
+            source: input.source, ...(input.providerId ? { providerId: input.providerId } : {}),
+            ...(input.providerName ? { providerName: input.providerName } : {}), routeGeometry: input.routeGeometry,
+            routeAccuracy: input.metadata.routeAccuracy ?? 'STRAIGHT_LINE_ESTIMATE', bookingAvailable: false,
+            lastUpdatedAt: input.metadata.geofenceSnapshotUpdatedAt ?? null, dataFreshnessSeconds: null,
+            liveStatus: 'UNVERIFIED', driver: null, vehicle: null, ...input.metadata });
+        };
+        const insertMicromobility = async () => {
+          let departureAt = route.estimate.departureAt;
+          for (const leg of route.estimate.legs) {
+            await insertEstimatedLeg({
+              mode: leg.mode, from: leg.origin, to: leg.destination, departureAt, durationSeconds: leg.durationSeconds,
+              distanceMeters: leg.distanceMeters, providerId: leg.providerId, providerName: leg.providerName,
+              source: leg.mode === 'WALK' ? 'walking-straight-line-estimate' : route.estimate.mode === 'BICYCLE' ? 'static-bike-network-estimate' : 'gbfs-geofence-scooter-estimate',
+              routeGeometry: leg.routeGeometry, metadata: { ...leg.metadata, networkId: route.estimate.mode === 'BICYCLE'
+                ? leg.metadata.networkId ?? route.estimate.diversityKey.split(':').at(-1) : leg.metadata.networkId,
+                availabilityStatus: leg.mode === 'WALK' ? 'AVAILABLE' : 'UNKNOWN', bookingAvailable: false },
+            });
+            departureAt = new Date(departureAt.getTime() + leg.durationSeconds * 1000);
+          }
+        };
+        const insertTransit = async (path: SearchItinerary) => {
+          const first = path.segments[0]; const last = path.segments.at(-1);
+          if (!first || !last) return;
+          const insertWalk = async (from: { name: string; coordinates: [number, number] }, to: { name: string; coordinates: [number, number] },
+            departureAt: Date, meters: number, seconds: number, geometry?: Array<[number, number]> | null) => {
+            if (meters <= 0) return;
+            await insertEstimatedLeg({ mode: 'WALK', from, to, departureAt, durationSeconds: seconds || Math.ceil(meters / 1.25),
+              distanceMeters: meters, source: geometry ? 'gtfs-pathway' : 'walking-straight-line-estimate',
+              routeGeometry: geometry ?? [from.coordinates, to.coordinates],
+              metadata: { routeAccuracy: geometry ? 'SOURCE_GEOMETRY' : 'STRAIGHT_LINE_ESTIMATE', availabilityStatus: 'AVAILABLE' } });
+          };
+          if (path.accessWalk || first.distanceToOriginStopMeters > 0) {
+            await insertWalk({ name: route.microPosition === 'before-transit' ? route.estimate.legs.at(-1)?.destination.name ?? first.originStop.name : search.origin.name,
+              coordinates: route.microPosition === 'before-transit' ? route.estimate.legs.at(-1)?.destination.coordinates ?? first.originStop.coordinates : search.origin.coordinates },
+            { name: first.originStop.name, coordinates: first.originStop.coordinates }, path.departureAt,
+            path.accessWalk?.distanceMeters ?? first.distanceToOriginStopMeters, path.accessWalk?.durationSeconds ?? Math.ceil(first.distanceToOriginStopMeters / 1.25),
+            path.accessWalk?.geometry ?? null);
+          }
+          for (const [segmentIndex, segment] of path.segments.entries()) {
+            if (segmentIndex > 0) {
+              const previous = path.segments[segmentIndex - 1]!;
+              await insertWalk({ name: previous.destinationStop.name, coordinates: previous.destinationStop.coordinates },
+                { name: segment.originStop.name, coordinates: segment.originStop.coordinates }, previous.arrivalAt,
+                path.transferWalkingMeters[segmentIndex - 1] ?? 0, path.transferWalkingSeconds[segmentIndex - 1] ?? 0,
+                path.transferWalks?.[segmentIndex - 1]?.geometry ?? path.transferWalkingGeometries[segmentIndex - 1] ?? null);
+            }
+            const allocation = path.fare?.allocations[segmentIndex] ?? null;
+            const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
+            const provider = providerMetadata.get(segment.providerId);
+            const inserted = await client.query<{ id: string }>(
+              `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
+               VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,NULL,NULL,$12,$13,$13,$13,$14,$15,'UNKNOWN',$16,'public_transit','SUGGESTED',$17,$18,$19::jsonb) RETURNING id`,
+              [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
+                segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
+                segment.scheduledDepartureAt, segment.scheduledArrivalAt, durationSeconds, allocation?.priceMinor ?? null,
+                path.fare?.currency ?? 'UAH', allocation ? 'ESTIMATED' : 'UNKNOWN', segment.providerId,
+                segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+                segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
+                JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
+                  transportType: segment.transportType, headsign: segment.headsign, tripId: segment.tripId,
+                  serviceDate: segment.serviceDate, scheduleSemantics: segment.scheduleSemantics,
+                  fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+                  ...(segment.stops ? { stops: segment.stops } : {}), ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
+            );
+            firstServiceLegId ??= inserted.rows[0].id;
+            responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, transportType: segment.transportType,
+              origin: { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
+              destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
+              departureAt: segment.departureAt, arrivalAt: segment.arrivalAt, scheduledDepartureAt: segment.scheduledDepartureAt,
+              scheduledArrivalAt: segment.scheduledArrivalAt, durationSeconds, distanceMeters: null,
+              priceMinor: allocation?.priceMinor ?? null, currency: allocation ? path.fare?.currency ?? null : null,
+              priceStatus: allocation ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN', source: 'gtfs-static',
+              providerName: segment.providerName, routeName: segment.routeName, headsign: segment.headsign,
+              scheduleSemantics: segment.scheduleSemantics, ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}),
+              liveStatus: 'SCHEDULED', dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - segment.sourceFreshAt.getTime()) / 1000)),
+              lastUpdatedAt: segment.sourceFreshAt, driver: null, vehicle: null });
+          }
+          if (path.egressWalk || last.distanceFromDestinationStopMeters > 0) {
+            await insertWalk({ name: last.destinationStop.name, coordinates: last.destinationStop.coordinates },
+              { name: route.microPosition === 'after-transit' ? route.estimate.legs[0]?.origin.name ?? last.destinationStop.name : search.destination.name,
+                coordinates: route.microPosition === 'after-transit' ? route.estimate.legs[0]?.origin.coordinates ?? last.destinationStop.coordinates : search.destination.coordinates },
+              last.arrivalAt, path.egressWalk?.distanceMeters ?? last.distanceFromDestinationStopMeters,
+              path.egressWalk?.durationSeconds ?? Math.ceil(last.distanceFromDestinationStopMeters / 1.25), path.egressWalk?.geometry ?? null);
+          }
+        };
+
+        if (route.itinerary && route.microPosition === 'after-transit') {
+          await insertTransit(route.itinerary); await insertMicromobility();
+        } else {
+          await insertMicromobility(); if (route.itinerary) await insertTransit(route.itinerary);
+        }
+        if (firstServiceLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstServiceLegId]);
+        journeys.push({ id: journeyId, offerId: null, origin: search.origin, destination: search.destination, strategy: representative.strategy,
+          requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: route.waitingSeconds,
+          recommendedStrategies: representative.recommendedStrategies, strategyRanks: representative.strategyRanks,
+          score: representative.score, state: 'PLANNED',
+          source: route.itinerary ? 'micromobility+metro-estimate' : 'micromobility-estimate',
+          totalDurationSeconds: route.durationSeconds, totalPriceMinor: route.totalPriceMinor, confirmedPriceMinor: null,
+          estimatedPriceMinMinor: route.totalPriceMinor, estimatedPriceMaxMinor: route.totalPriceMinor,
+          currency: route.totalPriceMinor === null ? null : 'UAH',
+          priceStatus: route.totalPriceMinor === null ? 'UNKNOWN' : 'ESTIMATED', walkingMeters: route.walkingMeters,
+          transfers: route.transfers, reliabilityScore: null, routeAccuracy: route.estimate.routeAccuracy, legs: responseLegs });
+        continue;
+      }
       if (candidate.kind === 'community-transit') {
         const composition = candidate;
         const offer = composition.offer;
@@ -3097,7 +3493,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           liveStatus: 'SCHEDULED', availableSeats: offer.availableSeats, driver: offer.metadata });
         if (suffix) await insertTransitPath(suffix, offer.destination, search.destination);
         if (firstServiceLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstServiceLegId]);
-        journeys.push({ id: journeyId, offerId: offer.id, strategy: representative.strategy,
+        journeys.push({ id: journeyId, offerId: offer.id, origin: search.origin, destination: search.destination, strategy: representative.strategy,
           requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: composition.waitingSeconds,
           recommendedStrategies: representative.recommendedStrategies, strategyRanks: representative.strategyRanks,
           score: representative.score, state: 'PLANNED', source: 'community-transit',
@@ -3143,7 +3539,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       );
       await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, leg.rows[0].id]);
       journeys.push({
-        id: journeyId, offerId: offer.offer_id, strategy: representative.strategy,
+        id: journeyId, offerId: offer.offer_id, origin: search.origin, destination: search.destination, strategy: representative.strategy,
         requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: candidate.waitingSeconds,
         recommendedStrategies: representative.recommendedStrategies, strategyRanks: representative.strategyRanks,
         score: representative.score, state: 'PLANNED',
@@ -3301,7 +3697,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         itinerary.egressWalk ? { durationSeconds: itinerary.egressWalk.durationSeconds, routeGeometry: itinerary.egressWalk.geometry, source: 'osrm-foot-route' } : {},
       );
       if (firstTransitLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstTransitLegId]);
-      journeys.push({ id: journeyId, offerId: null, source: 'gtfs-static', providerName: itinerary.providerName,
+      journeys.push({ id: journeyId, offerId: null, origin: search.origin, destination: search.destination, source: 'gtfs-static', providerName: itinerary.providerName,
         requestedDepartureAt: search.departureAt.toISOString(), waitingSeconds: itinerary.waitingSeconds,
         strategy: representative.strategy, recommendedStrategies: representative.recommendedStrategies,
         strategyRanks: representative.strategyRanks,
@@ -3324,7 +3720,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...unsupportedSelectedTypes,
     ...(search.preferences.preferredVehicleClass ? ['preferredVehicleClass'] : []),
     ...(hasUnpricedTransitCandidates ? ['maxPriceMinor:public-transit-fare-unavailable'] : []),
-    ...(search.strategy === 'CHEAPEST' && (scheduledCandidates.length > 0 || hasUnpricedTransitCandidates) ? ['CHEAPEST:public-transit-fares-unavailable'] : []),
+    ...(hasUnpricedMicromobilityCandidates ? ['maxPriceMinor:micromobility-price-unavailable'] : []),
+    ...(search.strategy === 'CHEAPEST' && (scheduledCandidates.length > 0 || hasUnpricedTransitCandidates || hasUnpricedMicromobilityCandidates) ? ['CHEAPEST:unpriced-route-segments-unavailable'] : []),
     ...(search.preferences.maxTransfers !== undefined && search.preferences.maxTransfers > MAX_GTFS_TRANSFERS ? [`maxTransfers:limited-to-${MAX_GTFS_TRANSFERS}`] : []),
   ];
   const partialReasons = getJourneySearchPartialReasons({

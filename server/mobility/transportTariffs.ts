@@ -29,6 +29,7 @@ export interface TransportFareRecord {
 }
 
 const VERIFIED_AT = '2026-10-13';
+const LVIV_ATP1_VERIFIED_AT = '2026-10-25';
 
 /** Audited tariff facts. Price is stored in minor units (kopiyky); source values remain visible. */
 export const transportFareCatalog: TransportFareRecord[] = [
@@ -98,7 +99,7 @@ export const transportFareCatalog: TransportFareRecord[] = [
     kind: 'single_ride' as const, status: 'verified_static' as const, currency: 'UAH' as const,
     priceMinor: amount, pricePerRideMinor: amount, fareMedia: media, riderCategory: category,
     effectiveFrom: '2026-05-16', sourceName: 'ЛК АТП-1 Львів — оплата проїзду',
-    sourceUrl: 'https://atp1.lviv.ua/passengers/payment/', lastVerifiedAt: VERIFIED_AT,
+    sourceUrl: 'https://atp1.lviv.ua/passengers/payment/', lastVerifiedAt: LVIV_ATP1_VERIFIED_AT,
   })),
   {
     id: 'lviv-leocard-40-minute-transfer', city: 'Львів', modes: ['bus', 'tram', 'trolleybus'],
@@ -106,7 +107,7 @@ export const transportFareCatalog: TransportFareRecord[] = [
     status: 'verified_static', currency: 'UAH', priceMinor: 0, validitySeconds: 2_400,
     transferValiditySeconds: 2_400, transferCount: 'unlimited', fareMedia: ['leocard', 'leocard_app'],
     riderCategory: 'adult', effectiveFrom: '2026-05-16', sourceName: 'ЛК АТП-1 Львів — правила безоплатної пересадки',
-    sourceUrl: 'https://atp1.lviv.ua/passengers/payment/', lastVerifiedAt: VERIFIED_AT,
+    sourceUrl: 'https://atp1.lviv.ua/passengers/payment/', lastVerifiedAt: LVIV_ATP1_VERIFIED_AT,
   },
   {
     id: 'lviv-monthly-adult', city: 'Львів', modes: ['tram', 'trolleybus'],

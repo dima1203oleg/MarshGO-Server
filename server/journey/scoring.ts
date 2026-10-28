@@ -35,6 +35,8 @@ export function strategiesWithComparablePrices<T extends JourneyOption>(
 
 type Metric = 'durationSeconds' | 'priceMinor' | 'transfers' | 'walkingMeters' | 'risk' | 'comfortPenalty';
 
+const BALANCED_TRANSFER_PENALTY_SECONDS = 8 * 60;
+
 function riskMetric(journey: JourneyOption): number {
   return Math.max(journey.transferRisk, journey.reliability === null ? 1 : 1 - journey.reliability);
 }
@@ -104,6 +106,54 @@ export function selectStrategyAlternatives<T extends JourneyOption>(
   return [...alternatives.values()];
 }
 
+export interface BoundedJourneyCandidatePool<T> {
+  candidates: T[];
+  truncated: boolean;
+  hasUnknownFare: boolean;
+}
+
+/** Bound a pre-ranking GTFS pool without letting arrival order erase strategy winners. */
+export function retainStrategyCandidatePool<T extends JourneyOption & { arrivalAt: Date; departureAt: Date }>(
+  journeys: readonly T[],
+  maximumCandidates: number,
+  strategies: readonly JourneyStrategy[],
+): BoundedJourneyCandidatePool<T> {
+  if (!Number.isInteger(maximumCandidates) || maximumCandidates < 1) {
+    throw new TypeError('maximum candidates must be a positive integer');
+  }
+
+  const hasUnknownFare = journeys.some((journey) => journey.priceMinor === null);
+  const byArrival = (a: T, b: T) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
+    || a.departureAt.getTime() - b.departureAt.getTime()
+    || a.id.localeCompare(b.id);
+  if (journeys.length <= maximumCandidates) {
+    return { candidates: [...journeys].sort(byArrival), truncated: false, hasUnknownFare };
+  }
+
+  const selected = new Map<string, T>();
+  const poolStrategies = [...new Set(strategies)].filter((strategy) => !hasUnknownFare || strategy !== 'CHEAPEST');
+  const rankedByStrategy = poolStrategies.map((strategy) =>
+    scoreJourneys(journeys, strategy).map(({ journey }) => journey));
+  for (let rank = 0; selected.size < maximumCandidates; rank += 1) {
+    let foundAtRank = false;
+    for (const ranked of rankedByStrategy) {
+      const journey = ranked[rank];
+      if (!journey) continue;
+      foundAtRank = true;
+      if (!selected.has(journey.id)) selected.set(journey.id, journey);
+      if (selected.size >= maximumCandidates) break;
+    }
+    if (!foundAtRank) break;
+  }
+
+  for (const journey of [...journeys].sort(byArrival)) {
+    if (selected.size >= maximumCandidates) break;
+    if (!selected.has(journey.id)) selected.set(journey.id, journey);
+  }
+
+  return { candidates: [...selected.values()].sort(byArrival), truncated: true, hasUnknownFare };
+}
+
 /** Return one winner per strategy, grouping exact same candidates across tabs. */
 export function selectStrategyRecommendations<T extends JourneyOption>(
   journeys: readonly T[],
@@ -151,7 +201,10 @@ export function scoreJourneys<T extends JourneyOption>(
   }
 
   const metrics: Record<Metric, (journey: T) => number> = {
-    durationSeconds: (journey) => journey.durationSeconds,
+    // BALANCED models the passenger's perceived door-to-door time, including
+    // the inconvenience of changing vehicles. FASTEST remains strict elapsed time.
+    durationSeconds: (journey) => journey.durationSeconds
+      + (strategy === 'BALANCED' ? journey.transfers * BALANCED_TRANSFER_PENALTY_SECONDS : 0),
     priceMinor: (journey) => journey.priceMinor ?? Number.MAX_SAFE_INTEGER,
     transfers: (journey) => journey.transfers,
     walkingMeters: (journey) => journey.walkingMeters,
@@ -166,7 +219,7 @@ export function scoreJourneys<T extends JourneyOption>(
 
   const scored = journeys.map((journey) => {
     const values: Record<Metric, number> = {
-      durationSeconds: journey.durationSeconds,
+      durationSeconds: metrics.durationSeconds(journey),
       priceMinor: metrics.priceMinor(journey),
       transfers: journey.transfers,
       walkingMeters: journey.walkingMeters,
