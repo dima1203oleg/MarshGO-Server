@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, mergeGtfsTimetables, parseGtfsTimetable } from '../server/journey/gtfsTimetable';
+import { projectScheduledGtfsCandidatePool } from '../server/journey/scheduledGtfsCandidatePool';
 import { scoreJourneys } from '../server/journey/scoring';
 
 function feed(overrides: { monday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean } = {}) {
@@ -518,25 +519,15 @@ test('BALANCED prefers a direct journey when a feasible transfer saves only five
     maximumStopDistanceMeters: 300,
     maximumTransfers: 1,
   });
-  const alternatives = results.itineraries.map((itinerary) => ({
-    id: itinerary.id,
-    durationSeconds: itinerary.durationSeconds,
-    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
-    transfers: itinerary.transfers,
-    walkingMeters: itinerary.walkingMeters,
-    reliability: null,
-    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
-    comfort: null,
-    legs: itinerary.segments.map(({ mode }) => ({ mode })),
-  }));
+  const projected = projectScheduledGtfsCandidatePool(results.itineraries, 10, ['BALANCED', 'FASTEST']);
   const direct = results.itineraries.find(({ segments }) => segments.length === 1);
   const transfer = results.itineraries.find(({ segments }) => segments.length === 2);
 
   assert.ok(direct && transfer, 'both direct and one-transfer options must be feasible');
   assert.equal(direct.durationSeconds - transfer.durationSeconds, 5 * 60);
-  assert.equal(scoreJourneys(alternatives, 'BALANCED')[0]?.journey.id, direct.id);
-  assert.equal(scoreJourneys(alternatives, 'FASTEST')[0]?.journey.id, transfer.id);
-  const equallyPriced = alternatives.map((journey) => ({ ...journey, priceMinor: 1000 }));
+  assert.equal(scoreJourneys(projected.candidates, 'BALANCED')[0]?.journey.id, direct.id);
+  assert.equal(scoreJourneys(projected.candidates, 'FASTEST')[0]?.journey.id, transfer.id);
+  const equallyPriced = projected.candidates.map((journey) => ({ ...journey, priceMinor: 1000 }));
   assert.equal(scoreJourneys(equallyPriced, 'CHEAPEST')[0]?.journey.id, transfer.id,
     'CHEAPEST keeps actual elapsed time as its secondary preference when fares tie');
 });
