@@ -3770,6 +3770,42 @@ test('independent lazy event labels preserve service dates and repeated trip-cal
     'service-date event projection honors the feed timezone offset');
 });
 
+test('bounded retention distinguishes repeated interchange calls on the same loop trip', () => {
+  const timetable = connectingFeed({ secondDeparture: '08:35:00' });
+  timetable.stops.set('start', { id: 'start', name: 'Start', lon: 24.0207, lat: 49.8400 });
+  timetable.stops.set('near-origin', { id: 'near-origin', name: 'Near origin', lon: 24.0200, lat: 49.8400 });
+  timetable.stopTimes.set('b1', [
+    { stopId: 'start', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+    { stopId: 'hub', sequence: 2, arrivalSeconds: 8 * 3600 + 20 * 60, departureSeconds: 8 * 3600 + 20 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: 'near-origin', sequence: 3, arrivalSeconds: 8 * 3600 + 25 * 60, departureSeconds: 8 * 3600 + 25 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: 'hub', sequence: 4, arrivalSeconds: 8 * 3600 + 40 * 60, departureSeconds: 8 * 3600 + 40 * 60, pickupType: 0, dropOffType: 0 },
+  ]);
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, stopTimes] of timetable.stopTimes) stopTimes.forEach((stopTime, index) => {
+    timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+    ]);
+  });
+
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 1,
+    maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 30 * 60,
+  };
+  let graph: GtfsCandidateGraphSnapshot | undefined;
+  const result = findGtfsItinerariesWithStats(timetable, query, { totalSegments: 2, segmentsPerRoute: 1 },
+    (snapshot) => { graph = snapshot; });
+  assert.ok(graph);
+  const retainedLoopCalls = graph.segments.filter(({ journey }) => journey.tripId === 'b1'
+    && journey.originStop.id !== 'hub' && journey.destinationStop.id === 'hub');
+  assert.deepEqual(retainedLoopCalls.map(({ journey }) => [journey.originStop.id, journey.destinationStop.id,
+    journey.arrivalAt.getTime()]), [['start', 'hub', Date.parse('2026-10-12T05:20:00.000Z')]],
+  'the later repeated hub call cannot inherit the earlier call’s feasible onward connection under a one-segment route cap');
+  assert.deepEqual(result.itineraries.map((journey) => journey.segments.map((segment) => segment.tripId)), [['b1', 'r1']],
+    'the feasible first hub call remains available to connect to the onward trip departing between the two calls');
+});
+
 test('applies parent-station transfer rules and preserves explicit in-seat transfers', () => {
   const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumStopDistanceMeters: 300, maximumTransfers: 1 };
   const parentRestricted = platformTransferFeed('08:40:00');
