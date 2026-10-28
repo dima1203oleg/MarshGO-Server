@@ -2877,7 +2877,7 @@ export function findGtfsItinerariesWithStats(
                 bestConnector = { segment: candidate, arrivalAt: onwardArrival };
               }
             }
-          } else if (hasNextEvent(candidate, minimumTransferBufferSeconds)) {
+          } else if (!connectsOneQueryFrontier && hasNextEvent(candidate, minimumTransferBufferSeconds)) {
             // A middle leg in a multi-transfer journey may only be reachable
             // from the origin side, or may only feed the destination side.
             // Keep that one-sided frontier evidence even when this segment
