@@ -43,7 +43,7 @@ import { getTransportFareCatalog } from './mobility/transportTariffs';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
-import { buildBicycleRouteEstimates, buildScooterRouteEstimates, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
+import { buildBicycleRouteEstimates, buildScooterRouteEstimates, completeMicromobilityFareMinor, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
 import { memoizeRequestSearch } from './journey/requestSearchMemo';
 import { buildMicromobilityGeofenceFeatures, buildMicromobilityPointFeatures, buildStaticRentalPointFeature } from './mobility/micromobilityFeatures';
 import { buildKiwitaxiAffiliateUrl, intuiTravelStatus, kiwitaxiStatus } from './mobility/transferAdapters';
@@ -2979,7 +2979,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const arrivalAt = microPosition === 'before-transit' && itinerary ? itinerary.arrivalAt : estimate.arrivalAt;
     const departureAt = microPosition === 'after-transit' && itinerary ? itinerary.departureAt : search.departureAt;
     const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
-    const priceMinor = itinerary?.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
+    const transitFareMinor = itinerary
+      ? itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null
+      : undefined;
+    const priceMinor = completeMicromobilityFareMinor(estimate.priceMinor, transitFareMinor);
     // Micromobility prices are not available as a complete rental quote yet.
     // A transit fare on one leg is only a partial subtotal, never the journey total.
     hasUnpricedMicromobilityCandidates = true;
