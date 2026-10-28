@@ -1517,7 +1517,7 @@ test('bounded connector overflow preserves the fastest onward stop from one midd
     maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 2 * 60 * 60,
   };
   let graph: GtfsCandidateGraphSnapshot | undefined;
-  const bounded = findGtfsItinerariesWithStats(timetable, query, { totalSegments: 5, segmentsPerRoute: 2 },
+  const bounded = findGtfsItinerariesWithStats(timetable, query, { totalSegments: 7, segmentsPerRoute: 3 },
     (snapshot) => { graph = snapshot; });
   assert.equal(bounded.truncation.candidateGraph, true, 'the fixture exercises a deliberately bounded graph');
   assert.ok(graph);
@@ -1583,6 +1583,10 @@ test('bounded connector overflow preserves the fastest onward stop from one midd
   const graphHasFastConnector = graph.segments.some(({ journey }) => journey.tripId === targetTripId
     && journey.originStop.id === 'hub-a' && journey.destinationStop.id === 'hub-c');
   assert.equal(graphHasFastConnector, true, 'the bounded graph must retain the connector needed by the exhaustive winner');
+  const graphHasAlternateFeasibleConnector = graph.segments.some(({ journey }) => journey.tripId === targetTripId
+    && journey.originStop.id === 'hub-a' && journey.destinationStop.id === 'hub-b');
+  assert.equal(graphHasAlternateFeasibleConnector, true,
+    'bounded connector overflow retains the second feasible alighting option when route/global budget has room');
   assert.deepEqual(returnedWinner.segments.map((segment) => segment.tripId), oracleWinner.tripIds,
     'bounded same-trip connector retention must preserve the exhaustive fastest continuation');
   assert.deepEqual([returnedWinner.segments[1]?.originStop.id, returnedWinner.segments[1]?.destinationStop.id],

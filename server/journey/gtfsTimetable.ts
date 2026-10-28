@@ -2805,6 +2805,7 @@ export function findGtfsItinerariesWithStats(
               feasibleConnectorEvaluations++;
               debugConnectorEvalIndex?.set(candidate, feasibleConnectorEvaluations);
               temporallyConnectsQueryEnds = true;
+              connectorOverflow.consider(candidate);
               if (!bestConnector || onwardArrival < bestConnector.arrivalAt
                 || (onwardArrival === bestConnector.arrivalAt
                   && compareTripSegments(candidate, bestConnector.segment) < 0)) {
@@ -2813,7 +2814,6 @@ export function findGtfsItinerariesWithStats(
             }
           }
         }
-        if (bestConnector) connectorOverflow.consider(bestConnector.segment);
         overflowSegmentsByRoute.set(trip.routeId, overflow);
         overflowConnectorsByRoute.set(trip.routeId, connectorOverflow);
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
