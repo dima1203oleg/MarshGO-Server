@@ -3731,6 +3731,7 @@ export function findGtfsItinerariesWithStats(
   // across first-leg route groups: a dense early route cannot spend the whole
   // budget before later lines contribute candidates to fastest/cheapest/balanced.
   let searchSteps = 0;
+  const searchStepsByDepthPass = debugSearch ? new Map<number, { paths: number; children: number }>() : undefined;
   // Dense urban feeds can require hundreds of thousands of bounded cursor
   // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
   // but do not cut off ordinary city results at the first-route frontier.
@@ -3834,7 +3835,7 @@ export function findGtfsItinerariesWithStats(
     last: GtfsDirectJourney;
     choices: GtfsDirectJourney[];
     nextIndex: number;
-    latestNext: number;
+    endIndex: number;
     remainingLegs: number;
     previousIds: Set<string>;
     visitedStops: Set<string>;
@@ -3893,6 +3894,11 @@ export function findGtfsItinerariesWithStats(
     queue.firstLegIndex < queue.firstLegs.length || queue.workIndex < queue.work.length);
   const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number) => {
     searchSteps++;
+    if (searchStepsByDepthPass) {
+      const counts = searchStepsByDepthPass.get(maximumLegsForPass) ?? { paths: 0, children: 0 };
+      counts.paths++;
+      searchStepsByDepthPass.set(maximumLegsForPass, counts);
+    }
     const last = path.at(-1)!;
     if (destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
       addPath(path, maximumLegsForPass);
@@ -3910,23 +3916,31 @@ export function findGtfsItinerariesWithStats(
       if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) low = middle + 1;
       else high = middle;
     }
-    if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
-    enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
+    let endIndex = low;
+    high = choices.length;
+    while (endIndex < high) {
+      const middle = (endIndex + high) >>> 1;
+      if (choices[middle].departureAt.getTime() <= latestNext) endIndex = middle + 1;
+      else high = middle;
+    }
+    if (low >= endIndex) return;
+    enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, endIndex,
       remainingLegs, previousIds, visitedStops });
   };
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue) => {
     searchSteps++;
+    if (searchStepsByDepthPass) {
+      const maximumLegsForPass = work.path.length + work.remainingLegs;
+      const counts = searchStepsByDepthPass.get(maximumLegsForPass) ?? { paths: 0, children: 0 };
+      counts.children++;
+      searchStepsByDepthPass.set(maximumLegsForPass, counts);
+    }
     const next = work.choices[work.nextIndex++];
-    if (next.departureAt.getTime() <= work.latestNext
-      && reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id)
-      && !work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
+    if (!work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
       && transferDecision(work.last, next).feasible) {
       enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
     }
-    if (work.nextIndex < work.choices.length
-      && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
-      enqueueWork(queue, work);
-    }
+    if (work.nextIndex < work.endIndex) enqueueWork(queue, work);
   };
   const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number) => {
     while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
@@ -4078,6 +4092,8 @@ export function findGtfsItinerariesWithStats(
     }
   }
   debugStage('itineraries-ranked', { searchSteps, firstLegs: firstLegs.length, candidateResults: rankedResults.length,
+    ...(searchStepsByDepthPass ? { searchStepsByDepthPass: JSON.stringify(Object.fromEntries(
+      [...searchStepsByDepthPass].sort(([left], [right]) => left - right))) } : {}),
     ...Object.fromEntries(Array.from({ length: maxTransitLegs }, (_, index) =>
       [`candidatesWith${index + 1}Legs`, resultCountByLegCount.get(index + 1) ?? 0])),
     returnedByLegCount: JSON.stringify(itineraries.reduce<Record<number, number>>((counts, itinerary) => {

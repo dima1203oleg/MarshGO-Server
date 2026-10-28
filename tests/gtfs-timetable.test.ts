@@ -549,8 +549,8 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
   console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
   try {
-    findGtfsItinerariesWithStats(feed(), {
-      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+    findGtfsItinerariesWithStats(connectingFeed(), {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 1,
     });
   } finally {
     console.info = originalInfo;
@@ -579,6 +579,10 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.equal(typeof graph.reachableStopSetCacheHits, 'number');
   assert.equal(typeof ranked.searchStepLimit, 'number');
   assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
+  const depthCounts = JSON.parse(String(ranked.searchStepsByDepthPass)) as Record<string, { paths: number; children: number }>;
+  assert.ok(depthCounts['1'] && depthCounts['2'], 'each permitted maximum leg count is measured separately');
+  assert.equal(Object.values(depthCounts).reduce((sum, counts) => sum + counts.paths + counts.children, 0), ranked.searchSteps,
+    'per-depth path and child work exactly accounts for the existing searchSteps counter');
   assert.equal(ranked.debugTripChainPresence, undefined, 'exact graph tracing stays absent without target IDs');
 });
 
@@ -3577,11 +3581,17 @@ test('graph-relative lazy search matches production itinerary materialization, c
   assert.ok(inSeatLazy.itineraries.some(({ segments, transferInSeat }) => segments.length === 2 && transferInSeat[0] === true),
     'GTFS transfer_type=4 remains traversable');
 
-  const shortWaitQuery = { ...transferQuery, maximumWaitSeconds: 5 * 60 };
+  const shortWaitQuery = { ...transferQuery, maximumWaitSeconds: 15 * 60 };
   const shortWaitProduction = findGtfsItinerariesWithStats(transferFeed, shortWaitQuery);
   const shortWaitLazy = lazyEventLabelSearchForRequest(transferFeed, shortWaitQuery);
   assert.deepEqual(shortWaitLazy.itineraries.map(({ id }) => id).sort(), shortWaitProduction.itineraries.map(({ id }) => id).sort(),
     'graph-relative traversal applies the production maximum-wait rule');
+  assert.ok(shortWaitProduction.itineraries.some(({ segments }) => segments.length === 2),
+    'a transfer departing exactly at the inclusive maximum-wait boundary remains feasible');
+  const overWaitQuery = { ...transferQuery, maximumWaitSeconds: 15 * 60 - 1 };
+  const overWaitProduction = findGtfsItinerariesWithStats(transferFeed, overWaitQuery);
+  assert.equal(overWaitProduction.itineraries.some(({ segments }) => segments.length === 2), false,
+    'a transfer departing one second beyond the maximum-wait boundary remains excluded');
 });
 
 test('matches a deterministic exhaustive oracle for pathways, transfer rules, loops, and realtime overlays', () => {
