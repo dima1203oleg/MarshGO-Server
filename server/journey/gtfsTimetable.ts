@@ -6,7 +6,7 @@ import type { JourneyOption } from './types';
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
 import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
-import { BoundedBestK, redistributeBoundedCandidates, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
+import { BoundedBestK, BoundedDiverseBestK, redistributeBoundedCandidates, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
 import { scoreJourneys } from './scoring';
 import { toRankedGtfsItinerary } from './gtfsRanking';
@@ -1986,7 +1986,14 @@ export function findGtfsItinerariesWithStats(
   const segmentsByRoute = new Map<string, RetainedGtfsTrip[]>();
   const retainedSegmentCountByRoute = new Map<string, number>();
   const overflowSegmentsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
-  const overflowConnectorsByRoute = new Map<string, BoundedBestK<RetainedGtfsSegment>>();
+  const overflowConnectorsByRoute = new Map<string, BoundedDiverseBestK<RetainedGtfsSegment>>();
+  const canonicalTransferHubKey = (candidate: RetainedGtfsSegment) => {
+    const transferNodes = candidate.destinationContext.transferNodeIds;
+    const lastNode = transferNodes.length > 0
+      ? transferNodes[transferNodes.length - 1]
+      : candidate.destinationContext.details.id;
+    return `${candidate.providerId}\u0000${lastNode}`;
+  };
   const retainedCandidateKey = (candidate: RetainedGtfsSegment) =>
     `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
   const candidateStopCountByRoute = new Map<string, number>();
@@ -2804,7 +2811,12 @@ export function findGtfsItinerariesWithStats(
           ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
         const connectorOverflowCapacity = Math.min(maximumRouteOverflowConnectors, graphSegmentLimitPerRoute);
         const connectorOverflow = overflowConnectorsByRoute.get(trip.routeId)
-          ?? new BoundedBestK<RetainedGtfsSegment>(connectorOverflowCapacity, compareTripSegments);
+          ?? new BoundedDiverseBestK<RetainedGtfsSegment>(
+            connectorOverflowCapacity,
+            compareTripSegments,
+            canonicalTransferHubKey,
+            retainedCandidateKey,
+          );
         let temporallyConnectsQueryEnds = false;
         let bestConnector: { segment: RetainedGtfsSegment; arrivalAt: number } | undefined;
         let feasibleConnectorEvaluations = 0;

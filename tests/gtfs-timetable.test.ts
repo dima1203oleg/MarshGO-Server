@@ -1750,6 +1750,78 @@ test('connector reservoir keeps a CHEAPEST winner behind faster fare-diverse con
     'the expanded connector and per-route budgets must restore the exact exhaustive CHEAPEST winner');
 });
 
+test('duplicate early-hub candidates cannot monopolize connector cap=2 when a feasible distinct hub exists', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+
+  for (const [id, name, lon, lat] of [
+    ['origin', 'Origin', 24.0200, 49.8400],
+    ['hub-a', 'Hub A', 24.0250, 49.8450],
+    ['hub-b', 'Hub B', 24.0300, 49.8490],
+    ['hub-c', 'Hub C', 24.0340, 49.8520],
+    ['destination', 'Destination', 24.0300, 49.8500],
+  ] as const) timetable.stops.set(id, { id, name, lon, lat });
+
+  for (const [id, name] of [
+    ['access', 'Access'], ['middle', 'Middle'], ['egress-b', 'Onward via B'], ['egress-c', 'Onward via C'],
+  ] as const) timetable.routes.set(id, { name, mode: 'BUS', transportType: 'bus' });
+
+  const addTrip = (tripId: string, routeId: string, stops: Array<[string, number]>) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    timetable.stopTimes.set(tripId, stops.map(([stopId, seconds], index) => ({
+      stopId, sequence: index + 1, arrivalSeconds: seconds, departureSeconds: seconds, pickupType: 0, dropOffType: 0,
+    })));
+  };
+
+  addTrip('access-trip', 'access', [['origin', 8 * 3600], ['hub-a', 8 * 3600 + 10 * 60]]);
+  // Two trips for middle route going to hub-c (same hub):
+  addTrip('middle-c-early', 'middle', [['hub-a', 8 * 3600 + 15 * 60], ['hub-c', 8 * 3600 + 22 * 60]]);
+  addTrip('middle-c-later', 'middle', [['hub-a', 8 * 3600 + 17 * 60], ['hub-c', 8 * 3600 + 24 * 60]]);
+  // One trip for middle route going to hub-b (distinct hub):
+  addTrip('middle-b', 'middle', [['hub-a', 8 * 3600 + 18 * 60], ['hub-b', 8 * 3600 + 26 * 60]]);
+
+  // Onward trips from hub-c and hub-b to destination:
+  addTrip('egress-c-trip', 'egress-c', [['hub-c', 8 * 3600 + 28 * 60], ['destination', 8 * 3600 + 40 * 60]]);
+  addTrip('egress-b-trip', 'egress-b', [['hub-b', 8 * 3600 + 32 * 60], ['destination', 8 * 3600 + 48 * 60]]);
+
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, stops] of timetable.stopTimes) stops.forEach((stopTime, index) => {
+    timetable.stopTimesByStop.set(stopTime.stopId,
+      [...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index }]);
+  });
+
+  const input = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+    maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 2 * 60 * 60,
+  };
+
+  let graphSnapshot: GtfsCandidateGraphSnapshot | undefined;
+  const result = findGtfsItinerariesWithStats(timetable, input, {
+    totalSegments: 100, segmentsPerRoute: 3, maxRouteOverflowConnectors: 2,
+  }, (snapshot) => { graphSnapshot = snapshot; });
+
+  assert.ok(graphSnapshot);
+  const middleConnectors = graphSnapshot.segments.filter(({ journey }) =>
+    journey.routeId === 'middle' && journey.originStop.id === 'hub-a');
+  const retainedHubs = new Set(middleConnectors.map(({ journey }) => journey.destinationStop.id));
+  assert.ok(retainedHubs.has('hub-c'), 'hub-c is retained');
+  assert.ok(retainedHubs.has('hub-b'), 'distinct hub-b is retained; duplicate hub-c candidate did not monopolize cap=2');
+
+  const bChain = 'access-trip,middle-b,egress-b-trip';
+  const cChain = 'access-trip,middle-c-early,egress-c-trip';
+  const foundChains = new Set(result.itineraries.map((j) => j.segments.map((s) => s.tripId).join(',')));
+  assert.ok(foundChains.has(bChain), 'feasible journey via distinct hub-b is found');
+  assert.ok(foundChains.has(cChain), 'feasible journey via hub-c is found');
+  assert.equal(result.truncation.candidateGraph, true,
+    'candidate graph truncation is reported when the bounded reservoir retains two of three feasible alternatives');
+});
+
 test('query-time retention keeps a scheduled connector ahead of dense irrelevant interchanges', () => {
   const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips({ denseIrrelevantInterchange: true });
   const searchInput = {
