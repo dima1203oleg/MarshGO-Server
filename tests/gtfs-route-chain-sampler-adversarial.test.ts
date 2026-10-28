@@ -212,7 +212,7 @@ test('route-chain sampling handles overlapping winners and unknown fares at a ti
     'an unknown fare must not displace known strategy winners as a zero-cost route');
   for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
     const winner = scoreJourneys(scored.filter((item) => selected.some((choice) => choice.id === item.id)), strategy)[0]!.journey.id;
-    const expected = strategy === 'FASTEST' ? fastestWinner : strategy === 'CHEAPEST' ? cheapestWinner : balancedWinner;
+    const expected: string = strategy === 'FASTEST' ? fastestWinner : strategy === 'CHEAPEST' ? cheapestWinner : balancedWinner;
     assert.equal(winner, expected, `${strategy} ranking of sampled results must preserve the visible winner`);
   }
 });
