@@ -13,10 +13,10 @@ export type ScheduledGtfsProjectionInput = Omit<Pick<GtfsItinerary,
   >>;
 };
 
-export type ScheduledGtfsCandidate = JourneyOption & {
+export type ScheduledGtfsCandidate<T extends ScheduledGtfsProjectionInput = ScheduledGtfsProjectionInput> = JourneyOption & {
   arrivalAt: Date;
   departureAt: Date;
-  itinerary: ScheduledGtfsProjectionInput;
+  itinerary: T;
 };
 
 function transitRouteChainKey(itinerary: ScheduledGtfsProjectionInput): string {
@@ -29,12 +29,12 @@ function transitRouteChainKey(itinerary: ScheduledGtfsProjectionInput): string {
 }
 
 /** Apply the production API projection before bounding the merged scheduled-feed pool. */
-export function projectScheduledGtfsCandidatePool(
-  itineraries: readonly ScheduledGtfsProjectionInput[],
+export function projectScheduledGtfsCandidatePool<T extends ScheduledGtfsProjectionInput>(
+  itineraries: readonly T[],
   maximumCandidates: number,
   strategies: readonly JourneyStrategy[],
-): BoundedJourneyCandidatePool<ScheduledGtfsCandidate> {
-  const projected: ScheduledGtfsCandidate[] = itineraries.map((itinerary) => ({
+): BoundedJourneyCandidatePool<ScheduledGtfsCandidate<T>> {
+  const projected: ScheduledGtfsCandidate<T>[] = itineraries.map((itinerary) => ({
     id: itinerary.id,
     diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
     durationSeconds: itinerary.durationSeconds,
