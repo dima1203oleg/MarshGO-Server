@@ -27,6 +27,27 @@ describe('Journey transfer feasibility', () => {
     assert.equal(result.connectionWindowEnd.getTime(), time(0).getTime() + 13 * 60_000);
   });
 
+  it('accepts the exact feasible boundary and rejects a departure one second earlier', () => {
+    const predictedArrivalAt = time(0);
+    const requiredSeconds = 2 * 60 + 60 + 5 * 60 + 3 * 60;
+    const exact = evaluateTransfer({
+      predictedArrivalAt, etaUncertaintySeconds: 2 * 60,
+      nextDepartureAt: new Date(predictedArrivalAt.getTime() + requiredSeconds * 1000),
+      walkingSeconds: 60, minimumTransferBufferSeconds: 5 * 60, boardingGraceSeconds: 3 * 60,
+    });
+    const oneSecondShort = evaluateTransfer({
+      predictedArrivalAt, etaUncertaintySeconds: 2 * 60,
+      nextDepartureAt: new Date(predictedArrivalAt.getTime() + (requiredSeconds - 1) * 1000),
+      walkingSeconds: 60, minimumTransferBufferSeconds: 5 * 60, boardingGraceSeconds: 3 * 60,
+    });
+
+    assert.equal(exact.requiredSeconds, requiredSeconds);
+    assert.equal(exact.slackSeconds, 0);
+    assert.equal(exact.feasible, true);
+    assert.equal(oneSecondShort.slackSeconds, -1);
+    assert.equal(oneSecondShort.feasible, false);
+  });
+
   it('rejects invalid uncertainty and negative transfer components', () => {
     assert.throws(() => evaluateTransfer({
       predictedArrivalAt: time(0), etaUncertaintySeconds: -1,
