@@ -2,9 +2,11 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
 import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
+import type { JourneyOption } from './types';
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
 import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
+import { paretoFrontier, scoreJourneys } from './scoring';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
@@ -162,6 +164,67 @@ export interface GtfsItinerary {
   transferMinimumBufferSeconds: number[];
   transferRuleMinimumSeconds: Array<number | null>;
   fare: ReturnType<typeof calculateGtfsItineraryFare>;
+}
+
+/**
+ * Retain route-chain candidates across the same objectives used by journey
+ * ranking. A fixed discovery-order cap can otherwise discard the cheapest or
+ * balanced itinerary before the response strategies see it.
+ */
+export function sampleGtfsRouteChainCandidates(
+  itineraries: readonly GtfsItinerary[], maximum = 8,
+): GtfsItinerary[] {
+  if (!Number.isInteger(maximum) || maximum < 1) throw new TypeError('route-chain sample maximum must be positive');
+  if (itineraries.length <= maximum) return [...itineraries];
+
+  const candidates = itineraries.map((itinerary) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+    itinerary,
+  } satisfies JourneyOption & { itinerary: GtfsItinerary }));
+  const ranked = (strategy: 'FASTEST' | 'CHEAPEST' | 'BALANCED') =>
+    scoreJourneys(candidates, strategy).map(({ journey }) => journey.itinerary);
+  const fastest = ranked('FASTEST');
+  const cheapest = candidates.filter((candidate) => candidate.priceMinor !== null)
+    .sort((a, b) => a.priceMinor! - b.priceMinor!
+      || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id))
+    .map((candidate) => candidate.itinerary);
+  const balanced = ranked('BALANCED');
+  const fewestTransfers = [...itineraries].sort((a, b) => a.transfers - b.transfers
+    || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+  const leastWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters
+    || a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id));
+  const balancedRank = new Map(balanced.map((candidate, index) => [candidate.id, index]));
+  const pareto = paretoFrontier(candidates).map(({ itinerary }) => itinerary)
+    .sort((a, b) => (balancedRank.get(a.id) ?? Number.MAX_SAFE_INTEGER)
+      - (balancedRank.get(b.id) ?? Number.MAX_SAFE_INTEGER) || a.id.localeCompare(b.id));
+  const objectives = [fastest, cheapest, balanced, fewestTransfers, leastWalking, pareto];
+  const selected = new Map<string, GtfsItinerary>();
+  // First preserve one candidate per objective, then distribute any remaining
+  // capacity round-robin. Overlapping winners consume a single slot.
+  for (const objective of objectives) {
+    const candidate = objective.find((item) => !selected.has(item.id));
+    if (candidate && selected.size < maximum) selected.set(candidate.id, candidate);
+  }
+  while (selected.size < maximum) {
+    let added = false;
+    for (const objective of objectives) {
+      const candidate = objective.find((item) => !selected.has(item.id));
+      if (!candidate) continue;
+      selected.set(candidate.id, candidate);
+      added = true;
+      if (selected.size === maximum) break;
+    }
+    if (!added) break;
+  }
+  return [...selected.values()];
 }
 
 export interface GtfsItinerarySearchResult {
@@ -1584,7 +1647,7 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   }
 
   const results = new Map<string, GtfsItinerary>();
-  const resultCountByRouteChain = new Map<string, number>();
+  const resultIdsByRouteChain = new Map<string, Set<string>>();
   const resultCountByLegCount = new Map<number, number>();
   const MAX_RESULTS_PER_ROUTE_CHAIN = 8;
   const maxTransitLegs = maximumTransfers + 1;
@@ -1656,14 +1719,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     const routeChain = path.map((segment, index) => index === 0 || path[index - 1].providerId !== segment.providerId
       || path[index - 1].routeId !== segment.routeId ? `${segment.providerId}:${segment.routeId}` : '')
       .filter(Boolean).join('>');
-    const routeChainCount = resultCountByRouteChain.get(routeChain) ?? 0;
     const legCount = resultCountByLegCount.get(path.length) ?? 0;
-    if (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || routeChainCount >= MAX_RESULTS_PER_ROUTE_CHAIN) {
-      candidateSamplingTruncated = true;
-      return;
-    }
-    if (results.size < MAX_SEARCH_RESULTS) {
-      results.set(id, {
+    const candidate: GtfsItinerary = {
       id, providerId: first.providerId,
       providerName: [...new Set(path.map((segment) => segment.providerName))].join(' + '),
       segments: path, departureAt, arrivalAt, durationSeconds,
@@ -1694,9 +1751,39 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
         departureAt: segment.departureAt,
         arrivalAt: segment.arrivalAt,
       }))),
-      });
-      resultCountByRouteChain.set(routeChain, routeChainCount + 1);
-      resultCountByLegCount.set(path.length, legCount + 1);
+    };
+    const routeChainIds = resultIdsByRouteChain.get(routeChain) ?? new Set<string>();
+    const existingRouteCandidates = [...routeChainIds].flatMap((existingId) => {
+      const existing = results.get(existingId);
+      return existing ? [existing] : [];
+    });
+    const sampledRouteCandidates = sampleGtfsRouteChainCandidates(
+      [...existingRouteCandidates, candidate], MAX_RESULTS_PER_ROUTE_CHAIN,
+    );
+    const sampledIds = new Set(sampledRouteCandidates.map((item) => item.id));
+    if (!sampledIds.has(candidate.id)) {
+      candidateSamplingTruncated = true;
+      return;
+    }
+    const removed = existingRouteCandidates.filter((item) => !sampledIds.has(item.id));
+    const replacesSameLeg = removed.some((item) => item.segments.length === path.length);
+    if ((legCount >= MAX_CANDIDATES_PER_LEG_COUNT && !replacesSameLeg)
+      || results.size - removed.length + 1 > MAX_SEARCH_RESULTS) {
+      candidateSamplingTruncated = true;
+      return;
+    }
+    for (const item of removed) {
+      results.delete(item.id);
+      routeChainIds.delete(item.id);
+      resultCountByLegCount.set(item.segments.length,
+        Math.max(0, (resultCountByLegCount.get(item.segments.length) ?? 1) - 1));
+    }
+    results.set(candidate.id, candidate);
+    routeChainIds.add(candidate.id);
+    resultIdsByRouteChain.set(routeChain, routeChainIds);
+    resultCountByLegCount.set(path.length, (resultCountByLegCount.get(path.length) ?? 0) + 1);
+    if (removed.length > 0 || existingRouteCandidates.length + 1 > sampledRouteCandidates.length) {
+      candidateSamplingTruncated = true;
     }
   };
 

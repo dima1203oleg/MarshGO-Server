@@ -9,7 +9,7 @@ function makeCandidate(
   durationSeconds: number,
   transfers: number,
   walkingMeters: number,
-  priceMinor: number,
+  priceMinor: number | null,
 ): GtfsItinerary {
   return {
     id,
@@ -28,7 +28,7 @@ function makeCandidate(
     transferInSeat: [],
     transferMinimumBufferSeconds: [],
     transferRuleMinimumSeconds: [],
-    fare: {
+    fare: priceMinor === null ? null : {
       priceMinor,
       currency: 'UAH',
       allocations: [],
@@ -107,6 +107,28 @@ test('adversarial route-chain candidate sampling preserves objective witnesses a
       `batch selection must retain objective witness ${witnessId}`,
     );
   }
+  for (const [strategy, winnerId] of [
+    ['FASTEST', fastestWinner], ['CHEAPEST', cheapestWinner], ['BALANCED', balancedWinner],
+  ] as const) {
+    assert.ok(batchSelected.some((item) => item.id === winnerId),
+      `${strategy} winner must remain available to the user-facing strategy ranking`);
+  }
+
+  // Tight budgets have an explicit deterministic priority: fastest, cheapest,
+  // then balanced before transfer/walking/Pareto diversity.
+  for (const [budget, expectedWinners] of [
+    [1, [fastestWinner]],
+    [2, [fastestWinner, cheapestWinner]],
+    [3, [fastestWinner, cheapestWinner, balancedWinner]],
+    [5, [...objectiveWitnesses]],
+  ] as const) {
+    const selected = sampleGtfsRouteChainCandidates(candidates, budget);
+    assert.equal(selected.length, budget, `budget ${budget} must be filled`);
+    assert.equal(new Set(selected.map((item) => item.id)).size, budget, `budget ${budget} must contain unique candidates`);
+    for (const winnerId of expectedWinners) {
+      assert.ok(selected.some((item) => item.id === winnerId), `budget ${budget} must preserve ${winnerId}`);
+    }
+  }
 
   // Incremental streaming selection helper
   const runIncremental = (order: readonly GtfsItinerary[]): GtfsItinerary[] => {
@@ -156,5 +178,41 @@ test('adversarial route-chain candidate sampling preserves objective witnesses a
         `incremental selection under ${label} must retain objective witness ${witnessId}`,
       );
     }
+  }
+});
+
+test('route-chain sampling handles overlapping winners and unknown fares at a tight budget', () => {
+  const candidates = [
+    makeCandidate('shared-fastest-cheapest', 1000, 3, 1500, 100),
+    makeCandidate('balanced-winner', 1200, 0, 0, 200),
+    makeCandidate('unknown-fare-decoy', 5000, 4, 2000, null),
+  ];
+  const scored = candidates.map((item) => ({
+    id: item.id,
+    durationSeconds: item.durationSeconds,
+    priceMinor: item.fare?.currency === 'UAH' ? item.fare.priceMinor : null,
+    transfers: item.transfers,
+    walkingMeters: item.walkingMeters,
+    reliability: null,
+    transferRisk: item.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+  }));
+  const fastestWinner = scoreJourneys(scored, 'FASTEST')[0]!.journey.id;
+  const cheapestWinner = scoreJourneys(scored, 'CHEAPEST')[0]!.journey.id;
+  const balancedWinner = scoreJourneys(scored, 'BALANCED')[0]!.journey.id;
+  assert.equal(fastestWinner, 'shared-fastest-cheapest');
+  assert.equal(cheapestWinner, 'shared-fastest-cheapest');
+  assert.equal(balancedWinner, 'balanced-winner');
+
+  const selected = sampleGtfsRouteChainCandidates(candidates, 2);
+  assert.equal(selected.length, 2);
+  assert.deepEqual(new Set(selected.map((item) => item.id)), new Set([fastestWinner, balancedWinner]));
+  assert.ok(!selected.some((item) => item.id === 'unknown-fare-decoy'),
+    'an unknown fare must not displace known strategy winners as a zero-cost route');
+  for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+    const winner = scoreJourneys(scored.filter((item) => selected.some((choice) => choice.id === item.id)), strategy)[0]!.journey.id;
+    const expected = strategy === 'FASTEST' ? fastestWinner : strategy === 'CHEAPEST' ? cheapestWinner : balancedWinner;
+    assert.equal(winner, expected, `${strategy} ranking of sampled results must preserve the visible winner`);
   }
 });
