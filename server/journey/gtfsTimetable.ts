@@ -2821,6 +2821,7 @@ export function findGtfsItinerariesWithStats(
         const evaluatedConnectorHubs = new Set<string>();
         const diverseConnectorProbeHubs = new Set<string>();
         let temporallyConnectsQueryEnds = false;
+        let connectsOneQueryFrontier = false;
         let bestConnector: { segment: RetainedGtfsSegment; arrivalAt: number } | undefined;
         let feasibleConnectorEvaluations = 0;
         let connectorScanCursor = 0;
@@ -2851,7 +2852,9 @@ export function findGtfsItinerariesWithStats(
           }
           if (!isDiverseConnectorProbe && bestConnector
             && candidate.arrivalAt.getTime() > bestConnector.arrivalAt) continue;
-          if (hasPriorEvent(candidate, minimumTransferBufferSeconds)) {
+          const connectsFromOriginFrontier = hasPriorEvent(candidate, minimumTransferBufferSeconds);
+          if (connectsFromOriginFrontier) {
+            connectsOneQueryFrontier = true;
             const onwardArrival = earliestQueryArrivalAfterSegment(candidate, minimumTransferBufferSeconds);
             if (onwardArrival !== null) {
               feasibleConnectorEvaluations++;
@@ -2874,6 +2877,12 @@ export function findGtfsItinerariesWithStats(
                 bestConnector = { segment: candidate, arrivalAt: onwardArrival };
               }
             }
+          } else if (hasNextEvent(candidate, minimumTransferBufferSeconds)) {
+            // A middle leg in a multi-transfer journey may only be reachable
+            // from the origin side, or may only feed the destination side.
+            // Keep that one-sided frontier evidence even when this segment
+            // cannot directly bridge both query frontiers on its own.
+            connectsOneQueryFrontier = true;
           }
         }
         overflowSegmentsByRoute.set(trip.routeId, overflow);
@@ -2902,8 +2911,9 @@ export function findGtfsItinerariesWithStats(
         const retentionPriorityTier = retentionTier === 0 ? 0
           : connectsOppositeQueryFrontier ? 1
             : temporallyConnectsQueryEnds ? 2
-              : retentionTier === 1 ? 3
-                : retentionTier === 2 ? 4 : 5;
+              : connectsOneQueryFrontier ? 3
+                : retentionTier === 1 ? 4
+                  : retentionTier === 2 ? 5 : 6;
         const routeCandidates = segmentsByRoute.get(trip.routeId) ?? [];
         // When a bounded route budget cannot retain every origin-serving trip,
         // prefer earlier arrivals at query-relevant corridor stops. A direct

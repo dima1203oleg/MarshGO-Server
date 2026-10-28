@@ -1530,9 +1530,10 @@ test('retains hash-ranked middle groups needed only by a four-leg chain under a 
   const targetTrace = trace.trips.find((trip) => trip.tripId === targetTripId);
   assert.ok(targetTrace, 'debug trace contains the target middle trip');
   assert.equal(targetTrace.retentionTier, 3, 'the middle trip is not an endpoint-serving trip');
-  assert.equal(targetTrace.retentionPriorityTier, 5, 'without direct query-frontier feasibility, it falls to hash ranking');
-  assert.ok(!bounded.graphs[0]!.segments.some((segment) => segment.journey.tripId === targetTripId),
-    'the target middle trip is missing from the bounded graph after the hash decoy replaces it');
+  assert.equal(targetTrace.retentionPriorityTier, 3,
+    'one-sided origin-frontier feasibility ranks this multi-hop middle trip ahead of hash-only groups');
+  assert.ok(bounded.graphs[0]!.segments.some((segment) => segment.journey.tripId === targetTripId),
+    'the bounded graph keeps the query-reachable middle trip instead of the hash-only decoy');
 
   const reversed = structuredClone(timetable);
   reversed.trips = new Map([...reversed.trips].reverse());
