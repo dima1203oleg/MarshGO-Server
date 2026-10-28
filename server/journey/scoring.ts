@@ -172,8 +172,15 @@ export function scoreJourneys<T extends JourneyOption>(
     comfortPenalty: (journey) => journey.comfort === null ? 0.5 : 1 - journey.comfort,
   };
   const ranges = Object.fromEntries(Object.entries(metrics).map(([key, valueOf]) => {
-    const values = journeys.map(valueOf);
-    return [key, { min: Math.min(...values), max: Math.max(...values) }];
+    // Unknown fares are incomparable with known fares. Keep them out of the
+    // known-fare range so one unknown value cannot flatten all real price deltas.
+    const values = key === 'priceMinor'
+      ? journeys.filter((journey) => journey.priceMinor !== null).map(valueOf)
+      : journeys.map(valueOf);
+    return [key, {
+      min: values.length > 0 ? Math.min(...values) : 0,
+      max: values.length > 0 ? Math.max(...values) : 0,
+    }];
   })) as Record<Metric, { min: number; max: number }>;
   const combinedWeights = { ...JOURNEY_SCORE_WEIGHTS[strategy], ...weights };
 
@@ -192,7 +199,10 @@ export function scoreJourneys<T extends JourneyOption>(
           : metric === 'transfers' ? 'transfers'
             : metric === 'walkingMeters' ? 'walking'
               : metric === 'risk' ? 'risk' : 'comfort';
-      return sum + normalized(value, ranges[metric].min, ranges[metric].max) * combinedWeights[weightKey];
+      const normalizedValue = metric === 'priceMinor' && journey.priceMinor === null
+        ? 1
+        : normalized(value, ranges[metric].min, ranges[metric].max);
+      return sum + normalizedValue * combinedWeights[weightKey];
     }, 0);
     return { journey, score, strategy };
   });
@@ -205,6 +215,11 @@ export function scoreJourneys<T extends JourneyOption>(
       if (a.journey.priceMinor !== null && b.journey.priceMinor === null) return -1;
       if (a.journey.priceMinor !== null && b.journey.priceMinor !== null && a.journey.priceMinor !== b.journey.priceMinor) {
         return a.journey.priceMinor - b.journey.priceMinor;
+      }
+      // When fares are identical, do not label an extra transfer as cheaper.
+      if (a.journey.priceMinor !== null && b.journey.priceMinor !== null
+        && a.journey.transfers !== b.journey.transfers) {
+        return a.journey.transfers - b.journey.transfers;
       }
     }
     return a.score - b.score || compareStableId(a.journey.id, b.journey.id);

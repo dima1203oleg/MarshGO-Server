@@ -45,7 +45,7 @@ export interface MicromobilityRouteEstimate {
   durationSeconds: number;
   distanceMeters: number;
   walkingMeters: number;
-  priceMinor: null;
+  priceMinor: number | null;
   availabilityStatus: 'UNKNOWN';
   transfers: number;
   legs: RentalRouteLeg[];
@@ -61,6 +61,18 @@ export interface RouteEstimateOptions {
   maxCandidates?: number;
   allowedProviderIds?: readonly string[];
   blockedProviderIds?: readonly string[];
+}
+
+/** Only a fully known rental (and, when present, transit) fare is comparable. */
+export function completeMicromobilityFareMinor(
+  rentalFareMinor: number | null,
+  transitFareMinor?: number | null,
+): number | null {
+  if (rentalFareMinor === null || !Number.isSafeInteger(rentalFareMinor) || rentalFareMinor < 0
+    || transitFareMinor === null
+    || transitFareMinor !== undefined && (!Number.isSafeInteger(transitFareMinor) || transitFareMinor < 0)) return null;
+  const total = rentalFareMinor + (transitFareMinor ?? 0);
+  return Number.isSafeInteger(total) && total >= 0 ? total : null;
 }
 
 const EARTH_RADIUS_METERS = 6_371_000;

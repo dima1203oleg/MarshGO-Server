@@ -11,8 +11,13 @@ on:
       - '.github/workflows/gtfs-lviv-replay.yml'
   workflow_dispatch:
     inputs:
+      candidate_sha:
+        description: Optional exact Server commit to compare; defaults to the workflow ref
+        required: false
+        type: string
+        default: ''
       baseline_sha:
-        description: Baseline Server commit to compare with the dispatched ref
+        description: Exact baseline Server commit to compare with the candidate SHA
         required: true
         default: ee60e4c7ffeb5645e1dc13f472b47fd43f0e838a
       origin:
@@ -25,8 +30,33 @@ on:
         required: false
         type: string
         default: 24.0175835,49.8013165
+      departure_start_utc:
+        description: Inclusive UTC start of the replay departure window (ISO 8601 ending in Z)
+        required: false
+        type: string
+        default: '2026-10-23T05:00:00.000Z'
+      departure_window_minutes:
+        description: Width of the replay departure window, from 1 to 180 minutes
+        required: false
+        type: string
+        default: '30'
       trace_trip_chains:
         description: Optional pipe-separated trip-chain IDs for debug-only ranked-pool/page presence checks
+        required: false
+        type: string
+        default: ''
+      trace_route_ids:
+        description: Optional comma-separated route IDs for selected trip-group diagnostics
+        required: false
+        type: string
+        default: ''
+      trace_trip_ids:
+        description: Optional comma-separated trip IDs for exact retained segment diagnostics
+        required: false
+        type: string
+        default: ''
+      trace_candidate_trip_ids:
+        description: Optional comma-separated trip IDs for bounded candidate-retention diagnostics (max 2 trips, 64 rows)
         required: false
         type: string
         default: ''
@@ -44,17 +74,22 @@ jobs:
     timeout-minutes: 30
     env:
       BASELINE_SHA: ${{ inputs.baseline_sha || 'ee60e4c7ffeb5645e1dc13f472b47fd43f0e838a' }}
-      CANDIDATE_SHA: ${{ github.sha }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
       GTFS_REPLAY_EXPECTED_SHA256: bb4ac0ce9127b4967ad889379f523b04b84a0bb033814aa8c844526b42078164
       GTFS_REPLAY_URL: https://track.ua-gis.com/gtfs/lviv/static.zip
       GTFS_REPLAY_ORIGIN: ${{ inputs.origin || '24.008217,49.864885' }}
       GTFS_REPLAY_DESTINATION: ${{ inputs.destination || '24.0175835,49.8013165' }}
+      GTFS_REPLAY_DEPARTURE_START_UTC: ${{ inputs.departure_start_utc || '2026-10-23T05:00:00.000Z' }}
+      GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES: ${{ inputs.departure_window_minutes || '30' }}
       GTFS_REPLAY_TRACE_TRIP_CHAINS: ${{ inputs.trace_trip_chains || '' }}
+      GTFS_REPLAY_TRACE_ROUTE_IDS: ${{ inputs.trace_route_ids || '' }}
+      GTFS_REPLAY_TRACE_TRIP_IDS: ${{ inputs.trace_trip_ids || '' }}
+      GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS: ${{ inputs.trace_candidate_trip_ids || '' }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.candidate_sha || github.sha }}
           path: candidate
       - name: Checkout baseline
         uses: actions/checkout@v4
@@ -77,6 +112,12 @@ jobs:
           curl --fail --location --silent --show-error --max-time 120 "$GTFS_REPLAY_URL" --output "$FEED_PATH"
           printf '%s  %s\n' "$GTFS_REPLAY_EXPECTED_SHA256" "$FEED_PATH" | sha256sum --check --status
           echo "Verified publisher archive SHA-256: $GTFS_REPLAY_EXPECTED_SHA256"
+      - name: Verify checked out revisions
+        run: |
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C baseline rev-parse HEAD)" = "$BASELINE_SHA"
+          echo "Candidate: $CANDIDATE_SHA"
+          echo "Baseline: $BASELINE_SHA"
       - name: Run three serialized paired replays
         env:
           FEED_PATH: ${{ runner.temp }}/marshgo-lviv-static.zip
@@ -97,6 +138,11 @@ jobs:
                 BENCH_ITER="$iteration" \
                 GTFS_REPLAY_ZIP="$FEED_PATH" \
                 GTFS_REPLAY_EXPECTED_SHA256="$GTFS_REPLAY_EXPECTED_SHA256" \
+                GTFS_REPLAY_DEPARTURE_START_UTC="$GTFS_REPLAY_DEPARTURE_START_UTC" \
+                GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES="$GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES" \
+                GTFS_REPLAY_TRACE_ROUTE_IDS="$GTFS_REPLAY_TRACE_ROUTE_IDS" \
+                GTFS_REPLAY_TRACE_TRIP_IDS="$GTFS_REPLAY_TRACE_TRIP_IDS" \
+                GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS="$GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS" \
                 ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
               ) | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))' >> replay-results.jsonl
             done

@@ -18,8 +18,8 @@ if set(by_revision) != expected_revisions or any(len(items) != 3 for items in by
     raise SystemExit("Expected exactly three serialized runs for baseline and candidate.")
 
 stable_fields = (
-    "origin", "destination", "idHash", "uniqueTripChains", "uniqueRouteChains", "strategyCandidates",
-    "tripChainIds", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
+    "origin", "destination", "departureWindow", "idHash", "uniqueTripChains", "uniqueRouteChains", "rankingMethod", "rankingScope", "availableStrategies", "strategyCandidates",
+    "tripChainIds", "strategyWinnerDetails", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
 )
 for revision, items in by_revision.items():
     for field in stable_fields:
@@ -36,21 +36,61 @@ baseline_median = statistics.median(item["searchMs"] for item in baseline)
 candidate_median = statistics.median(item["searchMs"] for item in candidate)
 delta = ((candidate_median / baseline_median) - 1) * 100 if baseline_median else 0.0
 
+
+def stage_duration_samples(items, stage, previous_stage=None):
+    samples = []
+    for item in items:
+        timings = item.get("searchTimingsByStage", {})
+        elapsed = timings.get(stage, {}).get("elapsedMs")
+        previous = 0 if previous_stage is None else timings.get(previous_stage, {}).get("elapsedMs")
+        if not isinstance(elapsed, (int, float)) or not isinstance(previous, (int, float)) or elapsed < previous:
+            return None
+        samples.append(elapsed - previous)
+    return samples
+
 print("# Frozen Lviv GTFS replay")
 print()
 print(f"- Feed SHA-256: `{baseline[0]['archiveSha256']}`")
 print(f"- Baseline SHA: `{baseline[0]['revision']}` (three repeat-stable runs)")
 print(f"- Candidate SHA: `{candidate[0]['revision']}` (three repeat-stable runs)")
 print(f"- OD: `{baseline[0]['origin']}` → `{baseline[0]['destination']}`")
+print(f"- Departure window (UTC): `{baseline[0]['departureWindow'][0]}` → `{baseline[0]['departureWindow'][1]}`")
 print(f"- Ordered result identity parity: **{'YES' if same_hash else 'NO'}**")
 print(f"- FASTEST/CHEAPEST/BALANCED winner parity: **{'YES' if same_winners else 'NO'}**")
+for strategy in ("fastest", "cheapest", "balanced"):
+    before = baseline[0].get("strategyWinnerDetails", {}).get(strategy)
+    after = candidate[0].get("strategyWinnerDetails", {}).get(strategy)
+    if not before or not after:
+        print(f"- `{strategy.upper()}` winner metrics: unavailable in one or both artifacts")
+        continue
+
+    def describe_winner(winner):
+        fare = winner.get("fare")
+        fare_text = "unknown fare" if not fare or fare.get("priceMinor") is None else (
+            f"{fare['priceMinor']} {fare.get('currency') or 'unknown currency'} minor units"
+        )
+        return (
+            f"`{winner.get('id')}`; arrives `{winner.get('arrivalAt')}`; "
+            f"{winner.get('transfers')} transfers; {winner.get('walkingMeters')} m walking; {fare_text}"
+        )
+
+    print(f"- `{strategy.upper()}` winner metrics: baseline {describe_winner(before)} → candidate {describe_winner(after)}")
 print(f"- Added trip-chain identities: `{json.dumps(sorted(candidate_chains - baseline_chains))}`")
 print(f"- Removed trip-chain identities: `{json.dumps(sorted(baseline_chains - candidate_chains))}`")
 print(f"- Median search time: {baseline_median:.2f} ms → {candidate_median:.2f} ms ({delta:+.2f}%)")
 print(f"- Peak sampled RSS: {max(item['rssBytes'] for item in baseline) / 1_048_576:.1f} MiB → {max(item['rssBytes'] for item in candidate) / 1_048_576:.1f} MiB")
 print(f"- Truncated: baseline `{baseline[0]['searchTruncated']}` / candidate `{candidate[0]['searchTruncated']}`; graph truncated: baseline `{baseline[0]['candidateGraphTruncated']}` / candidate `{candidate[0]['candidateGraphTruncated']}`")
 print(f"- Truncation causes: baseline `{json.dumps(baseline[0]['truncation'], sort_keys=True)}`; candidate `{json.dumps(candidate[0]['truncation'], sort_keys=True)}`")
-for stage in ("segments-built", "reachability-built", "itineraries-ranked"):
+for stage, previous_stage in (("segments-built", None), ("reachability-built", "segments-built"), ("itineraries-ranked", "reachability-built")):
     print(f"- `{stage}` counters: baseline `{json.dumps(baseline[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`; candidate `{json.dumps(candidate[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`")
+    baseline_times = stage_duration_samples(baseline, stage, previous_stage)
+    candidate_times = stage_duration_samples(candidate, stage, previous_stage)
+    if baseline_times is not None and candidate_times is not None:
+        baseline_stage_median = statistics.median(baseline_times)
+        candidate_stage_median = statistics.median(candidate_times)
+        stage_delta = ((candidate_stage_median / baseline_stage_median) - 1) * 100 if baseline_stage_median else 0.0
+        print(f"- `{stage}` median stage duration: {baseline_stage_median:.2f} ms → {candidate_stage_median:.2f} ms ({stage_delta:+.2f}%); samples baseline `{baseline_times}` / candidate `{candidate_times}`")
+    else:
+        print(f"- `{stage}` median stage duration: unavailable (replay artifact lacks valid cumulative timing samples)")
 print()
 print("This is one static Lviv OD and a diagnostic comparison, not a live GPS, realtime, staging, production, or complete-routing acceptance test.")

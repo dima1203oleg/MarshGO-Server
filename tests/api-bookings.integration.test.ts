@@ -302,6 +302,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         blockedProviders: string[];
         journeys: Array<{ offerId: string | null; origin: { name: string; coordinates: [number, number] }; destination: { name: string; coordinates: [number, number] }; legs: Array<{
           mode: string; transportType?: string; source?: string; providerId?: string; routeId?: string; headsign?: string;
+          routeGeometry?: [number, number][];
           origin?: { name: string; coordinates: [number, number] };
           destination?: { name: string; coordinates: [number, number] };
           stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string }>;
@@ -324,7 +325,16 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       for (const journey of modeData.journeys) {
         assert.deepEqual(journey.origin, modeSearch.origin, 'the journey keeps the requested origin instead of the first nearby transport stop');
         assert.deepEqual(journey.destination, modeSearch.destination, 'the journey keeps the requested destination instead of the last nearby transport stop');
-        if (journey.offerId) assert.equal(transportType, 'carpool', `${transportType} must not leak a carpool offer`);
+        if (journey.offerId) {
+          assert.equal(transportType, 'carpool', `${transportType} must not leak a carpool offer`);
+          const carpoolLeg = journey.legs.find((leg) => leg.mode === 'COMMUNITY');
+          assert.ok((carpoolLeg?.routeGeometry?.length ?? 0) >= 2,
+            'direct carpool results preserve their published road geometry for route-map rendering');
+          assert.deepEqual(carpoolLeg!.routeGeometry![0], carpoolLeg!.origin?.coordinates,
+            'direct carpool route geometry starts at the published pickup');
+          assert.deepEqual(carpoolLeg!.routeGeometry!.at(-1), carpoolLeg!.destination?.coordinates,
+            'direct carpool route geometry ends at the published dropoff');
+        }
         for (const leg of journey.legs) {
           if (leg.mode === 'WALK') continue;
           if (leg.mode === 'COMMUNITY') {
@@ -505,7 +515,9 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.equal(composedSearch.status, 200);
       const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partial: boolean; partialReasons: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated: boolean; candidateGenerationTruncated: boolean; resultSamplingTruncated: boolean; gtfsTruncation: Record<string, boolean>; journeys: Array<{
         id: string; offerId: string | null; source?: string; state: string;
-        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string }>;
+        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string;
+          driver?: { id: string; name: string; averageRating: number | null; reviewCount: number } | null;
+          vehicle?: { id: string; make: string; model: string } | null }>;
       }> } });
       const composedData = composedPayload.data;
       assert.equal(typeof composedData.partial, 'boolean');
@@ -526,6 +538,9 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.deepEqual(composedJourney.legs.map((leg) => leg.mode), ['BUS','COMMUNITY','TRAM']);
       assert.equal(composedJourney.legs[1]!.offerId, ids.transitCompositionOffer);
       assert.equal(composedJourney.legs[1]!.availabilityStatus, 'AVAILABLE');
+      assert.equal(composedJourney.legs[1]!.driver?.id, ids.driver, 'community-transit response follows the canonical driver contract');
+      assert.ok(composedJourney.legs[1]!.driver?.name, 'published driver name is exposed for the rideshare leg');
+      assert.equal(composedJourney.legs[1]!.vehicle?.id, ids.vehicle, 'rideshare leg exposes its canonical vehicle summary');
 
       const transferLimitedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },

@@ -41,6 +41,16 @@ describe('Journey strategy scoring', () => {
       'FASTEST remains strictly ordered by real duration');
   });
 
+  it('prefers a direct BALANCED route when one transfer saves only five actual minutes', () => {
+    const direct: JourneyOption = { ...candidates[0]!, id: 'direct', durationSeconds: 3_000,
+      priceMinor: 10_000, transfers: 0 };
+    const connection: JourneyOption = { ...candidates[0]!, id: 'one-transfer', durationSeconds: 2_700,
+      priceMinor: 10_000, transfers: 1 };
+
+    assert.equal(scoreJourneys([direct, connection], 'BALANCED')[0]?.journey.id, 'direct');
+    assert.equal(scoreJourneys([direct, connection], 'FASTEST')[0]?.journey.id, 'one-transfer');
+  });
+
   it('keeps the Pareto frontier and never treats an unknown fare as zero', () => {
     const fast = { ...candidates[2], id: 'fast' };
     const cheap = { ...candidates[0], id: 'cheap' };
@@ -67,6 +77,24 @@ describe('Journey strategy scoring', () => {
     const unknown = { ...candidates[0], id: 'unknown-comfort', comfort: null };
     const measured = { ...candidates[0], id: 'measured-comfort', comfort: 0.1 };
     assert.deepEqual(paretoFrontier([unknown, measured]).map((journey) => journey.id).sort(), ['measured-comfort', 'unknown-comfort']);
+  });
+
+  it('preserves known-fare differences in BALANCED when unknown-fare routes are present', () => {
+    const knownCheap: JourneyOption = {
+      ...candidates[0]!, id: 'known-cheap', durationSeconds: 1000, priceMinor: 1000,
+      transfers: 0, walkingMeters: 0, reliability: 1, transferRisk: 0, comfort: null,
+    };
+    const knownExpensiveAndOneSecondFaster: JourneyOption = {
+      ...knownCheap, id: 'known-expensive', durationSeconds: 999, priceMinor: 100_000,
+    };
+    const unknownFare: JourneyOption = {
+      ...knownCheap, id: 'unknown-fare', durationSeconds: 5000, priceMinor: null,
+    };
+
+    assert.equal(
+      selectStrategyRecommendations([knownCheap, knownExpensiveAndOneSecondFaster, unknownFare], ['BALANCED'])[0]?.journey.id,
+      'known-cheap',
+    );
   });
 
   it('exposes one winner per strategy and groups an identical winner across tabs', () => {
@@ -122,6 +150,19 @@ describe('Journey strategy scoring', () => {
     assert.equal(recommendations.length, 2);
     assert.equal(recommendations.find((item) => item.strategy === 'FASTEST')?.journey.id, 'same-bus-fast');
     assert.equal(recommendations.find((item) => item.strategy === 'CHEAPEST')?.journey.id, 'same-bus-cheap');
+  });
+
+  it('prefers fewer transfers for CHEAPEST when fares are equal', () => {
+    const direct: JourneyOption = {
+      ...candidates[0]!, id: 'same-fare-direct', durationSeconds: 3600, priceMinor: 2300,
+      transfers: 0, walkingMeters: 700, legs: [{ mode: 'BUS' }],
+    };
+    const connection: JourneyOption = {
+      ...candidates[0]!, id: 'same-fare-faster-connection', durationSeconds: 2100, priceMinor: 2300,
+      transfers: 1, walkingMeters: 646, legs: [{ mode: 'BUS' }, { mode: 'BUS' }],
+    };
+
+    assert.equal(scoreJourneys([connection, direct], 'CHEAPEST')[0]?.journey.id, 'same-fare-direct');
   });
 
   it('keeps FASTEST and CHEAPEST strict across direct and chained alternatives', () => {

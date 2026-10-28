@@ -23,6 +23,7 @@ import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNE
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { toRankedGtfsItinerary } from './journey/gtfsRanking';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
@@ -42,7 +43,7 @@ import { getTransportFareCatalog } from './mobility/transportTariffs';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
-import { buildBicycleRouteEstimates, buildScooterRouteEstimates, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
+import { buildBicycleRouteEstimates, buildScooterRouteEstimates, completeMicromobilityFareMinor, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
 import { memoizeRequestSearch } from './journey/requestSearchMemo';
 import { buildMicromobilityGeofenceFeatures, buildMicromobilityPointFeatures, buildStaticRentalPointFeature } from './mobility/micromobilityFeatures';
 import { buildKiwitaxiAffiliateUrl, intuiTravelStatus, kiwitaxiStatus } from './mobility/transferAdapters';
@@ -2978,7 +2979,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const arrivalAt = microPosition === 'before-transit' && itinerary ? itinerary.arrivalAt : estimate.arrivalAt;
     const departureAt = microPosition === 'after-transit' && itinerary ? itinerary.departureAt : search.departureAt;
     const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
-    const priceMinor = itinerary?.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
+    const transitFareMinor = itinerary
+      ? itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null
+      : undefined;
+    const priceMinor = completeMicromobilityFareMinor(estimate.priceMinor, transitFareMinor);
     // Micromobility prices are not available as a complete rental quote yet.
     // A transit fare on one leg is only a partial subtotal, never the journey total.
     hasUnpricedMicromobilityCandidates = true;
@@ -3247,39 +3251,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...micromobilityCandidates,
   ];
   scheduledCandidates = selectGtfsCandidatesForCrossProviderSearch(scheduledCandidates, 100, crossProviderRankingContext);
-  const transitRouteChainKey = (itinerary: GtfsItinerary) => {
-    const routes: string[] = [];
-    for (const segment of itinerary.segments) {
-      const key = `${segment.providerId}:${segment.routeId}`;
-      if (routes.at(-1) !== key) routes.push(key);
-    }
-    return routes.join('>');
-  };
   const rankedCandidates = [
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
     ...micromobilityCandidates.map((candidate) => ({ ...candidate })),
-    ...scheduledCandidates.map((itinerary) => ({
-      id: itinerary.id,
-      diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
-      durationSeconds: itinerary.durationSeconds,
-      priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
-      transfers: itinerary.transfers,
-      walkingMeters: itinerary.walkingMeters,
-      reliability: null,
-      transferRisk: itinerary.transfers ? 0.3 : 0,
-      comfort: null,
-      legs: [
-        ...(itinerary.segments[0].distanceToOriginStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
-        ...itinerary.segments.flatMap((segment, index) => [
-          ...(index > 0 && itinerary.transferWalkingMeters[index - 1] > 0 ? [{ mode: 'WALK' as const }] : []),
-          { mode: segment.mode, providerId: segment.providerId },
-        ]),
-        ...(itinerary.segments.at(-1)!.distanceFromDestinationStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
-      ],
-      kind: 'gtfs' as const,
-      itinerary,
-    })),
+    ...scheduledCandidates.map(toRankedGtfsItinerary),
   ];
   const availableStrategies = strategiesWithComparablePrices(rankedCandidates, strategies);
   const alternativeLimitPerStrategy = 12;
@@ -3606,6 +3582,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const prefix = composition.prefix as SearchItinerary | null;
         const suffix = composition.suffix as SearchItinerary | null;
         if (prefix) await insertTransitPath(prefix, search.origin, offer.origin);
+        const driverName = typeof offer.metadata.driverName === 'string' ? offer.metadata.driverName.trim() : '';
+        const driverRating = typeof offer.metadata.rating === 'number' && Number.isFinite(offer.metadata.rating)
+          ? offer.metadata.rating : null;
+        const driverReviewCount = typeof offer.metadata.reviewCount === 'number'
+          && Number.isSafeInteger(offer.metadata.reviewCount) && offer.metadata.reviewCount >= 0
+          ? offer.metadata.reviewCount : 0;
+        const vehicleId = typeof offer.metadata.vehicleId === 'string' ? offer.metadata.vehicleId : '';
+        const vehicleMake = typeof offer.metadata.vehicleMake === 'string' ? offer.metadata.vehicleMake.trim() : '';
+        const vehicleModel = typeof offer.metadata.vehicleModel === 'string' ? offer.metadata.vehicleModel.trim() : '';
         const communityPriceMinor = offer.pricePerSeatMinor * search.passengers;
         const safeCommunityPriceMinor = Number.isSafeInteger(communityPriceMinor) && communityPriceMinor >= 0 ? communityPriceMinor : null;
         const communityInserted = await client.query<{ id: string }>(
@@ -3628,7 +3613,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           priceStatus: offer.currency === 'UAH' && safeCommunityPriceMinor !== null ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'AVAILABLE',
           source: 'community-offer', routeGeometry: offer.routeGeometry, lastUpdatedAt: offer.snapshotAt,
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshotAt.getTime()) / 1000)),
-          liveStatus: 'SCHEDULED', availableSeats: offer.availableSeats, driver: offer.metadata });
+          liveStatus: 'SCHEDULED', availableSeats: offer.availableSeats,
+          driver: driverName ? { id: offer.driverId, name: driverName, averageRating: driverRating, reviewCount: driverReviewCount } : null,
+          vehicle: vehicleId && vehicleMake && vehicleModel ? { id: vehicleId, make: vehicleMake, model: vehicleModel } : null });
         if (suffix) await insertTransitPath(suffix, offer.destination, search.destination);
         if (firstServiceLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstServiceLegId]);
         journeys.push({ id: journeyId, offerId: offer.id, origin: search.origin, destination: search.destination, strategy: representative.strategy,
@@ -3643,6 +3630,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       }
       if (candidate.kind !== 'community') continue;
       const offer = candidate.offer;
+      const routeGeometry = parseOfferGeometry(offer.route_geojson);
       const stored = await client.query<{ id: string }>(
         `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
          VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$11,$11,$11,$12,0,0,NULL,NULL)
@@ -3673,7 +3661,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           candidate.totalPriceMinor, offer.currency, offer.offer_id, offer.snapshot_at,
           JSON.stringify({ driverId: offer.driver_id, driverName: offer.driver_name, vehicleId: offer.vehicle_id,
             vehicleMake: offer.vehicle_make, vehicleModel: offer.vehicle_model, rating: offer.average_rating,
-            reviewCount: offer.review_count, availableSeatsAtSearch: offer.available_seats, offerCreatedAt: offer.created_at })],
+            reviewCount: offer.review_count, availableSeatsAtSearch: offer.available_seats, offerCreatedAt: offer.created_at,
+            ...(routeGeometry ? { routeGeometry } : {}) })],
       );
       await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, leg.rows[0].id]);
       journeys.push({
@@ -3692,6 +3681,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           distanceMeters: offer.distance_m, priceMinor: candidate.totalPriceMinor, priceStatus: 'ESTIMATED',
           availabilityStatus: 'AVAILABLE', source: 'community-offer', lastUpdatedAt: offer.snapshot_at,
           transportType: 'carpool', liveStatus: 'SCHEDULED',
+          ...(routeGeometry ? { routeGeometry } : {}),
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshot_at.getTime()) / 1000)),
           driver: { id: offer.driver_id, name: offer.driver_name,
             averageRating: offer.average_rating === null ? null : Number(offer.average_rating), reviewCount: offer.review_count },

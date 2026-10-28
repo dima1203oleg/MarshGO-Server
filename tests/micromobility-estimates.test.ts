@@ -3,10 +3,19 @@ import assert from 'node:assert/strict';
 import {
   buildBicycleRouteEstimates,
   buildScooterRouteEstimates,
+  completeMicromobilityFareMinor,
   type GeofenceSnapshotForRouting,
   type RentalRouteNetwork,
   type RentalRoutePoint,
 } from '../server/journey/micromobilityEstimates';
+
+test('micromobility journey fare stays unknown unless the complete rental fare is known', () => {
+  assert.equal(completeMicromobilityFareMinor(null), null, 'a rental-only estimate has no confirmed rental fare');
+  assert.equal(completeMicromobilityFareMinor(null, 2_300), null, 'a known transit subtotal cannot price a journey with an unknown rental');
+  assert.equal(completeMicromobilityFareMinor(1_200, null), null, 'an unknown transit fare keeps a composed journey total unknown');
+  assert.equal(completeMicromobilityFareMinor(1_200, 2_300), 3_500, 'complete known rental and transit fares are combined');
+  assert.equal(completeMicromobilityFareMinor(Number.MAX_SAFE_INTEGER, 1), null, 'overflow cannot become a comparable fare');
+});
 
 const departureAt = new Date('2026-10-16T08:00:00+03:00');
 const bicycleNetwork: RentalRouteNetwork = {
