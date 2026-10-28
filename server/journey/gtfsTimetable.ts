@@ -3731,6 +3731,7 @@ export function findGtfsItinerariesWithStats(
   // across first-leg route groups: a dense early route cannot spend the whole
   // budget before later lines contribute candidates to fastest/cheapest/balanced.
   let searchSteps = 0;
+  const searchStepsByDepthPass = debugSearch ? new Map<number, { paths: number; children: number }>() : undefined;
   // Dense urban feeds can require hundreds of thousands of bounded cursor
   // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
   // but do not cut off ordinary city results at the first-route frontier.
@@ -3893,6 +3894,11 @@ export function findGtfsItinerariesWithStats(
     queue.firstLegIndex < queue.firstLegs.length || queue.workIndex < queue.work.length);
   const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number) => {
     searchSteps++;
+    if (searchStepsByDepthPass) {
+      const counts = searchStepsByDepthPass.get(maximumLegsForPass) ?? { paths: 0, children: 0 };
+      counts.paths++;
+      searchStepsByDepthPass.set(maximumLegsForPass, counts);
+    }
     const last = path.at(-1)!;
     if (destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
       addPath(path, maximumLegsForPass);
@@ -3916,6 +3922,12 @@ export function findGtfsItinerariesWithStats(
   };
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue) => {
     searchSteps++;
+    if (searchStepsByDepthPass) {
+      const maximumLegsForPass = work.path.length + work.remainingLegs;
+      const counts = searchStepsByDepthPass.get(maximumLegsForPass) ?? { paths: 0, children: 0 };
+      counts.children++;
+      searchStepsByDepthPass.set(maximumLegsForPass, counts);
+    }
     const next = work.choices[work.nextIndex++];
     if (next.departureAt.getTime() <= work.latestNext
       && reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id)
@@ -4078,6 +4090,8 @@ export function findGtfsItinerariesWithStats(
     }
   }
   debugStage('itineraries-ranked', { searchSteps, firstLegs: firstLegs.length, candidateResults: rankedResults.length,
+    ...(searchStepsByDepthPass ? { searchStepsByDepthPass: JSON.stringify(Object.fromEntries(
+      [...searchStepsByDepthPass].sort(([left], [right]) => left - right))) } : {}),
     ...Object.fromEntries(Array.from({ length: maxTransitLegs }, (_, index) =>
       [`candidatesWith${index + 1}Legs`, resultCountByLegCount.get(index + 1) ?? 0])),
     returnedByLegCount: JSON.stringify(itineraries.reduce<Record<number, number>>((counts, itinerary) => {

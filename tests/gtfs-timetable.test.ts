@@ -549,8 +549,8 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
   console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
   try {
-    findGtfsItinerariesWithStats(feed(), {
-      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+    findGtfsItinerariesWithStats(connectingFeed(), {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 1,
     });
   } finally {
     console.info = originalInfo;
@@ -579,6 +579,10 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.equal(typeof graph.reachableStopSetCacheHits, 'number');
   assert.equal(typeof ranked.searchStepLimit, 'number');
   assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
+  const depthCounts = JSON.parse(String(ranked.searchStepsByDepthPass)) as Record<string, { paths: number; children: number }>;
+  assert.ok(depthCounts['1'] && depthCounts['2'], 'each permitted maximum leg count is measured separately');
+  assert.equal(Object.values(depthCounts).reduce((sum, counts) => sum + counts.paths + counts.children, 0), ranked.searchSteps,
+    'per-depth path and child work exactly accounts for the existing searchSteps counter');
   assert.equal(ranked.debugTripChainPresence, undefined, 'exact graph tracing stays absent without target IDs');
 });
 
