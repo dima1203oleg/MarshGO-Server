@@ -216,6 +216,11 @@ export function scoreJourneys<T extends JourneyOption>(
       if (a.journey.priceMinor !== null && b.journey.priceMinor !== null && a.journey.priceMinor !== b.journey.priceMinor) {
         return a.journey.priceMinor - b.journey.priceMinor;
       }
+      // When fares are identical, do not label an extra transfer as cheaper.
+      if (a.journey.priceMinor !== null && b.journey.priceMinor !== null
+        && a.journey.transfers !== b.journey.transfers) {
+        return a.journey.transfers - b.journey.transfers;
+      }
     }
     return a.score - b.score || compareStableId(a.journey.id, b.journey.id);
   });

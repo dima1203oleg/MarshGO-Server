@@ -152,6 +152,19 @@ describe('Journey strategy scoring', () => {
     assert.equal(recommendations.find((item) => item.strategy === 'CHEAPEST')?.journey.id, 'same-bus-cheap');
   });
 
+  it('prefers fewer transfers for CHEAPEST when fares are equal', () => {
+    const direct: JourneyOption = {
+      ...candidates[0]!, id: 'same-fare-direct', durationSeconds: 3600, priceMinor: 2300,
+      transfers: 0, walkingMeters: 700, legs: [{ mode: 'BUS' }],
+    };
+    const connection: JourneyOption = {
+      ...candidates[0]!, id: 'same-fare-faster-connection', durationSeconds: 2100, priceMinor: 2300,
+      transfers: 1, walkingMeters: 646, legs: [{ mode: 'BUS' }, { mode: 'BUS' }],
+    };
+
+    assert.equal(scoreJourneys([connection, direct], 'CHEAPEST')[0]?.journey.id, 'same-fare-direct');
+  });
+
   it('keeps FASTEST and CHEAPEST strict across direct and chained alternatives', () => {
     const chain: JourneyOption = { id: 'bus-transfer-rail', durationSeconds: 5400, priceMinor: 18000, transfers: 1, walkingMeters: 250, reliability: null, transferRisk: 0.3, comfort: null, legs: [{ mode: 'BUS' }, { mode: 'RAIL' }] };
     const cheapestSlow: JourneyOption = { ...candidates[0], id: 'cheapest-slow', durationSeconds: 12000, priceMinor: 7000 };
