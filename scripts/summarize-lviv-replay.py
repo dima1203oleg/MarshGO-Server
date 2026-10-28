@@ -82,7 +82,9 @@ print(f"- Median search time: {baseline_median:.2f} ms → {candidate_median:.2f
 print(f"- Peak sampled RSS: {max(item['rssBytes'] for item in baseline) / 1_048_576:.1f} MiB → {max(item['rssBytes'] for item in candidate) / 1_048_576:.1f} MiB")
 print(f"- Truncated: baseline `{baseline[0]['searchTruncated']}` / candidate `{candidate[0]['searchTruncated']}`; graph truncated: baseline `{baseline[0]['candidateGraphTruncated']}` / candidate `{candidate[0]['candidateGraphTruncated']}`")
 print(f"- Truncation causes: baseline `{json.dumps(baseline[0]['truncation'], sort_keys=True)}`; candidate `{json.dumps(candidate[0]['truncation'], sort_keys=True)}`")
-for stage, previous_stage in (("segments-built", None), ("reachability-built", "segments-built"), ("itineraries-ranked", "reachability-built")):
+for stage, previous_stage in (("segments-built", None), ("incremental-index-built", None),
+                              ("incremental-reachability-built", "incremental-index-built"),
+                              ("reachability-built", "segments-built"), ("itineraries-ranked", "reachability-built")):
     print(f"- `{stage}` counters: baseline `{json.dumps(baseline[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`; candidate `{json.dumps(candidate[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`")
     baseline_times = stage_duration_samples(baseline, stage, previous_stage)
     candidate_times = stage_duration_samples(candidate, stage, previous_stage)

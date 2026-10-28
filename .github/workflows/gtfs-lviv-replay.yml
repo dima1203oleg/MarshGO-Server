@@ -139,6 +139,11 @@ jobs:
             else
               replay_sha="$CANDIDATE_SHA"
             fi
+            if [ "$revision" = baseline ]; then
+              replay_timeout=60
+            else
+              replay_timeout=180
+            fi
             for iteration in 1 2 3; do
               (
                 cd "$revision"
@@ -152,7 +157,8 @@ jobs:
                 GTFS_REPLAY_TRACE_ROUTE_IDS="$GTFS_REPLAY_TRACE_ROUTE_IDS" \
                 GTFS_REPLAY_TRACE_TRIP_IDS="$GTFS_REPLAY_TRACE_TRIP_IDS" \
                 GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS="$GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS" \
-                ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
+                timeout --signal=TERM --kill-after=10s "${replay_timeout}s" \
+                  ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
               ) | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))' >> replay-results.jsonl
             done
           done

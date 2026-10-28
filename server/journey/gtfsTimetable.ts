@@ -2405,6 +2405,7 @@ export function findGtfsItinerariesWithStats(
       if (incrementalSourceFallbackRequired) break;
     }
     if (incrementalSourceFallbackRequired) return eagerFallback();
+    debugStage('incremental-index-built', { indexedEventCalls, boardingCalls: calls.length });
 
     const callsByCell = new Map<string, IncrementalBoardingCall[]>();
     for (const call of calls) {
@@ -2414,35 +2415,49 @@ export function findGtfsItinerariesWithStats(
       values.push(call);
       callsByCell.set(key, values);
     }
-    const transferRulesByFromNode = new Map<string, GtfsTransferRule[]>();
-    for (const rule of feed.transfers ?? []) {
-      const values = transferRulesByFromNode.get(rule.fromStopId) ?? [];
-      values.push(rule);
-      transferRulesByFromNode.set(rule.fromStopId, values);
-    }
+    const compareBoardingCalls = (left: IncrementalBoardingCall, right: IncrementalBoardingCall) =>
+      left.event.departureAt!.getTime() - right.event.departureAt!.getTime()
+      || compareStableId(left.tripId, right.tripId) || compareStableId(left.serviceDate, right.serviceDate)
+      || left.stopIndex - right.stopIndex;
+    for (const pool of [...callsByNode.values(), ...callsByCell.values()]) pool.sort(compareBoardingCalls);
+    const addCallsInDepartureWindow = (pool: readonly IncrementalBoardingCall[], candidates: Set<IncrementalBoardingCall>,
+      earliestDepartureMs: number, latestDepartureMs: number,
+      include: (call: IncrementalBoardingCall) => boolean = () => true) => {
+      let low = 0, high = pool.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (pool[middle]!.event.departureAt!.getTime() < earliestDepartureMs) low = middle + 1;
+        else high = middle;
+      }
+      for (let index = low; index < pool.length; index++) {
+        const call = pool[index]!;
+        if (call.event.departureAt!.getTime() > latestDepartureMs) break;
+        if (include(call)) candidates.add(call);
+      }
+    };
     const candidateCallsFor = (previous: GtfsDirectJourney): IncrementalBoardingCall[] => {
       const candidates = new Set<IncrementalBoardingCall>();
+      const earliestDepartureMs = previous.arrivalAt.getTime();
+      const latestDepartureMs = Math.min(earliestDepartureMs + maximumWaitSeconds * 1000, journeyEnd.getTime());
       for (const nodeId of previous.destinationTransferNodeIds) {
-        for (const call of callsByNode.get(nodeId) ?? []) candidates.add(call);
+        addCallsInDepartureWindow(callsByNode.get(nodeId) ?? [], candidates, earliestDepartureMs, latestDepartureMs);
         for (const targetNode of transferRulesByFrom.get(nodeId) ?? []) {
-          for (const call of callsByNode.get(targetNode) ?? []) candidates.add(call);
+          addCallsInDepartureWindow(callsByNode.get(targetNode) ?? [], candidates, earliestDepartureMs, latestDepartureMs);
         }
         if (pathwayNodes.has(nodeId)) {
           for (const targetNode of reachablePathwayNodes(nodeId)) {
-            for (const call of callsByNode.get(targetNode) ?? []) candidates.add(call);
+            addCallsInDepartureWindow(callsByNode.get(targetNode) ?? [], candidates, earliestDepartureMs, latestDepartureMs);
           }
         }
       }
       const [centerX, centerY] = transferCell(previous.destinationStop.coordinates);
       const neighborCells = Math.ceil(transferRadius / Math.max(100, transferRadius)) + 1;
       for (let dx = -neighborCells; dx <= neighborCells; dx++) for (let dy = -neighborCells; dy <= neighborCells; dy++) {
-        for (const call of callsByCell.get(`${centerX + dx}:${centerY + dy}`) ?? []) {
-          if (distanceMeters(previous.destinationStop.coordinates, call.coordinates) <= transferRadius) candidates.add(call);
-        }
+        const cellCalls = callsByCell.get(`${centerX + dx}:${centerY + dy}`) ?? [];
+        addCallsInDepartureWindow(cellCalls, candidates, earliestDepartureMs, latestDepartureMs,
+          (call) => distanceMeters(previous.destinationStop.coordinates, call.coordinates) <= transferRadius);
       }
-      return [...candidates].sort((left, right) => left.event.departureAt!.getTime() - right.event.departureAt!.getTime()
-        || compareStableId(left.tripId, right.tripId) || compareStableId(left.serviceDate, right.serviceDate)
-        || left.stopIndex - right.stopIndex);
+      return [...candidates].sort(compareBoardingCalls);
     };
     const maxTransitLegsForIndex = maximumTransfers + 1;
     const queued: Array<{ call: IncrementalBoardingCall; segmentsUsed: number }> = [];
@@ -2524,6 +2539,8 @@ export function findGtfsItinerariesWithStats(
         if (incrementalSourceFallbackRequired) break;
       }
     }
+    debugStage('incremental-reachability-built', { reachableStates: visitedStates.size, projectedLegs,
+      reachableBoardingCalls: incrementalReachableBoardingKeys.size });
     if (incrementalSourceFallbackRequired) return eagerFallback();
 
     // Rebase graph demand on the event-reachable boarding calls. This keeps

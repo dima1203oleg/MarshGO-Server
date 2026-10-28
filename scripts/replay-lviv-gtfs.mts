@@ -125,7 +125,8 @@ console.info = (...args: unknown[]) => {
     try {
       const record = JSON.parse(args[0]) as Record<string, unknown>;
       if (record.event === 'gtfs.search.debug') {
-        if (typeof record.stage === 'string' && ['segments-built', 'reachability-built', 'itineraries-ranked'].includes(record.stage)) {
+        if (typeof record.stage === 'string' && ['segments-built', 'reachability-built', 'itineraries-ranked',
+          'incremental-index-built', 'incremental-reachability-built'].includes(record.stage)) {
           const timing = {
             ...(typeof record.elapsedMs === 'number' ? { elapsedMs: record.elapsedMs } : {}),
             ...(typeof record.heapUsedBytes === 'number' ? { heapUsedBytes: record.heapUsedBytes } : {}),
