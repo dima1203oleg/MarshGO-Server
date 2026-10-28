@@ -23,6 +23,41 @@ test('bounded segment sample rejects invalid capacities', () => {
   assert.throws(() => new BoundedBestK(0, (left: number, right: number) => left - right), /positive safe integer/);
 });
 
+test('bounded segment sample tracks size and predicate membership through insertion and eviction', () => {
+  const compare = (left: { id: string; cost: number }, right: { id: string; cost: number }) =>
+    left.cost - right.cost || left.id.localeCompare(right.id);
+  const best = new BoundedBestK(3, compare);
+
+  assert.equal(best.size, 0);
+  assert.equal(best.some((item) => item.id === 'a'), false);
+
+  assert.equal(best.consider({ id: 'mid', cost: 50 }), true);
+  assert.equal(best.size, 1);
+  assert.equal(best.some((item) => item.id === 'mid'), true);
+  assert.equal(best.some((item) => item.id === 'unknown'), false);
+
+  assert.equal(best.consider({ id: 'high', cost: 80 }), true);
+  assert.equal(best.consider({ id: 'low', cost: 20 }), true);
+  assert.equal(best.size, 3);
+  assert.equal(best.some((item) => item.id === 'low'), true);
+  assert.equal(best.some((item) => item.id === 'mid'), true);
+  assert.equal(best.some((item) => item.id === 'high'), true);
+
+  assert.equal(best.consider({ id: 'worse', cost: 90 }), false);
+  assert.equal(best.size, 3);
+  assert.equal(best.some((item) => item.id === 'worse'), false);
+  assert.equal(best.some((item) => item.id === 'high'), true);
+
+  assert.equal(best.consider({ id: 'better', cost: 10 }), true);
+  assert.equal(best.size, 3);
+  assert.equal(best.some((item) => item.id === 'high'), false, 'evicted item is no longer present');
+  assert.equal(best.some((item) => item.id === 'better'), true, 'new item is present');
+  assert.equal(best.some((item) => item.id === 'low'), true);
+  assert.equal(best.some((item) => item.id === 'mid'), true);
+
+  assert.deepEqual(best.toSortedArray().map((i) => i.id), ['better', 'low', 'mid']);
+});
+
 test('bounded GTFS retention evicts whole lower-priority trip groups', () => {
   const retained: BoundedTripGroup<string>[] = [
     { key: 'trip-a', priority: 1, segments: ['a-1', 'a-2', 'a-3'] },

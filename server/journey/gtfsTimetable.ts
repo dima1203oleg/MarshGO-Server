@@ -2849,10 +2849,8 @@ export function findGtfsItinerariesWithStats(
               feasibleConnectorEvaluations++;
               debugConnectorEvalIndex?.set(candidate, feasibleConnectorEvaluations);
               temporallyConnectsQueryEnds = true;
-              if (debugSearch) debugConnectorReservoirSorts++;
-              const retainedConnectors = connectorOverflow.toSortedArray();
-              const connectorReservoirWasFull = retainedConnectors.length >= connectorOverflowCapacity;
-              const candidateAlreadyRetained = retainedConnectors.some((retained) => {
+              const connectorReservoirWasFull = connectorOverflow.size >= connectorOverflowCapacity;
+              const candidateAlreadyRetained = connectorOverflow.some((retained) => {
                 if (debugSearch) debugConnectorReservoirItemsInspected++;
                 return retainedCandidateKey(retained) === retainedCandidateKey(candidate);
               });
