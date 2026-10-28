@@ -1659,7 +1659,7 @@ test('query-time retention ranks a middle connector by its complete onward arriv
 
   const search = {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
-    origin: [24.0200, 49.8400], destination: [24.0300, 49.8500],
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
     maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
   };
   const expectedTripChain = `access-trip,${targetTripId},egress-trip`;
