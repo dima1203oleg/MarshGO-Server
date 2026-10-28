@@ -13,7 +13,7 @@ const { unzipSync } = require('fflate');
 const { parseGtfsTimetable, findGtfsItinerariesWithStats } =
   await import(pathToFileURL(resolve(sourceRoot, 'server/journey/gtfsTimetable.ts')).href);
 const { toRankedGtfsItinerary } =
-  await import(pathToFileURL(resolve(candidateRoot, 'server/journey/gtfsRanking.ts')).href);
+  await import(pathToFileURL(resolve(candidateRoot, 'scripts/gtfs-ranking.ts')).href);
 const { selectStrategyAlternatives, strategiesWithComparablePrices } =
   await import(pathToFileURL(resolve(sourceRoot, 'server/journey/scoring.ts')).href);
 const archive = readFileSync(zipPath);

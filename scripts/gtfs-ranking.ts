@@ -1,5 +1,5 @@
-import type { GtfsItinerary } from './gtfsTimetable';
-import type { JourneyOption } from './types';
+import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
+import type { JourneyOption } from '../server/journey/types';
 
 export type RankedGtfsItinerary = JourneyOption & {
   kind: 'gtfs';
