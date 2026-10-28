@@ -69,6 +69,24 @@ describe('Journey strategy scoring', () => {
     assert.deepEqual(paretoFrontier([unknown, measured]).map((journey) => journey.id).sort(), ['measured-comfort', 'unknown-comfort']);
   });
 
+  it('preserves known-fare differences in BALANCED when unknown-fare routes are present', () => {
+    const knownCheap: JourneyOption = {
+      ...candidates[0]!, id: 'known-cheap', durationSeconds: 1000, priceMinor: 1000,
+      transfers: 0, walkingMeters: 0, reliability: 1, transferRisk: 0, comfort: null,
+    };
+    const knownExpensiveAndOneSecondFaster: JourneyOption = {
+      ...knownCheap, id: 'known-expensive', durationSeconds: 999, priceMinor: 100_000,
+    };
+    const unknownFare: JourneyOption = {
+      ...knownCheap, id: 'unknown-fare', durationSeconds: 5000, priceMinor: null,
+    };
+
+    assert.equal(
+      selectStrategyRecommendations([knownCheap, knownExpensiveAndOneSecondFaster, unknownFare], ['BALANCED'])[0]?.journey.id,
+      'known-cheap',
+    );
+  });
+
   it('exposes one winner per strategy and groups an identical winner across tabs', () => {
     const recommendations = selectStrategyRecommendations([candidates[0]], ['BALANCED', 'FASTEST', 'CHEAPEST']);
     assert.equal(recommendations.length, 1);
