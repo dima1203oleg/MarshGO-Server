@@ -2576,8 +2576,14 @@ export function findGtfsItinerariesWithStats(
         for (const nextCall of candidateCallsFor(previousSegment)) {
           const nextDepartureAt = nextCall.event.departureAt!;
           if (nextDepartureAt.getTime() < arrivalAt.getTime() || nextDepartureAt.getTime() > latestTransferDeparture) continue;
+          const nextSegmentsUsed = segmentsUsed + 1;
+          const previousSegmentsUsed = visitedStates.get(nextCall.key);
+          if (previousSegmentsUsed !== undefined && previousSegmentsUsed <= nextSegmentsUsed) {
+            dominatedStateAttempts++;
+            continue;
+          }
           if (!transferDecisionForBoarding(previousSegment, nextCall.boarding).feasible) continue;
-          enqueueState(nextCall, segmentsUsed + 1);
+          enqueueState(nextCall, nextSegmentsUsed);
           if (incrementalSourceFallbackRequired) break;
         }
         if (incrementalSourceFallbackRequired) break;
