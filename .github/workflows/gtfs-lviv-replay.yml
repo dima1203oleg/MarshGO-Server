@@ -20,6 +20,14 @@ on:
         description: Exact baseline Server commit to compare with the candidate SHA
         required: true
         default: ee60e4c7ffeb5645e1dc13f472b47fd43f0e838a
+      candidate_source:
+        description: Candidate-only GTFS candidate source for an isolated replay experiment
+        required: false
+        type: choice
+        options:
+          - eager
+          - incremental-event-index
+        default: eager
       origin:
         description: Replay origin as lon,lat
         required: false
@@ -76,6 +84,7 @@ jobs:
       BASELINE_SHA: ${{ inputs.baseline_sha || 'ee60e4c7ffeb5645e1dc13f472b47fd43f0e838a' }}
       CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
       GTFS_REPLAY_EXPECTED_SHA256: bb4ac0ce9127b4967ad889379f523b04b84a0bb033814aa8c844526b42078164
+      GTFS_REPLAY_CANDIDATE_SOURCE: ${{ inputs.candidate_source || 'eager' }}
       GTFS_REPLAY_URL: https://track.ua-gis.com/gtfs/lviv/static.zip
       GTFS_REPLAY_ORIGIN: ${{ inputs.origin || '24.008217,49.864885' }}
       GTFS_REPLAY_DESTINATION: ${{ inputs.destination || '24.0175835,49.8013165' }}

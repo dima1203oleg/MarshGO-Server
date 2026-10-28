@@ -46,6 +46,11 @@ if (!Number.isInteger(departureWindowMinutes) || departureWindowMinutes < 1 || d
   throw new Error('GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES must be an integer from 1 to 180.');
 }
 const latestDeparture = new Date(earliestDeparture.getTime() + departureWindowMinutes * 60_000);
+const candidateSource = process.env.REPLAY_GROUP === 'candidate'
+  ? process.env.GTFS_REPLAY_CANDIDATE_SOURCE ?? 'eager' : 'eager';
+if (!['eager', 'incremental-event-index'].includes(candidateSource)) {
+  throw new Error('GTFS_REPLAY_CANDIDATE_SOURCE must be eager or incremental-event-index.');
+}
 const traceRouteIds = new Set((process.env.GTFS_REPLAY_TRACE_ROUTE_IDS ?? '')
   .split(',').map((routeId) => routeId.trim()).filter(Boolean));
 const traceTripIds = new Set((process.env.GTFS_REPLAY_TRACE_TRIP_IDS ?? '')
@@ -162,7 +167,7 @@ try {
     maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
     maximumWaitSeconds: 4 * 60 * 60, limit: 100,
     now: new Date('2026-10-22T08:00:00.000Z'),
-  }, {}, graphObserver);
+  }, { candidateSource: candidateSource as 'eager' | 'incremental-event-index' }, graphObserver);
 } finally {
   console.info = originalConsoleInfo;
   if (previousDebugSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
@@ -218,6 +223,7 @@ console.log(JSON.stringify({
   comparisonGroup: process.env.REPLAY_GROUP ?? null,
   revision: process.env.REPLAY_REF ?? null,
   iteration: process.env.BENCH_ITER ?? null,
+  candidateSource,
   origin,
   destination,
   departureWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],

@@ -416,6 +416,12 @@ export interface GtfsItinerarySearchResult {
 export interface GtfsGraphBudgetLimits {
   totalSegments?: number;
   segmentsPerRoute?: number;
+  /** Opt-in exact event-index candidate discovery; eager remains the default. */
+  candidateSource?: 'eager' | 'incremental-event-index';
+  /** Test-only bounds. Hitting any bound falls back to the eager source. */
+  maxIncrementalEventCalls?: number;
+  maxIncrementalSearchStates?: number;
+  maxIncrementalProjectedLegs?: number;
   /** Test-only override for exercising bounded intermediate-connector retention. */
   maxRouteOverflowConnectors?: number;
   /** Test-only override for verifying bounded search-frontier behavior. */
@@ -1751,6 +1757,18 @@ export function findGtfsItinerariesWithStats(
   const maximumGraphSegments = graphLimits.totalSegments ?? MAX_GTFS_GRAPH_SEGMENTS;
   const maximumGraphSegmentsPerRoute = graphLimits.segmentsPerRoute ?? MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
   const maximumRouteOverflowConnectors = graphLimits.maxRouteOverflowConnectors ?? MAX_ROUTE_OVERFLOW_CONNECTORS;
+  const candidateSource = graphLimits.candidateSource ?? 'eager';
+  const maximumIncrementalEventCalls = graphLimits.maxIncrementalEventCalls ?? 100_000;
+  const maximumIncrementalSearchStates = graphLimits.maxIncrementalSearchStates ?? 100_000;
+  const maximumIncrementalProjectedLegs = graphLimits.maxIncrementalProjectedLegs ?? MAX_GTFS_GRAPH_SEGMENTS;
+  const eagerFallback = () => findGtfsItinerariesWithStats(feed, input,
+    { ...graphLimits, candidateSource: 'eager' }, observeCandidateGraph);
+  if (!['eager', 'incremental-event-index'].includes(candidateSource)
+    || !Number.isSafeInteger(maximumIncrementalEventCalls) || maximumIncrementalEventCalls < 1
+    || !Number.isSafeInteger(maximumIncrementalSearchStates) || maximumIncrementalSearchStates < 1
+    || !Number.isSafeInteger(maximumIncrementalProjectedLegs) || maximumIncrementalProjectedLegs < 1) {
+    throw new RangeError('GTFS incremental event-search bounds are invalid');
+  }
   if (!Number.isSafeInteger(maximumRouteOverflowConnectors) || maximumRouteOverflowConnectors < 1) {
     throw new RangeError('maxRouteOverflowConnectors must be a positive safe integer');
   }
@@ -1776,7 +1794,8 @@ export function findGtfsItinerariesWithStats(
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
   const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
-  const { decide: transferDecision, transferRuleFor, pathwayNodes, reachablePathwayNodes, pathwayConnection } = transferDecisionContext;
+  const { decide: transferDecision, decideBoarding: transferDecisionForBoarding,
+    transferRuleFor, pathwayNodes, reachablePathwayNodes, pathwayConnection } = transferDecisionContext;
 
   let stopSelectionTruncated = false;
   const closestStops = (point: [number, number], radius: number) => {
@@ -2294,11 +2313,247 @@ export function findGtfsItinerariesWithStats(
   const queryReachableTransferTripIdsByStopId = new Map<string, ReadonlySet<string>>(
     [...destinationRetentionEventsByReachableStop].map(([stopId, events]) => [stopId, new Set(events.map((event) => event.tripId))]),
   );
+  const incrementalReachableBoardingKeys = new Set<string>();
+  const reachableStopsByRoute = new Map<string, Set<string>>();
+  let incrementalSourceFallbackRequired = false;
+  if (candidateSource === 'incremental-event-index') {
+    type IncrementalTripEvents = NonNullable<ReturnType<typeof eligibleTripInstanceStopEvents>>;
+    type IncrementalBoardingCall = {
+      key: string;
+      tripId: string;
+      routeId: string;
+      serviceDate: string;
+      stopIndex: number;
+      event: IncrementalTripEvents['events'][number];
+      projection: IncrementalTripEvents;
+      boarding: GtfsTransferBoarding;
+      coordinates: [number, number];
+      nodeIds: string[];
+    };
+    const candidateIndexesByTrip = new Map<string, number[]>();
+    const calls: IncrementalBoardingCall[] = [];
+    const callsByNode = new Map<string, IncrementalBoardingCall[]>();
+    const transferRulesByFrom = new Map<string, string[]>();
+    let indexedEventCalls = 0;
+    const transferNodesForEvent = (event: IncrementalTripEvents['events'][number]) => {
+      const primary = event.stopTime.sourceStopId ?? event.stopTime.stopId;
+      return event.stopTime.sourceParentStationId && event.stopTime.sourceParentStationId !== primary
+        ? [primary, event.stopTime.sourceParentStationId] : [primary];
+    };
+    const tripInfoFor = (tripId: string) => {
+      const trip = feed.trips.get(tripId), route = trip && feed.routes.get(trip.routeId);
+      if (!trip || !route || (input.allowedModes && !input.allowedModes.includes(route.mode))) return null;
+      const provider = feed.providersByRoute?.get(trip.routeId);
+      const providerCity = provider?.city ?? input.providerCity;
+      const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
+      if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) return null;
+      const stops = feed.stopTimes.get(tripId);
+      if (!stops || stops.length < 2) return null;
+      let indexes = candidateIndexesByTrip.get(tripId);
+      if (!indexes) {
+        const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
+          ? localCityCatchmentStops : corridorStops;
+        indexes = stops.flatMap((stop, index) => eligibleStopIds.has(stop.stopId)
+          && interchangeStopIds.has(stop.stopId) ? [index] : []);
+        candidateIndexesByTrip.set(tripId, indexes);
+      }
+      return { trip, route, provider, providerCity, transportType, indexes };
+    };
+    for (const rule of feed.transfers ?? []) {
+      const targets = transferRulesByFrom.get(rule.fromStopId) ?? [];
+      targets.push(rule.toStopId);
+      transferRulesByFrom.set(rule.fromStopId, targets);
+    }
+    for (const [tripId, trip] of [...feed.trips].sort(([left], [right]) => compareStableId(left, right))) {
+      const info = tripInfoFor(tripId);
+      if (!info || info.indexes.length < 2) continue;
+      for (const serviceDate of serviceDates) {
+        const projection = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, info.indexes, serviceTimeToUtc);
+        if (!projection) continue;
+        for (const event of projection.events) {
+          if (!event.canBoard || !event.departureAt || event.departureAt < input.earliestDeparture
+            || event.departureAt > journeyEnd) continue;
+          indexedEventCalls++;
+          if (indexedEventCalls > maximumIncrementalEventCalls) {
+            incrementalSourceFallbackRequired = true;
+            break;
+          }
+          const stopTime = event.stopTime;
+          const stop = feed.stops.get(stopTime.stopId);
+          const coordinates = stopTime.sourceStopCoordinates ?? (stop ? [stop.lon, stop.lat] as [number, number] : undefined);
+          if (!stop || !coordinates) continue;
+          const nodeIds = transferNodesForEvent(event);
+          const key = `${tripId}\u0000${serviceDate}\u0000${event.stopIndex}`;
+          const call: IncrementalBoardingCall = {
+            key, tripId, routeId: trip.routeId, serviceDate, stopIndex: event.stopIndex, event, projection,
+            coordinates, nodeIds,
+            boarding: {
+              providerId: info.provider?.id ?? input.providerId, tripId, routeId: trip.routeId,
+              originStop: { id: stopTime.stopId, name: stopTime.sourceStopName ?? stop.name, coordinates },
+              originTransferNodeIds: nodeIds, departureAt: event.departureAt, transportType: info.transportType,
+            },
+          };
+          calls.push(call);
+          for (const nodeId of nodeIds) {
+            const values = callsByNode.get(nodeId) ?? [];
+            values.push(call);
+            callsByNode.set(nodeId, values);
+          }
+        }
+        if (incrementalSourceFallbackRequired) break;
+      }
+      if (incrementalSourceFallbackRequired) break;
+    }
+    if (incrementalSourceFallbackRequired) return eagerFallback();
+
+    const callsByCell = new Map<string, IncrementalBoardingCall[]>();
+    for (const call of calls) {
+      const [cellX, cellY] = transferCell(call.coordinates);
+      const key = `${cellX}:${cellY}`;
+      const values = callsByCell.get(key) ?? [];
+      values.push(call);
+      callsByCell.set(key, values);
+    }
+    const transferRulesByFromNode = new Map<string, GtfsTransferRule[]>();
+    for (const rule of feed.transfers ?? []) {
+      const values = transferRulesByFromNode.get(rule.fromStopId) ?? [];
+      values.push(rule);
+      transferRulesByFromNode.set(rule.fromStopId, values);
+    }
+    const candidateCallsFor = (previous: GtfsDirectJourney): IncrementalBoardingCall[] => {
+      const candidates = new Set<IncrementalBoardingCall>();
+      for (const nodeId of previous.destinationTransferNodeIds) {
+        for (const call of callsByNode.get(nodeId) ?? []) candidates.add(call);
+        for (const targetNode of transferRulesByFrom.get(nodeId) ?? []) {
+          for (const call of callsByNode.get(targetNode) ?? []) candidates.add(call);
+        }
+        if (pathwayNodes.has(nodeId)) {
+          for (const targetNode of reachablePathwayNodes(nodeId)) {
+            for (const call of callsByNode.get(targetNode) ?? []) candidates.add(call);
+          }
+        }
+      }
+      const [centerX, centerY] = transferCell(previous.destinationStop.coordinates);
+      const neighborCells = Math.ceil(transferRadius / Math.max(100, transferRadius)) + 1;
+      for (let dx = -neighborCells; dx <= neighborCells; dx++) for (let dy = -neighborCells; dy <= neighborCells; dy++) {
+        for (const call of callsByCell.get(`${centerX + dx}:${centerY + dy}`) ?? []) {
+          if (distanceMeters(previous.destinationStop.coordinates, call.coordinates) <= transferRadius) candidates.add(call);
+        }
+      }
+      return [...candidates].sort((left, right) => left.event.departureAt!.getTime() - right.event.departureAt!.getTime()
+        || compareStableId(left.tripId, right.tripId) || compareStableId(left.serviceDate, right.serviceDate)
+        || left.stopIndex - right.stopIndex);
+    };
+    const maxTransitLegsForIndex = maximumTransfers + 1;
+    const queued: Array<{ call: IncrementalBoardingCall; segmentsUsed: number }> = [];
+    const visitedStates = new Set<string>();
+    const enqueueState = (call: IncrementalBoardingCall, segmentsUsed: number) => {
+      const key = `${call.key}\u0000${segmentsUsed}`;
+      if (visitedStates.has(key)) return;
+      if (visitedStates.size >= maximumIncrementalSearchStates) {
+        incrementalSourceFallbackRequired = true;
+        return;
+      }
+      visitedStates.add(key);
+      queued.push({ call, segmentsUsed });
+    };
+    for (const call of calls) {
+      if (!originStopIds.has(call.event.stopTime.stopId) || call.event.departureAt!.getTime() > maxFirstDeparture) continue;
+      const accessMeters = distanceMeters(input.origin, call.coordinates);
+      if (accessMeters > accessRadius || call.event.departureAt!.getTime()
+        < input.earliestDeparture.getTime() + Math.ceil(accessMeters / 1.25) * 1000) continue;
+      enqueueState(call, 1);
+    }
+    const seenProjectionPairs = new Map<string, Set<string>>();
+    const reachablePairCountByTrip = new Map<string, number>();
+    let projectedLegs = 0;
+    const projectedLegsByCall = new Set<string>();
+    for (let cursor = 0; cursor < queued.length && !incrementalSourceFallbackRequired; cursor++) {
+      const { call, segmentsUsed } = queued[cursor]!;
+      incrementalReachableBoardingKeys.add(call.key);
+      if (projectedLegsByCall.has(call.key)) continue;
+      projectedLegsByCall.add(call.key);
+      const previousRoute = feed.routes.get(call.routeId);
+      const previousProvider = feed.providersByRoute?.get(call.routeId);
+      const previousTransportType = previousRoute?.transportType === 'bus'
+        && (previousProvider?.city ?? input.providerCity) === 'Україна' ? 'intercity_bus' : previousRoute?.transportType;
+      const pairKey = `${call.tripId}\u0000${call.serviceDate}`;
+      const seenPairs = seenProjectionPairs.get(pairKey) ?? new Set<string>();
+      seenProjectionPairs.set(pairKey, seenPairs);
+      for (const projection of materializeTripInstanceLegs(call.projection.events, {
+        tripId: call.tripId, maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
+        queryReachableTransferTripIdsByStopId, canBelongToDirectOnlyJourney, boardingStopIndex: call.stopIndex,
+      })) {
+        if (projection.kind === 'omitted-beyond-window') {
+          incrementalSourceFallbackRequired = true;
+          break;
+        }
+        projectedLegs++;
+        if (projectedLegs > maximumIncrementalProjectedLegs) {
+          incrementalSourceFallbackRequired = true;
+          break;
+        }
+        const { fromEvent, toEvent } = projection;
+        const departureAt = fromEvent.departureAt, arrivalAt = toEvent.arrivalAt;
+        if (!departureAt || !arrivalAt || !toEvent.canAlight) continue;
+        const pairIdentity = `${fromEvent.stopTime.stopId}:${toEvent.stopTime.stopId}:${departureAt.getTime()}`;
+        if (!seenPairs.has(pairIdentity)) {
+          seenPairs.add(pairIdentity);
+          reachablePairCountByTrip.set(call.tripId, (reachablePairCountByTrip.get(call.tripId) ?? 0) + 1);
+        }
+        if (segmentsUsed >= maxTransitLegsForIndex || arrivalAt.getTime() > journeyEnd.getTime()) continue;
+        const destinationEntry = toEvent.stopTime;
+        const destinationStop = feed.stops.get(destinationEntry.stopId);
+        const destinationCoordinates = destinationEntry.sourceStopCoordinates
+          ?? (destinationStop ? [destinationStop.lon, destinationStop.lat] as [number, number] : undefined);
+        if (!destinationStop || !destinationCoordinates) continue;
+        const previousSegment = {
+          providerId: call.boarding.providerId, tripId: call.tripId, routeId: call.routeId,
+          destinationStop: { id: destinationEntry.stopId, name: destinationEntry.sourceStopName ?? destinationStop.name,
+            coordinates: destinationCoordinates },
+          destinationTransferNodeIds: transferNodesForEvent(toEvent), arrivalAt, transportType: previousTransportType,
+        } as GtfsDirectJourney;
+        const latestTransferDeparture = Math.min(arrivalAt.getTime() + maximumWaitSeconds * 1000, journeyEnd.getTime());
+        for (const nextCall of candidateCallsFor(previousSegment)) {
+          const nextDepartureAt = nextCall.event.departureAt!;
+          if (nextDepartureAt.getTime() < arrivalAt.getTime() || nextDepartureAt.getTime() > latestTransferDeparture) continue;
+          if (!transferDecisionForBoarding(previousSegment, nextCall.boarding).feasible) continue;
+          enqueueState(nextCall, segmentsUsed + 1);
+          if (incrementalSourceFallbackRequired) break;
+        }
+        if (incrementalSourceFallbackRequired) break;
+      }
+    }
+    if (incrementalSourceFallbackRequired) return eagerFallback();
+
+    // Rebase graph demand on the event-reachable boarding calls. This keeps
+    // the unchanged route/global caps focused on candidates the query can
+    // actually board, while retaining the eager source's retention code.
+    candidateStopCountByRoute.clear();
+    for (const call of calls) {
+      if (!incrementalReachableBoardingKeys.has(call.key)) continue;
+      const seenStopIds = reachableStopsByRoute.get(call.routeId) ?? new Set<string>();
+      if (!seenStopIds.has(call.event.stopTime.stopId)) {
+        seenStopIds.add(call.event.stopTime.stopId);
+        reachableStopsByRoute.set(call.routeId, seenStopIds);
+      }
+    }
+    candidateDemandByRoute.clear();
+    candidatePairDemandByTrip.clear();
+    for (const [routeId, stopIds] of reachableStopsByRoute) candidateStopCountByRoute.set(routeId, stopIds.size);
+    for (const [tripId, count] of reachablePairCountByTrip) {
+      const trip = feed.trips.get(tripId);
+      if (!trip || count === 0) continue;
+      const boundedDemand = Math.min(maximumGraphSegmentsPerRoute, count);
+      candidatePairDemandByTrip.set(tripId, boundedDemand);
+      candidateDemandByRoute.set(trip.routeId, (candidateDemandByRoute.get(trip.routeId) ?? 0) + boundedDemand);
+    }
+  }
   // Keep graph-budget demand aligned with the expanded, query-reachable leg
   // set. The first bounded demand pass intentionally counts only nearby pairs
   // and direct destinations; add a capped per-trip allowance for longer legs
   // ending at an indexed transfer hub before dividing the global graph budget.
-  for (const [tripId, trip] of feed.trips) {
+  if (candidateSource !== 'incremental-event-index') for (const [tripId, trip] of feed.trips) {
     if ((candidateStopCountByRoute.get(trip.routeId) ?? 0) < 2) continue;
     const remainingTripDemand = maximumGraphSegmentsPerRoute - (candidatePairDemandByTrip.get(tripId) ?? 0);
     if (remainingTripDemand <= 0) continue;
@@ -2757,6 +3012,10 @@ export function findGtfsItinerariesWithStats(
     for (const serviceDate of serviceDates) {
       const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes, serviceTimeToUtc);
       if (!tripEvents) continue;
+      const reachableBoardingIndexes = candidateSource === 'incremental-event-index'
+        ? eligibleIndexes.filter((index) => incrementalReachableBoardingKeys.has(`${tripId}\u0000${serviceDate}\u0000${index}`))
+        : eligibleIndexes;
+      if (reachableBoardingIndexes.length === 0) continue;
       let tripCandidates: RetainedGtfsSegment[] = [];
       let boundedTripCandidates: BoundedBestK<RetainedGtfsSegment> | undefined;
       const debugMaterializedCandidates = traceThisTrip ? ([] as RetainedGtfsSegment[]) : undefined;
@@ -2767,11 +3026,18 @@ export function findGtfsItinerariesWithStats(
       // this trip instance so a citywide set of every candidate key is not
       // retained alongside the graph.
       const seenTripSegments = new Set<string>();
-      for (const projection of materializeTripInstanceLegs(tripEvents.events, {
-        tripId, maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
-        queryReachableTransferTripIdsByStopId,
-        canBelongToDirectOnlyJourney,
-      })) {
+      const tripLegProjections = function* (): Generator<GtfsTripLegProjection> {
+        const options = { tripId, maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
+          queryReachableTransferTripIdsByStopId, canBelongToDirectOnlyJourney };
+        if (candidateSource !== 'incremental-event-index') {
+          yield* materializeTripInstanceLegs(tripEvents.events, options);
+          return;
+        }
+        for (const boardingIndex of reachableBoardingIndexes) {
+          yield* materializeTripInstanceLegs(tripEvents.events, { ...options, boardingStopIndex: boardingIndex });
+        }
+      }();
+      for (const projection of tripLegProjections) {
         if (projection.kind === 'omitted-beyond-window') {
           // Preserve the partial-search signal for omitted, potentially useful legs.
           segmentGraphTruncated = true;
@@ -3045,6 +3311,7 @@ export function findGtfsItinerariesWithStats(
   );
   selectedSegmentsByRoute.clear();
   for (const [routeId, routeSegments] of redistributed.routes) selectedSegmentsByRoute.set(routeId, routeSegments);
+  if (candidateSource === 'incremental-event-index' && segmentGraphTruncated) return eagerFallback();
   const segments = [...selectedSegmentsByRoute.values()].flatMap((routeSegments) => routeSegments.map((candidate) => {
     const route = feed.routes.get(candidate.routeId)!;
     const trip = feed.trips.get(candidate.tripId)!;
@@ -4257,7 +4524,7 @@ export function findGtfsItinerariesWithStats(
     searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
-  return {
+  const result: GtfsItinerarySearchResult = {
     itineraries,
     searchTruncated: stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated,
@@ -4273,6 +4540,12 @@ export function findGtfsItinerariesWithStats(
       responsePage: rankedResults.length > itineraries.length,
     },
   };
+  if (candidateSource === 'incremental-event-index'
+    && (result.truncation.stopSelection || result.truncation.candidateGraph || result.truncation.searchBudget
+      || result.truncation.searchStepLimit || result.truncation.candidatePoolLimit || result.truncation.candidateSampling)) {
+    return eagerFallback();
+  }
+  return result;
 }
 
 export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerary[] {

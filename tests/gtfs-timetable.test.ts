@@ -3466,6 +3466,28 @@ test('graph-relative lazy search matches production itinerary materialization, c
     maximumWaitSeconds: 2 * 60 * 60, limit: 100,
   };
   const production = findGtfsItinerariesWithStats(timetable, query);
+  const incremental = findGtfsItinerariesWithStats(timetable, query, { candidateSource: 'incremental-event-index' });
+  assert.deepEqual(incremental, production,
+    'the opt-in event-index source preserves complete ordered itineraries, fare metadata, and truncation flags');
+  const forcedFallback = findGtfsItinerariesWithStats(timetable, query, {
+    candidateSource: 'incremental-event-index', maxIncrementalEventCalls: 1,
+  });
+  assert.deepEqual(forcedFallback, production, 'an event-index bound falls back to the authoritative eager source');
+  const forcedFrontierFallback = findGtfsItinerariesWithStats(timetable, query, {
+    candidateSource: 'incremental-event-index', maxIncrementalSearchStates: 1,
+  });
+  assert.deepEqual(forcedFrontierFallback, production, 'a bounded event-search frontier falls back to eager search');
+  for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
+    const winnerId = (itineraries: GtfsItinerary[]) => scoreJourneys(itineraries.map((journey) => ({
+      id: journey.id, durationSeconds: journey.durationSeconds,
+      priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+      transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+      transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+      legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+    })), strategy)[0]?.journey.id ?? null;
+    assert.equal(winnerId(incremental.itineraries), winnerId(production.itineraries),
+      `${strategy} winner remains identical on fare-diverse alternatives`);
+  }
   let capturedGraph: GtfsCandidateGraphSnapshot | undefined;
   const observedProduction = findGtfsItinerariesWithStats(timetable, query, {}, (snapshot) => { capturedGraph = snapshot; });
   assert.deepEqual(observedProduction, production, 'the optional candidate graph observer does not alter production output');
@@ -3601,6 +3623,10 @@ test('graph-relative lazy search matches production itinerary materialization, c
   const transferQuery = { ...query, origin: [24.0201, 49.8401] as [number, number],
     destination: [24.0301, 49.8501] as [number, number], maximumTransfers: 1 };
   const transferProduction = findGtfsItinerariesWithStats(transferFeed, transferQuery);
+  const transferIncremental = findGtfsItinerariesWithStats(transferFeed, transferQuery,
+    { candidateSource: 'incremental-event-index' });
+  assert.deepEqual(transferIncremental, transferProduction,
+    'event-index source preserves transfer geometry, waits, fare, and all truncation flags');
   const transferLazy = lazyEventLabelSearchForRequest(transferFeed, transferQuery);
   const transferProductionById = new Map(transferProduction.itineraries.map((journey) => [journey.id, journey]));
   const transferLazyById = new Map(transferLazy.itineraries.map((journey) => [journey.id, journey]));
@@ -3650,6 +3676,9 @@ test('graph-relative lazy search matches production itinerary materialization, c
 
   const forbiddenFeed = connectingFeed({ transferType: '3', secondDeparture: '08:35:00' });
   const forbiddenProduction = findGtfsItinerariesWithStats(forbiddenFeed, transferQuery);
+  assert.deepEqual(findGtfsItinerariesWithStats(forbiddenFeed, transferQuery,
+    { candidateSource: 'incremental-event-index' }), forbiddenProduction,
+  'event-index source preserves exact forbidden-transfer authority');
   const forbiddenLazy = lazyEventLabelSearchForRequest(forbiddenFeed, transferQuery);
   assert.deepEqual(forbiddenLazy.itineraries.map(({ id }) => id).sort(), forbiddenProduction.itineraries.map(({ id }) => id).sort(),
     'graph-relative traversal agrees for forbidden transfers');
@@ -3669,6 +3698,9 @@ test('graph-relative lazy search matches production itinerary materialization, c
 
   const inSeatFeed = connectingFeed({ sameRoute: true, transferType: '4', inSeat: true, secondDeparture: '08:35:00' });
   const inSeatProduction = findGtfsItinerariesWithStats(inSeatFeed, transferQuery);
+  assert.deepEqual(findGtfsItinerariesWithStats(inSeatFeed, transferQuery,
+    { candidateSource: 'incremental-event-index' }), inSeatProduction,
+  'event-index source preserves trip-specific in-seat continuations');
   const inSeatLazy = lazyEventLabelSearchForRequest(inSeatFeed, transferQuery);
   assert.deepEqual(inSeatLazy.itineraries.map(({ id }) => id).sort(), inSeatProduction.itineraries.map(({ id }) => id).sort(),
     'graph-relative traversal agrees for explicit in-seat transfers');
@@ -3957,7 +3989,12 @@ test('the extracted transfer decision matches public router feasibility for type
     originTransferNodeIds: ['city:rail-platform'], departureAt: new Date('2026-10-12T05:40:00Z'),
   } as unknown as GtfsDirectJourney;
   const platformDecision = platformContext.decide(platformPrevious, platformNext);
-  const platformChain = findGtfsItineraries(platformFeed, platformQuery).find((journey) => journey.segments.length === 2);
+  const platformProduction = findGtfsItinerariesWithStats(platformFeed, platformQuery);
+  const platformIncremental = findGtfsItinerariesWithStats(platformFeed, platformQuery,
+    { candidateSource: 'incremental-event-index' });
+  assert.deepEqual(platformIncremental, platformProduction,
+    'event-index source preserves platform-pathway transfer geometry and complete metadata');
+  const platformChain = platformProduction.itineraries.find((journey) => journey.segments.length === 2);
   assert.ok(platformDecision.feasible && platformChain, 'the extracted pathway context and public router accept the same platform connection');
   assert.deepEqual(platformChain.transferWalkingMeters, [platformDecision.measure.walkingMeters]);
   assert.deepEqual(platformChain.transferWalkingSeconds, [platformDecision.measure.walkingSeconds]);
@@ -4017,6 +4054,12 @@ test('independent lazy event labels preserve service dates and repeated trip-cal
   afterMidnight.stopTimes.get('b1')![1]!.departureSeconds = 25 * 3600 + 20 * 60;
   afterMidnight.stopTimes.get('r1')![1]!.arrivalSeconds = 26 * 3600;
   afterMidnight.stopTimes.get('r1')![1]!.departureSeconds = 26 * 3600;
+  const overnightQuery = { ...request('2026-10-12T21:55:00Z', '2026-10-12T22:05:00Z'),
+    maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 1, maximumWaitSeconds: 60 * 60,
+    maximumTransferWalkingMeters: 100, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS };
+  assert.deepEqual(findGtfsItinerariesWithStats(afterMidnight, overnightQuery, { candidateSource: 'incremental-event-index' }),
+    findGtfsItinerariesWithStats(afterMidnight, overnightQuery),
+    'event-index source preserves service-date and post-midnight 25-hour trip semantics');
   const overnight = lazyEventLabelSearch(afterMidnight, {
     originStopIds: ['start'], destinationStopIds: ['finish'], serviceDates: ['20261012'],
     ...lazyEndpointOptions(afterMidnight, 'start', 'finish'),
