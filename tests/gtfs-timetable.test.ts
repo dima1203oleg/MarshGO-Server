@@ -3581,11 +3581,17 @@ test('graph-relative lazy search matches production itinerary materialization, c
   assert.ok(inSeatLazy.itineraries.some(({ segments, transferInSeat }) => segments.length === 2 && transferInSeat[0] === true),
     'GTFS transfer_type=4 remains traversable');
 
-  const shortWaitQuery = { ...transferQuery, maximumWaitSeconds: 5 * 60 };
+  const shortWaitQuery = { ...transferQuery, maximumWaitSeconds: 15 * 60 };
   const shortWaitProduction = findGtfsItinerariesWithStats(transferFeed, shortWaitQuery);
   const shortWaitLazy = lazyEventLabelSearchForRequest(transferFeed, shortWaitQuery);
   assert.deepEqual(shortWaitLazy.itineraries.map(({ id }) => id).sort(), shortWaitProduction.itineraries.map(({ id }) => id).sort(),
     'graph-relative traversal applies the production maximum-wait rule');
+  assert.ok(shortWaitProduction.itineraries.some(({ segments }) => segments.length === 2),
+    'a transfer departing exactly at the inclusive maximum-wait boundary remains feasible');
+  const overWaitQuery = { ...transferQuery, maximumWaitSeconds: 15 * 60 - 1 };
+  const overWaitProduction = findGtfsItinerariesWithStats(transferFeed, overWaitQuery);
+  assert.equal(overWaitProduction.itineraries.some(({ segments }) => segments.length === 2), false,
+    'a transfer departing one second beyond the maximum-wait boundary remains excluded');
 });
 
 test('matches a deterministic exhaustive oracle for pathways, transfer rules, loops, and realtime overlays', () => {

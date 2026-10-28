@@ -3835,7 +3835,7 @@ export function findGtfsItinerariesWithStats(
     last: GtfsDirectJourney;
     choices: GtfsDirectJourney[];
     nextIndex: number;
-    latestNext: number;
+    endIndex: number;
     remainingLegs: number;
     previousIds: Set<string>;
     visitedStops: Set<string>;
@@ -3916,8 +3916,15 @@ export function findGtfsItinerariesWithStats(
       if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) low = middle + 1;
       else high = middle;
     }
-    if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
-    enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
+    let endIndex = low;
+    high = choices.length;
+    while (endIndex < high) {
+      const middle = (endIndex + high) >>> 1;
+      if (choices[middle].departureAt.getTime() <= latestNext) endIndex = middle + 1;
+      else high = middle;
+    }
+    if (low >= endIndex) return;
+    enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, endIndex,
       remainingLegs, previousIds, visitedStops });
   };
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue) => {
@@ -3929,16 +3936,11 @@ export function findGtfsItinerariesWithStats(
       searchStepsByDepthPass.set(maximumLegsForPass, counts);
     }
     const next = work.choices[work.nextIndex++];
-    if (next.departureAt.getTime() <= work.latestNext
-      && reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id)
-      && !work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
+    if (!work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
       && transferDecision(work.last, next).feasible) {
       enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
     }
-    if (work.nextIndex < work.choices.length
-      && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
-      enqueueWork(queue, work);
-    }
+    if (work.nextIndex < work.endIndex) enqueueWork(queue, work);
   };
   const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number) => {
     while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
