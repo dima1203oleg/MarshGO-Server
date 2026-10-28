@@ -1441,6 +1441,113 @@ test('keeps a multi-transfer connector ahead of an earlier dead-end endpoint tri
       bounded.itineraries.map(chainId))}`);
 });
 
+test('retains hash-ranked middle groups needed only by a four-leg chain under a tight graph budget', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.stops.set('hub-c', { id: 'hub-c', name: 'Hub C', lon: 24.0285, lat: 49.8480 });
+  timetable.routes.set('middle-2', { name: 'Second middle', mode: 'BUS', transportType: 'bus' });
+
+  const egress = timetable.stopTimes.get('egress-trip')!;
+  egress[0]!.stopId = 'hub-c';
+  egress[0]!.arrivalSeconds = 8 * 3600 + 55 * 60;
+  egress[0]!.departureSeconds = 8 * 3600 + 55 * 60;
+  egress[1]!.arrivalSeconds = 9 * 3600 + 15 * 60;
+  egress[1]!.departureSeconds = 9 * 3600 + 15 * 60;
+  const secondMiddle = [
+    { stopId: 'hub-b', sequence: 1, arrivalSeconds: 8 * 3600 + 35 * 60,
+      departureSeconds: 8 * 3600 + 35 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: 'hub-c', sequence: 2, arrivalSeconds: 8 * 3600 + 45 * 60,
+      departureSeconds: 8 * 3600 + 45 * 60, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.trips.set('second-middle-trip', { routeId: 'middle-2', serviceId: 'weekday', headsign: 'Hub C' });
+  timetable.stopTimes.set('second-middle-trip', secondMiddle);
+
+  // The first middle trip is query-feasible only as part of the complete
+  // access -> middle -> second-middle -> egress chain. It cannot connect
+  // directly to the destination-side retention frontier at hub-b.
+  const rebuildStopTimesByStop = (feed: GtfsTimetableFeed) => {
+    feed.stopTimesByStop = new Map();
+    for (const [tripId, entries] of feed.stopTimes) entries.forEach((entry, index) => {
+      feed.stopTimesByStop.set(entry.stopId, [
+        ...(feed.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index },
+      ]);
+    });
+  };
+  rebuildStopTimesByStop(timetable);
+
+  const input = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number],
+    destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100,
+    maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 100,
+    maximumTransfers: 3,
+    maximumJourneySeconds: 2 * 60 * 60,
+    maximumWaitSeconds: 2 * 60 * 60,
+  };
+  const identify = (journey: GtfsItinerary) => journey.segments.map((segment) => segment.tripId).join(',');
+  const expected = `access-trip,${targetTripId},second-middle-trip,egress-trip`;
+  const exhaustive = findGtfsItinerariesWithStats(timetable, input, { totalSegments: 100, segmentsPerRoute: 100 });
+  assert.deepEqual(exhaustive.itineraries.map(identify), [expected], 'the exhaustive oracle contains the only feasible four-leg chain');
+
+  const runBounded = (feed: GtfsTimetableFeed, traceTripId?: string) => {
+    const graphs: GtfsCandidateGraphSnapshot[] = [];
+    const diagnostics: Array<Record<string, unknown>> = [];
+    const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+    const previousInfo = console.info;
+    let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+    try {
+      if (traceTripId) {
+        process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+        process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = traceTripId;
+        console.info = (...args: unknown[]) => {
+          try { diagnostics.push(JSON.parse(String(args[0])) as Record<string, unknown>); } catch { /* unrelated logs */ }
+        };
+      }
+      result = findGtfsItinerariesWithStats(feed, input, { totalSegments: 4, segmentsPerRoute: 1 },
+        (snapshot) => graphs.push(snapshot));
+    } finally {
+      console.info = previousInfo;
+      if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+      else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+      if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+      else process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = previousTrace;
+    }
+    return { result, graphs, diagnostics };
+  };
+  const bounded = runBounded(timetable, targetTripId);
+  const boundedIds = bounded.result.itineraries.map(identify);
+  assert.equal(bounded.result.truncation.candidateGraph, true, 'the bounded graph reports truncation');
+  assert.ok(bounded.graphs[0]!.segments.length <= 4, 'the global graph cap is respected');
+  assert.ok(bounded.graphs[0]!.segments.every((segment) => segment.journey), 'the retained graph contains valid GTFS segments');
+  const graphTraceEvent = bounded.diagnostics.find((entry) => entry.stage === 'segments-built');
+  assert.ok(graphTraceEvent);
+  const trace = JSON.parse(String(graphTraceEvent.debugCandidateTripTrace)) as {
+    trips: Array<{ tripId: string; retentionTier: number | null; retentionPriorityTier: number | null;
+      retainedWholeTripGroup: boolean }>;
+  };
+  const targetTrace = trace.trips.find((trip) => trip.tripId === targetTripId);
+  assert.ok(targetTrace, 'debug trace contains the target middle trip');
+  assert.equal(targetTrace.retentionTier, 3, 'the middle trip is not an endpoint-serving trip');
+  assert.equal(targetTrace.retentionPriorityTier, 5, 'without direct query-frontier feasibility, it falls to hash ranking');
+  assert.ok(!bounded.graphs[0]!.segments.some((segment) => segment.journey.tripId === targetTripId),
+    'the target middle trip is missing from the bounded graph after the hash decoy replaces it');
+
+  const reversed = structuredClone(timetable);
+  reversed.trips = new Map([...reversed.trips].reverse());
+  reversed.stopTimes = new Map([...reversed.stopTimes].reverse());
+  for (const [stopId, entries] of reversed.stopTimesByStop) reversed.stopTimesByStop.set(stopId, [...entries].reverse());
+  assert.deepEqual(runBounded(reversed).result.itineraries.map(identify), boundedIds,
+    'the bounded result is deterministic when GTFS trip/map enumeration order is reversed');
+
+  assert.ok(boundedIds.includes(expected),
+    `the bounded graph must preserve the exact four-leg chain; got ${JSON.stringify(boundedIds)}; `
+      + `segments=${JSON.stringify(bounded.graphs[0]!.segments.map(({ journey }) => ({
+        tripId: journey.tripId, routeId: journey.routeId, from: journey.originStop.id, to: journey.destinationStop.id,
+      })))}`);
+});
+
 test('retains a trip-specific in-seat feeder with a sub-buffer connection under a tight graph budget', () => {
   const { timetable } = timeFeasibleChainWithHashCompetingTrips();
   timetable.routes.clear();
