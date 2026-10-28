@@ -3637,7 +3637,7 @@ test('opt-in query-directed boarding source preserves exhaustive small-feed winn
   for (const transferFeed of [
     connectingFeed(),
     connectingFeed({ transferType: '3' }),
-    connectingFeed({ sameRoute: true, transferType: '4', inSeat: true }),
+    connectingFeed({ transferType: '4', inSeat: true }),
     connectingFeed({ transferType: '2', minimumTransferTime: '240' }),
   ]) {
     const transferQuery = { ...query, maximumTransfers: 1 };
@@ -3648,6 +3648,8 @@ test('opt-in query-directed boarding source preserves exhaustive small-feed winn
     assert.deepEqual(actual.itineraries, expected.itineraries,
       'the exact transfer authority preserves forbidden, in-seat, and minimum-buffer behavior');
   }
+  assertSourceParity(timeFeasibleChainWithHashCompetingTrips().timetable,
+    { ...query, maximumTransfers: 2 }, 'two-transfer route-state frontier');
 
   assertSourceParity(feed({ tuesday: '1' }), { ...query,
     earliestDeparture: new Date('2026-10-13T04:55:00Z'), latestDeparture: new Date('2026-10-13T05:12:00Z'),

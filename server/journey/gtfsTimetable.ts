@@ -418,8 +418,10 @@ export interface GtfsGraphBudgetLimits {
   segmentsPerRoute?: number;
   /** Opt-in candidate source for bounded query-reachable boarding experiments. */
   candidateSource?: 'production' | 'query-directed-boardings';
-  /** Test-only override for exercising query-directed boarding frontier truncation. */
+  /** Test-only override for exercising query-directed transfer-state frontier truncation. */
   maxQueryDirectedBoardingStops?: number;
+  /** Preferred name for the state bound; the older stops name remains accepted for experiment callers. */
+  maxQueryDirectedBoardingStates?: number;
   /** Test-only override for exercising bounded intermediate-connector retention. */
   maxRouteOverflowConnectors?: number;
   /** Test-only override for verifying bounded search-frontier behavior. */
@@ -1741,9 +1743,10 @@ export function findGtfsItinerariesWithStats(
   const maximumGraphSegmentsPerRoute = graphLimits.segmentsPerRoute ?? MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
   const maximumRouteOverflowConnectors = graphLimits.maxRouteOverflowConnectors ?? MAX_ROUTE_OVERFLOW_CONNECTORS;
   const candidateSource = graphLimits.candidateSource ?? 'production';
-  const maximumQueryDirectedBoardingStops = graphLimits.maxQueryDirectedBoardingStops ?? 20_000;
+  const maximumQueryDirectedBoardingStates = graphLimits.maxQueryDirectedBoardingStates
+    ?? graphLimits.maxQueryDirectedBoardingStops ?? 20_000;
   if (!['production', 'query-directed-boardings'].includes(candidateSource)
-    || !Number.isSafeInteger(maximumQueryDirectedBoardingStops) || maximumQueryDirectedBoardingStops < 1) {
+    || !Number.isSafeInteger(maximumQueryDirectedBoardingStates) || maximumQueryDirectedBoardingStates < 1) {
     throw new RangeError('GTFS candidate source bounds are invalid');
   }
   if (!Number.isSafeInteger(maximumRouteOverflowConnectors) || maximumRouteOverflowConnectors < 1) {
@@ -2003,33 +2006,38 @@ export function findGtfsItinerariesWithStats(
   debugStage('corridor-selected', { corridorStops: corridorStops.size, interchangeStops: interchangeStopIds.size,
     corridorWidthMeters: Math.round(corridorWidth) });
 
-  // The opt-in source walks a conservative stop/trip reachability superset
-  // from the selected origins. It ignores clock time and transfer prohibitions
-  // here on purpose; the normal transferDecision remains the only feasibility
-  // authority when the retained candidate graph is searched.
-  const queryDirectedBoardingStopIds = new Set<string>();
+  // The opt-in source walks a conservative transfer-count state superset from
+  // selected origins. Schedule time, pickup restrictions and transfer type 3
+  // remain downstream concerns; possible type-4 rules can keep a route switch
+  // in the same passenger-transfer layer. Exact transferDecision remains the
+  // only feasibility authority when the retained candidate graph is searched.
+  const queryDirectedBoardingRouteIdsByStop = new Map<string, Set<string>>();
   let queryDirectedBoardingFrontierTruncated = false;
   if (candidateSource === 'query-directed-boardings') {
     const stopIdsByTransferNode = new Map<string, Set<string>>();
     const stopsByParentStation = new Map<string, Set<string>>();
     const tripIdsByRoute = new Map<string, string[]>();
     const transferRulesByFromStop = new Map<string, GtfsTransferRule[]>();
+    const transferNodesByStop = new Map<string, Set<string>>();
     for (const [stopId, entries] of feed.stopTimesByStop) {
+      const transferNodes = new Set<string>([stopId]);
       for (const entry of entries) {
         const stopTime = feed.stopTimes.get(entry.tripId)?.[entry.index];
-        const nodes = new Set([stopId, stopTime?.sourceStopId, stopTime?.sourceParentStationId,
-          feed.stops.get(stopId)?.parentStation].filter((value): value is string => Boolean(value)));
-        for (const node of nodes) {
-          const stops = stopIdsByTransferNode.get(node) ?? new Set<string>();
-          stops.add(stopId);
-          stopIdsByTransferNode.set(node, stops);
-        }
+        if (stopTime?.sourceStopId) transferNodes.add(stopTime.sourceStopId);
+        if (stopTime?.sourceParentStationId) transferNodes.add(stopTime.sourceParentStationId);
       }
       const parent = feed.stops.get(stopId)?.parentStation;
       if (parent) {
+        transferNodes.add(parent);
         const stops = stopsByParentStation.get(parent) ?? new Set<string>();
         stops.add(stopId);
         stopsByParentStation.set(parent, stops);
+      }
+      transferNodesByStop.set(stopId, transferNodes);
+      for (const node of transferNodes) {
+        const stops = stopIdsByTransferNode.get(node) ?? new Set<string>();
+        stops.add(stopId);
+        stopIdsByTransferNode.set(node, stops);
       }
     }
     for (const [tripId, trip] of feed.trips) {
@@ -2042,59 +2050,98 @@ export function findGtfsItinerariesWithStats(
       rules.push(rule);
       transferRulesByFromStop.set(rule.fromStopId, rules);
     }
-    const pendingStops: string[] = [];
-    const enqueueReachableStop = (stopId: string) => {
-      if (!feed.stopTimesByStop.has(stopId) || !interchangeStopIds.has(stopId)
-        || queryDirectedBoardingStopIds.has(stopId)) return;
-      if (queryDirectedBoardingStopIds.size >= maximumQueryDirectedBoardingStops) {
+    const stateKey = (stopId: string, routeId: string, transfersUsed: number) =>
+      `${stopId}\u0000${routeId}\u0000${transfersUsed}`;
+    const visitedStates = new Set<string>();
+    const expandedRouteLayers = new Set<string>();
+    const transferNeighborsByStop = new Map<string, Set<string>>();
+    const pendingStates: Array<{ stopId: string; routeId: string; transfersUsed: number }> = [];
+    const enqueueReachableState = (stopId: string, routeId: string, transfersUsed: number) => {
+      if (!interchangeStopIds.has(stopId) || !routesByStop.get(stopId)?.has(routeId)) return;
+      const key = stateKey(stopId, routeId, transfersUsed);
+      if (visitedStates.has(key)) return;
+      if (visitedStates.size >= maximumQueryDirectedBoardingStates) {
         queryDirectedBoardingFrontierTruncated = true;
         return;
       }
-      queryDirectedBoardingStopIds.add(stopId);
-      pendingStops.push(stopId);
+      visitedStates.add(key);
+      const routes = queryDirectedBoardingRouteIdsByStop.get(stopId) ?? new Set<string>();
+      routes.add(routeId);
+      queryDirectedBoardingRouteIdsByStop.set(stopId, routes);
+      pendingStates.push({ stopId, routeId, transfersUsed });
     };
-    originStopIds.forEach(enqueueReachableStop);
-    for (let cursor = 0; cursor < pendingStops.length; cursor++) {
-      const stopId = pendingStops[cursor]!;
-      for (const routeId of routesByStop.get(stopId) ?? []) {
+    for (const stopId of originStopIds) {
+      for (const routeId of routesByStop.get(stopId) ?? []) enqueueReachableState(stopId, routeId, 0);
+    }
+    const possibleInSeatSwitch = (fromStopId: string, toStopId: string, fromRouteId: string, toRouteId: string) => {
+      const fromNodes = transferNodesByStop.get(fromStopId) ?? new Set([fromStopId]);
+      const toNodes = transferNodesByStop.get(toStopId) ?? new Set([toStopId]);
+      for (const nodeId of fromNodes) for (const rule of transferRulesByFromStop.get(nodeId) ?? []) {
+        if (rule.transferType !== 4 || !toNodes.has(rule.toStopId)
+          || (rule.fromRouteId && rule.fromRouteId !== fromRouteId)
+          || (rule.toRouteId && rule.toRouteId !== toRouteId)) continue;
+        // Trip-specific selectors are ignored by this reachability superset;
+        // they may add states but cannot hide a feasible Type-4 continuation.
+        return true;
+      }
+      return false;
+    };
+    for (let cursor = 0; cursor < pendingStates.length; cursor++) {
+      const { stopId, routeId, transfersUsed } = pendingStates[cursor]!;
+      // Ride every trip on this route without increasing the passenger
+      // transfer count. Direction and timetable feasibility are intentionally
+      // relaxed here to keep the frontier a superset of valid journeys.
+      const routeLayerKey = `${routeId}\u0000${transfersUsed}`;
+      if (!expandedRouteLayers.has(routeLayerKey)) {
+        expandedRouteLayers.add(routeLayerKey);
         for (const tripId of tripIdsByRoute.get(routeId) ?? []) {
-          for (const stopTime of feed.stopTimes.get(tripId) ?? []) enqueueReachableStop(stopTime.stopId);
+          for (const stopTime of feed.stopTimes.get(tripId) ?? []) {
+            enqueueReachableState(stopTime.stopId, routeId, transfersUsed);
+          }
         }
       }
-      const stop = feed.stops.get(stopId);
-      if (stop?.parentStation) {
-        for (const siblingId of stopsByParentStation.get(stop.parentStation) ?? []) enqueueReachableStop(siblingId);
-      }
-      const transferNodes = new Set([stopId]);
-      for (const entry of feed.stopTimesByStop.get(stopId) ?? []) {
-        const stopTime = feed.stopTimes.get(entry.tripId)?.[entry.index];
-        if (stopTime?.sourceStopId) transferNodes.add(stopTime.sourceStopId);
-        if (stopTime?.sourceParentStationId) transferNodes.add(stopTime.sourceParentStationId);
-      }
-      for (const nodeId of transferNodes) {
-        for (const reachableNode of reachablePathwayNodes(nodeId)) {
-          for (const candidateStopId of stopIdsByTransferNode.get(reachableNode) ?? []) enqueueReachableStop(candidateStopId);
+      let transferNeighborIds = transferNeighborsByStop.get(stopId);
+      if (!transferNeighborIds) {
+        const transferNodes = transferNodesByStop.get(stopId) ?? new Set([stopId]);
+        transferNeighborIds = new Set<string>([stopId]);
+        for (const nodeId of transferNodes) {
+          for (const reachableNode of reachablePathwayNodes(nodeId)) {
+            for (const candidateStopId of stopIdsByTransferNode.get(reachableNode) ?? []) transferNeighborIds.add(candidateStopId);
+          }
+          for (const rule of transferRulesByFromStop.get(nodeId) ?? []) {
+            for (const candidateStopId of stopIdsByTransferNode.get(rule.toStopId) ?? []) transferNeighborIds.add(candidateStopId);
+          }
         }
-        for (const rule of transferRulesByFromStop.get(nodeId) ?? []) {
-          for (const candidateStopId of stopIdsByTransferNode.get(rule.toStopId) ?? []) enqueueReachableStop(candidateStopId);
-        }
-      }
-      const stopDetails = feed.stops.get(stopId);
-      if (stopDetails) {
-        const [cellX, cellY] = transferCell([stopDetails.lon, stopDetails.lat]);
-        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-          for (const nearbyStopId of stopIdsByTransferCell.get(`${cellX + dx}:${cellY + dy}`) ?? []) {
-            const nearby = feed.stops.get(nearbyStopId);
-            if (nearby && distanceMeters([stopDetails.lon, stopDetails.lat], [nearby.lon, nearby.lat]) <= transferRadius) {
-              enqueueReachableStop(nearbyStopId);
+        const stopDetails = feed.stops.get(stopId);
+        if (stopDetails) {
+          const [cellX, cellY] = transferCell([stopDetails.lon, stopDetails.lat]);
+          for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+            for (const nearbyStopId of stopIdsByTransferCell.get(`${cellX + dx}:${cellY + dy}`) ?? []) {
+              const nearby = feed.stops.get(nearbyStopId);
+              if (nearby && distanceMeters([stopDetails.lon, stopDetails.lat], [nearby.lon, nearby.lat]) <= transferRadius) {
+                transferNeighborIds.add(nearbyStopId);
+              }
             }
+          }
+          const parentStation = stopDetails.parentStation;
+          if (parentStation) for (const siblingId of stopsByParentStation.get(parentStation) ?? []) transferNeighborIds.add(siblingId);
+        }
+        transferNeighborsByStop.set(stopId, transferNeighborIds);
+      }
+      for (const neighborId of transferNeighborIds) {
+        for (const nextRouteId of routesByStop.get(neighborId) ?? []) {
+          const transferIncrement = nextRouteId === routeId
+            || possibleInSeatSwitch(stopId, neighborId, routeId, nextRouteId) ? 0 : 1;
+          const nextTransfersUsed = transfersUsed + transferIncrement;
+          if (nextTransfersUsed <= maximumTransfers) {
+            enqueueReachableState(neighborId, nextRouteId, nextTransfersUsed);
           }
         }
       }
     }
   }
-  const canBoardFromCandidateSource = (stopId: string) => candidateSource !== 'query-directed-boardings'
-    || queryDirectedBoardingStopIds.has(stopId);
+  const canBoardFromCandidateSource = (stopId: string, routeId: string) => candidateSource !== 'query-directed-boardings'
+    || queryDirectedBoardingRouteIdsByStop.get(stopId)?.has(routeId) === true;
 
   const segmentsByRoute = new Map<string, RetainedGtfsTrip[]>();
   const retainedSegmentCountByRoute = new Map<string, number>();
@@ -2105,8 +2152,9 @@ export function findGtfsItinerariesWithStats(
     `${candidate.providerId}\u0000${candidate.serviceDate}\u0000${candidate.tripId}\u0000${candidate.originContext.details.id}\u0000${candidate.destinationContext.details.id}\u0000${candidate.departureAt.getTime()}\u0000${candidate.arrivalAt.getTime()}`;
   const candidateStopCountByRoute = new Map<string, number>();
   for (const [stopId, routeIds] of routesByStop) {
-    if (!interchangeStopIds.has(stopId) || !canBoardFromCandidateSource(stopId)) continue;
+    if (!interchangeStopIds.has(stopId)) continue;
     for (const routeId of routeIds) {
+      if (!canBoardFromCandidateSource(stopId, routeId)) continue;
       const route = feed.routes.get(routeId);
       if (!route || (input.allowedModes && !input.allowedModes.includes(route.mode))) continue;
       const providerCity = feed.providersByRoute?.get(routeId)?.city ?? input.providerCity;
@@ -2237,7 +2285,7 @@ export function findGtfsItinerariesWithStats(
     const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
       ? localCityCatchmentStops : corridorStops;
     const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
-      && interchangeStopIds.has(stopTime.stopId) && canBoardFromCandidateSource(stopTime.stopId) ? [index] : []);
+      && interchangeStopIds.has(stopTime.stopId) && canBoardFromCandidateSource(stopTime.stopId, trip.routeId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
     let pairOpportunities = 0;
     for (const serviceDate of serviceDates) {
@@ -2396,7 +2444,7 @@ export function findGtfsItinerariesWithStats(
     const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
       ? localCityCatchmentStops : corridorStops;
     const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
-      && interchangeStopIds.has(stopTime.stopId) && canBoardFromCandidateSource(stopTime.stopId) ? [index] : []);
+      && interchangeStopIds.has(stopTime.stopId) && canBoardFromCandidateSource(stopTime.stopId, trip.routeId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
     let addedTripDemand = 0;
     for (const serviceDate of serviceDates) {
@@ -2833,7 +2881,7 @@ export function findGtfsItinerariesWithStats(
     const localFeedInIntercitySearch = intercitySearch && providerCity !== undefined && providerCity !== 'Україна';
     const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : corridorStops;
     const eligibleIndexes = stops.flatMap((stop, index) => eligibleStopIds.has(stop.stopId)
-      && interchangeStopIds.has(stop.stopId) && canBoardFromCandidateSource(stop.stopId) ? [index] : []);
+      && interchangeStopIds.has(stop.stopId) && canBoardFromCandidateSource(stop.stopId, trip.routeId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
     tripsWithEligibleStops++;
     // A trip's stop metadata is shared across its service dates and all
