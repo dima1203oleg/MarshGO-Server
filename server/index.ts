@@ -40,6 +40,7 @@ import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
 import { buildBicycleRouteEstimates, buildScooterRouteEstimates, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
+import { micromobilityJourneyFareMinor } from './journey/micromobilityFare';
 import { buildMicromobilityGeofenceFeatures, buildMicromobilityPointFeatures, buildStaticRentalPointFeature } from './mobility/micromobilityFeatures';
 import { buildKiwitaxiAffiliateUrl, intuiTravelStatus, kiwitaxiStatus } from './mobility/transferAdapters';
 import { normalizePlate } from './vehiclePlate';
@@ -2896,7 +2897,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const arrivalAt = microPosition === 'before-transit' && itinerary ? itinerary.arrivalAt : estimate.arrivalAt;
     const departureAt = microPosition === 'after-transit' && itinerary ? itinerary.departureAt : search.departureAt;
     const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
-    const priceMinor = itinerary?.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
+    const transitFareMinor = itinerary?.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
+    const priceMinor = itinerary
+      ? micromobilityJourneyFareMinor(transitFareMinor, null)
+      : null;
     const walkingMeters = estimate.walkingMeters + (itinerary?.walkingMeters ?? 0);
     const transfers = (itinerary?.transfers ?? 0) + (itinerary ? 1 : 0);
     const waitingSeconds = itinerary
