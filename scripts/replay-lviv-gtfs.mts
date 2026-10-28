@@ -1,19 +1,21 @@
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 
 const zipPath = process.env.GTFS_REPLAY_ZIP;
 if (!zipPath) throw new Error('Set GTFS_REPLAY_ZIP to a frozen Lviv GTFS archive.');
-const require = createRequire(resolve(process.cwd(), 'package.json'));
+const sourceRoot = resolve(process.env.REPLAY_SOURCE_ROOT ?? process.cwd());
+const candidateRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const require = createRequire(resolve(sourceRoot, 'package.json'));
 const { unzipSync } = require('fflate');
 const { parseGtfsTimetable, findGtfsItinerariesWithStats } =
-  await import(pathToFileURL(resolve(process.cwd(), 'server/journey/gtfsTimetable.ts')).href);
+  await import(pathToFileURL(resolve(sourceRoot, 'server/journey/gtfsTimetable.ts')).href);
 const { toRankedGtfsItinerary } =
-  await import(pathToFileURL(resolve(process.cwd(), 'server/journey/gtfsRanking.ts')).href);
+  await import(pathToFileURL(resolve(candidateRoot, 'server/journey/gtfsRanking.ts')).href);
 const { selectStrategyAlternatives, strategiesWithComparablePrices } =
-  await import(pathToFileURL(resolve(process.cwd(), 'server/journey/scoring.ts')).href);
+  await import(pathToFileURL(resolve(sourceRoot, 'server/journey/scoring.ts')).href);
 const archive = readFileSync(zipPath);
 const archiveSha256 = createHash('sha256').update(archive).digest('hex');
 const expectedSha256 = process.env.GTFS_REPLAY_EXPECTED_SHA256;
