@@ -1,8 +1,7 @@
 import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
-import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
-import type { JourneyOption } from './types';
+import { journeyTransportTypeSelected, type JourneyOption, type JourneyTransportType } from './types';
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
 import { calculateCityTariffFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';

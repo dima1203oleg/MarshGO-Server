@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { micromobilityJourneyFareMinor } from '../server/journey/micromobilityFare';
-import { selectStrategyAlternatives } from '../server/journey/scoring';
+import { selectStrategyAlternatives, strategiesWithComparablePrices } from '../server/journey/scoring';
 import type { JourneyOption } from '../server/journey/types';
 
 test('micromobility + transit is excluded from CHEAPEST until both fares are known', () => {
@@ -17,8 +17,17 @@ test('micromobility + transit is excluded from CHEAPEST until both fares are kno
       legs: [{ mode: 'BUS' }] },
   ];
 
-  const cheapest = selectStrategyAlternatives(journeys, ['CHEAPEST']);
-  assert.deepEqual(cheapest.map(({ journey }) => journey.id), ['known-bus']);
+  const availableStrategies = strategiesWithComparablePrices(journeys, ['CHEAPEST']);
+  assert.deepEqual(availableStrategies, [], 'CHEAPEST must be unavailable while any candidate has an unknown total fare');
+  assert.deepEqual(selectStrategyAlternatives(journeys, availableStrategies), []);
+
+  const fullyPricedJourneys = journeys.map((journey) => journey.id === 'bike+metro'
+    ? { ...journey, priceMinor: 4_500 }
+    : journey);
+  const fullyPricedStrategies = strategiesWithComparablePrices(fullyPricedJourneys, ['CHEAPEST']);
+  assert.deepEqual(fullyPricedStrategies, ['CHEAPEST']);
+  const cheapest = selectStrategyAlternatives(fullyPricedJourneys, fullyPricedStrategies);
+  assert.equal(cheapest[0]?.journey.id, 'known-bus');
 });
 
 test('a micromobility journey fare is comparable only when both component fares are valid', () => {
