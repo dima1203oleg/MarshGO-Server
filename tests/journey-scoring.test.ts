@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { JOURNEY_SCORE_WEIGHTS, paretoFrontier, scoreJourneys, selectRepresentativeJourneys, selectStrategyAlternatives, selectStrategyRecommendations, strategiesWithComparablePrices } from '../server/journey/scoring';
+import { JOURNEY_SCORE_WEIGHTS, paretoFrontier, retainStrategyCandidatePool, scoreJourneys, selectRepresentativeJourneys, selectStrategyAlternatives, selectStrategyRecommendations, strategiesWithComparablePrices } from '../server/journey/scoring';
 import type { JourneyOption } from '../server/journey/types';
 
 const candidates: JourneyOption[] = [
@@ -86,6 +86,56 @@ describe('Journey strategy scoring', () => {
     const selected = selectStrategyAlternatives(sameChain, ['BALANCED'], 12);
     assert.equal(selected.length, 3);
     assert.equal(new Set(selected.map((item) => item.journey.diversityKey)).size, 1);
+  });
+
+  it('preserves strategy winners beyond an arrival-first GTFS cap and remembers dropped unknown fares', () => {
+    const denseArrivals: Array<JourneyOption & { arrivalAt: Date; departureAt: Date }> = Array.from({ length: 100 }, (_, index) => {
+      const arrivalAt = new Date(Date.parse('2026-10-28T08:40:00Z') + index * 10_000);
+      return {
+        ...candidates[0], id: `local-${index}`, diversityKey: 'transit:local',
+        durationSeconds: 2400, priceMinor: 2500, arrivalAt,
+        departureAt: new Date(arrivalAt.getTime() - 2_400_000),
+      };
+    });
+    const fastestAndCheaper = {
+      ...candidates[0], id: 'express', diversityKey: 'transit:local', durationSeconds: 600,
+      priceMinor: 1500, arrivalAt: new Date('2026-10-28T09:00:00Z'),
+      departureAt: new Date('2026-10-28T08:50:00Z'),
+    };
+    const cheapestSlow = {
+      ...candidates[0], id: 'cheap-slow', diversityKey: 'transit:cheap', durationSeconds: 3900,
+      priceMinor: 300, arrivalAt: new Date('2026-10-28T09:05:00Z'),
+      departureAt: new Date('2026-10-28T08:00:00Z'),
+    };
+    const droppedUnknownFare = {
+      ...candidates[0], id: 'unknown-late', diversityKey: 'transit:unknown', durationSeconds: 3960,
+      priceMinor: null, arrivalAt: new Date('2026-10-28T09:06:00Z'),
+      departureAt: new Date('2026-10-28T08:00:00Z'),
+    };
+
+    const allScheduled = [...denseArrivals, fastestAndCheaper, cheapestSlow, droppedUnknownFare];
+    const pool = retainStrategyCandidatePool(
+      allScheduled, 100,
+      ['BALANCED', 'FASTEST', 'CHEAPEST'],
+    );
+    const fullWinners = selectStrategyRecommendations(allScheduled, ['BALANCED', 'FASTEST']);
+    const boundedWinners = selectStrategyRecommendations(pool.candidates, ['BALANCED', 'FASTEST']);
+
+    assert.equal(pool.truncated, true);
+    assert.equal(pool.candidates.length, 100);
+    assert.ok(pool.candidates.some((journey) => journey.id === 'express'), 'the globally fastest and cheaper route must survive');
+    assert.ok(pool.candidates.some((journey) => journey.id === 'cheap-slow'), 'the globally cheapest route must survive');
+    assert.deepEqual(
+      boundedWinners.map(({ strategy, journey }) => [strategy, journey.id]),
+      fullWinners.map(({ strategy, journey }) => [strategy, journey.id]),
+      'the final BALANCED and FASTEST winners must match the complete scheduled pool',
+    );
+    assert.equal(pool.hasUnknownFare, true, 'fare completeness must include candidates omitted from the bounded pool');
+    assert.deepEqual(
+      strategiesWithComparablePrices(pool.candidates, ['BALANCED', 'FASTEST', 'CHEAPEST'])
+        .filter((strategy) => strategy !== 'CHEAPEST' || !pool.hasUnknownFare),
+      ['BALANCED', 'FASTEST'],
+    );
   });
 
   it('keeps distinct winners for distinct strategies', () => {

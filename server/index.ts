@@ -26,7 +26,7 @@ import { isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg } from './jour
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
-import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePrices } from './journey/scoring';
+import { paretoFrontier, retainStrategyCandidatePool, selectStrategyAlternatives, strategiesWithComparablePrices } from './journey/scoring';
 import { journeyTransportTypeSelected, type JourneyLegMode, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
@@ -3134,9 +3134,6 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerErrors.push(`Пішохідний маршрутизатор обмежив перевірку комбінацій ${communityWalkingBudget.limit} шляхами; частину варіантів не перевірено.`);
     }
   }
-  scheduledCandidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.departureAt.getTime() - b.departureAt.getTime());
-  if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
-  scheduledCandidates.splice(100);
   const transitRouteChainKey = (itinerary: GtfsItinerary) => {
     const routes: string[] = [];
     for (const segment of itinerary.segments) {
@@ -3145,30 +3142,38 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
     return routes.join('>');
   };
+  const scheduledCandidatePool = retainStrategyCandidatePool(scheduledCandidates.map((itinerary) => ({
+    id: itinerary.id,
+    diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers ? 0.3 : 0,
+    comfort: null,
+    legs: [
+      ...(itinerary.segments[0].distanceToOriginStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
+      ...itinerary.segments.flatMap((segment, index) => [
+        ...(index > 0 && itinerary.transferWalkingMeters[index - 1] > 0 ? [{ mode: 'WALK' as const }] : []),
+        { mode: segment.mode, providerId: segment.providerId },
+      ]),
+      ...(itinerary.segments.at(-1)!.distanceFromDestinationStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
+    ],
+    arrivalAt: itinerary.arrivalAt,
+    departureAt: itinerary.departureAt,
+    itinerary,
+  })), 100, strategies);
+  candidateGenerationTruncated ||= scheduledCandidatePool.truncated;
+  hasUnpricedTransitCandidates ||= scheduledCandidatePool.hasUnknownFare;
+  scheduledCandidates = scheduledCandidatePool.candidates.map(({ itinerary }) => itinerary);
   const rankedCandidates = [
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
     ...micromobilityCandidates.map((candidate) => ({ ...candidate })),
-    ...scheduledCandidates.map((itinerary) => ({
-      id: itinerary.id,
-      diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
-      durationSeconds: itinerary.durationSeconds,
-      priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
-      transfers: itinerary.transfers,
-      walkingMeters: itinerary.walkingMeters,
-      reliability: null,
-      transferRisk: itinerary.transfers ? 0.3 : 0,
-      comfort: null,
-      legs: [
-        ...(itinerary.segments[0].distanceToOriginStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
-        ...itinerary.segments.flatMap((segment, index) => [
-          ...(index > 0 && itinerary.transferWalkingMeters[index - 1] > 0 ? [{ mode: 'WALK' as const }] : []),
-          { mode: segment.mode, providerId: segment.providerId },
-        ]),
-        ...(itinerary.segments.at(-1)!.distanceFromDestinationStopMeters > 0 ? [{ mode: 'WALK' as const }] : []),
-      ],
+    ...scheduledCandidatePool.candidates.map(({ arrivalAt: _arrivalAt, departureAt: _departureAt, ...candidate }) => ({
+      ...candidate,
       kind: 'gtfs' as const,
-      itinerary,
     })),
   ];
   const availableStrategies = strategiesWithComparablePrices(rankedCandidates, strategies)
