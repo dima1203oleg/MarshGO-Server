@@ -326,7 +326,30 @@ export function createGtfsTransferDecisionContext(context: {
     return { feasible: availableSeconds >= requiredSeconds, measure, requiredSeconds,
       minimumBufferSeconds: inSeat ? 0 : modeBuffer, ruleMinimumSeconds, rule };
   };
-  const decide = (previous: GtfsDirectJourney, next: GtfsDirectJourney): GtfsTransferDecision => decideBoarding(previous, next);
+  // The same scheduled segment pair can be checked from multiple search
+  // prefixes. Reuse its exact transfer decision, but cap the per-query cache
+  // so dense feeds cannot turn pair memoization into unbounded memory growth.
+  const MAX_CACHED_TRANSFER_DECISIONS = 100_000;
+  const decisionsByPrevious = new WeakMap<GtfsDirectJourney, WeakMap<GtfsDirectJourney, GtfsTransferDecision>>();
+  let cachedTransferDecisionCount = 0;
+  let transferDecisionCacheHits = 0;
+  const decide = (previous: GtfsDirectJourney, next: GtfsDirectJourney): GtfsTransferDecision => {
+    const decisionsByNext = decisionsByPrevious.get(previous);
+    const cached = decisionsByNext?.get(next);
+    if (cached) {
+      transferDecisionCacheHits++;
+      return cached;
+    }
+    const decision = decideBoarding(previous, next);
+    if (cachedTransferDecisionCount < MAX_CACHED_TRANSFER_DECISIONS) {
+      const nextDecisions = decisionsByNext ?? new WeakMap<GtfsDirectJourney, GtfsTransferDecision>();
+      if (!decisionsByNext) decisionsByPrevious.set(previous, nextDecisions);
+      nextDecisions.set(next, decision);
+      cachedTransferDecisionCount++;
+    }
+    return decision;
+  };
+  const transferDecisionCacheStats = () => ({ cachedTransferDecisionCount, transferDecisionCacheHits });
   const pathwayReachableCache = new Map<string, Set<string>>();
   const reachablePathwayNodes = (fromStopId: string): Set<string> => {
     const cached = pathwayReachableCache.get(fromStopId);
@@ -343,7 +366,8 @@ export function createGtfsTransferDecisionContext(context: {
     pathwayReachableCache.set(fromStopId, reachable);
     return reachable;
   };
-  return { decide, decideBoarding, transferRuleFor, pathwayNodes, reachablePathwayNodes, pathwayConnection };
+  return { decide, decideBoarding, transferRuleFor, pathwayNodes, reachablePathwayNodes, pathwayConnection,
+    transferDecisionCacheStats };
 }
 
 interface SearchInput {
@@ -1761,7 +1785,8 @@ export function findGtfsItinerariesWithStats(
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
   const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
-  const { decide: transferDecision, transferRuleFor, pathwayNodes, reachablePathwayNodes, pathwayConnection } = transferDecisionContext;
+  const { decide: transferDecision, transferRuleFor, pathwayNodes, reachablePathwayNodes, pathwayConnection,
+    transferDecisionCacheStats } = transferDecisionContext;
 
   let stopSelectionTruncated = false;
   const closestStops = (point: [number, number], radius: number) => {
@@ -4078,6 +4103,7 @@ export function findGtfsItinerariesWithStats(
     }
   }
   debugStage('itineraries-ranked', { searchSteps, firstLegs: firstLegs.length, candidateResults: rankedResults.length,
+    ...transferDecisionCacheStats(),
     ...Object.fromEntries(Array.from({ length: maxTransitLegs }, (_, index) =>
       [`candidatesWith${index + 1}Legs`, resultCountByLegCount.get(index + 1) ?? 0])),
     returnedByLegCount: JSON.stringify(itineraries.reduce<Record<number, number>>((counts, itinerary) => {

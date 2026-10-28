@@ -3820,6 +3820,9 @@ test('the extracted transfer decision matches public router feasibility for type
       minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
     });
     const decision = context.decide(previous, next);
+    assert.strictEqual(context.decide(previous, next), decision,
+      'the same scheduled segment pair reuses its immutable feasibility decision');
+    assert.equal(context.transferDecisionCacheStats().transferDecisionCacheHits, 1);
     assert.equal(decision.feasible, expected);
     assert.equal(decision.measure.inSeat, expectedInSeat);
     const publicChain = findGtfsItineraries(timetable, query).find((journey) => journey.segments.length === 2);
