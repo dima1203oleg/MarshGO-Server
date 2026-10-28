@@ -1713,6 +1713,7 @@ export function findGtfsItinerariesWithStats(
   let debugOnwardArrivalWeakMapHits = 0;
   let debugOnwardArrivalStringCacheHits = 0;
   let debugReachableStopSetBuilds = 0;
+  let debugReachableStopSetCacheHits = 0;
   let debugDestinationEventsScanned = 0;
   let debugConnectorCandidatesInspected = 0;
   const debugConnectorReservoirSorts = 0;
@@ -2409,6 +2410,21 @@ export function findGtfsItinerariesWithStats(
   const nextEventCache = new WeakMap<RetainedGtfsSegment, boolean>();
   const nextEventByTripStopCache = new Map<string, boolean>();
   const MAX_CACHED_NEXT_EVENT_TRIP_STOPS = 16_384;
+  const reachableDestinationStopsByContext = new WeakMap<GtfsStopContext, ReadonlySet<string>>();
+  const reachableDestinationStopsFor = (context: GtfsStopContext): ReadonlySet<string> => {
+    const cached = reachableDestinationStopsByContext.get(context);
+    if (cached) {
+      if (debugSearch) debugReachableStopSetCacheHits++;
+      return cached;
+    }
+    const reachable = new Set([context.details.id]);
+    for (const nodeId of context.transferNodeIds) {
+      for (const stopId of reachablePathwayNodes(nodeId)) reachable.add(stopId);
+    }
+    reachableDestinationStopsByContext.set(context, reachable);
+    if (debugSearch) debugReachableStopSetBuilds++;
+    return reachable;
+  };
   const hasNextEvent = (segment: RetainedGtfsSegment, minimumGapSeconds: number) => {
     const cached = nextEventCache.get(segment);
     if (cached !== undefined) return cached;
@@ -2442,8 +2458,7 @@ export function findGtfsItinerariesWithStats(
       return retentionRequiredTransferSeconds(segment.routeId, event.routeId,
         pathway ? pathway.walkingSeconds : 0, minimumGapSeconds, rule);
     };
-    const reachableDestinationStops = new Set([segment.destinationContext.details.id,
-      ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
+    const reachableDestinationStops = reachableDestinationStopsFor(segment.destinationContext);
     // Each reachable-stop event list is already time sorted. The predicate
     // only asks whether any feasible continuation exists, so merging and
     // sorting all lists for every segment is unnecessary; scan each indexed
@@ -2497,9 +2512,7 @@ export function findGtfsItinerariesWithStats(
     const earliestAllowed = segment.arrivalAt.getTime();
     const eventStopId = segment.destinationContext.details.id;
     const segmentProviderId = feed.providersByRoute?.get(segment.routeId)?.id ?? input.providerId;
-    if (debugSearch) debugReachableStopSetBuilds++;
-    const reachableDestinationStops = new Set([eventStopId,
-      ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
+    const reachableDestinationStops = reachableDestinationStopsFor(segment.destinationContext);
     let earliestArrival = Infinity;
     for (const stopId of reachableDestinationStops) {
       const events = destinationRetentionEventsByReachableStop.get(stopId) ?? [];
@@ -3256,6 +3269,7 @@ export function findGtfsItinerariesWithStats(
       onwardArrivalWeakMapHits: debugOnwardArrivalWeakMapHits,
       onwardArrivalStringCacheHits: debugOnwardArrivalStringCacheHits,
       reachableStopSetBuilds: debugReachableStopSetBuilds,
+      reachableStopSetCacheHits: debugReachableStopSetCacheHits,
       destinationEventsScanned: debugDestinationEventsScanned,
       connectorCandidatesInspected: debugConnectorCandidatesInspected,
       connectorReservoirSorts: debugConnectorReservoirSorts,
