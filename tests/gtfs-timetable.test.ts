@@ -574,7 +574,12 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.equal(typeof graph.overflowReservoirRetained, 'number');
   assert.equal(typeof graph.overflowReservoirsAtCap, 'number');
   assert.equal(typeof graph.routeBudgetUnderfillSample, 'string');
-  assert.ok(Array.isArray(JSON.parse(String(graph.routeBudgetUnderfillSample))));
+  assert.equal(typeof graph.routeBudgetUnderfillOmitted, 'number');
+  const underfilledRoutes = JSON.parse(String(graph.routeBudgetUnderfillSample)) as unknown[];
+  assert.ok(Array.isArray(underfilledRoutes));
+  assert.ok(underfilledRoutes.length <= 100);
+  assert.equal(underfilledRoutes.length + Number(graph.routeBudgetUnderfillOmitted), graph.graphRoutesUnderfilled,
+    'debug details report every underfilled route or explicitly count omitted rows');
   assert.equal(typeof graph.reachableStopSetBuilds, 'number');
   assert.equal(typeof graph.reachableStopSetCacheHits, 'number');
   assert.equal(typeof ranked.searchStepLimit, 'number');

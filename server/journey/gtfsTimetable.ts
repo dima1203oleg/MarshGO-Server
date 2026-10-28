@@ -3085,7 +3085,7 @@ export function findGtfsItinerariesWithStats(
     capacity: Math.min(maximumRouteOverflowConnectors, graphSegmentBudgetByRoute.get(routeId) ?? 0),
   }));
   const overflowConnectorReservoirSizes = overflowConnectorReservoirs.map(({ retained }) => retained);
-  const routeBudgetUnderfillSample = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
+  const routeBudgetUnderfillDetails = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
     ? [...graphSegmentBudgetByRoute].map(([routeId, budget]) => {
       const retainedSegments = selectedSegmentsByRoute.get(routeId)?.length ?? 0;
       const wholeTripSegments = (segmentsByRoute.get(routeId) ?? [])
@@ -3098,8 +3098,13 @@ export function findGtfsItinerariesWithStats(
       };
     }).filter((route) => route.unused > 0)
       .sort((left, right) => right.unused - left.unused || compareStableId(left.routeId, right.routeId))
-      .slice(0, 10)
     : undefined;
+  // Keep debug replay evidence useful for dense city feeds without allowing
+  // diagnostics to create unbounded log payloads. Omitted count makes the
+  // capped list's completeness explicit.
+  const routeBudgetUnderfillSample = routeBudgetUnderfillDetails?.slice(0, 100);
+  const routeBudgetUnderfillOmitted = Math.max(0, (routeBudgetUnderfillDetails?.length ?? 0)
+    - (routeBudgetUnderfillSample?.length ?? 0));
   const debugCandidateTripTrace = debugTraceCandidateTripSet ? (() => {
     const finalGraphKeys = new Set(segments.map((segment) =>
       `${segment.providerId}\u0000${segment.serviceDate}\u0000${segment.tripId}\u0000${segment.originStop.id}\u0000${segment.destinationStop.id}\u0000${segment.departureAt.getTime()}\u0000${segment.arrivalAt.getTime()}`));
@@ -3287,6 +3292,7 @@ export function findGtfsItinerariesWithStats(
       connectorReservoirItemsInspected: debugConnectorReservoirItemsInspected,
     } : {}),
     ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
+    ...(routeBudgetUnderfillDetails ? { routeBudgetUnderfillOmitted } : {}),
     ...(debugCandidateTripTrace ? { debugCandidateTripTrace: JSON.stringify(debugCandidateTripTrace) } : {}),
     estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
     globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
