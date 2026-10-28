@@ -3918,19 +3918,22 @@ export function findGtfsItinerariesWithStats(
       startIndexByLegDepth = new Map<number, number>();
       transferChoiceStartIndexBySegment.set(last, startIndexByLegDepth);
     }
-    let low = startIndexByLegDepth.get(remainingLegs);
-    if (low === undefined) {
-      low = 0;
+    const cachedLow = startIndexByLegDepth.get(remainingLegs);
+    let low: number;
+    if (cachedLow === undefined) {
+      let computedLow = 0;
       let high = choices.length;
-      while (low < high) {
-        const middle = (low + high) >>> 1;
+      while (computedLow < high) {
+        const middle = (computedLow + high) >>> 1;
         if (debugSearch) debugTransferChoiceStartIndexComparisons++;
-        if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) low = middle + 1;
+        if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) computedLow = middle + 1;
         else high = middle;
       }
-      startIndexByLegDepth.set(remainingLegs, low);
-    } else if (debugSearch) {
-      debugTransferChoiceStartIndexCacheHits++;
+      low = computedLow;
+      startIndexByLegDepth.set(remainingLegs, computedLow);
+    } else {
+      low = cachedLow;
+      if (debugSearch) debugTransferChoiceStartIndexCacheHits++;
     }
     if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
     enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
