@@ -2445,6 +2445,7 @@ export function findGtfsItinerariesWithStats(
     const maximumCachedSuccessorResults = 256;
     let successorLookupRequests = 0;
     let successorCacheHits = 0;
+    let dominatedStateAttempts = 0;
     const candidateCallsFor = (previous: GtfsDirectJourney): IncrementalBoardingCall[] => {
       const earliestDepartureMs = previous.arrivalAt.getTime();
       const [destinationLongitude, destinationLatitude] = previous.destinationStop.coordinates;
@@ -2494,15 +2495,18 @@ export function findGtfsItinerariesWithStats(
     };
     const maxTransitLegsForIndex = maximumTransfers + 1;
     const queued: Array<{ call: IncrementalBoardingCall; segmentsUsed: number }> = [];
-    const visitedStates = new Set<string>();
+    const visitedStates = new Map<string, number>();
     const enqueueState = (call: IncrementalBoardingCall, segmentsUsed: number) => {
-      const key = `${call.key}\u0000${segmentsUsed}`;
-      if (visitedStates.has(key)) return;
-      if (visitedStates.size >= maximumIncrementalSearchStates) {
+      const previousSegmentsUsed = visitedStates.get(call.key);
+      if (previousSegmentsUsed !== undefined && previousSegmentsUsed <= segmentsUsed) {
+        dominatedStateAttempts++;
+        return;
+      }
+      if (previousSegmentsUsed === undefined && visitedStates.size >= maximumIncrementalSearchStates) {
         incrementalSourceFallbackRequired = true;
         return;
       }
-      visitedStates.add(key);
+      visitedStates.set(call.key, segmentsUsed);
       queued.push({ call, segmentsUsed });
     };
     for (const call of calls) {
@@ -2517,12 +2521,14 @@ export function findGtfsItinerariesWithStats(
     let projectedLegs = 0;
     const projectedLegsByCall = new Set<string>();
     for (let cursor = 0; cursor < queued.length && !incrementalSourceFallbackRequired; cursor++) {
-      if (process.env.MARSHGO_GTFS_SEARCH_PROGRESS === '1' && cursor > 0 && cursor % 5000 === 0) {
+      if (process.env.MARSHGO_GTFS_SEARCH_PROGRESS === '1' && cursor > 0 && cursor % 1000 === 0) {
         debugStage('incremental-reachability-progress', { searchCursor: cursor, queuedStates: queued.length,
           projectedLegs, reachableBoardingCalls: incrementalReachableBoardingKeys.size,
-          successorLookupRequests, successorCacheHits, successorCacheEntries: successorLookupCache.size });
+          successorLookupRequests, successorCacheHits, successorCacheEntries: successorLookupCache.size,
+          dominatedStateAttempts });
       }
       const { call, segmentsUsed } = queued[cursor]!;
+      if (visitedStates.get(call.key) !== segmentsUsed) continue;
       incrementalReachableBoardingKeys.add(call.key);
       if (projectedLegsByCall.has(call.key)) continue;
       projectedLegsByCall.add(call.key);
@@ -2579,7 +2585,7 @@ export function findGtfsItinerariesWithStats(
     }
     debugStage('incremental-reachability-built', { reachableStates: visitedStates.size, projectedLegs,
       reachableBoardingCalls: incrementalReachableBoardingKeys.size, successorLookupRequests,
-      successorCacheHits, successorCacheEntries: successorLookupCache.size });
+      successorCacheHits, successorCacheEntries: successorLookupCache.size, dominatedStateAttempts });
     if (incrementalSourceFallbackRequired) return eagerFallback();
 
     // Rebase graph demand on the event-reachable boarding calls. This keeps

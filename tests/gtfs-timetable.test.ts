@@ -1304,6 +1304,10 @@ test('query-time retention keeps a feasible multi-leg chain under an injected gr
   };
   const graphLimits = { totalSegments: 3, segmentsPerRoute: 1 };
   const result = findGtfsItinerariesWithStats(timetable, searchInput, graphLimits);
+  const incrementalResult = findGtfsItinerariesWithStats(timetable, searchInput,
+    { ...graphLimits, candidateSource: 'incremental-event-index' });
+  assert.deepEqual(incrementalResult.itineraries, result.itineraries,
+    'event-index depth deduplication preserves exact feasible itineraries despite using its own bounded search');
 
   assert.equal(result.candidateGraphTruncated, true);
   assert.equal(result.searchTruncated, true);
@@ -3745,7 +3749,7 @@ test('incremental successor cache preserves feasible transfer chains and three r
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:12:00Z'),
     origin: [24.0201, 49.8401] as [number, number],
     destination: [24.0301, 49.8501] as [number, number],
-    maximumTransfers: 1, maximumAccessWalkingMeters: 300, maximumEgressWalkingMeters: 300,
+    maximumTransfers: 1, maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 300,
     maximumTransferWalkingMeters: 500, minimumTransferBufferSeconds: 180, maximumWaitSeconds: 4 * 60 * 60,
   };
   const eager = findGtfsItinerariesWithStats(timetable, query);
@@ -3772,6 +3776,8 @@ test('incremental successor cache preserves feasible transfer chains and three r
   const reachability = diagnostics[0];
   assert.ok(reachability, 'incremental search emits completed reachability diagnostics');
   assert.ok(Number(reachability.successorCacheHits) > 0, 'repeated exact transfer queries reuse cached successor calls');
+  assert.ok(Number(reachability.dominatedStateAttempts) > 0,
+    'a boarding call already reachable with fewer legs is not queued again at a greater depth');
   for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const) {
     const winnerId = (itineraries: GtfsItinerary[]) => scoreJourneys(itineraries.map((journey) => ({
       id: journey.id, durationSeconds: journey.durationSeconds,
