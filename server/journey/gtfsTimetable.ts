@@ -3964,6 +3964,13 @@ export function findGtfsItinerariesWithStats(
   // A single depth-first pass otherwise fills its candidate pool with the
   // maximum-transfer branches before it has represented useful shorter trips.
   const depthWeights = [0.05, 0.35, 0.27, 0.20, 0.13].slice(0, maxTransitLegs);
+  const firstLegGroups = new Map<string, GtfsDirectJourney[]>();
+  for (const segment of firstLegs) {
+    const key = `${segment.providerId}:${segment.routeId}`;
+    const group = firstLegGroups.get(key) ?? [];
+    group.push(segment);
+    firstLegGroups.set(key, group);
+  }
   for (let depthIndex = 0; depthIndex < maxTransitLegs; depthIndex++) {
     const maximumLegsForPass = depthIndex + 1;
     if ((resultCountByLegCount.get(maximumLegsForPass) ?? 0) >= limit) continue;
@@ -3977,13 +3984,6 @@ export function findGtfsItinerariesWithStats(
       ? MAX_SEARCH_STEPS
       : Math.min(MAX_SEARCH_STEPS, searchSteps + Math.max(1,
         Math.floor((MAX_SEARCH_STEPS - searchSteps) * depthWeights[depthIndex] / remainingWeight)));
-    const firstLegGroups = new Map<string, GtfsDirectJourney[]>();
-    for (const segment of firstLegs) {
-      const key = `${segment.providerId}:${segment.routeId}`;
-      const group = firstLegGroups.get(key) ?? [];
-      group.push(segment);
-      firstLegGroups.set(key, group);
-    }
     queuesPendingWork = 0;
     const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true,
