@@ -53,5 +53,14 @@ print(f"- Truncated: baseline `{baseline[0]['searchTruncated']}` / candidate `{c
 print(f"- Truncation causes: baseline `{json.dumps(baseline[0]['truncation'], sort_keys=True)}`; candidate `{json.dumps(candidate[0]['truncation'], sort_keys=True)}`")
 for stage in ("segments-built", "reachability-built", "itineraries-ranked"):
     print(f"- `{stage}` counters: baseline `{json.dumps(baseline[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`; candidate `{json.dumps(candidate[0]['searchDiagnosticsByStage'].get(stage), sort_keys=True)}`")
+    baseline_times = [item.get("searchTimingsByStage", {}).get(stage, {}).get("elapsedMs") for item in baseline]
+    candidate_times = [item.get("searchTimingsByStage", {}).get(stage, {}).get("elapsedMs") for item in candidate]
+    if all(isinstance(value, (int, float)) for value in baseline_times + candidate_times):
+        baseline_stage_median = statistics.median(baseline_times)
+        candidate_stage_median = statistics.median(candidate_times)
+        stage_delta = ((candidate_stage_median / baseline_stage_median) - 1) * 100 if baseline_stage_median else 0.0
+        print(f"- `{stage}` median elapsed: {baseline_stage_median:.2f} ms → {candidate_stage_median:.2f} ms ({stage_delta:+.2f}%); samples baseline `{baseline_times}` / candidate `{candidate_times}`")
+    else:
+        print(f"- `{stage}` median elapsed: unavailable (replay artifact lacks stage timing samples)")
 print()
 print("This is one static Lviv OD and a diagnostic comparison, not a live GPS, realtime, staging, production, or complete-routing acceptance test.")

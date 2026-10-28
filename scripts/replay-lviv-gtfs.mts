@@ -97,6 +97,7 @@ const graphObserver = traceRouteIds.size > 0 || traceTripIds.size > 0
   : undefined;
 const startedAt = performance.now();
 const searchDiagnosticsByStage: Record<string, Record<string, unknown>> = {};
+const searchTimingsByStage: Record<string, { elapsedMs?: number; heapUsedBytes?: number; rssBytes?: number }> = {};
 let searchCandidateTrace: unknown;
 let searchCandidateTraceError: string | undefined;
 const originalConsoleInfo = console.info.bind(console);
@@ -120,6 +121,12 @@ console.info = (...args: unknown[]) => {
       const record = JSON.parse(args[0]) as Record<string, unknown>;
       if (record.event === 'gtfs.search.debug') {
         if (typeof record.stage === 'string' && ['segments-built', 'reachability-built', 'itineraries-ranked'].includes(record.stage)) {
+          const timing = {
+            ...(typeof record.elapsedMs === 'number' ? { elapsedMs: record.elapsedMs } : {}),
+            ...(typeof record.heapUsedBytes === 'number' ? { heapUsedBytes: record.heapUsedBytes } : {}),
+            ...(typeof record.rssBytes === 'number' ? { rssBytes: record.rssBytes } : {}),
+          };
+          if (Object.keys(timing).length > 0) searchTimingsByStage[record.stage] = timing;
           const { elapsedMs: _elapsedMs, heapUsedBytes: _heapUsedBytes, rssBytes: _rssBytes, ...stable } = record;
           searchDiagnosticsByStage[record.stage] = stable;
           if (record.stage === 'segments-built' && typeof record.debugCandidateTripTrace === 'string') {
@@ -219,4 +226,5 @@ console.log(JSON.stringify({
         || left.destinationStopId.localeCompare(right.destinationStopId))])) } : {}),
   ...(searchCandidateTrace !== undefined ? { searchCandidateTrace } : {}),
   searchDiagnosticsByStage,
+  searchTimingsByStage,
 }, null, 2));
