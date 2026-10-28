@@ -1750,7 +1750,7 @@ test('connector reservoir keeps a CHEAPEST winner behind faster fare-diverse con
     'the expanded connector and per-route budgets must restore the exact exhaustive CHEAPEST winner');
 });
 
-test('duplicate early-hub candidates cannot monopolize connector cap=2 when a feasible distinct hub exists', () => {
+test('duplicate same-trip early-hub candidates cannot hide a later feasible hub at connector cap=2', () => {
   const timetable = feed();
   timetable.routes.clear();
   timetable.trips.clear();
@@ -1761,10 +1761,16 @@ test('duplicate early-hub candidates cannot monopolize connector cap=2 when a fe
   for (const [id, name, lon, lat] of [
     ['origin', 'Origin', 24.0200, 49.8400],
     ['hub-a', 'Hub A', 24.0250, 49.8450],
+    ['hub-c1', 'Hub C platform 1', 24.0340, 49.8520],
+    ['hub-c2', 'Hub C platform 2', 24.0340, 49.8520],
+    ['hub-c3', 'Hub C platform 3', 24.0340, 49.8520],
     ['hub-b', 'Hub B', 24.0300, 49.8490],
-    ['hub-c', 'Hub C', 24.0340, 49.8520],
     ['destination', 'Destination', 24.0300, 49.8500],
   ] as const) timetable.stops.set(id, { id, name, lon, lat });
+  for (const id of ['hub-c1', 'hub-c2', 'hub-c3']) {
+    timetable.stops.set(id, { ...timetable.stops.get(id)!, parentStation: 'shared-hub-c' });
+  }
+  timetable.transfers = [{ fromStopId: 'shared-hub-c', toStopId: 'shared-hub-c', transferType: 0 }];
 
   for (const [id, name] of [
     ['access', 'Access'], ['middle', 'Middle'], ['egress-b', 'Onward via B'], ['egress-c', 'Onward via C'],
@@ -1778,14 +1784,23 @@ test('duplicate early-hub candidates cannot monopolize connector cap=2 when a fe
   };
 
   addTrip('access-trip', 'access', [['origin', 8 * 3600], ['hub-a', 8 * 3600 + 10 * 60]]);
-  // Two trips for middle route going to hub-c (same hub):
-  addTrip('middle-c-early', 'middle', [['hub-a', 8 * 3600 + 15 * 60], ['hub-c', 8 * 3600 + 22 * 60]]);
-  addTrip('middle-c-later', 'middle', [['hub-a', 8 * 3600 + 17 * 60], ['hub-c', 8 * 3600 + 24 * 60]]);
-  // One trip for middle route going to hub-b (distinct hub):
-  addTrip('middle-b', 'middle', [['hub-a', 8 * 3600 + 18 * 60], ['hub-b', 8 * 3600 + 26 * 60]]);
+  // A single loop trip has three feasible candidates to the same canonical
+  // hub before it reaches the distinct hub-b. Its repeated hub-c stops are
+  // alighting-only so they cannot create extra boarding candidates.
+  addTrip('middle-loop', 'middle', [
+    ['hub-a', 8 * 3600 + 15 * 60], ['hub-c1', 8 * 3600 + 22 * 60],
+    ['hub-c2', 8 * 3600 + 24 * 60], ['hub-c3', 8 * 3600 + 26 * 60],
+    ['hub-b', 8 * 3600 + 28 * 60],
+  ]);
+  const middleStops = timetable.stopTimes.get('middle-loop')!;
+  for (const stopTime of middleStops.slice(1, 4)) {
+    stopTime.pickupType = 1;
+    stopTime.sourceParentStationId = 'shared-hub-c';
+  }
 
   // Onward trips from hub-c and hub-b to destination:
-  addTrip('egress-c-trip', 'egress-c', [['hub-c', 8 * 3600 + 28 * 60], ['destination', 8 * 3600 + 40 * 60]]);
+  addTrip('egress-c-trip', 'egress-c', [['hub-c3', 8 * 3600 + 30 * 60], ['destination', 8 * 3600 + 40 * 60]]);
+  timetable.stopTimes.get('egress-c-trip')![0]!.sourceParentStationId = 'shared-hub-c';
   addTrip('egress-b-trip', 'egress-b', [['hub-b', 8 * 3600 + 32 * 60], ['destination', 8 * 3600 + 48 * 60]]);
 
   timetable.stopTimesByStop = new Map();
@@ -1802,24 +1817,65 @@ test('duplicate early-hub candidates cannot monopolize connector cap=2 when a fe
   };
 
   let graphSnapshot: GtfsCandidateGraphSnapshot | undefined;
-  const result = findGtfsItinerariesWithStats(timetable, input, {
-    totalSegments: 100, segmentsPerRoute: 3, maxRouteOverflowConnectors: 2,
-  }, (snapshot) => { graphSnapshot = snapshot; });
+  const diagnostics: Array<Record<string, unknown>> = [];
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+  const previousInfo = console.info;
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+    process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = 'middle-loop';
+    console.info = (...args: unknown[]) => {
+      try { diagnostics.push(JSON.parse(String(args[0])) as Record<string, unknown>); } catch { /* unrelated logs */ }
+    };
+    result = findGtfsItinerariesWithStats(timetable, input, {
+      totalSegments: 100, segmentsPerRoute: 10, maxRouteOverflowConnectors: 2,
+    }, (snapshot) => { graphSnapshot = snapshot; });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+    if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = previousTrace;
+  }
+
+  let expandedGraphSnapshot: GtfsCandidateGraphSnapshot | undefined;
+  const expanded = findGtfsItinerariesWithStats(timetable, input, {
+    totalSegments: 100, segmentsPerRoute: 10, maxRouteOverflowConnectors: 3,
+  }, (snapshot) => { expandedGraphSnapshot = snapshot; });
 
   assert.ok(graphSnapshot);
+  const graphDiagnostics = diagnostics.find((entry) => entry.stage === 'segments-built');
+  assert.ok(graphDiagnostics);
+  const candidateTrace = JSON.parse(String(graphDiagnostics.debugCandidateTripTrace)) as {
+    candidates: Array<{ tripId: string; fromStopId: string; toStopId: string; connectorEvalIndex: number | null;
+      earliestQueryArrivalAfterSegment: number | null }>;
+  };
+  const hubBCandidate = candidateTrace.candidates.find((candidate) => candidate.tripId === 'middle-loop'
+    && candidate.fromStopId === 'hub-a' && candidate.toStopId === 'hub-b');
+  assert.ok(hubBCandidate && hubBCandidate.earliestQueryArrivalAfterSegment !== null,
+    'hub-b is a feasible query connector in the debug oracle');
+  assert.ok(hubBCandidate.connectorEvalIndex !== null,
+    `hub-b reaches the bounded connector evaluator; row=${JSON.stringify(hubBCandidate)}`);
   const middleConnectors = graphSnapshot.segments.filter(({ journey }) =>
     journey.routeId === 'middle' && journey.originStop.id === 'hub-a');
   const retainedHubs = new Set(middleConnectors.map(({ journey }) => journey.destinationStop.id));
-  assert.ok(retainedHubs.has('hub-c'), 'hub-c is retained');
-  assert.ok(retainedHubs.has('hub-b'), 'distinct hub-b is retained; duplicate hub-c candidate did not monopolize cap=2');
+  assert.ok(['hub-c1', 'hub-c2', 'hub-c3'].some((hub) => retainedHubs.has(hub)), 'a hub-c platform is retained');
 
-  const bChain = 'access-trip,middle-b,egress-b-trip';
-  const cChain = 'access-trip,middle-c-early,egress-c-trip';
+  const bChain = 'access-trip,middle-loop,egress-b-trip';
+  const cChain = 'access-trip,middle-loop,egress-c-trip';
   const foundChains = new Set(result.itineraries.map((j) => j.segments.map((s) => s.tripId).join(',')));
-  assert.ok(foundChains.has(bChain), 'feasible journey via distinct hub-b is found');
   assert.ok(foundChains.has(cChain), 'feasible journey via hub-c is found');
   assert.equal(result.truncation.candidateGraph, true,
-    'candidate graph truncation is reported when the bounded reservoir retains two of three feasible alternatives');
+    'candidate graph truncation is reported when the bounded reservoir omits additional feasible connectors');
+  assert.ok(expandedGraphSnapshot?.segments.some(({ journey }) => journey.routeId === 'middle'
+    && journey.originStop.id === 'hub-a' && journey.destinationStop.id === 'hub-b'),
+  'a larger explicit evaluation bound observes the later hub-b connector');
+  assert.ok(expanded.itineraries.some((journey) => journey.segments.map((segment) => segment.tripId).join(',') === bChain),
+    'a larger explicit evaluation bound returns the hub-b continuation');
+  assert.ok(foundChains.has(bChain), 'feasible journey via distinct hub-b is found');
+  assert.ok(retainedHubs.has('hub-b'),
+    'distinct hub-b is retained; duplicate hub-c candidates did not monopolize cap=2');
 });
 
 test('query-time retention keeps a scheduled connector ahead of dense irrelevant interchanges', () => {
