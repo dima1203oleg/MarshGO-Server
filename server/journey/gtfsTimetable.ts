@@ -1715,7 +1715,7 @@ export function findGtfsItinerariesWithStats(
   let debugReachableStopSetBuilds = 0;
   let debugDestinationEventsScanned = 0;
   let debugConnectorCandidatesInspected = 0;
-  let debugConnectorReservoirSorts = 0;
+  const debugConnectorReservoirSorts = 0;
   let debugConnectorReservoirItemsInspected = 0;
   const debugTripChainsIn = (candidates: readonly GtfsItinerary[]) => {
     const found = new Set<string>();
