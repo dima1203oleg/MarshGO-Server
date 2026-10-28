@@ -1650,6 +1650,9 @@ test('query-time retention ranks a middle connector by its complete onward arriv
     timetable.stopTimes.set(tripId, stops);
   };
   addTrip('branch-egress-trip-a', 'branch-egress-a', 'branch-a', 8 * 3600 + 30 * 60, 9 * 3600 + 10 * 60);
+  // A departure at hub-b leaves first but arrives later than the following
+  // service, so event-time order must not be mistaken for arrival-time order.
+  addTrip('slow-egress-trip', 'egress', 'hub-b', 8 * 3600 + 30 * 60, 9 * 3600 + 10 * 60);
   timetable.stopTimesByStop = new Map();
   for (const [tripId, entries] of timetable.stopTimes) entries.forEach((entry, index) => {
     const atStop = timetable.stopTimesByStop.get(entry.stopId) ?? [];
@@ -1660,7 +1663,7 @@ test('query-time retention ranks a middle connector by its complete onward arriv
   const search = {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
     origin: [24.0200, 49.8400] as [number, number], destination: [24.0300, 49.8500] as [number, number],
-    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransfers: 2,
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransferWalkingMeters: 100, maximumTransfers: 2,
   };
   const expectedTripChain = `access-trip,${targetTripId},egress-trip`;
   const exhaustive = findGtfsItinerariesWithStats(timetable, search, { totalSegments: 100, segmentsPerRoute: 100 });

@@ -2330,9 +2330,16 @@ export function findGtfsItinerariesWithStats(
   // as a complete no-route answer.
   let segmentGraphTruncated = graphRoutesBudgetLimited > 0;
   const priorEventCache = new WeakMap<RetainedGtfsSegment, boolean>();
+  const priorEventByTripStopCache = new Map<string, boolean>();
   const hasPriorEvent = (segment: RetainedGtfsSegment, minimumGapSeconds: number) => {
     const cached = priorEventCache.get(segment);
     if (cached !== undefined) return cached;
+    const stopKey = `${segment.tripId}\u0000${segment.serviceDate}\u0000${segment.fromIndex}\u0000${minimumGapSeconds}`;
+    const cachedByStop = priorEventByTripStopCache.get(stopKey);
+    if (cachedByStop !== undefined) {
+      priorEventCache.set(segment, cachedByStop);
+      return cachedByStop;
+    }
     // Type-4 rules allow zero-buffer continuations, so retain the short-gap
     // events until their exact transfer rule has been resolved.
     const latestAllowed = segment.departureAt.getTime();
@@ -2372,11 +2379,13 @@ export function findGtfsItinerariesWithStats(
         if (availableSeconds > maximumWaitSeconds) break;
         const requiredSeconds = minimumGapForEvent(event);
         if (requiredSeconds !== null && availableSeconds >= requiredSeconds) {
+          priorEventByTripStopCache.set(stopKey, true);
           priorEventCache.set(segment, true);
           return true;
         }
       }
     }
+    priorEventByTripStopCache.set(stopKey, false);
     priorEventCache.set(segment, false);
     return false;
   };
@@ -2429,12 +2438,23 @@ export function findGtfsItinerariesWithStats(
     }
     return false;
   };
+  const MAX_ONWARD_ARRIVAL_SCAN_AFTER_FEASIBLE = 8;
+  const maxJourneyArrivalAt = input.earliestDeparture.getTime() + maximumJourneySeconds * 1000;
   const onwardArrivalCache = new WeakMap<RetainedGtfsSegment, number | null>();
+  const onwardArrivalByTripStopCache = new Map<string, number | null>();
   const earliestQueryArrivalAfterSegment = (segment: RetainedGtfsSegment, minimumGapSeconds: number) => {
     const cached = onwardArrivalCache.get(segment);
     if (cached !== undefined) return cached;
+    const stopKey = `${segment.tripId}\u0000${segment.serviceDate}\u0000${segment.toIndex}\u0000${minimumGapSeconds}`;
+    const cachedByStop = onwardArrivalByTripStopCache.get(stopKey);
+    if (cachedByStop !== undefined) {
+      onwardArrivalCache.set(segment, cachedByStop);
+      return cachedByStop;
+    }
     const earliestAllowed = segment.arrivalAt.getTime();
-    const reachableDestinationStops = new Set([segment.destinationContext.details.id,
+    const eventStopId = segment.destinationContext.details.id;
+    const segmentProviderId = feed.providersByRoute?.get(segment.routeId)?.id ?? input.providerId;
+    const reachableDestinationStops = new Set([eventStopId,
       ...segment.destinationContext.transferNodeIds.flatMap((nodeId) => [...reachablePathwayNodes(nodeId)])]);
     let earliestArrival = Infinity;
     for (const stopId of reachableDestinationStops) {
@@ -2445,20 +2465,24 @@ export function findGtfsItinerariesWithStats(
         if (events[middle]!.at < earliestAllowed) low = middle + 1;
         else high = middle;
       }
+      let foundFeasibleAtStop = false;
+      let postFeasibleScanned = 0;
       for (let index = low; index < events.length; index++) {
         const event = events[index]!;
-        const availableSeconds = (event.at - segment.arrivalAt.getTime()) / 1000;
+        if (event.at >= earliestArrival) break;
+        const availableSeconds = (event.at - earliestAllowed) / 1000;
         if (availableSeconds > maximumWaitSeconds) break;
-        if (event.journeyArrivalAt !== undefined
-          && event.journeyArrivalAt > input.earliestDeparture.getTime() + maximumJourneySeconds * 1000) continue;
+        if (foundFeasibleAtStop && ++postFeasibleScanned > MAX_ONWARD_ARRIVAL_SCAN_AFTER_FEASIBLE) break;
+        if (event.journeyArrivalAt === undefined
+          || event.journeyArrivalAt >= earliestArrival
+          || event.journeyArrivalAt > maxJourneyArrivalAt) continue;
         const { rule, ambiguous } = retentionRuleFor(segment.destinationContext.transferNodeIds, event.nodeIds,
           segment.tripId, event.tripId, segment.routeId, event.routeId);
         if (ambiguous || rule?.transferType === 3) continue;
         const inSeat = rule?.transferType === 4;
         let walkingSeconds = 0;
         if (!inSeat) {
-          const eventStopId = segment.destinationContext.details.id;
-          const nearby = event.providerId === (feed.providersByRoute?.get(segment.routeId)?.id ?? input.providerId) || rule !== null
+          const nearby = event.providerId === segmentProviderId || rule !== null
             ? feed.stops.get(eventStopId) && feed.stops.get(event.canonicalStopId)
               ? distanceMeters([feed.stops.get(eventStopId)!.lon, feed.stops.get(eventStopId)!.lat],
                 [feed.stops.get(event.canonicalStopId)!.lon, feed.stops.get(event.canonicalStopId)!.lat]) : null
@@ -2473,15 +2497,15 @@ export function findGtfsItinerariesWithStats(
         }
         const requiredSeconds = retentionRequiredTransferSeconds(segment.routeId, event.routeId,
           walkingSeconds, minimumGapSeconds, rule);
-        if (availableSeconds < requiredSeconds || event.journeyArrivalAt === undefined) continue;
-        earliestArrival = Math.min(earliestArrival, event.journeyArrivalAt);
-        // Events are ordered by departure time. The earliest feasible event
-        // at a reachable stop is a bounded proxy for onward quality; scanning
-        // every later trip here makes dense-feed connector ranking quadratic.
-        break;
+        if (availableSeconds < requiredSeconds) continue;
+        foundFeasibleAtStop = true;
+        if (event.journeyArrivalAt < earliestArrival) {
+          earliestArrival = event.journeyArrivalAt;
+        }
       }
     }
     const result = Number.isFinite(earliestArrival) ? earliestArrival : null;
+    onwardArrivalByTripStopCache.set(stopKey, result);
     onwardArrivalCache.set(segment, result);
     return result;
   };
