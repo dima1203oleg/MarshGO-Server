@@ -1612,7 +1612,7 @@ test('connector reservoir keeps a CHEAPEST winner behind faster fare-diverse con
     // remains within 400 m of hub-c, the trip can walk to the fast egress.
     ['hub-d', 'Hub D', 24.0500, 49.8700],
     ['destination', 'Destination', 24.0300, 49.8500],
-    ['dead-end-stop', 'Dead end', 24.0370, 49.8550],
+    ['dead-end-stop', 'Dead end', 24.0510, 49.8710],
   ] as const) timetable.stops.set(id, { id, name, lon, lat });
   for (const [id, name] of [
     ['access', 'Access'], ['middle', 'Middle'], ['egress-cheap', 'Cheap onward'],
