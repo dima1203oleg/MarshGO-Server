@@ -1923,7 +1923,7 @@ test('production connector default preserves exhaustive winners across nine dist
   timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: 24.080, lat: 49.840 });
   for (let index = 0; index <= 9; index++) {
     const stopId = `hub-${index}`;
-    timetable.stops.set(stopId, { id: stopId, name: `Hub ${index}`, lon: 24.001 + index * 0.007, lat: 49.840 });
+    timetable.stops.set(stopId, { id: stopId, name: `Hub ${index}`, lon: 24.0025 + index * 0.007, lat: 49.840 });
   }
   const addTrip = (tripId: string, routeId: string, stops: Array<[string, number]>) => {
     timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
