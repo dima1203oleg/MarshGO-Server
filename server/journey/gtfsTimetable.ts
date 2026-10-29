@@ -3730,7 +3730,7 @@ export function findGtfsItinerariesWithStats(
   // Once a leg-count pool is full, keep searching a bounded window so late
   // objective improvements can enter the reservoirs without scanning the
   // entire dense feed. Any remaining work is still reported as truncated.
-  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = graphLimits.maxObjectiveReservoirSearchSteps ?? 25_000;
+  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = graphLimits.maxObjectiveReservoirSearchSteps ?? 30_000;
   if (!Number.isSafeInteger(MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS) || MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS < 0) {
     throw new RangeError('maxObjectiveReservoirSearchSteps must be a non-negative safe integer');
   }
