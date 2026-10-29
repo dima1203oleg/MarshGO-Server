@@ -3600,6 +3600,102 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
   'trace reports the sorted choice position for a feasible target successor');
 });
 
+test('preserves a late feasible successor cursor under a small bounded queue', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  const addStop = (id: string, lon: number, lat: number) => timetable.stops.set(id, { id, name: id, lon, lat });
+  addStop('origin', 24.0200, 49.8400);
+  addStop('hub', 24.0500, 49.8600);
+  addStop('destination', 24.1700, 49.9400);
+  const addRoute = (routeId: string) => timetable.routes.set(routeId, {
+    name: routeId, mode: 'BUS', transportType: 'bus',
+  });
+  const addTrip = (tripId: string, routeId: string, from: string, to: string,
+    departureSeconds: number, arrivalSeconds: number) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [from, to].map((stopId, index) => ({
+      stopId, sequence: index + 1,
+      arrivalSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      departureSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+
+  addRoute('access-route');
+  addTrip('access-trip', 'access-route', 'origin', 'hub', 8 * 3600, 8 * 3600 + 10 * 60);
+  const distractorCount = 30;
+  for (let index = 0; index < distractorCount; index++) {
+    const suffix = String(index).padStart(2, '0');
+    const middleStop = `middle-${suffix}`;
+    addStop(middleStop, 24.0700 + index * 0.002, 49.8700 + index * 0.0012);
+    addRoute(`middle-route-${suffix}`);
+    addRoute(`egress-route-${suffix}`);
+    const middleDeparture = 8 * 3600 + 13 * 60 + index * 20;
+    addTrip(`middle-trip-${suffix}`, `middle-route-${suffix}`, 'hub', middleStop,
+      middleDeparture, middleDeparture + 60);
+    addTrip(`egress-trip-${suffix}`, `egress-route-${suffix}`, middleStop, 'destination',
+      middleDeparture + 4 * 60, middleDeparture + 14 * 60);
+  }
+  const target = 'target';
+  addStop('middle-target', 24.1400, 49.9100);
+  addRoute('middle-route-target');
+  addRoute('egress-route-target');
+  addTrip('middle-trip-target', 'middle-route-target', 'hub', 'middle-target',
+    8 * 3600 + 30 * 60, 8 * 3600 + 31 * 60);
+  addTrip('egress-trip-target', 'egress-route-target', 'middle-target', 'destination',
+    8 * 3600 + 35 * 60, 8 * 3600 + 42 * 60);
+
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+  const previousInfo = console.info;
+  const diagnostics: Array<Record<string, unknown>> = [];
+  const targetChain = 'access-trip>middle-trip-target>egress-trip-target';
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = targetChain.split('>')
+    .map((tripId) => `p1:20261012:${tripId}`).join('>');
+  console.info = (...args: unknown[]) => {
+    if (typeof args[0] !== 'string') return;
+    try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
+  };
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    result = findGtfsItinerariesWithStats(timetable, {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T06:30:00Z'),
+      origin: [24.0200, 49.8400], destination: [24.1700, 49.9400],
+      maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+      maximumTransferWalkingMeters: 10, maximumTransfers: 2, limit: 100,
+    }, { maxCandidatesPerLegCount: 100, maxObjectiveReservoirSearchSteps: 1_000, maxQueuedSearchWork: 6 });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+    if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTrace;
+  }
+
+  const returnedChains = new Set(result.itineraries.map((journey) => journey.segments
+    .map((segment) => segment.tripId).join('>')));
+  assert.ok(returnedChains.has(targetChain), 'the latest feasible chain survives bounded cursor pressure');
+  assert.equal(result.truncation.searchBudget, true, 'evicted alternative branches are reported as partial search');
+  const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
+  const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
+    successorPositionsByPath: Record<string, { targetSuccessors: Array<{ tripKey: string; cursorOffset: number; transferFeasible: boolean }> }>;
+  }>;
+  const targetTrace = trace[`p1:20261012:access-trip>p1:20261012:middle-trip-target>p1:20261012:egress-trip-target`];
+  assert.ok(targetTrace, 'the target chain trace is present');
+  assert.ok(Object.values(targetTrace.successorPositionsByPath).some((variant) =>
+    variant.targetSuccessors.some((successor) => successor.tripKey === 'p1:20261012:middle-trip-target'
+      && successor.cursorOffset > 6 && successor.transferFeasible)),
+  'the feasible target lies beyond the six-item queue share');
+});
+
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
   const timetable = feed();
   timetable.routes.clear();

@@ -3953,13 +3953,31 @@ export function findGtfsItinerariesWithStats(
   };
   const pausedDepthPassQueues = new Map<number, RouteSearchQueue[]>();
   const truncatedDepthPasses = new Set<number>();
-  const enqueueWork = (queue: RouteSearchQueue, work: SearchWork) => {
-    const pendingInQueue = queue.work.length - queue.workIndex;
+  const evictOldestQueuedPath = (queue: RouteSearchQueue) => {
+    for (let index = queue.workIndex; index < queue.work.length; index++) {
+      if (queue.work[index].kind !== 'path') continue;
+      queue.work.splice(index, 1);
+      queuesPendingWork--;
+      queueWorkDropped = true;
+      return true;
+    }
+    return false;
+  };
+  const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false) => {
+    let pendingInQueue = queue.work.length - queue.workIndex;
+    if (work.kind === 'children'
+      && (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork)) {
+      // A child cursor is the only record of unvisited successors for its path.
+      // Keep it moving under pressure by evicting the oldest deferred path first;
+      // the search still reports that discarded branch as truncated.
+      if (evictOldestQueuedPath(queue)) pendingInQueue--;
+    }
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
       queueWorkDropped = true;
       return;
     }
-    queue.work.push(work);
+    if (prioritize) queue.work.splice(queue.workIndex, 0, work);
+    else queue.work.push(work);
     maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
       queuesPendingWork + 1);
     queuesPendingWork++;
@@ -4019,7 +4037,7 @@ export function findGtfsItinerariesWithStats(
     if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
     recordDebugTargetSuccessorPositions(path, choices, low, latestNext);
     enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
-      remainingLegs, previousIds, visitedStops });
+      remainingLegs, previousIds, visitedStops }, true);
   };
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue) => {
     searchSteps++;
@@ -4048,7 +4066,7 @@ export function findGtfsItinerariesWithStats(
     }
     if (work.nextIndex < work.choices.length
       && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
-      enqueueWork(queue, work);
+      enqueueWork(queue, work, true);
     }
   };
   const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number) => {
