@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, objectiveReservoirTransferPathTurnLimit, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsDeterministicOverflowSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch, shouldBorrowGtfsQueueShare } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, objectiveReservoirChildTurnsBeforeTransferPath, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsDeterministicOverflowSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch, shouldBorrowGtfsQueueShare } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 import { queryDirectedEventIndexPrototype, validateEventIndexCandidatesWithProductionTransfers } from './helpers/gtfs-event-label-prototype';
@@ -310,13 +310,13 @@ test('child cursors borrow idle queue share only below global admission and hard
     'borrowing is unnecessary while the local fairness share has room');
 });
 
-test('increases completed-path service only at the high objective-reservoir backlog threshold', () => {
-  assert.equal(objectiveReservoirTransferPathTurnLimit(0), 16);
-  assert.equal(objectiveReservoirTransferPathTurnLimit(7), 16);
-  assert.equal(objectiveReservoirTransferPathTurnLimit(8), 2);
-  assert.equal(objectiveReservoirTransferPathTurnLimit(15), 2);
-  assert.equal(objectiveReservoirTransferPathTurnLimit(16), 1);
-  assert.throws(() => objectiveReservoirTransferPathTurnLimit(-1), RangeError);
+test('adapts objective-reservoir cursor cadence to the transfer-path backlog', () => {
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(0), 16);
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(7), 16);
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(8), 2);
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(15), 2);
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(16), 4);
+  assert.throws(() => objectiveReservoirChildTurnsBeforeTransferPath(-1), RangeError);
 });
 
 /**
@@ -3795,9 +3795,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     selectedWorkKind: decision.selectedWorkKind,
   }));
   assert.ok(reservoirQueueDecisions.some((decision) => decision.forcedTransferPathTurn
-    && decision.pendingTransferPathCount >= 16 && decision.transferPathTurnLimit === 1
-    && decision.fairChildTurnsBeforePath >= 1 && decision.selectedWorkKind === 'path'),
-  `very large transfer-path backlog receives a path turn after one child turn; ${JSON.stringify(schedulingEvidence)}`);
+    && decision.pendingTransferPathCount >= 16 && decision.transferPathTurnLimit === 4
+    && decision.fairChildTurnsBeforePath >= 4 && decision.selectedWorkKind === 'path'),
+  `very large transfer-path backlog gives four cursor turns per path turn; ${JSON.stringify(schedulingEvidence)}`);
   assert.ok(reservoirQueueDecisions.some((decision) => decision.pendingTransferPathCount >= 8
     && decision.pendingTransferPathCount < 16 && decision.transferPathTurnLimit === 2),
   'large but bounded transfer-path queues keep the two-child-turn cadence');

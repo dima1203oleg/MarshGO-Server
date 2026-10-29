@@ -40,6 +40,7 @@ const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
 const MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST = 1;
 const MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH = 16;
 const MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH = 2;
+const MAX_OBJECTIVE_RESERVOIR_HIGH_BACKLOG_CHILD_TURNS_BEFORE_PATH = 4;
 const OBJECTIVE_RESERVOIR_TRANSFER_PATH_BACKLOG_THRESHOLD = 8;
 const OBJECTIVE_RESERVOIR_TRANSFER_PATH_HIGH_BACKLOG_THRESHOLD = 16;
 const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 4;
@@ -66,12 +67,14 @@ export function shouldBorrowGtfsQueueShare(input: {
     && (input.priorityPath || input.childCursor);
 }
 
-/** Increase completion service only when a saturated reservoir has a deep path backlog. */
-export function objectiveReservoirTransferPathTurnLimit(pendingTransferPaths: number): number {
+/** Balance cursor discovery against prefix completion as the reservoir backlog grows. */
+export function objectiveReservoirChildTurnsBeforeTransferPath(pendingTransferPaths: number): number {
   if (!Number.isSafeInteger(pendingTransferPaths) || pendingTransferPaths < 0) {
     throw new RangeError('pendingTransferPaths must be a non-negative safe integer');
   }
-  if (pendingTransferPaths >= OBJECTIVE_RESERVOIR_TRANSFER_PATH_HIGH_BACKLOG_THRESHOLD) return 1;
+  if (pendingTransferPaths >= OBJECTIVE_RESERVOIR_TRANSFER_PATH_HIGH_BACKLOG_THRESHOLD) {
+    return MAX_OBJECTIVE_RESERVOIR_HIGH_BACKLOG_CHILD_TURNS_BEFORE_PATH;
+  }
   if (pendingTransferPaths >= OBJECTIVE_RESERVOIR_TRANSFER_PATH_BACKLOG_THRESHOLD) {
     return MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH;
   }
@@ -4435,7 +4438,7 @@ export function findGtfsItinerariesWithStats(
       const shouldServeNonPriorityCursor = pendingNonPriorityChildCursor >= queue.workIndex
         && (!hasPendingPriorityWork
           || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
-      const childTurnsBeforePath = objectiveReservoirTransferPathTurnLimit(pendingTransferPathCount);
+      const childTurnsBeforePath = objectiveReservoirChildTurnsBeforeTransferPath(pendingTransferPathCount);
       // Guarantee transfer-path service independently of priority streaks:
       // shorten the cursor cadence as the prefix backlog grows, while a small
       // backlog waits longer so cursor discovery keeps moving.
