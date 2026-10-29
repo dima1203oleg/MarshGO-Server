@@ -3499,20 +3499,43 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
   addTrip(`${target}-egress-trip`, `${target}-egress`, targetHubB, 'destination',
     firstDeparture + 23 * 60, firstDeparture + 33 * 60);
 
-  const result = findGtfsItinerariesWithStats(timetable, {
-    ...request('2026-10-12T04:55:00Z', '2026-10-12T06:30:00Z'),
-    maximumAccessWalkingMeters: 100,
-    maximumEgressWalkingMeters: 100,
-    maximumTransferWalkingMeters: 100,
-    maximumTransfers: 2,
-    limit: 100,
-  }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 160 });
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+  const previousInfo = console.info;
+  const diagnostics: Array<Record<string, unknown>> = [];
+  const targetTrace = [`${target}-access`, `${target}-middle-trip`, `${target}-egress-trip`]
+    .map((tripId) => `p1:20261012:${tripId}`).join('>');
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = targetTrace;
+  console.info = (...args: unknown[]) => {
+    if (typeof args[0] !== 'string') return;
+    try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
+  };
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    result = findGtfsItinerariesWithStats(timetable, {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T06:30:00Z'),
+      maximumAccessWalkingMeters: 100,
+      maximumEgressWalkingMeters: 100,
+      maximumTransferWalkingMeters: 100,
+      maximumTransfers: 2,
+      limit: 100,
+    }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 160 });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+    if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTrace;
+  }
 
   const targetChain = `${target}-access>${target}-middle-trip>${target}-egress-trip`;
   const returnedChains = new Set(result.itineraries.map((journey) =>
     journey.segments.map((segment) => segment.tripId).join('>')));
+  const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
+  const trace = ranked?.debugTripChainPresence;
   assert.ok(returnedChains.has(targetChain),
-    'the later, faster feasible chain survives early slower branches sharing its access route');
+    `the later, faster feasible chain survives early slower branches; trace=${String(trace)}`);
   assert.equal(result.truncation.searchBudget, false,
     'the fair scheduler exhausts this bounded fixture instead of leaving the late branch pending');
 });
