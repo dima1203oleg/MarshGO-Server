@@ -3710,12 +3710,14 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     variant.targetSuccessors.some((successor) => successor.tripKey === 'p1:20261012:middle-trip-target'
       && successor.cursorOffset > 6 && successor.transferFeasible)),
   'the feasible target lies beyond the six-item queue share');
-  assert.equal(targetTrace.queueEventsByLegCount['2']?.pathEnqueued ?? 0, 0,
-    'a feasible two-leg prefix is expanded immediately instead of being evicted from the queue');
-  assert.equal(targetTrace.queueEventsByLegCount['3']?.pathEnqueued ?? 0, 0,
-    'a completed target journey enters the result pool without queue admission');
-  assert.equal(targetTrace.queueEventsByLegCount['2']?.childCursorEnqueued ?? 0, 0,
-    'the final-leg cursor is processed in the current bounded work turn');
+  assert.ok((targetTrace.queueEventsByLegCount['2']?.pathEnqueued ?? 0) > 0,
+    'the feasible two-leg prefix is admitted using idle global queue capacity');
+  assert.equal(targetTrace.queueEventsByLegCount['2']?.pathEvicted ?? 0, 0,
+    'the prefix is not evicted merely because its first-leg queue reached its soft share');
+  assert.ok((targetTrace.queueEventsByLegCount['3']?.pathEnqueued ?? 0) > 0,
+    'the completed target journey is admitted to the bounded result work queue');
+  assert.ok((targetTrace.queueEventsByLegCount['2']?.childCursorEnqueued ?? 0) > 0,
+    'the final-leg cursor is admitted and processed within the bounded work queue');
   assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
     progress.nextIndexAfter > progress.nextIndexBefore),
   'target child cursor diagnostics show bounded forward progress');

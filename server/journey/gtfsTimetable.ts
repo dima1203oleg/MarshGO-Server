@@ -4111,14 +4111,16 @@ export function findGtfsItinerariesWithStats(
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false): boolean => {
     const queuedWork: SearchWork = work.kind === 'path' ? { ...work, priority: prioritize } : work;
     let pendingInQueue = queue.work.length - queue.workIndex;
-    if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
+    const globalLimitReachedBeforeAdmission = queuesPendingWork >= MAX_QUEUED_SEARCH_WORK;
+    if (globalLimitReachedBeforeAdmission || pendingInQueue >= queue.maxQueuedWork) {
       // Preserve shallower exploration before its derivable descendants: evict
       // ordinary paths first; then preserve shallow cursors over derivable
-      // deeper paths and let new feasible paths replace only paths no shallower
-      // than themselves. Priority work remains FIFO after admission.
+      // deeper paths. A feasible path may borrow a queue's unused global share,
+      // so comparable priority paths are replaceable only at the global cap.
+      // Priority work remains FIFO after admission.
       const evicted = evictOldestQueuedPath(queue)
         || (queuedWork.kind === 'children' && evictDeeperPriorityPath(queue, queuedWork.path.length))
-        || (queuedWork.kind === 'path' && queuedWork.priority
+        || (globalLimitReachedBeforeAdmission && queuedWork.kind === 'path' && queuedWork.priority
           && evictComparablePriorityPath(queue, queuedWork.path.length));
       if (evicted) pendingInQueue--;
     }
@@ -4285,22 +4287,10 @@ export function findGtfsItinerariesWithStats(
     const hasNextBeforeHorizon = work.nextIndex < work.choices.length
       && work.choices[work.nextIndex]!.departureAt.getTime() <= work.latestNext;
     const continuationQueued = hasNextBeforeHorizon ? enqueueWork(queue, work) : false;
-    if (maximumLegsForPass >= 3 && work.remainingLegs === 2) {
-      // These prefixes have only one transit leg left. Expand them immediately
-      // so a bounded queue cannot evict a feasible deep-chain connector before
-      // its final segment is checked; every nested step still uses the same caps.
-      for (const path of feasiblePaths) {
-        if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS
-          || !canContinueCandidateSearch(maximumLegsForPass)) break;
-        const finalLegCursor = expandPath(path, queue, maximumLegsForPass, stepLimit, true);
-        if (finalLegCursor) expandNextChild(finalLegCursor, queue, maximumLegsForPass, stepLimit);
-      }
-    } else {
-      // The popped cursor freed a bounded queue slot. Reinsert its continuation
-      // first so feasible descendants generated during this batch cannot evict
-      // the only remaining path that will discover later successors.
-      for (const path of feasiblePaths) enqueueWork(queue, { kind: 'path', path, priority: false }, true);
-    }
+    // The popped cursor freed a bounded queue slot. Reinsert its continuation
+    // first so feasible descendants generated during this batch cannot evict
+    // the only remaining path that will discover later successors.
+    for (const path of feasiblePaths) enqueueWork(queue, { kind: 'path', path, priority: false }, true);
     const stopReason = !hasNextBeforeHorizon ? (work.nextIndex >= work.choices.length ? 'choices-exhausted' : 'past-wait-horizon')
       : searchSteps >= MAX_SEARCH_STEPS ? 'global-search-step-limit'
         : searchSteps >= stepLimit ? 'depth-pass-step-limit'
