@@ -513,7 +513,7 @@ type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
 const MAX_ROUTE_OVERFLOW_SEGMENTS = 200;
 // Keep connector discovery independent from endpoint fallbacks, but prevent
 // dense routes from expanding the search graph with hundreds of middle trips.
-const MAX_ROUTE_OVERFLOW_CONNECTORS = 8;
+const MAX_ROUTE_OVERFLOW_CONNECTORS = 16;
 
 // Keep the same deterministic, order-independent sample for a feed snapshot.
 // GTFS feeds are often written in departure-time order, so a simple prefix cap

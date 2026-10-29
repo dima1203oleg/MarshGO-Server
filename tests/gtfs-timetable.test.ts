@@ -1908,6 +1908,95 @@ test('connector reservoir keeps a CHEAPEST winner behind faster fare-diverse con
     'the expanded connector and per-route budgets must restore the exact exhaustive CHEAPEST winner');
 });
 
+test('production connector default preserves exhaustive winners across nine distinct hubs', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.transfers = [];
+  timetable.pathways = [];
+  timetable.fareProducts = new Map();
+  timetable.fareRules = new Map();
+  timetable.stops.set('origin', { id: 'origin', name: 'Origin', lon: 24.000, lat: 49.840 });
+  timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: 24.080, lat: 49.840 });
+  for (let index = 0; index <= 9; index++) {
+    const stopId = `hub-${index}`;
+    timetable.stops.set(stopId, { id: stopId, name: `Hub ${index}`, lon: 24.001 + index * 0.007, lat: 49.840 });
+  }
+  const addTrip = (tripId: string, routeId: string, stops: Array<[string, number]>) => {
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    timetable.stopTimes.set(tripId, stops.map(([stopId, seconds], index) => ({
+      stopId, sequence: index + 1, arrivalSeconds: seconds, departureSeconds: seconds, pickupType: 0, dropOffType: 0,
+    })));
+  };
+  const fare = (id: string, routeId: string, priceMinor: number) => {
+    timetable.fareProducts!.set(id, { id, priceMinor, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
+    timetable.fareRules!.set(id, [{ fareId: id, routeId }]);
+  };
+  addTrip('access-trip', 'access', [['origin', 8 * 3600], ['hub-0', 8 * 3600 + 5 * 60]]);
+  addTrip('middle-trip', 'middle', Array.from({ length: 10 }, (_, index) => [
+    `hub-${index}`, 8 * 3600 + (10 + index) * 60,
+  ] as [string, number]));
+
+  const egressArrivalMinutes = [18, 24, 27, 30, 22, 32, 34, 35, 36];
+  const egressPrices = [5_000, 3_000, 3_000, 3_000, 1_000, 3_000, 3_000, 3_000, 1];
+  for (let index = 0; index < 9; index++) {
+    const routeId = `egress-${index}`;
+    const tripId = `egress-trip-${index}`;
+    const departureSeconds = 8 * 3600 + (14 + index) * 60;
+    const arrivalSeconds = 8 * 3600 + egressArrivalMinutes[index]! * 60;
+    addTrip(tripId, routeId, [[`hub-${index + 1}`, departureSeconds], ['destination', arrivalSeconds]]);
+    fare(`fare-${index}`, routeId, egressPrices[index]!);
+  }
+  fare('access-fare', 'access', 100);
+  fare('middle-fare', 'middle', 100);
+
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, stops] of timetable.stopTimes) stops.forEach((stop, index) => {
+    timetable.stopTimesByStop.set(stop.stopId, [...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId, index }]);
+  });
+  const input = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.000, 49.840] as [number, number], destination: [24.080, 49.840] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransferWalkingMeters: 0,
+    maximumTransfers: 2, maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 2 * 60 * 60,
+  };
+  const chainId = (journey: GtfsItinerary) => journey.segments.map((segment) => segment.tripId).join('>');
+  const toScorable = (journey: GtfsItinerary) => ({
+    id: chainId(journey), durationSeconds: journey.durationSeconds,
+    priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+    transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+    transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+    legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+  });
+  const graphLimits = { totalSegments: 1_000, segmentsPerRoute: 100 };
+  const exhaustive = findGtfsItinerariesWithStats(timetable, input, graphLimits);
+  let boundedSnapshot: GtfsCandidateGraphSnapshot | undefined;
+  // Deliberately leave maxRouteOverflowConnectors unset to exercise its production default.
+  const bounded = findGtfsItinerariesWithStats(timetable, input, graphLimits, (snapshot) => { boundedSnapshot = snapshot; });
+  const winners = (result: ReturnType<typeof findGtfsItinerariesWithStats>) => Object.fromEntries(
+    (['FASTEST', 'CHEAPEST', 'BALANCED'] as const).map((strategy) => [strategy,
+      scoreJourneys(result.itineraries.map(toScorable), strategy)[0]?.journey.id ?? null]),
+  );
+
+  assert.equal(exhaustive.searchTruncated, false, 'the all-candidate tiny feed is a complete oracle');
+  assert.deepEqual(winners(exhaustive), {
+    FASTEST: 'access-trip>middle-trip>egress-trip-0',
+    CHEAPEST: 'access-trip>middle-trip>egress-trip-8',
+    BALANCED: 'access-trip>middle-trip>egress-trip-4',
+  }, 'the fixture gives each user strategy a distinct exhaustive winner beyond eight hubs');
+  assert.equal(bounded.truncation.candidateGraph, false,
+    `all nine connector hubs fit under the production default: ${JSON.stringify(bounded.truncation)}`);
+  const retainedHubs = new Set(boundedSnapshot!.segments
+    .filter(({ journey }) => journey.tripId === 'middle-trip' && journey.originStop.id === 'hub-0')
+    .map(({ journey }) => journey.destinationStop.id));
+  assert.equal(retainedHubs.size, 9, 'all nine distinct query-feasible connector hubs are retained');
+  assert.deepEqual(winners(bounded), winners(exhaustive), 'all three production-default strategy winners match the exhaustive oracle');
+});
+
 test('duplicate same-trip early-hub candidates cannot hide a later feasible hub at connector cap=2', () => {
   const timetable = feed();
   timetable.routes.clear();
