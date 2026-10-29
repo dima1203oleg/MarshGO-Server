@@ -4080,6 +4080,7 @@ export function findGtfsItinerariesWithStats(
     workIndex: number;
     preferFirstLeg: boolean;
     preferDeepCursor: boolean;
+    reservoirQueuedWorkStreak: number;
     maxQueuedWork: number;
   };
   let activeQueues: RouteSearchQueue[] = [];
@@ -4204,12 +4205,18 @@ export function findGtfsItinerariesWithStats(
     return candidatePoolHasRoom || withinLegObjectiveReservoir;
   };
   const takeNextWork = (queue: RouteSearchQueue, preferDeepCursor: boolean): SearchWork | undefined => {
-    if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length) {
+    const hasQueuedWork = queue.workIndex < queue.work.length;
+    const prioritizeQueuedWork = preferDeepCursor && hasQueuedWork && queue.reservoirQueuedWorkStreak < 2;
+    if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length
+      && !prioritizeQueuedWork) {
       queue.preferFirstLeg = false;
+      queue.reservoirQueuedWorkStreak = 0;
       return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]], priority: false };
     }
     if (queue.workIndex < queue.work.length) {
       queue.preferFirstLeg = true;
+      queue.reservoirQueuedWorkStreak = prioritizeQueuedWork
+        ? queue.reservoirQueuedWorkStreak + 1 : 0;
       // Once the deep candidate pool is saturated, service a live deep cursor
       // alongside queued work. Already-feasible priority paths go first: they
       // have completed transfer validation and only need bounded expansion to
@@ -4357,7 +4364,7 @@ export function findGtfsItinerariesWithStats(
           || !canContinueCandidateSearch(maximumLegsForPass)) break;
         const reservoirActive = maximumLegsForPass >= 3
           && candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass);
-        const work = takeNextWork(queue, reservoirActive && queue.preferDeepCursor);
+        const work = takeNextWork(queue, reservoirActive);
         if (!work) continue;
         processed = true;
         if (work.kind === 'path') {
@@ -4403,6 +4410,7 @@ export function findGtfsItinerariesWithStats(
       Math.floor(MAX_QUEUED_SEARCH_WORK / Math.max(1, firstLegGroups.size)));
     const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
+      reservoirQueuedWorkStreak: 0,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
     activeQueues = queues;
