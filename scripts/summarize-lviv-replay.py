@@ -91,6 +91,8 @@ print(f"- FASTEST/CHEAPEST/BALANCED winner parity: **{'YES' if same_winners else
 print(f"- Added trip-chain identities: {short_identity_delta(candidate_chains - baseline_chains)}")
 print(f"- Removed trip-chain identities: {short_identity_delta(baseline_chains - candidate_chains)}")
 print(f"- Median search time: {baseline_median:.2f} ms → {candidate_median:.2f} ms ({delta:+.2f}%)")
+diagnostics_enabled = any(record.get("searchDiagnosticsByStage") for record in records)
+print(f"- Detailed search diagnostics: **{'enabled' if diagnostics_enabled else 'disabled'}**")
 print(f"- Peak sampled RSS: {max(item['rssBytes'] for item in baseline) / 1_048_576:.1f} MiB → {max(item['rssBytes'] for item in candidate) / 1_048_576:.1f} MiB")
 print(f"- Truncated: baseline `{baseline[0]['searchTruncated']}` / candidate `{candidate[0]['searchTruncated']}`; graph truncated: baseline `{baseline[0]['candidateGraphTruncated']}` / candidate `{candidate[0]['candidateGraphTruncated']}`")
 print(f"- Truncation causes: baseline `{json.dumps(baseline[0]['truncation'], sort_keys=True)}`; candidate `{json.dumps(candidate[0]['truncation'], sort_keys=True)}`")
@@ -106,4 +108,4 @@ for stage, previous_stage in (("segments-built", None), ("reachability-built", "
     else:
         print(f"- `{stage}` median stage duration: unavailable (replay artifact lacks valid cumulative timing samples)")
 print()
-print("This is one static Lviv OD and a diagnostic comparison, not a live GPS, realtime, staging, production, or complete-routing acceptance test.")
+print("This is one frozen-feed Lviv query, not a live GPS, realtime, staging, production, or complete-routing acceptance test.")
