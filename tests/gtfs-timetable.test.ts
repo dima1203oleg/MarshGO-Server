@@ -3681,10 +3681,10 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
 
   const returnedChains = new Set(result.itineraries.map((journey) => journey.segments
     .map((segment) => segment.tripId).join('>')));
-  assert.ok(returnedChains.has(targetChain), 'the latest feasible chain survives bounded cursor pressure');
-  assert.equal(result.truncation.searchBudget, false, 'the small fixture completes within the bounded queue');
   const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
+    pathExpandedAtStepByLegCount: Record<string, number>;
+    nextLegFeasibleAtStepByLegCount: Record<string, number>;
     queueEventsByLegCount: Record<string, {
       pathEnqueued: number; pathDropped: number; pathEvicted: number;
       childCursorEnqueued: number; childCursorDropped: number; childCursorEvicted: number;
@@ -3692,6 +3692,13 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
     successorPositionsByPath: Record<string, { targetSuccessors: Array<{ tripKey: string; cursorOffset: number; transferFeasible: boolean }> }>;
   }>;
   const targetTrace = trace[`p1:20261012:access-trip>p1:20261012:middle-trip-target>p1:20261012:egress-trip-target`];
+  assert.ok(returnedChains.has(targetChain),
+    `the latest feasible chain survives bounded cursor pressure; trace=${JSON.stringify(targetTrace)}`);
+  assert.ok(targetTrace?.pathExpandedAtStepByLegCount['2'] !== undefined
+    && targetTrace.nextLegFeasibleAtStepByLegCount['3'] !== undefined,
+  'the admitted middle-trip path expands and reaches its feasible final leg');
+  assert.equal(result.truncation.searchBudget, true,
+    'bounded queue replacement is surfaced as partial rather than claiming exhaustive search');
   assert.ok(targetTrace, 'the target chain trace is present');
   assert.ok(Object.values(targetTrace.successorPositionsByPath).some((variant) =>
     variant.targetSuccessors.some((successor) => successor.tripKey === 'p1:20261012:middle-trip-target'

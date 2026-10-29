@@ -36,6 +36,7 @@ const MAX_ROUTE_GEOMETRY_POINTS = 500;
 // preserves a fair slice for each line and makes truncation explicit.
 const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
+const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
 const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
 export const MAX_GTFS_TRANSFERS = 4;
@@ -4012,14 +4013,43 @@ export function findGtfsItinerariesWithStats(
     }
     return false;
   };
+  const evictDeeperPriorityPath = (queue: RouteSearchQueue, cursorDepth: number) => {
+    for (let index = queue.workIndex; index < queue.work.length; index++) {
+      const evicted = queue.work[index]!;
+      if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length <= cursorDepth) continue;
+      recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
+      queue.work.splice(index, 1);
+      queuesPendingWork--;
+      queueWorkDropped = true;
+      return true;
+    }
+    return false;
+  };
+  const evictComparablePriorityPath = (queue: RouteSearchQueue, incomingDepth: number) => {
+    for (let index = queue.workIndex; index < queue.work.length; index++) {
+      const evicted = queue.work[index]!;
+      if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length < incomingDepth) continue;
+      recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
+      queue.work.splice(index, 1);
+      queuesPendingWork--;
+      queueWorkDropped = true;
+      return true;
+    }
+    return false;
+  };
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false) => {
     const queuedWork: SearchWork = work.kind === 'path' ? { ...work, priority: prioritize } : work;
     let pendingInQueue = queue.work.length - queue.workIndex;
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
-      // Preserve forward progress when a bounded queue is saturated: replace
-      // an older ordinary path first. A newly feasible path must not evict an
-      // already admitted feasible path before either has a chance to expand.
-      if (evictOldestQueuedPath(queue)) pendingInQueue--;
+      // Preserve shallower exploration before its derivable descendants: evict
+      // ordinary paths first; then preserve shallow cursors over derivable
+      // deeper paths and let new feasible paths replace only paths no shallower
+      // than themselves. Priority work remains FIFO after admission.
+      const evicted = evictOldestQueuedPath(queue)
+        || (queuedWork.kind === 'children' && evictDeeperPriorityPath(queue, queuedWork.path.length))
+        || (queuedWork.kind === 'path' && queuedWork.priority
+          && evictComparablePriorityPath(queue, queuedWork.path.length));
+      if (evicted) pendingInQueue--;
     }
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
       recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathDropped' : 'childCursorDropped');
@@ -4097,30 +4127,36 @@ export function findGtfsItinerariesWithStats(
     enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
       remainingLegs, previousIds, visitedStops });
   };
-  const expandNextChild = (work: ChildWork, queue: RouteSearchQueue) => {
-    searchSteps++;
-    const next = work.choices[work.nextIndex++];
-    const withinSchedule = next.departureAt.getTime() <= work.latestNext;
-    const canReachDestination = reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id);
-    const distinctTrip = !work.previousIds.has(next.tripId);
-    const noStopCycle = !work.visitedStops.has(next.destinationStop.id);
-    const transferFeasible = withinSchedule && canReachDestination && distinctTrip && noStopCycle
-      ? transferDecision(work.last, next).feasible : false;
-    const feasible = withinSchedule && canReachDestination && distinctTrip && noStopCycle && transferFeasible;
-    const candidatePath = debugTraceTripChainSet ? [...work.path, next] : undefined;
-    if (candidatePath) {
-      const rejectionReasons = [
-        ...(!withinSchedule ? ['outside-wait-window'] : []),
-        ...(!canReachDestination ? ['cannot-reach-destination'] : []),
-        ...(!distinctTrip ? ['repeated-trip'] : []),
-        ...(!noStopCycle ? ['stop-cycle'] : []),
-        ...(withinSchedule && canReachDestination && distinctTrip && noStopCycle && !transferFeasible ? ['transfer-infeasible'] : []),
-      ];
-      recordDebugTripChainSearch(candidatePath, 'next-leg-considered', rejectionReasons);
-    }
-    if (feasible) {
-      if (candidatePath) recordDebugTripChainSearch(candidatePath, 'next-leg-feasible');
-      enqueueWork(queue, { kind: 'path', path: [...work.path, next], priority: false }, true);
+  const expandNextChild = (work: ChildWork, queue: RouteSearchQueue, maximumLegsForPass: number, stepLimit: number) => {
+    let processed = 0;
+    while (processed < MAX_GTFS_CHILDREN_PER_WORK_TURN
+      && searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
+      && canContinueCandidateSearch(maximumLegsForPass)
+      && work.nextIndex < work.choices.length
+      && work.choices[work.nextIndex]!.departureAt.getTime() <= work.latestNext) {
+      searchSteps++;
+      processed++;
+      const next = work.choices[work.nextIndex++]!;
+      const canReachDestination = reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id);
+      const distinctTrip = !work.previousIds.has(next.tripId);
+      const noStopCycle = !work.visitedStops.has(next.destinationStop.id);
+      const transferFeasible = canReachDestination && distinctTrip && noStopCycle
+        ? transferDecision(work.last, next).feasible : false;
+      const feasible = canReachDestination && distinctTrip && noStopCycle && transferFeasible;
+      const candidatePath = debugTraceTripChainSet ? [...work.path, next] : undefined;
+      if (candidatePath) {
+        const rejectionReasons = [
+          ...(!canReachDestination ? ['cannot-reach-destination'] : []),
+          ...(!distinctTrip ? ['repeated-trip'] : []),
+          ...(!noStopCycle ? ['stop-cycle'] : []),
+          ...(canReachDestination && distinctTrip && noStopCycle && !transferFeasible ? ['transfer-infeasible'] : []),
+        ];
+        recordDebugTripChainSearch(candidatePath, 'next-leg-considered', rejectionReasons);
+      }
+      if (feasible) {
+        if (candidatePath) recordDebugTripChainSearch(candidatePath, 'next-leg-feasible');
+        enqueueWork(queue, { kind: 'path', path: [...work.path, next], priority: false }, true);
+      }
     }
     if (work.nextIndex < work.choices.length
       && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
@@ -4138,7 +4174,7 @@ export function findGtfsItinerariesWithStats(
         if (!work) continue;
         processed = true;
         if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass);
-        else expandNextChild(work, queue);
+        else expandNextChild(work, queue, maximumLegsForPass, stepLimit);
       }
       if (!processed) break;
     }
