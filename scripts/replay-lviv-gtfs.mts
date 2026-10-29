@@ -249,6 +249,22 @@ const strategyRecommendations = selectStrategyAlternatives(rankedCandidates, ava
 const winnerFor = (strategy: typeof userFacingStrategies[number]) =>
   strategyRecommendations.find((candidate) => candidate.strategyRanks?.[strategy] === 1)?.journey;
 const signature = (item: typeof rankedCandidates[number] | undefined) => item?.id ?? null;
+const winnerSummary = (strategy: typeof userFacingStrategies[number]) => {
+  const item = winnerFor(strategy);
+  if (!item) return null;
+  return {
+    id: item.id,
+    departureAt: item.itinerary.departureAt.toISOString(),
+    arrivalAt: item.itinerary.arrivalAt.toISOString(),
+    durationSeconds: item.durationSeconds,
+    priceMinor: item.priceMinor,
+    transfers: item.transfers,
+    walkingMeters: item.walkingMeters,
+    modes: item.legs.map((leg) => leg.mode),
+    routeIds: item.itinerary.segments.map((segment) => `${segment.providerId}:${segment.routeId}`),
+    tripIds: item.itinerary.segments.map((segment) => `${segment.providerId}:${segment.tripId}`),
+  };
+};
 const details = result as typeof result & Record<string, unknown>;
 console.log(JSON.stringify({
   comparisonGroup: process.env.REPLAY_GROUP ?? null,
@@ -276,6 +292,11 @@ console.log(JSON.stringify({
     balanced: signature(winnerFor('BALANCED')),
     fastest: signature(winnerFor('FASTEST')),
     cheapest: signature(winnerFor('CHEAPEST')),
+  },
+  strategyWinners: {
+    BALANCED: winnerSummary('BALANCED'),
+    FASTEST: winnerSummary('FASTEST'),
+    CHEAPEST: winnerSummary('CHEAPEST'),
   },
   searchTruncated: details.searchTruncated,
   candidateGraphTruncated: details.candidateGraphTruncated,
