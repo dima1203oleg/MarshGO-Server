@@ -291,7 +291,7 @@ console.log(JSON.stringify({
   uniqueRouteChains: new Set(result.itineraries.map((item) => item.segments.map((segment) => segment.routeId).join(','))).size,
   rankingMethod: 'production-paretoFrontier+selectStrategyAlternatives',
   rankingScope: 'gtfs-only-candidates; shared with API projection and scorer',
-  objectiveReservoirSearchSteps: objectiveReservoirSearchSteps ?? 25_000,
+  objectiveReservoirSearchStepsOverride: objectiveReservoirSearchSteps ?? null,
   availableStrategies,
   strategyCandidates: {
     balanced: signature(winnerFor('BALANCED')),
