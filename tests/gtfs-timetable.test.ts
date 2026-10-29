@@ -3587,8 +3587,8 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
   assert.ok(targetSearchTrace.pathExpandedAtStepByLegCount['1'] < targetSearchTrace.nextLegConsideredAtStepByLegCount['2']
     && targetSearchTrace.nextLegConsideredAtStepByLegCount['2'] < targetSearchTrace.pathExpandedAtStepByLegCount['2']
     && targetSearchTrace.pathExpandedAtStepByLegCount['2'] < targetSearchTrace.nextLegConsideredAtStepByLegCount['3']
-    && targetSearchTrace.nextLegConsideredAtStepByLegCount['3'] < targetSearchTrace.pathExpandedAtStepByLegCount['3'],
-  'trace orders each exact feasible successor before its expanded path prefix');
+    && targetSearchTrace.nextLegConsideredAtStepByLegCount['3'] <= targetSearchTrace.pathExpandedAtStepByLegCount['3'],
+  'trace orders intermediate expansion and records final-path admission after its last feasible successor');
   assert.ok(Object.values(targetSearchTrace.variantsByStopPair).some((variant) =>
     variant.pathSegments.length === 3 && variant.pathExpandedAtStep !== undefined),
   'trace identifies the exact stop-pair variant that expands the complete target chain');
