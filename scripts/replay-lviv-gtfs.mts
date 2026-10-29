@@ -80,7 +80,7 @@ const retainedSegmentsByTripId = new Map<string, Map<string, {
   arrivalAt: string;
 }>>();
 let targetChainGraphTrace: Record<string, unknown> | undefined;
-const graphObserver = traceRouteIds.size > 0 || traceTripIds.size > 0
+const graphObserver = traceRouteIds.size > 0 || traceTripIds.size > 0 || traceTripChains.length > 0
   ? (graph: { segments: readonly { id: string; journey: {
     providerId: string; routeId: string; serviceDate: string; tripId: string;
     originStop: { id: string }; destinationStop: { id: string };
