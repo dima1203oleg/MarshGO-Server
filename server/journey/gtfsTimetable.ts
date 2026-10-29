@@ -4113,6 +4113,7 @@ export function findGtfsItinerariesWithStats(
     preferDeepCursor: boolean;
     reservoirQueuedWorkStreak: number;
     reservoirPriorityWorkStreak: number;
+    reservoirPreferPathOnFairTurn: boolean;
     nextChildCursorSequence: number;
     maxQueuedWork: number;
   };
@@ -4338,9 +4339,9 @@ export function findGtfsItinerariesWithStats(
       queue.reservoirQueuedWorkStreak = prioritizeQueuedWork
         ? queue.reservoirQueuedWorkStreak + 1 : 0;
       // Once the deep candidate pool is saturated, bound consecutive priority
-      // selections and give the oldest queued path a turn. A feasible transfer
-      // prefix may itself be priority work, so child-cursor fairness alone
-      // cannot prevent it waiting behind a continuing path backlog.
+      // selections and alternate fair turns between the oldest child cursor
+      // and path. A feasible prefix may be priority work too, so fairness must
+      // cover both kinds without starving cursor progress.
       const pendingPriorityWork = queue.work.findIndex((pending, index) => index >= queue.workIndex
         && pending.priority);
       let pendingNonPriorityWork = -1;
@@ -4375,7 +4376,10 @@ export function findGtfsItinerariesWithStats(
       const shouldServeNonPriorityCursor = pendingNonPriorityChildCursor >= queue.workIndex
         && (!hasPendingPriorityWork
           || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
-      const pendingIndex = forceFairQueueTurn && pendingPathWork >= queue.workIndex ? pendingPathWork
+      const fairPathIndex = pendingPathWork >= queue.workIndex ? pendingPathWork : pendingChildCursor;
+      const fairChildIndex = pendingChildCursor >= queue.workIndex ? pendingChildCursor : pendingPathWork;
+      const fairTurnIndex = queue.reservoirPreferPathOnFairTurn ? fairPathIndex : fairChildIndex;
+      const pendingIndex = forceFairQueueTurn && fairTurnIndex >= queue.workIndex ? fairTurnIndex
         : shouldServeNonPriorityWork ? pendingNonPriorityWork
         : shouldServeNonPriorityCursor ? pendingNonPriorityChildCursor
         : shouldServeDeepCursor ? pendingChildCursor
@@ -4384,6 +4388,7 @@ export function findGtfsItinerariesWithStats(
       const work = pendingIndex >= queue.workIndex
         ? queue.work.splice(pendingIndex, 1)[0]!
         : queue.work[queue.workIndex++]!;
+      if (forceFairQueueTurn) queue.reservoirPreferPathOnFairTurn = work.kind === 'children';
       if (preferDeepCursor && work.priority && !forceFairQueueTurn) queue.reservoirPriorityWorkStreak++;
       else if (preferDeepCursor) queue.reservoirPriorityWorkStreak = 0;
       queue.preferDeepCursor = work.kind !== 'children' || work.remainingLegs <= 1;
@@ -4606,6 +4611,7 @@ export function findGtfsItinerariesWithStats(
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
       reservoirQueuedWorkStreak: 0,
       reservoirPriorityWorkStreak: 0,
+      reservoirPreferPathOnFairTurn: false,
       nextChildCursorSequence: 0,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
