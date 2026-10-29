@@ -4000,6 +4000,7 @@ export function findGtfsItinerariesWithStats(
   type PathWork = { kind: 'path'; path: GtfsDirectJourney[]; priority: boolean };
   type ChildWork = {
     kind: 'children';
+    priority: boolean;
     path: GtfsDirectJourney[];
     last: GtfsDirectJourney;
     choices: GtfsDirectJourney[];
@@ -4075,7 +4076,8 @@ export function findGtfsItinerariesWithStats(
     // The per-first-leg share is a fairness target, not a hard ceiling for
     // already-feasible journey prefixes. Let those borrow idle global slots;
     // the global cap remains the hard memory/work bound.
-    const mayBorrowQueueShare = queuedWork.kind === 'path' && queuedWork.priority && !globalLimitReached;
+    const priorityWork = queuedWork.priority;
+    const mayBorrowQueueShare = priorityWork && !globalLimitReached;
     if (globalLimitReached || (queueLimitReached && !mayBorrowQueueShare)) {
       if (globalLimitReached) queueAdmissionGlobalLimitDrops++;
       if (queueLimitReached) queueAdmissionPerQueueLimitDrops++;
@@ -4089,11 +4091,11 @@ export function findGtfsItinerariesWithStats(
       return;
     }
     if (queueLimitReached) queueAdmissionPerQueueBorrowed++;
-    if (queuedWork.kind === 'path' && queuedWork.priority) {
+    if (priorityWork) {
       let priorityEnd = queue.workIndex;
       while (priorityEnd < queue.work.length) {
         const pending = queue.work[priorityEnd]!;
-        if (pending.kind !== 'path' || !pending.priority) break;
+        if (!pending.priority) break;
         priorityEnd++;
       }
       queue.work.splice(priorityEnd, 0, queuedWork);
@@ -4138,7 +4140,8 @@ export function findGtfsItinerariesWithStats(
   };
   const hasQueuedWork = (queues: RouteSearchQueue[]) => queues.some((queue) =>
     queue.firstLegIndex < queue.firstLegs.length || queue.workIndex < queue.work.length);
-  const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number) => {
+  const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number,
+    priority = false) => {
     searchSteps++;
     recordDebugTripChainSearch(path, 'path-expanded');
     const last = path.at(-1)!;
@@ -4160,7 +4163,7 @@ export function findGtfsItinerariesWithStats(
     }
     if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
     recordDebugTargetSuccessorPositions(path, choices, low, latestNext);
-    enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
+    enqueueWork(queue, { kind: 'children', priority, path, last, choices, nextIndex: low, latestNext,
       remainingLegs, previousIds, visitedStops });
   };
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue, maximumLegsForPass: number, stepLimit: number) => {
@@ -4214,7 +4217,7 @@ export function findGtfsItinerariesWithStats(
         const work = takeNextWork(queue);
         if (!work) continue;
         processed = true;
-        if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass);
+        if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass, work.priority);
         else expandNextChild(work, queue, maximumLegsForPass, stepLimit);
       }
       if (!processed) break;
