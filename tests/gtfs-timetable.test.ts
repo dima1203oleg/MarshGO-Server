@@ -3700,12 +3700,14 @@ test('marks dense bounded search partial when it misses the oracle fastest chain
   assert.equal(oracle.searchTruncated, false, 'the independent oracle exhausts this fixture');
   assert.equal(oracleFastest?.tripIds.join('>'), 'access-trip>middle-trip-target>egress-trip-target',
     'the late target is the independently verified fastest feasible chain');
-  const result = findGtfsItinerariesWithStats(timetable, {
+  const query = {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T06:30:00Z'),
-    origin: [24.0200, 49.8400], destination: [24.1700, 49.9400],
+    origin: [24.0200, 49.8400] as [number, number], destination: [24.1700, 49.9400] as [number, number],
     maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
     maximumTransferWalkingMeters: 10, maximumTransfers: 2, limit: 100,
-  }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 100, maxQueuedSearchWork: 100 });
+  };
+  const result = findGtfsItinerariesWithStats(timetable, query,
+    { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 100, maxQueuedSearchWork: 100 });
   assert.ok(result.itineraries.length > 0, 'the bounded search still returns alternatives');
   const targetReturned = result.itineraries.some((journey) => journey.segments.map((segment) => segment.tripId)
     .join('>') === oracleFastest?.tripIds.join('>'));
@@ -3716,6 +3718,11 @@ test('marks dense bounded search partial when it misses the oracle fastest chain
     assert.equal(result.truncation.searchBudget, true, 'a missed oracle winner must expose the search budget cutoff');
     assert.equal(result.searchTruncated, true, 'a missed oracle winner must never be presented as a complete search');
   }
+  const defaultResult = findGtfsItinerariesWithStats(timetable, query);
+  const defaultFastest = [...defaultResult.itineraries].sort((left, right) =>
+    left.arrivalAt.getTime() - right.arrivalAt.getTime())[0];
+  assert.equal(defaultFastest?.segments.map((segment) => segment.tripId).join('>'),
+    oracleFastest?.tripIds.join('>'), 'default search retains the oracle fastest chain on this fixture');
 });
 
 test('preserves a late feasible successor after the deep candidate pool saturates', () => {
