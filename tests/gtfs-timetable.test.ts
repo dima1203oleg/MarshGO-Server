@@ -3643,7 +3643,6 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
     addTrip(`egress-trip-${suffix}`, `egress-route-${suffix}`, middleStop, 'destination',
       middleDeparture + 4 * 60, middleDeparture + 14 * 60);
   }
-  const target = 'target';
   addStop('middle-target', 24.1400, 49.9100);
   addRoute('middle-route-target');
   addRoute('egress-route-target');
