@@ -4337,13 +4337,13 @@ export function findGtfsItinerariesWithStats(
       queue.preferFirstLeg = true;
       queue.reservoirQueuedWorkStreak = prioritizeQueuedWork
         ? queue.reservoirQueuedWorkStreak + 1 : 0;
-      // Once the deep candidate pool is saturated, service a live deep cursor
-      // alongside queued work. Give already-feasible paths a short burst, then
-      // serve the oldest live child cursor so a growing priority backlog cannot
-      // starve its continuation until the objective reservoir closes.
+      // Once the deep candidate pool is saturated, alternate bounded priority
+      // work with the oldest non-priority child cursor. If none is waiting,
+      // serve the oldest live cursor so a priority backlog cannot starve it.
       const pendingPriorityWork = queue.work.findIndex((pending, index) => index >= queue.workIndex
         && pending.priority);
       let pendingChildCursor = -1;
+      let pendingNonPriorityChildCursor = -1;
       if (preferDeepCursor) {
         for (let index = queue.workIndex; index < queue.work.length; index++) {
           const pending = queue.work[index]!;
@@ -4352,13 +4352,23 @@ export function findGtfsItinerariesWithStats(
             || pending.queueSequence < (queue.work[pendingChildCursor] as ChildWork).queueSequence) {
             pendingChildCursor = index;
           }
+          if (!pending.priority && (pendingNonPriorityChildCursor < 0
+            || pending.queueSequence < (queue.work[pendingNonPriorityChildCursor] as ChildWork).queueSequence)) {
+            pendingNonPriorityChildCursor = index;
+          }
         }
       }
       const hasPendingPriorityWork = pendingPriorityWork >= queue.workIndex;
       const shouldServeDeepCursor = pendingChildCursor >= queue.workIndex
         && (!hasPendingPriorityWork
           || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
-      const pendingIndex = shouldServeDeepCursor ? pendingChildCursor : -1;
+      const shouldServeNonPriorityCursor = pendingNonPriorityChildCursor >= queue.workIndex
+        && (!hasPendingPriorityWork
+          || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
+      const pendingIndex = shouldServeNonPriorityCursor ? pendingNonPriorityChildCursor
+        : shouldServeDeepCursor ? pendingChildCursor
+          : hasPendingPriorityWork && queue.reservoirPriorityWorkStreak < MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST
+            ? pendingPriorityWork : -1;
       const work = pendingIndex >= queue.workIndex
         ? queue.work.splice(pendingIndex, 1)[0]!
         : queue.work[queue.workIndex++]!;

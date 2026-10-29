@@ -3761,6 +3761,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedWorkPriority
     && decision.priorityWorkStreakAfter > decision.priorityWorkStreakBefore),
   'priority work consumes the same bounded burst regardless of work kind');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedTargetCursor
+    && !decision.selectedWorkPriority && decision.priorityWorkStreakBefore >= 1),
+  'an aged non-priority cursor gets service after a priority item');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
