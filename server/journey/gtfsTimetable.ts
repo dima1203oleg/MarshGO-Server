@@ -4067,6 +4067,7 @@ export function findGtfsItinerariesWithStats(
     work: SearchWork[];
     workIndex: number;
     preferFirstLeg: boolean;
+    preferDeepCursor: boolean;
     maxQueuedWork: number;
   };
   const pausedDepthPassQueues = new Map<number, RouteSearchQueue[]>();
@@ -4168,14 +4169,23 @@ export function findGtfsItinerariesWithStats(
       || searchSteps - legReservoirReachedAt < MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
     return candidatePoolHasRoom || withinLegObjectiveReservoir;
   };
-  const takeNextWork = (queue: RouteSearchQueue): SearchWork | undefined => {
+  const takeNextWork = (queue: RouteSearchQueue, preferDeepCursor: boolean): SearchWork | undefined => {
     if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length) {
       queue.preferFirstLeg = false;
       return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]], priority: false };
     }
     if (queue.workIndex < queue.work.length) {
       queue.preferFirstLeg = true;
-      const work = queue.work[queue.workIndex++];
+      // Once the deep candidate pool is saturated, alternate a live multi-leg
+      // cursor with ordinary queued work so descendants cannot starve its scan.
+      const pendingIndex = preferDeepCursor
+        ? queue.work.findIndex((pending, index) => index >= queue.workIndex
+          && pending.kind === 'children' && pending.remainingLegs > 1)
+        : -1;
+      const work = pendingIndex >= queue.workIndex
+        ? queue.work.splice(pendingIndex, 1)[0]!
+        : queue.work[queue.workIndex++]!;
+      queue.preferDeepCursor = work.kind !== 'children' || work.remainingLegs <= 1;
       queuesPendingWork--;
       if (queue.workIndex >= 128 && queue.workIndex * 2 >= queue.work.length) {
         queue.work.splice(0, queue.workIndex);
@@ -4307,7 +4317,9 @@ export function findGtfsItinerariesWithStats(
       for (const queue of queues) {
         if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS
           || !canContinueCandidateSearch(maximumLegsForPass)) break;
-        const work = takeNextWork(queue);
+        const reservoirActive = maximumLegsForPass >= 3
+          && candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass);
+        const work = takeNextWork(queue, reservoirActive && queue.preferDeepCursor);
         if (!work) continue;
         processed = true;
         if (work.kind === 'path') {
@@ -4352,7 +4364,7 @@ export function findGtfsItinerariesWithStats(
     const maxQueuedWorkPerFirstLegQueue = Math.max(1,
       Math.floor(MAX_QUEUED_SEARCH_WORK / Math.max(1, firstLegGroups.size)));
     const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
-      firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true,
+      firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
     runDepthPass(queues, maximumLegsForPass, stepLimit);

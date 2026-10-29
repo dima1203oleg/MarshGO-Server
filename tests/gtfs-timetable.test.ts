@@ -3628,7 +3628,7 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
 
   addRoute('access-route');
   addTrip('access-trip', 'access-route', 'origin', 'hub', 8 * 3600, 8 * 3600 + 10 * 60);
-  const distractorCount = 30;
+  const distractorCount = 60;
   for (let index = 0; index < distractorCount; index++) {
     const suffix = String(index).padStart(2, '0');
     const middleStop = `middle-${suffix}`;
@@ -3639,7 +3639,7 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
     addTrip(`middle-trip-${suffix}`, `middle-route-${suffix}`, 'hub', middleStop,
       middleDeparture, middleDeparture + 60);
     addTrip(`egress-trip-${suffix}`, `egress-route-${suffix}`, middleStop, 'destination',
-      middleDeparture + 4 * 60, middleDeparture + 14 * 60);
+      middleDeparture + 4 * 60, middleDeparture + 45 * 60);
   }
   addStop('middle-target', 24.1400, 49.9100);
   addRoute('middle-route-target');
@@ -3668,7 +3668,7 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
       origin: [24.0200, 49.8400], destination: [24.1700, 49.9400],
       maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
       maximumTransferWalkingMeters: 10, maximumTransfers: 2, limit: 100,
-    }, { maxCandidatesPerLegCount: 100, maxObjectiveReservoirSearchSteps: 1_000, maxQueuedSearchWork: 6 });
+    }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 1_000, maxQueuedSearchWork: 6 });
   } finally {
     console.info = previousInfo;
     if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
@@ -3680,6 +3680,7 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
   const returnedChains = new Set(result.itineraries.map((journey) => journey.segments
     .map((segment) => segment.tripId).join('>')));
   const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
+  const candidatePoolReachedAtByLegCount = JSON.parse(String(ranked?.candidatePoolReachedAtStepByLegCount)) as Record<string, number>;
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
     nextLegFeasibleAtStepByLegCount: Record<string, number>;
@@ -3700,6 +3701,10 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
   assert.ok(targetTrace?.pathExpandedAtStepByLegCount['2'] !== undefined
     && targetTrace.nextLegFeasibleAtStepByLegCount['3'] !== undefined,
   'the admitted middle-trip path expands and reaches its feasible final leg');
+  assert.ok(candidatePoolReachedAtByLegCount['3'] !== undefined
+    && targetTrace.pathExpandedAtStepByLegCount['3'] !== undefined
+    && candidatePoolReachedAtByLegCount['3'] < targetTrace.pathExpandedAtStepByLegCount['3'],
+  'the late target cursor continues to a complete journey after the three-leg candidate pool saturates');
   assert.equal(result.truncation.searchBudget, true,
     'bounded queue replacement is surfaced as partial rather than claiming exhaustive search');
   assert.ok(targetTrace, 'the target chain trace is present');
