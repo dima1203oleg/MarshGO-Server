@@ -2531,14 +2531,23 @@ export function findGtfsItinerariesWithStats(
   // reach, so a different platform stop ID can participate in the bounded
   // retention hint without scanning the full event set per candidate segment.
   const originRetentionEventsByReachableStop = new Map<string, QueryReachabilityEvent[]>();
-  const indexedOriginEvents = new Set<QueryReachabilityEvent>();
+  const seenOriginEvents = new Set<QueryReachabilityEvent>();
+  const indexOriginEventAtStop = (event: QueryReachabilityEvent, stopId: string) => {
+    const reachableEvents = originRetentionEventsByReachableStop.get(stopId) ?? [];
+    reachableEvents.push(event);
+    originRetentionEventsByReachableStop.set(stopId, reachableEvents);
+  };
   for (const events of originRetentionEvents.values()) for (const event of events) {
-    if (indexedOriginEvents.has(event)) continue;
-    indexedOriginEvents.add(event);
-    for (const stopId of new Set([event.canonicalStopId, event.stopId, ...reachablePathwayNodes(event.pathwayStopId)])) {
-      const reachableEvents = originRetentionEventsByReachableStop.get(stopId) ?? [];
-      reachableEvents.push(event);
-      originRetentionEventsByReachableStop.set(stopId, reachableEvents);
+    if (seenOriginEvents.has(event)) continue;
+    seenOriginEvents.add(event);
+    // The former union Set copied every reachable pathway node into a second
+    // Set per event. The pathway result is already a Set; skip only its two
+    // possible direct IDs while preserving the original insertion order.
+    indexOriginEventAtStop(event, event.canonicalStopId);
+    if (event.stopId !== event.canonicalStopId) indexOriginEventAtStop(event, event.stopId);
+    for (const stopId of reachablePathwayNodes(event.pathwayStopId)) {
+      if (stopId === event.canonicalStopId || stopId === event.stopId) continue;
+      indexOriginEventAtStop(event, stopId);
     }
   }
   // The journey search permits a same-provider walking transfer between
@@ -2579,9 +2588,8 @@ export function findGtfsItinerariesWithStats(
   for (const events of destinationRetentionEvents.values()) for (const event of events) {
     const eventStop = feed.stops.get(event.canonicalStopId);
     if (!eventStop) continue;
-    for (const stopId of new Set([event.canonicalStopId, ...reachablePathwayNodes(event.pathwayStopId)])) {
-      indexDestinationEvent(event, stopId);
-    }
+    indexDestinationEvent(event, event.canonicalStopId);
+    for (const stopId of reachablePathwayNodes(event.pathwayStopId)) indexDestinationEvent(event, stopId);
     for (const nearbyStopId of nearbyTransferStopIds(eventStop, event.routeId)) indexDestinationEvent(event, nearbyStopId);
   }
   for (const events of originRetentionEventsByReachableStop.values()) events.sort((a, b) => a.at - b.at
