@@ -3632,7 +3632,7 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
   'trace reports the sorted choice position for a feasible target successor');
 });
 
-test('preserves a late feasible successor after the deep candidate pool saturates', () => {
+function lateSuccessorFixture(dense = false) {
   const timetable = feed();
   timetable.routes.clear();
   timetable.trips.clear();
@@ -3662,14 +3662,15 @@ test('preserves a late feasible successor after the deep candidate pool saturate
 
   addRoute('access-route');
   addTrip('access-trip', 'access-route', 'origin', 'hub', 8 * 3600, 8 * 3600 + 10 * 60);
-  const distractorCount = 40;
+  const distractorCount = dense ? 160 : 40;
   for (let index = 0; index < distractorCount; index++) {
     const suffix = String(index).padStart(2, '0');
     const middleStop = `middle-${suffix}`;
-    addStop(middleStop, 24.0700 + index * 0.002, 49.8700 + index * 0.0012);
+    addStop(middleStop, 24.0700 + index * (dense ? 0.0002 : 0.002),
+      49.8700 + index * (dense ? 0.00012 : 0.0012));
     addRoute(`middle-route-${suffix}`);
     addRoute(`egress-route-${suffix}`);
-    const middleDeparture = 8 * 3600 + 13 * 60 + index * 20;
+    const middleDeparture = 8 * 3600 + 13 * 60 + index * (dense ? 4 : 20);
     addTrip(`middle-trip-${suffix}`, `middle-route-${suffix}`, 'hub', middleStop,
       middleDeparture, middleDeparture + 60);
     addTrip(`egress-trip-${suffix}`, `egress-route-${suffix}`, middleStop, 'destination',
@@ -3682,7 +3683,43 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     8 * 3600 + 24 * 60, 8 * 3600 + 25 * 60);
   addTrip('egress-trip-target', 'egress-route-target', 'middle-target', 'destination',
     8 * 3600 + 29 * 60, 8 * 3600 + 36 * 60);
+  return timetable;
+}
 
+test('marks dense bounded search partial when it misses the oracle fastest chain', () => {
+  const timetable = lateSuccessorFixture(true);
+  const oracle = lazyEventLabelSearch(timetable, {
+    originStopIds: ['origin'], destinationStopIds: ['destination'], serviceDates: ['20261012'],
+    earliestDeparture: new Date('2026-10-12T04:55:00Z'), latestDeparture: new Date('2026-10-12T06:30:00Z'),
+    maximumJourneySeconds: 2 * 60 * 60, maximumTransfers: 2, maximumWaitSeconds: 2 * 60 * 60,
+    transferRadiusMeters: 10, minimumTransferBufferSeconds: DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
+    providerId: 'p1', providerName: 'Test Transit',
+  });
+  const oracleFastest = [...oracle.identities.values()].sort((left, right) =>
+    left.path.at(-1)!.journey.arrivalAt.getTime() - right.path.at(-1)!.journey.arrivalAt.getTime())[0];
+  assert.equal(oracle.searchTruncated, false, 'the independent oracle exhausts this fixture');
+  assert.equal(oracleFastest?.tripIds.join('>'), 'access-trip>middle-trip-target>egress-trip-target',
+    'the late target is the independently verified fastest feasible chain');
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T06:30:00Z'),
+    origin: [24.0200, 49.8400], destination: [24.1700, 49.9400],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 10, maximumTransfers: 2, limit: 100,
+  }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 100, maxQueuedSearchWork: 100 });
+  assert.ok(result.itineraries.length > 0, 'the bounded search still returns alternatives');
+  const targetReturned = result.itineraries.some((journey) => journey.segments.map((segment) => segment.tripId)
+    .join('>') === oracleFastest?.tripIds.join('>'));
+  if (!targetReturned) {
+    const bestReturnedArrival = Math.min(...result.itineraries.map((journey) => journey.arrivalAt.getTime()));
+    assert.ok(bestReturnedArrival > oracleFastest!.path.at(-1)!.journey.arrivalAt.getTime(),
+      'the returned alternatives arrive later than the independently verified fastest chain');
+    assert.equal(result.truncation.searchBudget, true, 'a missed oracle winner must expose the search budget cutoff');
+    assert.equal(result.searchTruncated, true, 'a missed oracle winner must never be presented as a complete search');
+  }
+});
+
+test('preserves a late feasible successor after the deep candidate pool saturates', () => {
+  const timetable = lateSuccessorFixture();
   const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
   const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
   const previousInfo = console.info;
