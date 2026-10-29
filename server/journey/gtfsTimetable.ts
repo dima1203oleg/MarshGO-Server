@@ -4087,6 +4087,7 @@ export function findGtfsItinerariesWithStats(
     remainingLegs: number;
     previousIds: Set<string>;
     visitedStops: Set<string>;
+    queueSequence: number;
   };
   type SearchWork = PathWork | ChildWork;
   type RouteSearchQueue = {
@@ -4099,6 +4100,7 @@ export function findGtfsItinerariesWithStats(
     preferDeepCursor: boolean;
     reservoirQueuedWorkStreak: number;
     reservoirPriorityPathStreak: number;
+    nextChildCursorSequence: number;
     maxQueuedWork: number;
   };
   const recordDebugObjectiveReservoirQueueSnapshot = (
@@ -4293,10 +4295,17 @@ export function findGtfsItinerariesWithStats(
       // starve its continuation until the objective reservoir closes.
       const pendingPriorityPath = queue.work.findIndex((pending, index) => index >= queue.workIndex
         && pending.kind === 'path' && pending.priority);
-      const pendingChildCursor = preferDeepCursor
-        ? queue.work.findIndex((pending, index) => index >= queue.workIndex
-          && pending.kind === 'children' && pending.remainingLegs >= 1)
-        : -1;
+      let pendingChildCursor = -1;
+      if (preferDeepCursor) {
+        for (let index = queue.workIndex; index < queue.work.length; index++) {
+          const pending = queue.work[index]!;
+          if (pending.kind !== 'children' || pending.remainingLegs < 1) continue;
+          if (pendingChildCursor < 0
+            || pending.queueSequence < (queue.work[pendingChildCursor] as ChildWork).queueSequence) {
+            pendingChildCursor = index;
+          }
+        }
+      }
       const hasPendingPriorityPath = pendingPriorityPath >= queue.workIndex;
       const shouldServeDeepCursor = pendingChildCursor >= queue.workIndex
         && (!hasPendingPriorityPath
@@ -4348,7 +4357,7 @@ export function findGtfsItinerariesWithStats(
     if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return undefined;
     recordDebugTargetSuccessorPositions(path, choices, low, latestNext);
     const work: ChildWork = { kind: 'children', priority, path, last, choices, nextIndex: low, latestNext,
-      remainingLegs, previousIds, visitedStops };
+      remainingLegs, previousIds, visitedStops, queueSequence: queue.nextChildCursorSequence++ };
     if (remainingLegs === 1) return work;
     enqueueWork(queue, work);
     return undefined;
@@ -4407,6 +4416,7 @@ export function findGtfsItinerariesWithStats(
     }
     const hasNextBeforeHorizon = work.nextIndex < work.choices.length
       && work.choices[work.nextIndex]!.departureAt.getTime() <= work.latestNext;
+    if (hasNextBeforeHorizon) work.queueSequence = queue.nextChildCursorSequence++;
     const continuationQueued = hasNextBeforeHorizon ? enqueueWork(queue, work) : false;
     // The popped cursor freed a bounded queue slot. Reinsert its continuation
     // first so feasible descendants generated during this batch cannot evict
@@ -4520,6 +4530,7 @@ export function findGtfsItinerariesWithStats(
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
       reservoirQueuedWorkStreak: 0,
       reservoirPriorityPathStreak: 0,
+      nextChildCursorSequence: 0,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
     activeQueues = queues;
