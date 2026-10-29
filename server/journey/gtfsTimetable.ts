@@ -3977,7 +3977,7 @@ export function findGtfsItinerariesWithStats(
     observeCandidateGraph(snapshot);
   }
 
-  type PathWork = { kind: 'path'; path: GtfsDirectJourney[] };
+  type PathWork = { kind: 'path'; path: GtfsDirectJourney[]; priority: boolean };
   type ChildWork = {
     kind: 'children';
     path: GtfsDirectJourney[];
@@ -4000,33 +4000,45 @@ export function findGtfsItinerariesWithStats(
   };
   const pausedDepthPassQueues = new Map<number, RouteSearchQueue[]>();
   const truncatedDepthPasses = new Set<number>();
-  const evictOldestQueuedPath = (queue: RouteSearchQueue) => {
-    for (let index = queue.workIndex; index < queue.work.length; index++) {
-      const evicted = queue.work[index]!;
-      if (evicted.kind !== 'path') continue;
-      recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-      queue.work.splice(index, 1);
-      queuesPendingWork--;
-      queueWorkDropped = true;
-      return true;
-    }
-    return false;
+  const evictOldestQueuedPath = (queue: RouteSearchQueue, protectPriority: boolean) => {
+    const evict = (allowPriority: boolean) => {
+      for (let index = queue.workIndex; index < queue.work.length; index++) {
+        const evicted = queue.work[index]!;
+        if (evicted.kind !== 'path' || (!allowPriority && evicted.priority)) continue;
+        recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
+        queue.work.splice(index, 1);
+        queuesPendingWork--;
+        queueWorkDropped = true;
+        return true;
+      }
+      return false;
+    };
+    if (evict(false)) return true;
+    return protectPriority ? false : evict(true);
   };
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false) => {
+    const queuedWork: SearchWork = work.kind === 'path' ? { ...work, priority: prioritize } : work;
     let pendingInQueue = queue.work.length - queue.workIndex;
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
       // Preserve forward progress when a bounded queue is saturated: replace
-      // its oldest deferred path with the next path/cursor, and report the
-      // discarded branch as truncation rather than silently losing the queue.
-      if (evictOldestQueuedPath(queue)) pendingInQueue--;
+      // an older ordinary path first. A newly feasible path must not evict an
+      // already admitted feasible path before either has a chance to expand.
+      if (evictOldestQueuedPath(queue, queuedWork.kind === 'path' && queuedWork.priority)) pendingInQueue--;
     }
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
       recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathDropped' : 'childCursorDropped');
       queueWorkDropped = true;
       return;
     }
-    if (prioritize) queue.work.splice(queue.workIndex, 0, work);
-    else queue.work.push(work);
+    if (queuedWork.kind === 'path' && queuedWork.priority) {
+      let priorityEnd = queue.workIndex;
+      while (priorityEnd < queue.work.length) {
+        const pending = queue.work[priorityEnd]!;
+        if (pending.kind !== 'path' || !pending.priority) break;
+        priorityEnd++;
+      }
+      queue.work.splice(priorityEnd, 0, queuedWork);
+    } else queue.work.push(queuedWork);
     maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
       queuesPendingWork + 1);
     queuesPendingWork++;
@@ -4044,7 +4056,7 @@ export function findGtfsItinerariesWithStats(
   const takeNextWork = (queue: RouteSearchQueue): SearchWork | undefined => {
     if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length) {
       queue.preferFirstLeg = false;
-      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]] };
+      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]], priority: false };
     }
     if (queue.workIndex < queue.work.length) {
       queue.preferFirstLeg = true;
@@ -4058,7 +4070,7 @@ export function findGtfsItinerariesWithStats(
     }
     if (queue.firstLegIndex < queue.firstLegs.length) {
       queue.preferFirstLeg = false;
-      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]] };
+      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]], priority: false };
     }
     return undefined;
   };
@@ -4112,7 +4124,7 @@ export function findGtfsItinerariesWithStats(
     }
     if (feasible) {
       if (candidatePath) recordDebugTripChainSearch(candidatePath, 'next-leg-feasible');
-      enqueueWork(queue, { kind: 'path', path: [...work.path, next] }, true);
+      enqueueWork(queue, { kind: 'path', path: [...work.path, next], priority: false }, true);
     }
     if (work.nextIndex < work.choices.length
       && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
