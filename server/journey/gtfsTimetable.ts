@@ -39,8 +39,7 @@ const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
 const MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST = 1;
 const MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH = 16;
-const MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH = 1;
-const MAX_OBJECTIVE_RESERVOIR_CHILD_BATCH_SIZE = 4;
+const MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH = 2;
 const OBJECTIVE_RESERVOIR_TRANSFER_PATH_BACKLOG_THRESHOLD = 8;
 const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 4;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
@@ -4485,13 +4484,12 @@ export function findGtfsItinerariesWithStats(
     // fairness matter most.
     // Before the candidate pool fills, use a wider quantum to discover useful
     // transfers efficiently. Once the bounded objective reservoir is active,
-    // use half the normal deep-search quantum so child cursors and validated
-    // transfer paths alternate more often without increasing the step budget.
+    // shrink the quantum so more queued first-leg groups receive service
+    // within the same search-step window instead of letting early queues use
+    // the entire tail budget.
     const objectiveReservoirActive = candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass);
-    const childBatchLimit = maximumLegsForPass >= 3
-      ? objectiveReservoirActive ? MAX_OBJECTIVE_RESERVOIR_CHILD_BATCH_SIZE
-        : MAX_GTFS_CHILDREN_PER_WORK_TURN * 4
-      : MAX_GTFS_CHILDREN_PER_WORK_TURN;
+    const childBatchLimit = maximumLegsForPass >= 3 && !objectiveReservoirActive
+      ? MAX_GTFS_CHILDREN_PER_WORK_TURN * 4 : MAX_GTFS_CHILDREN_PER_WORK_TURN;
     if (objectiveReservoirActive) {
       queue.reservoirFairChildTurnsSinceTransferPathTurn = Math.min(MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH,
         queue.reservoirFairChildTurnsSinceTransferPathTurn + 1);

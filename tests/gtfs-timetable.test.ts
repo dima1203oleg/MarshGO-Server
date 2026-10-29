@@ -3746,9 +3746,6 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     && reservoirCursorTurn.queuedWorkAhead >= 0,
   'cursor trace exposes its search-step offset and queue service position');
   assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
-    progress.objectiveReservoirStepsElapsed > 0 && progress.batchProcessed === 4),
-  'deep-search cursors use a smaller batch while the bounded objective reservoir is active');
-  assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
     progress.queuedPriorityPathsAhead > 0),
   'the late target cursor competes with already validated priority paths');
   assert.ok(reservoirQueueSnapshots.some((snapshot) => snapshot.phase === 'activated'
@@ -3770,9 +3767,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     selectedWorkKind: decision.selectedWorkKind,
   }));
   assert.ok(reservoirQueueDecisions.some((decision) => decision.forcedTransferPathTurn
-    && decision.pendingTransferPathCount >= 8 && decision.transferPathTurnLimit === 1
-    && decision.fairChildTurnsBeforePath >= 1 && decision.selectedWorkKind === 'path'),
-  `large transfer-path backlog receives a path turn after one child turn; ${JSON.stringify(schedulingEvidence)}`);
+    && decision.pendingTransferPathCount >= 8 && decision.transferPathTurnLimit === 2
+    && decision.fairChildTurnsBeforePath >= 2 && decision.selectedWorkKind === 'path'),
+  `large transfer-path backlog receives a path turn after two child turns; ${JSON.stringify(schedulingEvidence)}`);
   assert.ok(reservoirQueueDecisions.some((decision) => decision.pendingTransferPathCount < 8
     && decision.transferPathTurnLimit === 16),
   'small transfer-path queues keep the lower-frequency sixteen-turn cadence');
