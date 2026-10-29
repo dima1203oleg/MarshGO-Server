@@ -3719,7 +3719,7 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     selectedWorkPriority: boolean; priorityWorkStreakBefore: number; priorityWorkStreakAfter: number;
     targetPathQueuePosition: number; targetPathPriority: boolean; selectedTargetPath: boolean;
     pendingTransferPathCount: number; fairChildTurnsBeforePath: number; transferPathTurnLimit: number;
-    forcedTransferPathTurn: boolean; hasPendingPriorityWork: boolean;
+    forcedTransferPathTurn: boolean; forcedPriorityFairTurn: boolean; hasPendingPriorityWork: boolean;
   }>;
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
@@ -3784,6 +3784,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   assert.ok(reservoirQueueDecisions.some((decision) => decision.targetCursorNextIndex > 0
     && decision.selectedWorkKind === 'path' && !decision.selectedTargetCursor),
   'debug trace records competing path service while the target cursor is queued');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.forcedPriorityFairTurn
+    && decision.hasPendingPriorityWork && decision.selectedTargetCursor && !decision.selectedWorkPriority),
+  'a forced fairness turn serves the waiting non-priority target cursor ahead of replenished priority cursors');
   assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedTargetPath),
     'debug trace records when the exact feasible target prefix receives service');
   const schedulingEvidence = reservoirQueueDecisions.slice(-12).map((decision) => ({
