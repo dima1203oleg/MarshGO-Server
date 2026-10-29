@@ -93,6 +93,7 @@ test('hub-diverse bounded reservoir prevents duplicate early-hub candidates from
   assert.equal(reservoir.consider({ id: 'hub-a-early', hub: 'hub-a', cost: 10 }), true);
   assert.equal(reservoir.consider({ id: 'hub-a-second', hub: 'hub-a', cost: 20 }), true);
   assert.equal(reservoir.length, 2);
+  assert.equal(reservoir.has({ id: 'hub-a-second', hub: 'hub-a', cost: 20 }), true);
 
   // A third candidate arriving for a distinct hub, but with higher cost than both hub-a candidates
   assert.equal(reservoir.consider({ id: 'hub-b-candidate', hub: 'hub-b', cost: 30 }), true);
@@ -101,6 +102,10 @@ test('hub-diverse bounded reservoir prevents duplicate early-hub candidates from
   const retained = reservoir.toSortedArray();
   assert.deepEqual(retained.map((c) => c.id), ['hub-a-early', 'hub-b-candidate'],
     'the duplicate hub-a candidate must be evicted to admit the distinct hub-b candidate');
+  assert.equal(reservoir.has({ id: 'hub-a-second', hub: 'hub-a', cost: 20 }), false,
+    'evicted candidates must leave the membership index');
+  assert.equal(reservoir.has({ id: 'hub-b-candidate', hub: 'hub-b', cost: 30 }), true,
+    'newly retained candidates must enter the membership index');
 
   // Duplicate candidate already retained is rejected and does not exceed cap
   assert.equal(reservoir.consider({ id: 'hub-a-early', hub: 'hub-a', cost: 10 }), false);

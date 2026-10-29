@@ -3170,10 +3170,8 @@ export function findGtfsItinerariesWithStats(
               evaluatedConnectorHubs.add(canonicalTransferHubKey(candidate));
               debugConnectorEvalIndex?.set(candidate, feasibleConnectorEvaluations);
               temporallyConnectsQueryEnds = true;
-              const retainedConnectors = connectorOverflow.toSortedArray();
-              const connectorReservoirWasFull = retainedConnectors.length >= connectorOverflowCapacity;
-              const candidateAlreadyRetained = retainedConnectors.some((retained) =>
-                retainedCandidateKey(retained) === retainedCandidateKey(candidate));
+              const connectorReservoirWasFull = connectorOverflow.length >= connectorOverflowCapacity;
+              const candidateAlreadyRetained = connectorOverflow.has(candidate);
               connectorOverflow.consider(candidate);
               // A bounded connector sample can omit a feasible alternative even
               // when the estimated graph budget itself is not exhausted. Only
