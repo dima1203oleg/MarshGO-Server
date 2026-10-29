@@ -241,6 +241,9 @@ try {
   if (previousCandidateTraceSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
   else process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = previousCandidateTraceSetting;
 }
+// Stop the search timer before ranking projections, summary metrics, and JSON
+// serialization so diagnostic-report cost cannot distort the paired replay.
+const searchMs = Number((performance.now() - startedAt).toFixed(2));
 if (process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS && process.env.REPLAY_GROUP === 'candidate') {
   if (searchCandidateTraceError) throw new Error(`Invalid candidate trip trace: ${searchCandidateTraceError}`);
   if (searchCandidateTrace === undefined) {
@@ -324,7 +327,7 @@ console.log(JSON.stringify({
   departureWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
   archiveSha256,
   runtime: process.version,
-  searchMs: Number((performance.now() - startedAt).toFixed(2)),
+  searchMs,
   heapUsedBytes: process.memoryUsage().heapUsed,
   rssBytes: process.memoryUsage().rss,
   returned: result.itineraries.length,
