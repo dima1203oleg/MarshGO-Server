@@ -4178,9 +4178,13 @@ export function findGtfsItinerariesWithStats(
     }
     if (queue.workIndex < queue.work.length) {
       queue.preferFirstLeg = true;
-      // Once the deep candidate pool is saturated, alternate a live multi-leg
-      // cursor with ordinary queued work so descendants cannot starve its scan.
-      const pendingIndex = preferDeepCursor
+      // Once the deep candidate pool is saturated, service a live deep cursor
+      // alongside queued work. Already-feasible priority paths go first: they
+      // have completed transfer validation and only need bounded expansion to
+      // reach the final leg, while pending cursors may still produce no path.
+      const pendingPriorityPath = queue.work.findIndex((pending, index) => index >= queue.workIndex
+        && pending.kind === 'path' && pending.priority);
+      const pendingIndex = preferDeepCursor && pendingPriorityPath < queue.workIndex
         ? queue.work.findIndex((pending, index) => index >= queue.workIndex
           && pending.kind === 'children' && pending.remainingLegs > 1)
         : -1;
