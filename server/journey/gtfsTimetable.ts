@@ -3963,6 +3963,12 @@ export function findGtfsItinerariesWithStats(
   // pending frontier bounded independently, and disclose any dropped work via
   // the existing search-budget truncation flag.
   const MAX_QUEUED_SEARCH_WORK = graphLimits.maxQueuedSearchWork ?? 10_000;
+  // Keep a bounded slice of the global frontier available for paths whose
+  // transfers are already validated; ordinary cursors cannot occupy the whole
+  // hard cap before those high-value prefixes are discovered.
+  const PRIORITY_SEARCH_WORK_RESERVE = Math.min(1_000, Math.floor(MAX_QUEUED_SEARCH_WORK / 10));
+  const REGULAR_QUEUED_SEARCH_WORK_LIMIT = Math.max(0,
+    MAX_QUEUED_SEARCH_WORK - PRIORITY_SEARCH_WORK_RESERVE);
   let queueWorkDropped = false;
   let globalBudgetPreventedDepthPass = false;
   let maximumQueuedSearchWork = 0;
@@ -4126,8 +4132,11 @@ export function findGtfsItinerariesWithStats(
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false): boolean => {
     const queuedWork: SearchWork = work.kind === 'path' ? { ...work, priority: prioritize } : work;
     let pendingInQueue = queue.work.length - queue.workIndex;
-    const globalLimitReachedBeforeAdmission = queuesPendingWork >= MAX_QUEUED_SEARCH_WORK;
-    if (globalLimitReachedBeforeAdmission || pendingInQueue >= queue.maxQueuedWork) {
+    const priorityWork = queuedWork.priority;
+    const globalAdmissionLimit = priorityWork ? MAX_QUEUED_SEARCH_WORK : REGULAR_QUEUED_SEARCH_WORK_LIMIT;
+    const admissionLimitReachedBeforeAdmission = queuesPendingWork >= globalAdmissionLimit;
+    const hardGlobalLimitReachedBeforeAdmission = queuesPendingWork >= MAX_QUEUED_SEARCH_WORK;
+    if (admissionLimitReachedBeforeAdmission || pendingInQueue >= queue.maxQueuedWork) {
       // Preserve shallower exploration before its derivable descendants: evict
       // ordinary paths first; then preserve shallow cursors over derivable
       // deeper paths. A feasible path may borrow a queue's unused global share,
@@ -4135,24 +4144,25 @@ export function findGtfsItinerariesWithStats(
       // Priority work remains FIFO after admission.
       const evicted = evictOldestQueuedPath(queue)
         || (queuedWork.kind === 'children' && evictDeeperPriorityPath(queue, queuedWork.path.length))
-        || (globalLimitReachedBeforeAdmission && queuedWork.kind === 'path' && queuedWork.priority
+        || (hardGlobalLimitReachedBeforeAdmission && queuedWork.kind === 'path' && queuedWork.priority
           && (evictComparablePriorityPath(queue, queuedWork.path.length)
             || evictGlobalDeeperPriorityPath(queuedWork.path.length)));
       if (evicted) pendingInQueue--;
     }
     const globalLimitReached = queuesPendingWork >= MAX_QUEUED_SEARCH_WORK;
+    const globalAdmissionLimitReached = queuesPendingWork >= globalAdmissionLimit;
     const queueLimitReached = pendingInQueue >= queue.maxQueuedWork;
     // The per-first-leg share is a fairness target, not a hard ceiling for
     // already-feasible journey prefixes. Let those borrow idle global slots;
     // the global cap remains the hard memory/work bound.
-    const priorityWork = queuedWork.priority;
     const mayBorrowQueueShare = priorityWork && !globalLimitReached;
-    if (globalLimitReached || (queueLimitReached && !mayBorrowQueueShare)) {
-      if (globalLimitReached) queueAdmissionGlobalLimitDrops++;
+    if (globalLimitReached || globalAdmissionLimitReached || (queueLimitReached && !mayBorrowQueueShare)) {
+      if (globalLimitReached || globalAdmissionLimitReached) queueAdmissionGlobalLimitDrops++;
       if (queueLimitReached) queueAdmissionPerQueueLimitDrops++;
       recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathDropped' : 'childCursorDropped', {
         globalPending: queuesPendingWork,
         globalLimit: MAX_QUEUED_SEARCH_WORK,
+        globalAdmissionLimit,
         queuePending: pendingInQueue,
         queueLimit: queue.maxQueuedWork,
       });
