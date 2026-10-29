@@ -4269,6 +4269,13 @@ export function findGtfsItinerariesWithStats(
       while (priorityEnd < queue.work.length) {
         const pending = queue.work[priorityEnd]!;
         if (!pending.priority) break;
+        if (queuedWork.kind === 'path') {
+          // Keep shallow paths FIFO, but place a feasible prefix before
+          // deeper paths and same/deeper child cursors that could otherwise
+          // fill the reservoir before this prefix is expanded.
+          if ((pending.kind === 'path' && pending.path.length > queuedWork.path.length)
+            || (pending.kind === 'children' && pending.path.length >= queuedWork.path.length)) break;
+        }
         priorityEnd++;
       }
       queue.work.splice(priorityEnd, 0, queuedWork);
