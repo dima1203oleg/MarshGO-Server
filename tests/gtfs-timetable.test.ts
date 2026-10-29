@@ -3697,6 +3697,8 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
   const targetTrace = trace[`p1:20261012:access-trip>p1:20261012:middle-trip-target>p1:20261012:egress-trip-target`];
   assert.ok(returnedChains.has(targetChain),
     `the latest feasible chain survives bounded cursor pressure; trace=${JSON.stringify(targetTrace)}`);
+  assert.ok(result.itineraries.some((journey) => journey.segments.length <= 2),
+    'deeper-chain recovery keeps direct and one-transfer alternatives available');
   assert.ok(targetTrace?.pathExpandedAtStepByLegCount['2'] !== undefined
     && targetTrace.nextLegFeasibleAtStepByLegCount['3'] !== undefined,
   'the admitted middle-trip path expands and reaches its feasible final leg');
