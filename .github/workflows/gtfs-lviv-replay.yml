@@ -179,7 +179,29 @@ jobs:
         run: |
           python3 candidate/scripts/summarize-lviv-replay.py replay-results.jsonl > replay-summary.md
           printf '\nFeed attribution: [Lviv municipal GTFS open data](https://data.gov.ua/en/dataset/lviv-public-transport-gtfs-real-time). The publisher specifies attribution for reuse.\n' >> replay-summary.md
-          cat replay-summary.md >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          from pathlib import Path
+
+          report = Path("replay-summary.md").read_text().splitlines()
+          max_line_bytes = 12_000
+          max_summary_bytes = 800 * 1024
+          selected = []
+          total_bytes = 0
+          omitted_lines = 0
+          for line in report:
+              encoded = (line + "\n").encode()
+              if len(encoded) > max_line_bytes or total_bytes + len(encoded) > max_summary_bytes:
+                  omitted_lines += 1
+                  continue
+              selected.append(line)
+              total_bytes += len(encoded)
+          if omitted_lines:
+              selected.extend([
+                  "",
+                  f"{omitted_lines} oversized diagnostic line(s) omitted from this summary; the complete replay-summary.md and JSONL are attached as workflow artifacts.",
+              ])
+          print("\n".join(selected))
+          PY
       - name: Upload replay evidence
         uses: actions/upload-artifact@v4
         with:
