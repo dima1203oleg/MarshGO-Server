@@ -4192,7 +4192,7 @@ export function findGtfsItinerariesWithStats(
   const hasQueuedWork = (queues: RouteSearchQueue[]) => queues.some((queue) =>
     queue.firstLegIndex < queue.firstLegs.length || queue.workIndex < queue.work.length);
   const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number,
-    priority = false) => {
+    stepLimit: number, priority = false): ChildWork | undefined => {
     searchSteps++;
     recordDebugTripChainSearch(path, 'path-expanded');
     const last = path.at(-1)!;
@@ -4200,7 +4200,7 @@ export function findGtfsItinerariesWithStats(
       addPath(path, maximumLegsForPass);
     }
     const remainingLegs = maximumLegsForPass - path.length;
-    if (remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return;
+    if (remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return undefined;
     const previousIds = new Set(path.map((segment) => segment.tripId));
     const visitedStops = new Set(path.map((segment) => segment.originStop.id));
     visitedStops.add(last.destinationStop.id);
@@ -4212,10 +4212,13 @@ export function findGtfsItinerariesWithStats(
       if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) low = middle + 1;
       else high = middle;
     }
-    if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
+    if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return undefined;
     recordDebugTargetSuccessorPositions(path, choices, low, latestNext);
-    enqueueWork(queue, { kind: 'children', priority, path, last, choices, nextIndex: low, latestNext,
-      remainingLegs, previousIds, visitedStops });
+    const work: ChildWork = { kind: 'children', priority, path, last, choices, nextIndex: low, latestNext,
+      remainingLegs, previousIds, visitedStops };
+    if (remainingLegs === 1) return work;
+    enqueueWork(queue, work);
+    return undefined;
   };
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue, maximumLegsForPass: number, stepLimit: number) => {
     let processed = 0;
@@ -4301,8 +4304,10 @@ export function findGtfsItinerariesWithStats(
         const work = takeNextWork(queue);
         if (!work) continue;
         processed = true;
-        if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass, work.priority);
-        else expandNextChild(work, queue, maximumLegsForPass, stepLimit);
+        if (work.kind === 'path') {
+          const finalLegCursor = expandPath(work.path, queue, maximumLegsForPass, stepLimit, work.priority);
+          if (finalLegCursor) expandNextChild(finalLegCursor, queue, maximumLegsForPass, stepLimit);
+        } else expandNextChild(work, queue, maximumLegsForPass, stepLimit);
       }
       if (!processed) break;
     }
