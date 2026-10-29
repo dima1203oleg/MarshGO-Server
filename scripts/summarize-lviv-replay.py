@@ -19,7 +19,7 @@ if set(by_revision) != expected_revisions or any(len(items) != 3 for items in by
 
 stable_fields = (
     "origin", "destination", "departureWindow", "idHash", "uniqueTripChains", "uniqueRouteChains", "rankingMethod", "rankingScope", "availableStrategies", "strategyCandidates",
-    "tripChainIds", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
+    "tripChainIds", "strategyWinners", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
 )
 for revision, items in by_revision.items():
     for field in stable_fields:
@@ -74,5 +74,28 @@ for stage, previous_stage in (("segments-built", None), ("reachability-built", "
         print(f"- `{stage}` median stage duration: {baseline_stage_median:.2f} ms → {candidate_stage_median:.2f} ms ({stage_delta:+.2f}%); samples baseline `{baseline_times}` / candidate `{candidate_times}`")
     else:
         print(f"- `{stage}` median stage duration: unavailable (replay artifact lacks valid cumulative timing samples)")
+
+for revision, items in (("baseline", baseline), ("candidate", candidate)):
+    print()
+    print(f"## {revision.capitalize()} strategy winner segments")
+    for strategy, winner in items[0]["strategyWinners"].items():
+        print()
+        print(f"### {strategy}")
+        if winner is None:
+            print("- No winner")
+            continue
+        print(f"- Journey: `{winner['departureAt']}` → `{winner['arrivalAt']}`; {winner['durationSeconds']} s; {winner['transfers']} transfers; walk {winner['walkingMeters']} m; fare `{winner['priceMinor']}` minor units")
+        legs = winner.get("legs")
+        if legs is None:
+            print("- Ordered legs unavailable (artifact predates detailed winner summaries)")
+            continue
+        for index, leg in enumerate(legs, start=1):
+            print(
+                f"- {index}. `{leg['mode']}` {leg['originStop']['name']} (`{leg['originStop']['id']}`) → "
+                f"{leg['destinationStop']['name']} (`{leg['destinationStop']['id']}`); "
+                f"{leg['departureAt']} → {leg['arrivalAt']}; route `{leg['providerId']}:{leg['routeId']}` "
+                f"({leg['routeName']}); trip `{leg['providerId']}:{leg['serviceDate']}:{leg['tripId']}`; "
+                f"schedule `{leg['scheduleSemantics']}`"
+            )
 print()
 print("This is one static Lviv OD and a diagnostic comparison, not a live GPS, realtime, staging, production, or complete-routing acceptance test.")

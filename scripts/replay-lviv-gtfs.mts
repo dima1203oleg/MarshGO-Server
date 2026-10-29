@@ -268,6 +268,19 @@ const winnerSummary = (strategy: typeof userFacingStrategies[number]) => {
     modes: item.legs.map((leg) => leg.mode),
     routeIds: item.itinerary.segments.map((segment) => `${segment.providerId}:${segment.routeId}`),
     tripIds: item.itinerary.segments.map((segment) => `${segment.providerId}:${segment.tripId}`),
+    legs: item.itinerary.segments.map((segment) => ({
+      providerId: segment.providerId,
+      routeId: segment.routeId,
+      routeName: segment.routeName,
+      tripId: segment.tripId,
+      serviceDate: segment.serviceDate,
+      mode: segment.mode,
+      originStop: { id: segment.originStop.id, name: segment.originStop.name },
+      destinationStop: { id: segment.destinationStop.id, name: segment.destinationStop.name },
+      departureAt: segment.departureAt.toISOString(),
+      arrivalAt: segment.arrivalAt.toISOString(),
+      scheduleSemantics: segment.scheduleSemantics,
+    })),
   };
 };
 const details = result as typeof result & Record<string, unknown>;
