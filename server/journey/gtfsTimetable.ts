@@ -3950,10 +3950,11 @@ export function findGtfsItinerariesWithStats(
         Math.floor((MAX_SEARCH_STEPS - searchSteps) * depthWeights[depthIndex] / remainingWeight)));
     const firstLegGroups = new Map<string, GtfsDirectJourney[]>();
     for (const segment of firstLegs) {
-      // Keep dense departures on one route independently schedulable. A single
-      // route queue can spend the bounded objective window on earlier trips
-      // before reaching a later, faster feasible chain on that same route.
-      const key = `${segment.providerId}:${segment.routeId}:${segment.tripId}`;
+      // Keep each exact start segment independently schedulable. A route or
+      // trip queue can still bury a useful stop-pair behind many earlier
+      // departures/pairs after the bounded objective reservoir is reached.
+      const key = `${segment.providerId}:${segment.routeId}:${segment.serviceDate}:${segment.tripId}`
+        + `:${segment.originStop.id}:${segment.destinationStop.id}:${segment.departureAt.getTime()}`;
       const group = firstLegGroups.get(key) ?? [];
       group.push(segment);
       firstLegGroups.set(key, group);
