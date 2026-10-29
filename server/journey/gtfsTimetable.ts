@@ -53,6 +53,18 @@ export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
 const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
 const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
 
+/** Allow bounded queues to borrow unused local share only before their global admission ceiling. */
+export function shouldBorrowGtfsQueueShare(input: {
+  queueShareReached: boolean;
+  priorityPath: boolean;
+  childCursor: boolean;
+  globalAdmissionLimitReached: boolean;
+  globalHardLimitReached: boolean;
+}): boolean {
+  return input.queueShareReached && !input.globalAdmissionLimitReached && !input.globalHardLimitReached
+    && (input.priorityPath || input.childCursor);
+}
+
 type CsvRow = Record<string, string>;
 export type TransitJourneyMode = 'BUS' | 'MINIBUS' | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'FERRY' | 'FUNICULAR';
 export type GtfsTransportType = 'bus' | 'marshrutka' | 'intercity_bus' | 'train' | 'suburban_train' | 'city_train' | 'tram' | 'trolleybus' | 'metro' | 'ferry' | 'funicular';
@@ -4251,7 +4263,13 @@ export function findGtfsItinerariesWithStats(
     // The per-first-leg share is a fairness target, not a hard ceiling for
     // already-feasible journey prefixes. Let those borrow idle global slots;
     // the global cap remains the hard memory/work bound.
-    const mayBorrowQueueShare = priorityWork && !globalLimitReached;
+    const mayBorrowQueueShare = shouldBorrowGtfsQueueShare({
+      queueShareReached: queueLimitReached,
+      priorityPath: priorityWork,
+      childCursor: queuedWork.kind === 'children',
+      globalAdmissionLimitReached,
+      globalHardLimitReached: globalLimitReached,
+    });
     if (globalLimitReached || globalAdmissionLimitReached || (queueLimitReached && !mayBorrowQueueShare)) {
       if (globalLimitReached || globalAdmissionLimitReached) queueAdmissionGlobalLimitDrops++;
       if (queueLimitReached) queueAdmissionPerQueueLimitDrops++;
@@ -4265,7 +4283,10 @@ export function findGtfsItinerariesWithStats(
       queueWorkDropped = true;
       return false;
     }
-    if (queueLimitReached) queueAdmissionPerQueueBorrowed++;
+    if (queueLimitReached) {
+      queueAdmissionPerQueueBorrowed++;
+      if (queuedWork.kind === 'children') queueAdmissionPerQueueChildCursorBorrowed++;
+    }
     if (priorityWork) {
       let priorityEnd = queue.workIndex;
       while (priorityEnd < queue.work.length) {
@@ -4292,6 +4313,7 @@ export function findGtfsItinerariesWithStats(
   let queueAdmissionGlobalLimitDrops = 0;
   let queueAdmissionPerQueueLimitDrops = 0;
   let queueAdmissionPerQueueBorrowed = 0;
+  let queueAdmissionPerQueueChildCursorBorrowed = 0;
   const canContinueCandidateSearch = (legCount: number) => {
     const candidatePoolHasRoom = results.size < MAX_SEARCH_RESULTS
       && (resultCountByLegCount.get(legCount) ?? 0) < MAX_CANDIDATES_PER_LEG_COUNT;
@@ -4786,6 +4808,7 @@ export function findGtfsItinerariesWithStats(
     queueAdmissionGlobalLimitDrops,
     queueAdmissionPerQueueLimitDrops,
     queueAdmissionPerQueueBorrowed,
+    queueAdmissionPerQueueChildCursorBorrowed,
     ...(debugTraceTripChains.length > 0 ? { debugTripChainPresence: (() => {
       const requestedTripKeys = new Set(debugTraceTripChains.flatMap((tripChain) => tripChain.split('>')));
       const retainedTargetTripKeys = new Set<string>();

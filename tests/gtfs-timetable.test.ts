@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsDeterministicOverflowSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsDeterministicOverflowSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch, shouldBorrowGtfsQueueShare } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 import { queryDirectedEventIndexPrototype, validateEventIndexCandidatesWithProductionTransfers } from './helpers/gtfs-event-label-prototype';
@@ -289,6 +289,25 @@ function transferFeed(options: { routeType: string; routeName: string; fromId: s
 const request = (earliest: string, latest: string) => ({
   providerId: 'p1', providerName: 'Test Transit', origin: [24.0201, 49.8401] as [number, number], destination: [24.0301, 49.8501] as [number, number],
   earliestDeparture: new Date(earliest), latestDeparture: new Date(latest), now: new Date('2026-10-08T00:00:00Z'),
+});
+
+test('child cursors borrow idle queue share only below global admission and hard caps', () => {
+  const base = {
+    queueShareReached: true, priorityPath: false, childCursor: true,
+    globalAdmissionLimitReached: false, globalHardLimitReached: false,
+  };
+  assert.equal(shouldBorrowGtfsQueueShare(base), true,
+    'ordinary cursor work may use globally available capacity beyond its local fairness share');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, globalAdmissionLimitReached: true }), false,
+    'ordinary cursor work preserves the reserved global priority capacity');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, globalHardLimitReached: true }), false,
+    'no queue may borrow beyond the hard global frontier cap');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, childCursor: false }), false,
+    'ordinary non-priority paths cannot borrow the queue share');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, priorityPath: true, childCursor: false }), true,
+    'validated priority paths retain their existing borrowing behavior');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, queueShareReached: false }), false,
+    'borrowing is unnecessary while the local fairness share has room');
 });
 
 /**
