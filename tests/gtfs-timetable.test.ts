@@ -3710,8 +3710,8 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     variant.targetSuccessors.some((successor) => successor.tripKey === 'p1:20261012:middle-trip-target'
       && successor.cursorOffset > 6 && successor.transferFeasible)),
   'the feasible target lies beyond the six-item queue share');
-  assert.ok((targetTrace.queueEventsByLegCount['2']?.pathEnqueued ?? 0) > 0,
-    'queue diagnostics record when the feasible target path prefix is admitted');
+  assert.equal(targetTrace.queueEventsByLegCount['2']?.pathEnqueued ?? 0, 0,
+    'a feasible two-leg prefix is expanded immediately instead of being evicted from the queue');
   assert.equal(targetTrace.queueEventsByLegCount['3']?.pathEnqueued ?? 0, 0,
     'a completed target journey enters the result pool without queue admission');
   assert.equal(targetTrace.queueEventsByLegCount['2']?.childCursorEnqueued ?? 0, 0,

@@ -4285,10 +4285,22 @@ export function findGtfsItinerariesWithStats(
     const hasNextBeforeHorizon = work.nextIndex < work.choices.length
       && work.choices[work.nextIndex]!.departureAt.getTime() <= work.latestNext;
     const continuationQueued = hasNextBeforeHorizon ? enqueueWork(queue, work) : false;
-    // The popped cursor freed a bounded queue slot. Reinsert its continuation
-    // first so feasible descendants generated during this batch cannot evict
-    // the only remaining path that will discover later successors.
-    for (const path of feasiblePaths) enqueueWork(queue, { kind: 'path', path, priority: false }, true);
+    if (maximumLegsForPass >= 3 && work.remainingLegs === 2) {
+      // These prefixes have only one transit leg left. Expand them immediately
+      // so a bounded queue cannot evict a feasible deep-chain connector before
+      // its final segment is checked; every nested step still uses the same caps.
+      for (const path of feasiblePaths) {
+        if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS
+          || !canContinueCandidateSearch(maximumLegsForPass)) break;
+        const finalLegCursor = expandPath(path, queue, maximumLegsForPass, stepLimit, true);
+        if (finalLegCursor) expandNextChild(finalLegCursor, queue, maximumLegsForPass, stepLimit);
+      }
+    } else {
+      // The popped cursor freed a bounded queue slot. Reinsert its continuation
+      // first so feasible descendants generated during this batch cannot evict
+      // the only remaining path that will discover later successors.
+      for (const path of feasiblePaths) enqueueWork(queue, { kind: 'path', path, priority: false }, true);
+    }
     const stopReason = !hasNextBeforeHorizon ? (work.nextIndex >= work.choices.length ? 'choices-exhausted' : 'past-wait-horizon')
       : searchSteps >= MAX_SEARCH_STEPS ? 'global-search-step-limit'
         : searchSteps >= stepLimit ? 'depth-pass-step-limit'
