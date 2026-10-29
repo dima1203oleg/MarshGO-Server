@@ -3963,7 +3963,7 @@ export function findGtfsItinerariesWithStats(
     }
     return false;
   };
-  const enqueueWork = (queue: RouteSearchQueue, work: SearchWork) => {
+  const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false) => {
     let pendingInQueue = queue.work.length - queue.workIndex;
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
       // Preserve forward progress when a bounded queue is saturated: replace
@@ -3975,7 +3975,8 @@ export function findGtfsItinerariesWithStats(
       queueWorkDropped = true;
       return;
     }
-    queue.work.push(work);
+    if (prioritize) queue.work.splice(queue.workIndex, 0, work);
+    else queue.work.push(work);
     maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
       queuesPendingWork + 1);
     queuesPendingWork++;
@@ -4060,7 +4061,7 @@ export function findGtfsItinerariesWithStats(
     }
     if (feasible) {
       if (candidatePath) recordDebugTripChainSearch(candidatePath, 'next-leg-feasible');
-      enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
+      enqueueWork(queue, { kind: 'path', path: [...work.path, next] }, true);
     }
     if (work.nextIndex < work.choices.length
       && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
