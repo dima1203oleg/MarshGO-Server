@@ -44,6 +44,7 @@ const MAX_OBJECTIVE_RESERVOIR_HIGH_BACKLOG_CHILD_TURNS_BEFORE_PATH = 4;
 const OBJECTIVE_RESERVOIR_TRANSFER_PATH_BACKLOG_THRESHOLD = 8;
 const OBJECTIVE_RESERVOIR_TRANSFER_PATH_HIGH_BACKLOG_THRESHOLD = 16;
 const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 4;
+const MAX_OBJECTIVE_RESERVOIR_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 8;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
 const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
 export const MAX_GTFS_TRANSFERS = 4;
@@ -4572,7 +4573,12 @@ export function findGtfsItinerariesWithStats(
       && work.choices[work.nextIndex]!.departureAt.getTime() <= work.latestNext;
     if (hasNextBeforeHorizon) {
       work.batchesInAgeQuantum++;
-      if (work.batchesInAgeQuantum >= MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM) {
+      // Once a bounded reservoir is full, let a live cursor traverse farther
+      // before rotating so late feasible successors are not stranded at cutoff.
+      const cursorAgeQuantum = objectiveReservoirActive
+        ? MAX_OBJECTIVE_RESERVOIR_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM
+        : MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM;
+      if (work.batchesInAgeQuantum >= cursorAgeQuantum) {
         work.queueSequence = queue.nextChildCursorSequence++;
         work.batchesInAgeQuantum = 0;
       }
