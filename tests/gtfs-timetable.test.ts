@@ -3714,6 +3714,12 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   const returnedChains = new Set(result.itineraries.map((journey) => journey.segments
     .map((segment) => segment.tripId).join('>')));
   const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
+  const depthPasses = JSON.parse(String(ranked?.debugDepthPasses)) as Array<Record<string, number>>;
+  assert.ok(depthPasses.some((pass) => pass.middleQueueRemovals > 0),
+    'saturated scheduling exercises non-head queue removal');
+  assert.ok(depthPasses.every((pass) => pass.pendingBefore >= 0 && pass.pendingAfter >= 0
+    && pass.peakPendingWork <= 100),
+  'live queue counts stay non-negative and within the configured global cap');
   const candidatePoolReachedAtByLegCount = JSON.parse(String(ranked?.candidatePoolReachedAtStepByLegCount)) as Record<string, number>;
   const reservoirQueueSnapshots = JSON.parse(String(ranked?.debugObjectiveReservoirQueueSnapshots ?? '[]')) as Array<{
     phase: string; targetChain: string; legCount: number; objectiveReservoirStepsElapsed: number;
@@ -3751,6 +3757,12 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   assert.ok(targetTrace?.pathExpandedAtStepByLegCount['2'] !== undefined
     && targetTrace.nextLegFeasibleAtStepByLegCount['3'] !== undefined,
   'the admitted middle-trip path expands and reaches its feasible final leg');
+  const queueProgress = Object.values(targetTrace.cursorProgressByPath).flat();
+  assert.ok(queueProgress.length > 0 && queueProgress.every((progress) =>
+    Number.isInteger(progress.queuePending) && progress.queuePending >= 0
+      && Number.isInteger(progress.globalPending) && progress.globalPending >= 0
+      && progress.globalPending <= progress.globalLimit),
+  'live queue counts remain non-negative and within the global cap during saturated scheduling');
   assert.ok(candidatePoolReachedAtByLegCount['3'] !== undefined
     && targetTrace.nextLegFeasibleAtStepByLegCount['2'] !== undefined
     && targetTrace.nextLegFeasibleAtStepByLegCount['2'] > candidatePoolReachedAtByLegCount['3'],

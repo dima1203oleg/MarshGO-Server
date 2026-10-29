@@ -1727,6 +1727,7 @@ export function findGtfsItinerariesWithStats(
     visitedQueues: number;
     scannedQueueItems: number;
     middleQueueRemovals: number;
+    queueCompactions: number;
     peakPendingWork: number;
   } | undefined;
   const debugStage = (stage: string, details: Record<string, number | string> = {}) => {
@@ -4144,8 +4145,10 @@ export function findGtfsItinerariesWithStats(
     queueOrdinal: number;
     firstLegs: GtfsDirectJourney[];
     firstLegIndex: number;
-    work: SearchWork[];
+    work: Array<SearchWork | undefined>;
     workIndex: number;
+    pendingCount: number;
+    tombstoneCount: number;
     preferFirstLeg: boolean;
     preferDeepCursor: boolean;
     reservoirQueuedWorkStreak: number;
@@ -4153,6 +4156,42 @@ export function findGtfsItinerariesWithStats(
     reservoirFairChildTurnsSinceTransferPathTurn: number;
     nextChildCursorSequence: number;
     maxQueuedWork: number;
+  };
+  const isPendingWork = (work: SearchWork | undefined): work is SearchWork => work !== undefined;
+  const pendingWorkBefore = (queue: RouteSearchQueue, endIndex: number): number => {
+    let count = 0;
+    for (let index = queue.workIndex; index < endIndex; index++) {
+      if (isPendingWork(queue.work[index])) count++;
+    }
+    return count;
+  };
+  const compactQueueWork = (queue: RouteSearchQueue) => {
+    const remainingSlots = queue.work.length - queue.workIndex;
+    const hasManyConsumedHeadSlots = queue.workIndex >= 128 && queue.workIndex * 2 >= queue.work.length;
+    const hasManyMiddleTombstones = queue.tombstoneCount >= 64
+      && queue.tombstoneCount * 5 >= remainingSlots;
+    if (!hasManyConsumedHeadSlots && !hasManyMiddleTombstones) return;
+    if (activeDebugDepthPass) activeDebugDepthPass.queueCompactions++;
+    queue.work = queue.work.slice(queue.workIndex).filter(isPendingWork);
+    queue.workIndex = 0;
+    queue.tombstoneCount = 0;
+  };
+  const skipTombstonesAtHead = (queue: RouteSearchQueue) => {
+    while (queue.workIndex < queue.work.length && queue.work[queue.workIndex] === undefined) {
+      queue.workIndex++;
+      queue.tombstoneCount--;
+    }
+  };
+  const removePendingWork = (queue: RouteSearchQueue, index: number): SearchWork | undefined => {
+    const removed = queue.work[index];
+    if (!removed) return undefined;
+    queue.work[index] = undefined;
+    queue.pendingCount--;
+    queue.tombstoneCount++;
+    queuesPendingWork--;
+    if (index === queue.workIndex) skipTombstonesAtHead(queue);
+    compactQueueWork(queue);
+    return removed;
   };
   const recordDebugObjectiveReservoirQueueSnapshot = (
     phase: 'activated' | 'cutoff', legCount: number, queues: RouteSearchQueue[], reservoirStartedAt: number,
@@ -4162,8 +4201,8 @@ export function findGtfsItinerariesWithStats(
     for (const queue of queues) {
       for (let workIndex = queue.workIndex; workIndex < queue.work.length; workIndex++) {
         if (debugObjectiveReservoirQueueSnapshots.length >= 256) return;
-        const work = queue.work[workIndex]!;
-        if (work.kind !== 'children') continue;
+        const work = queue.work[workIndex];
+        if (!work || work.kind !== 'children') continue;
         let targetIndex = -1;
         for (let index = 0; index < debugTraceTripChainParts.length; index++) {
           const target = debugTraceTripChainParts[index]!;
@@ -4179,8 +4218,8 @@ export function findGtfsItinerariesWithStats(
           if (matches) { targetIndex = index; break; }
         }
         if (targetIndex < 0 || (snapshotsByTarget.get(targetIndex) ?? 0) >= 8) continue;
-        const queuedWorkAhead = workIndex - queue.workIndex;
-        const queuedWorkBeforeCursor = queue.work.slice(queue.workIndex, workIndex);
+        const queuedWorkAhead = pendingWorkBefore(queue, workIndex);
+        const queuedWorkBeforeCursor = queue.work.slice(queue.workIndex, workIndex).filter(isPendingWork);
         const pathKey = work.path.map((segment) =>
           `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`).join('>');
         debugObjectiveReservoirQueueSnapshots.push({
@@ -4193,11 +4232,11 @@ export function findGtfsItinerariesWithStats(
           pathKey,
           cursorNextIndex: work.nextIndex,
           cursorChoiceCount: work.choices.length,
-          queuedWorkPosition: workIndex,
+          queuedWorkPosition: queuedWorkAhead,
           queuedWorkAhead,
           queuedChildCursorsAhead: queuedWorkBeforeCursor.filter((pending) => pending.kind === 'children').length,
           queuedPriorityPathsAhead: queuedWorkBeforeCursor.filter((pending) => pending.kind === 'path' && pending.priority).length,
-          queuePending: queue.work.length - queue.workIndex,
+          queuePending: queue.pendingCount,
           firstLegIndex: queue.firstLegIndex,
           firstLegCount: queue.firstLegs.length,
           priorityWorkStreak: queue.reservoirPriorityWorkStreak,
@@ -4211,11 +4250,11 @@ export function findGtfsItinerariesWithStats(
   const truncatedDepthPasses = new Set<number>();
   const evictOldestQueuedPath = (queue: RouteSearchQueue) => {
     for (let index = queue.workIndex; index < queue.work.length; index++) {
-      const evicted = queue.work[index]!;
+      const evicted = queue.work[index];
+      if (!evicted) continue;
       if (evicted.kind !== 'path' || evicted.priority) continue;
       recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-      queue.work.splice(index, 1);
-      queuesPendingWork--;
+      removePendingWork(queue, index);
       queueWorkDropped = true;
       return true;
     }
@@ -4223,11 +4262,11 @@ export function findGtfsItinerariesWithStats(
   };
   const evictDeeperPriorityPath = (queue: RouteSearchQueue, cursorDepth: number) => {
     for (let index = queue.workIndex; index < queue.work.length; index++) {
-      const evicted = queue.work[index]!;
+      const evicted = queue.work[index];
+      if (!evicted) continue;
       if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length <= cursorDepth) continue;
       recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-      queue.work.splice(index, 1);
-      queuesPendingWork--;
+      removePendingWork(queue, index);
       queueWorkDropped = true;
       return true;
     }
@@ -4235,11 +4274,11 @@ export function findGtfsItinerariesWithStats(
   };
   const evictComparablePriorityPath = (queue: RouteSearchQueue, incomingDepth: number) => {
     for (let index = queue.workIndex; index < queue.work.length; index++) {
-      const evicted = queue.work[index]!;
+      const evicted = queue.work[index];
+      if (!evicted) continue;
       if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length < incomingDepth) continue;
       recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-      queue.work.splice(index, 1);
-      queuesPendingWork--;
+      removePendingWork(queue, index);
       queueWorkDropped = true;
       return true;
     }
@@ -4248,11 +4287,11 @@ export function findGtfsItinerariesWithStats(
   const evictGlobalDeeperPriorityPath = (incomingDepth: number) => {
     for (const activeQueue of activeQueues) {
       for (let index = activeQueue.workIndex; index < activeQueue.work.length; index++) {
-        const evicted = activeQueue.work[index]!;
+        const evicted = activeQueue.work[index];
+        if (!evicted) continue;
         if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length <= incomingDepth) continue;
         recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-        activeQueue.work.splice(index, 1);
-        queuesPendingWork--;
+        removePendingWork(activeQueue, index);
         queueWorkDropped = true;
         return true;
       }
@@ -4261,7 +4300,7 @@ export function findGtfsItinerariesWithStats(
   };
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false): boolean => {
     const queuedWork: SearchWork = work.kind === 'path' ? { ...work, priority: prioritize } : work;
-    let pendingInQueue = queue.work.length - queue.workIndex;
+    let pendingInQueue = queue.pendingCount;
     const priorityWork = queuedWork.priority;
     const globalAdmissionLimit = priorityWork ? MAX_QUEUED_SEARCH_WORK : REGULAR_QUEUED_SEARCH_WORK_LIMIT;
     const admissionLimitReachedBeforeAdmission = queuesPendingWork >= globalAdmissionLimit;
@@ -4277,7 +4316,7 @@ export function findGtfsItinerariesWithStats(
         || (hardGlobalLimitReachedBeforeAdmission && queuedWork.kind === 'path' && queuedWork.priority
           && (evictComparablePriorityPath(queue, queuedWork.path.length)
             || evictGlobalDeeperPriorityPath(queuedWork.path.length)));
-      if (evicted) pendingInQueue--;
+      if (evicted) pendingInQueue = queue.pendingCount;
     }
     const globalLimitReached = queuesPendingWork >= MAX_QUEUED_SEARCH_WORK;
     const globalAdmissionLimitReached = queuesPendingWork >= globalAdmissionLimit;
@@ -4312,7 +4351,8 @@ export function findGtfsItinerariesWithStats(
     if (priorityWork) {
       let priorityEnd = queue.workIndex;
       while (priorityEnd < queue.work.length) {
-        const pending = queue.work[priorityEnd]!;
+        const pending = queue.work[priorityEnd];
+        if (!pending) { priorityEnd++; continue; }
         if (!pending.priority) break;
         if (queuedWork.kind === 'path' && queuedWork.path.length > 1) {
           // Keep shallow paths FIFO, but place a feasible prefix before
@@ -4325,6 +4365,7 @@ export function findGtfsItinerariesWithStats(
       }
       queue.work.splice(priorityEnd, 0, queuedWork);
     } else queue.work.push(queuedWork);
+    queue.pendingCount++;
     maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
       queuesPendingWork + 1);
     queuesPendingWork++;
@@ -4347,8 +4388,10 @@ export function findGtfsItinerariesWithStats(
     return candidatePoolHasRoom || withinLegObjectiveReservoir;
   };
   const takeNextWork = (queue: RouteSearchQueue, preferDeepCursor: boolean): SearchWork | undefined => {
+    skipTombstonesAtHead(queue);
     const targetCursorPosition = debugTraceTripChainSet && preferDeepCursor
       ? queue.work.findIndex((pending, index) => index >= queue.workIndex
+        && pending !== undefined
         && pending.kind === 'children'
         && debugTraceTripChainParts.some((target) => pending.path.length < target.length
           && pending.path.every((segment, pathIndex) =>
@@ -4361,13 +4404,16 @@ export function findGtfsItinerariesWithStats(
         `${segment.providerId}:${segment.serviceDate}:${segment.tripId}` === target[pathIndex]);
     const targetPathPosition = debugTraceTripChainSet && preferDeepCursor
       ? queue.work.findIndex((pending, index) => index >= queue.workIndex
+        && pending !== undefined
         && pending.kind === 'path'
         && debugTraceTripChainParts.some((target) => matchesTargetPrefix(pending.path, target)))
       : -1;
     const targetPath = targetPathPosition >= queue.workIndex
       ? queue.work[targetPathPosition] as PathWork : undefined;
     const priorityWorkStreakBefore = queue.reservoirPriorityWorkStreak;
-    const queuePendingBefore = queue.work.length - queue.workIndex;
+    const queuePendingBefore = queue.pendingCount;
+    const targetCursorQueuePosition = targetCursor ? pendingWorkBefore(queue, targetCursorPosition) : -1;
+    const targetPathQueuePosition = targetPath ? pendingWorkBefore(queue, targetPathPosition) : -1;
     const recordQueueDecision = (work: SearchWork, scheduling: Record<string, number | boolean> = {}) => {
       if (!targetCursor && !targetPath) return;
       const selectedTargetPath = work.kind === 'path'
@@ -4380,8 +4426,8 @@ export function findGtfsItinerariesWithStats(
         targetCursorQueueSequence: targetCursor?.queueSequence ?? -1,
         targetCursorBatchesInAgeQuantum: targetCursor?.batchesInAgeQuantum ?? 0,
         targetCursorNextIndex: targetCursor?.nextIndex ?? -1,
-        targetCursorPosition: targetCursor ? targetCursorPosition : -1,
-        targetPathQueuePosition: targetPath ? targetPathPosition - queue.workIndex : -1,
+        targetCursorPosition: targetCursorQueuePosition,
+        targetPathQueuePosition,
         targetPathPriority: targetPath?.priority ?? false,
         selectedWorkKind: work.kind,
         selectedWorkPriority: work.priority,
@@ -4396,7 +4442,7 @@ export function findGtfsItinerariesWithStats(
         ...scheduling,
       });
     };
-    const hasQueuedWork = queue.workIndex < queue.work.length;
+    const hasQueuedWork = queue.pendingCount > 0;
     const prioritizeQueuedWork = preferDeepCursor && hasQueuedWork && queue.reservoirQueuedWorkStreak < 2;
     if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length
       && !prioritizeQueuedWork) {
@@ -4406,7 +4452,7 @@ export function findGtfsItinerariesWithStats(
       recordQueueDecision(work);
       return work;
     }
-    if (queue.workIndex < queue.work.length) {
+    if (queue.pendingCount > 0) {
       queue.preferFirstLeg = true;
       queue.reservoirQueuedWorkStreak = prioritizeQueuedWork
         ? queue.reservoirQueuedWorkStreak + 1 : 0;
@@ -4414,6 +4460,7 @@ export function findGtfsItinerariesWithStats(
       // work with the oldest non-priority child cursor. If none is waiting,
       // serve the oldest live cursor so a priority backlog cannot starve it.
       const pendingPriorityWork = queue.work.findIndex((pending, index) => index >= queue.workIndex
+        && pending !== undefined
         && pending.priority);
       let pendingChildCursor = -1;
       let pendingNonPriorityChildCursor = -1;
@@ -4422,7 +4469,8 @@ export function findGtfsItinerariesWithStats(
       if (preferDeepCursor) {
         for (let index = queue.workIndex; index < queue.work.length; index++) {
           if (activeDebugDepthPass) activeDebugDepthPass.scannedQueueItems++;
-          const pending = queue.work[index]!;
+          const pending = queue.work[index];
+          if (!pending) continue;
           if (pending.kind === 'path' && pending.path.length > 1) {
             pendingTransferPathCount++;
             if (pendingTransferPath < 0) pendingTransferPath = index;
@@ -4461,10 +4509,13 @@ export function findGtfsItinerariesWithStats(
         : shouldServeDeepCursor ? pendingChildCursor
           : hasPendingPriorityWork && queue.reservoirPriorityWorkStreak < MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST
             ? pendingPriorityWork : -1;
+      const removedFromQueue = pendingIndex >= queue.workIndex;
       const work = pendingIndex >= queue.workIndex
         ? (() => {
-          if (activeDebugDepthPass && pendingIndex > queue.workIndex) activeDebugDepthPass.middleQueueRemovals++;
-          return queue.work.splice(pendingIndex, 1)[0]!;
+          if (activeDebugDepthPass && pendingWorkBefore(queue, pendingIndex) > 0) {
+            activeDebugDepthPass.middleQueueRemovals++;
+          }
+          return removePendingWork(queue, pendingIndex)!;
         })()
         : queue.work[queue.workIndex++]!;
       if (preferDeepCursor) {
@@ -4474,10 +4525,13 @@ export function findGtfsItinerariesWithStats(
       if (preferDeepCursor && work.priority && !forceFairQueueTurn) queue.reservoirPriorityWorkStreak++;
       else if (preferDeepCursor) queue.reservoirPriorityWorkStreak = 0;
       queue.preferDeepCursor = work.kind !== 'children' || work.remainingLegs <= 1;
-      queuesPendingWork--;
-      if (queue.workIndex >= 128 && queue.workIndex * 2 >= queue.work.length) {
-        queue.work.splice(0, queue.workIndex);
-        queue.workIndex = 0;
+      if (removedFromQueue) {
+        // Middle selection already adjusted both live counts.
+      } else {
+        queue.pendingCount--;
+        queuesPendingWork--;
+        skipTombstonesAtHead(queue);
+        compactQueueWork(queue);
       }
       recordQueueDecision(work, {
         pendingTransferPathCount,
@@ -4496,7 +4550,7 @@ export function findGtfsItinerariesWithStats(
     return undefined;
   };
   const hasQueuedWork = (queues: RouteSearchQueue[]) => queues.some((queue) =>
-    queue.firstLegIndex < queue.firstLegs.length || queue.workIndex < queue.work.length);
+    queue.firstLegIndex < queue.firstLegs.length || queue.pendingCount > 0);
   const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number,
     stepLimit: number, priority = false): ChildWork | undefined => {
     searchSteps++;
@@ -4598,9 +4652,9 @@ export function findGtfsItinerariesWithStats(
     for (const path of feasiblePaths) enqueueWork(queue, { kind: 'path', path, priority: false }, true);
     const queuedWorkPosition = debugTraceTripChainSet && continuationQueued
       ? queue.work.findIndex((pending, index) => index >= queue.workIndex && pending === work) : -1;
-    const queuedWorkAhead = queuedWorkPosition < 0 ? 0 : queuedWorkPosition - queue.workIndex;
+    const queuedWorkAhead = queuedWorkPosition < 0 ? 0 : pendingWorkBefore(queue, queuedWorkPosition);
     const queuedWorkBeforeCursor = queuedWorkPosition < 0
-      ? undefined : queue.work.slice(queue.workIndex, queuedWorkPosition);
+      ? undefined : queue.work.slice(queue.workIndex, queuedWorkPosition).filter(isPendingWork);
     const reservoirStartedAt = debugTraceTripChainSet
       ? candidatePoolReachedAtStepByLegCount.get(maximumLegsForPass) : undefined;
     const stopReason = !hasNextBeforeHorizon ? (work.nextIndex >= work.choices.length ? 'choices-exhausted' : 'past-wait-horizon')
@@ -4625,7 +4679,7 @@ export function findGtfsItinerariesWithStats(
       choiceCount: work.choices.length,
       batchProcessed: processed,
       remainingStepBudget: Math.max(0, Math.min(stepLimit, MAX_SEARCH_STEPS) - searchSteps),
-      queuePending: queue.work.length - queue.workIndex,
+      queuePending: queue.pendingCount,
       queueLimit: queue.maxQueuedWork,
       globalPending: queuesPendingWork,
       globalLimit: MAX_QUEUED_SEARCH_WORK,
@@ -4645,6 +4699,7 @@ export function findGtfsItinerariesWithStats(
       visitedQueues: 0,
       scannedQueueItems: 0,
       middleQueueRemovals: 0,
+      queueCompactions: 0,
       peakPendingWork: pendingBefore,
     } : undefined;
     activeDebugDepthPass = passMetrics;
@@ -4697,13 +4752,14 @@ export function findGtfsItinerariesWithStats(
         visitedQueues: passMetrics.visitedQueues,
         scannedQueueItems: passMetrics.scannedQueueItems,
         middleQueueRemovals: passMetrics.middleQueueRemovals,
+        queueCompactions: passMetrics.queueCompactions,
         globalQueueDrops: queueAdmissionGlobalLimitDrops - globalDropsBefore,
         perQueueDrops: queueAdmissionPerQueueLimitDrops - perQueueDropsBefore,
       });
     }
   };
   const countPendingWork = (queues: RouteSearchQueue[]) => queues.reduce((count, queue) =>
-    count + queue.work.length - queue.workIndex, 0);
+    count + queue.pendingCount, 0);
   // Give each possible chain length an explicit share of the bounded search.
   // A single depth-first pass otherwise fills its candidate pool with the
   // maximum-transfer branches before it has represented useful shorter trips.
@@ -4735,7 +4791,8 @@ export function findGtfsItinerariesWithStats(
       Math.floor(MAX_QUEUED_SEARCH_WORK / Math.max(1, firstLegGroups.size)));
     const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group, queueOrdinal) => ({
       queueOrdinal,
-      firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
+      firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, pendingCount: 0, tombstoneCount: 0,
+      preferFirstLeg: true, preferDeepCursor: true,
       reservoirQueuedWorkStreak: 0,
       reservoirPriorityWorkStreak: 0,
       reservoirFairChildTurnsSinceTransferPathTurn: 0,
