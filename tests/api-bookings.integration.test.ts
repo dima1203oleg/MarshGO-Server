@@ -445,7 +445,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
           .sort((left, right) => left.strategyRanks![strategy]! - right.strategyRanks![strategy]!);
         const winner = ranked[0];
         assert.ok(winner, `${strategy} has a top-ranked API result`);
-        assert.ok(winner.legs.some((leg) => leg.providerId === ids.gtfsFixtureProvider && leg.routeId === expectedRouteId),
+        assert.ok(winner.legs.some((leg) => leg.providerId === ids.gtfsFixtureProvider
+          && leg.routeId === `${ids.gtfsFixtureProvider}:${expectedRouteId}`),
           `${strategy} top-ranked API result is the expected ${expectedRouteId} GTFS route; actual=${JSON.stringify(ranked.slice(0, 5).map((journey) => ({
             rank: journey.strategyRanks?.[strategy], durationSeconds: journey.totalDurationSeconds,
             priceMinor: journey.totalPriceMinor,
