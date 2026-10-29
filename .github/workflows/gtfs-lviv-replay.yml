@@ -70,6 +70,11 @@ on:
         required: false
         type: boolean
         default: true
+      cpu_profile:
+        description: Capture Node CPU profiles for candidate replays only; profiled timings are not comparable
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -97,6 +102,7 @@ jobs:
       GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS: ${{ inputs.trace_candidate_trip_ids || '' }}
       GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS: ${{ inputs.objective_reservoir_search_steps || '' }}
       GTFS_REPLAY_DEBUG_DIAGNOSTICS: ${{ inputs.debug_diagnostics }}
+      GTFS_REPLAY_CPU_PROFILE: ${{ inputs.cpu_profile }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@v4
@@ -136,6 +142,9 @@ jobs:
         run: |
           set -euo pipefail
           : > replay-results.jsonl
+          if [ "$GTFS_REPLAY_CPU_PROFILE" = "true" ]; then
+            mkdir -p "$RUNNER_TEMP/marshgo-cpu-profiles"
+          fi
           for revision in baseline candidate; do
             if [ "$revision" = baseline ]; then
               replay_sha="$BASELINE_SHA"
@@ -143,6 +152,10 @@ jobs:
               replay_sha="$CANDIDATE_SHA"
             fi
             for iteration in 1 2 3; do
+              profile_node_options=''
+              if [ "$revision" = candidate ] && [ "$GTFS_REPLAY_CPU_PROFILE" = "true" ]; then
+                profile_node_options="--cpu-prof --cpu-prof-dir=$RUNNER_TEMP/marshgo-cpu-profiles"
+              fi
               (
                 cd "$revision"
                 REPLAY_GROUP="$revision" \
@@ -157,6 +170,7 @@ jobs:
                 GTFS_REPLAY_TRACE_TRIP_IDS="$GTFS_REPLAY_TRACE_TRIP_IDS" \
                 GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS="$GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS" \
                 GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS="$GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS" \
+                NODE_OPTIONS="$profile_node_options" \
                 ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
               ) | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))' >> replay-results.jsonl
             done
@@ -174,3 +188,11 @@ jobs:
             replay-results.jsonl
             replay-summary.md
           retention-days: 14
+      - name: Upload candidate CPU profiles
+        if: ${{ inputs.cpu_profile }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: frozen-lviv-gtfs-cpu-profiles-${{ inputs.candidate_sha || github.sha }}
+          path: ${{ runner.temp }}/marshgo-cpu-profiles/*.cpuprofile
+          if-no-files-found: error
+          retention-days: 3
