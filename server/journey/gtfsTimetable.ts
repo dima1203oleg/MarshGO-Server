@@ -4413,29 +4413,28 @@ export function findGtfsItinerariesWithStats(
       // Once the deep candidate pool is saturated, alternate bounded priority
       // work with the oldest non-priority child cursor. If none is waiting,
       // serve the oldest live cursor so a priority backlog cannot starve it.
-      const pendingPriorityWork = queue.work.findIndex((pending, index) => index >= queue.workIndex
-        && pending.priority);
+      let pendingPriorityWork = -1;
       let pendingChildCursor = -1;
       let pendingNonPriorityChildCursor = -1;
       let pendingTransferPath = -1;
       let pendingTransferPathCount = 0;
-      if (preferDeepCursor) {
-        for (let index = queue.workIndex; index < queue.work.length; index++) {
-          if (activeDebugDepthPass) activeDebugDepthPass.scannedQueueItems++;
-          const pending = queue.work[index]!;
-          if (pending.kind === 'path' && pending.path.length > 1) {
-            pendingTransferPathCount++;
-            if (pendingTransferPath < 0) pendingTransferPath = index;
-          }
-          if (pending.kind !== 'children' || pending.remainingLegs < 1) continue;
-          if (pendingChildCursor < 0
-            || pending.queueSequence < (queue.work[pendingChildCursor] as ChildWork).queueSequence) {
-            pendingChildCursor = index;
-          }
-          if (!pending.priority && (pendingNonPriorityChildCursor < 0
-            || pending.queueSequence < (queue.work[pendingNonPriorityChildCursor] as ChildWork).queueSequence)) {
-            pendingNonPriorityChildCursor = index;
-          }
+      for (let index = queue.workIndex; index < queue.work.length; index++) {
+        const pending = queue.work[index]!;
+        if (pendingPriorityWork < 0 && pending.priority) pendingPriorityWork = index;
+        if (!preferDeepCursor) continue;
+        if (activeDebugDepthPass) activeDebugDepthPass.scannedQueueItems++;
+        if (pending.kind === 'path' && pending.path.length > 1) {
+          pendingTransferPathCount++;
+          if (pendingTransferPath < 0) pendingTransferPath = index;
+        }
+        if (pending.kind !== 'children' || pending.remainingLegs < 1) continue;
+        if (pendingChildCursor < 0
+          || pending.queueSequence < (queue.work[pendingChildCursor] as ChildWork).queueSequence) {
+          pendingChildCursor = index;
+        }
+        if (!pending.priority && (pendingNonPriorityChildCursor < 0
+          || pending.queueSequence < (queue.work[pendingNonPriorityChildCursor] as ChildWork).queueSequence)) {
+          pendingNonPriorityChildCursor = index;
         }
       }
       const hasPendingPriorityWork = pendingPriorityWork >= queue.workIndex;
