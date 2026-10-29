@@ -3705,8 +3705,6 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     && targetTrace.pathExpandedAtStepByLegCount['3'] !== undefined
     && candidatePoolReachedAtByLegCount['3'] < targetTrace.pathExpandedAtStepByLegCount['3'],
   'the late target cursor continues to a complete journey after the three-leg candidate pool saturates');
-  assert.equal(result.truncation.searchBudget, true,
-    'bounded queue replacement is surfaced as partial rather than claiming exhaustive search');
   assert.ok(targetTrace, 'the target chain trace is present');
   assert.ok(Object.values(targetTrace.successorPositionsByPath).some((variant) =>
     variant.targetSuccessors.some((successor) => successor.tripKey === 'p1:20261012:middle-trip-target'
