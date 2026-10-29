@@ -3689,6 +3689,10 @@ test('preserves a late feasible successor after the deep candidate pool saturate
       childCursorEnqueued: number; childCursorDropped: number; childCursorEvicted: number;
     }>;
     cursorProgressByPath: Record<string, Array<{
+      searchSteps: number; objectiveReservoirStepsElapsed: number; queueOrdinal: number;
+      firstLegIndex: number; firstLegCount: number; queuedWorkPosition: number;
+      queuedWorkAhead: number; queuedChildCursorsAhead: number; queuedPriorityPathsAhead: number;
+      queuedWorkStreak: number;
       nextIndexBefore: number; nextIndexAfter: number; nextIndexStart: number; choiceCount: number;
       batchProcessed: number; remainingStepBudget: number; queuePending: number; queueLimit: number;
       globalPending: number; globalLimit: number; priority: boolean; continuationQueued: boolean; stopReason: string;
@@ -3721,6 +3725,14 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
     progress.nextIndexAfter > progress.nextIndexBefore),
   'target child cursor diagnostics show bounded forward progress');
+  const reservoirCursorTurn = Object.values(targetTrace.cursorProgressByPath).flat().find((progress) =>
+    progress.objectiveReservoirStepsElapsed > 0);
+  assert.ok(reservoirCursorTurn, 'cursor trace captures turns taken after the objective reservoir begins');
+  assert.ok(reservoirCursorTurn.searchSteps > candidatePoolReachedAtByLegCount['3']!
+    && reservoirCursorTurn.queueOrdinal >= 0
+    && reservoirCursorTurn.firstLegCount >= reservoirCursorTurn.firstLegIndex
+    && reservoirCursorTurn.queuedWorkAhead >= 0,
+  'cursor trace exposes its search-step offset and queue service position');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {

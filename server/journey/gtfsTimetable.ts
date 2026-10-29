@@ -1728,6 +1728,16 @@ export function findGtfsItinerariesWithStats(
       queueLimitReached: boolean;
     }>>;
     cursorProgressByPath: Record<string, Array<{
+      searchSteps: number;
+      objectiveReservoirStepsElapsed: number;
+      queueOrdinal: number;
+      firstLegIndex: number;
+      firstLegCount: number;
+      queuedWorkPosition: number;
+      queuedWorkAhead: number;
+      queuedChildCursorsAhead: number;
+      queuedPriorityPathsAhead: number;
+      queuedWorkStreak: number;
       nextIndexBefore: number;
       nextIndexAfter: number;
       nextIndexStart: number;
@@ -1877,6 +1887,10 @@ export function findGtfsItinerariesWithStats(
   const recordDebugTripChainCursorProgress = (
     path: readonly GtfsDirectJourney[],
     progress: {
+      searchSteps: number; objectiveReservoirStepsElapsed: number; queueOrdinal: number;
+      firstLegIndex: number; firstLegCount: number; queuedWorkPosition: number;
+      queuedWorkAhead: number; queuedChildCursorsAhead: number; queuedPriorityPathsAhead: number;
+      queuedWorkStreak: number;
       nextIndexBefore: number; nextIndexAfter: number; nextIndexStart: number; choiceCount: number;
       batchProcessed: number; remainingStepBudget: number; queuePending: number; queueLimit: number;
       globalPending: number; globalLimit: number; priority: boolean; continuationQueued: boolean; stopReason: string;
@@ -4074,6 +4088,7 @@ export function findGtfsItinerariesWithStats(
   };
   type SearchWork = PathWork | ChildWork;
   type RouteSearchQueue = {
+    queueOrdinal: number;
     firstLegs: GtfsDirectJourney[];
     firstLegIndex: number;
     work: SearchWork[];
@@ -4334,12 +4349,29 @@ export function findGtfsItinerariesWithStats(
     // first so feasible descendants generated during this batch cannot evict
     // the only remaining path that will discover later successors.
     for (const path of feasiblePaths) enqueueWork(queue, { kind: 'path', path, priority: false }, true);
+    const queuedWorkPosition = debugTraceTripChainSet && continuationQueued
+      ? queue.work.findIndex((pending, index) => index >= queue.workIndex && pending === work) : -1;
+    const queuedWorkAhead = queuedWorkPosition < 0 ? 0 : queuedWorkPosition - queue.workIndex;
+    const queuedWorkBeforeCursor = queuedWorkPosition < 0
+      ? undefined : queue.work.slice(queue.workIndex, queuedWorkPosition);
+    const reservoirStartedAt = debugTraceTripChainSet
+      ? candidatePoolReachedAtStepByLegCount.get(maximumLegsForPass) : undefined;
     const stopReason = !hasNextBeforeHorizon ? (work.nextIndex >= work.choices.length ? 'choices-exhausted' : 'past-wait-horizon')
       : searchSteps >= MAX_SEARCH_STEPS ? 'global-search-step-limit'
         : searchSteps >= stepLimit ? 'depth-pass-step-limit'
           : !canContinueCandidateSearch(maximumLegsForPass) ? 'candidate-pool-cutoff'
           : processed >= childBatchLimit ? 'child-batch-limit' : 'unknown';
     recordDebugTripChainCursorProgress(work.path, {
+      searchSteps,
+      objectiveReservoirStepsElapsed: reservoirStartedAt === undefined ? 0 : searchSteps - reservoirStartedAt,
+      queueOrdinal: queue.queueOrdinal,
+      firstLegIndex: queue.firstLegIndex,
+      firstLegCount: queue.firstLegs.length,
+      queuedWorkPosition,
+      queuedWorkAhead,
+      queuedChildCursorsAhead: queuedWorkBeforeCursor?.filter((pending) => pending.kind === 'children').length ?? 0,
+      queuedPriorityPathsAhead: queuedWorkBeforeCursor?.filter((pending) => pending.kind === 'path' && pending.priority).length ?? 0,
+      queuedWorkStreak: queue.reservoirQueuedWorkStreak,
       nextIndexBefore,
       nextIndexAfter: work.nextIndex,
       nextIndexStart: nextIndexBefore,
@@ -4408,7 +4440,8 @@ export function findGtfsItinerariesWithStats(
     queuesPendingWork = 0;
     const maxQueuedWorkPerFirstLegQueue = Math.max(1,
       Math.floor(MAX_QUEUED_SEARCH_WORK / Math.max(1, firstLegGroups.size)));
-    const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
+    const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group, queueOrdinal) => ({
+      queueOrdinal,
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
       reservoirQueuedWorkStreak: 0,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
