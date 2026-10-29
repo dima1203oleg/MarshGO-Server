@@ -3511,9 +3511,10 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
   const targetChain = `${target}-access>${target}-middle-trip>${target}-egress-trip`;
   const returnedChains = new Set(result.itineraries.map((journey) =>
     journey.segments.map((segment) => segment.tripId).join('>')));
-  assert.ok(result.truncation.searchBudget, 'the small objective reservoir intentionally bounds the search');
   assert.ok(returnedChains.has(targetChain),
     'the later, faster feasible chain survives early slower branches sharing its access route');
+  assert.equal(result.truncation.searchBudget, false,
+    'the fair scheduler exhausts this bounded fixture instead of leaving the late branch pending');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
