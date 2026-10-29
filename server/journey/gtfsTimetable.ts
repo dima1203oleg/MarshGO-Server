@@ -39,7 +39,7 @@ const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
 const MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST = 1;
 const MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH = 16;
-const MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH = 4;
+const MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH = 1;
 const OBJECTIVE_RESERVOIR_TRANSFER_PATH_BACKLOG_THRESHOLD = 8;
 const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 4;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
@@ -4404,7 +4404,7 @@ export function findGtfsItinerariesWithStats(
         ? MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH
         : MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH;
       // Guarantee transfer-path service independently of priority streaks:
-      // a large prefix backlog gets a slot after four cursor turns, while a
+      // a large prefix backlog gets a slot after each cursor turn, while a
       // small backlog waits longer so cursor discovery keeps moving.
       const forceTransferPathTurn = pendingTransferPath >= queue.workIndex
         && queue.reservoirFairChildTurnsSinceTransferPathTurn >= childTurnsBeforePath;

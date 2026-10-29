@@ -3767,9 +3767,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     selectedWorkKind: decision.selectedWorkKind,
   }));
   assert.ok(reservoirQueueDecisions.some((decision) => decision.forcedTransferPathTurn
-    && decision.pendingTransferPathCount >= 8 && decision.transferPathTurnLimit === 4
-    && decision.fairChildTurnsBeforePath >= 4 && decision.selectedWorkKind === 'path'),
-  `transfer-path backlog uses its four-turn cadence; ${JSON.stringify(schedulingEvidence)}`);
+    && decision.pendingTransferPathCount >= 8 && decision.transferPathTurnLimit === 1
+    && decision.fairChildTurnsBeforePath >= 1 && decision.selectedWorkKind === 'path'),
+  `large transfer-path backlog receives a path turn after one child turn; ${JSON.stringify(schedulingEvidence)}`);
   assert.ok(reservoirQueueDecisions.some((decision) => decision.pendingTransferPathCount < 8
     && decision.transferPathTurnLimit === 16),
   'small transfer-path queues keep the lower-frequency sixteen-turn cadence');
