@@ -17,7 +17,7 @@ const [{ cachedGtfsTimetable, mergeGtfsTimetables, getCachedGtfsTimetableStats, 
 // worker/parser/planner without a public feed or any relaxation of safeFetch.
 // Production never receives the directory, and no other URL can use the seam.
 const GTFS_TEST_FIXTURE_URL = 'https://gtfs-api-fixture.invalid/lviv.zip';
-const GTFS_TEST_FILES = ['agency.txt', 'routes.txt', 'stops.txt', 'trips.txt', 'stop_times.txt', 'calendar.txt', 'shapes.txt'];
+const GTFS_TEST_FILES = ['agency.txt', 'routes.txt', 'stops.txt', 'trips.txt', 'stop_times.txt', 'calendar.txt', 'shapes.txt', 'fare_attributes.txt', 'fare_rules.txt'];
 const testFixtureDirectory = typeof workerData?.testFixtureDirectory === 'string'
   ? workerData.testFixtureDirectory : undefined;
 

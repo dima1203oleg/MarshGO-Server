@@ -413,6 +413,41 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
           && Date.parse(leg.departureAt) < Date.parse(leg.arrivalAt),
         `${leg.transportType} HTTP response preserves a valid scheduled interval`);
       }
+
+      const strategyResponse = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': passengerA },
+        body: JSON.stringify({
+          ...body,
+          origin: { name: 'Fixture origin', coordinates: [24.0029933, 49.8681678] },
+          destination: { name: 'Fixture destination', coordinates: [24.057585, 49.794117] },
+          departureAt: multiSearchDeparture,
+          strategy: 'BALANCED',
+          preferences: { allowCommunity: false, allowedTransportTypes: ['bus'] },
+        }),
+      });
+      assert.equal(strategyResponse.status, 200);
+      const strategyData = (await strategyResponse.json() as { data: { availableStrategies: string[]; journeys: Array<{
+        totalDurationSeconds: number; totalPriceMinor: number | null; strategyRanks?: Record<string, number>;
+        legs: Array<{ routeId?: string; providerId?: string }>;
+      }> } }).data;
+      const expectedStrategyWinners = {
+        FASTEST: 'fixture-bus-fast',
+        BALANCED: 'fixture-bus-balanced',
+        CHEAPEST: 'fixture-bus-cheap',
+      } as const;
+      const actualStrategyWinners: string[] = [];
+      for (const [strategy, expectedRouteId] of Object.entries(expectedStrategyWinners)) {
+        assert.ok(strategyData.availableStrategies.includes(strategy), `${strategy} is available with comparable fixture fares`);
+        const winner = strategyData.journeys
+          .filter((journey) => Number.isInteger(journey.strategyRanks?.[strategy]))
+          .sort((left, right) => left.strategyRanks![strategy]! - right.strategyRanks![strategy]!)[0];
+        assert.ok(winner, `${strategy} has a top-ranked API result`);
+        assert.ok(winner.legs.some((leg) => leg.providerId === ids.gtfsFixtureProvider && leg.routeId === expectedRouteId),
+          `${strategy} top-ranked API result is the expected ${expectedRouteId} GTFS route`);
+        actualStrategyWinners.push(expectedRouteId);
+      }
+      assert.equal(new Set(actualStrategyWinners).size, 3,
+        'the HTTP response preserves distinct fastest, balanced, and cheapest GTFS winners');
     }
     if (healthyLvivRealGtfsEnabled) {
       assert.ok(multiData.availableStrategies.includes('BALANCED'));

@@ -1,0 +1,4 @@
+fare_id,price,currency_type,payment_method,transfers,agency_id
+fare-fast,10,UAH,0,0,fixture
+fare-balanced,5,UAH,0,0,fixture
+fare-cheap,1,UAH,0,0,fixture

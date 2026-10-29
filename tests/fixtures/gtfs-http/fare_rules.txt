@@ -1,0 +1,4 @@
+fare_id,route_id
+fare-fast,fixture-bus-fast
+fare-balanced,fixture-bus-balanced
+fare-cheap,fixture-bus-cheap
