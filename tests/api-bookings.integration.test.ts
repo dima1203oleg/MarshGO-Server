@@ -440,12 +440,17 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const actualStrategyWinners: string[] = [];
       for (const [strategy, expectedRouteId] of Object.entries(expectedStrategyWinners)) {
         assert.ok(strategyData.availableStrategies.includes(strategy), `${strategy} is available with comparable fixture fares`);
-        const winner = strategyData.journeys
+        const ranked = strategyData.journeys
           .filter((journey) => Number.isInteger(journey.strategyRanks?.[strategy]))
-          .sort((left, right) => left.strategyRanks![strategy]! - right.strategyRanks![strategy]!)[0];
+          .sort((left, right) => left.strategyRanks![strategy]! - right.strategyRanks![strategy]!);
+        const winner = ranked[0];
         assert.ok(winner, `${strategy} has a top-ranked API result`);
         assert.ok(winner.legs.some((leg) => leg.providerId === ids.gtfsFixtureProvider && leg.routeId === expectedRouteId),
-          `${strategy} top-ranked API result is the expected ${expectedRouteId} GTFS route`);
+          `${strategy} top-ranked API result is the expected ${expectedRouteId} GTFS route; actual=${JSON.stringify(ranked.slice(0, 5).map((journey) => ({
+            rank: journey.strategyRanks?.[strategy], durationSeconds: journey.totalDurationSeconds,
+            priceMinor: journey.totalPriceMinor,
+            legs: journey.legs.map((leg) => ({ providerId: leg.providerId, routeId: leg.routeId })),
+          })))}`);
         actualStrategyWinners.push(expectedRouteId);
       }
       assert.equal(new Set(actualStrategyWinners).size, 3,
