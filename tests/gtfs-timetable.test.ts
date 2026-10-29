@@ -3687,7 +3687,7 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   }>;
   const reservoirQueueDecisions = JSON.parse(String(ranked?.debugObjectiveReservoirQueueDecisions ?? '[]')) as Array<{
     selectedWorkKind: string; selectedTargetCursor: boolean; targetCursorNextIndex: number;
-    targetCursorQueueSequence: number; targetCursorBatchesInAgeQuantum: number;
+    targetCursorQueueSequence: number; targetCursorBatchesInAgeQuantum: number; targetCursorPathKey: string;
   }>;
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
@@ -3754,8 +3754,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   'debug trace records competing path service while the target cursor is queued');
   assert.ok(reservoirQueueDecisions.some((decision) => decision.targetCursorNextIndex > 0
     && decision.selectedTargetCursor && decision.targetCursorQueueSequence >= 0
-    && decision.targetCursorBatchesInAgeQuantum >= 0),
-  'debug trace records when the target cursor itself receives service');
+    && decision.targetCursorBatchesInAgeQuantum >= 0
+    && decision.targetCursorPathKey.includes('access-trip')),
+  'debug trace records when the exact target cursor receives service');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {

@@ -1708,6 +1708,16 @@ export function findGtfsItinerariesWithStats(
   const debugTraceTripChainParts = debugTraceTripChains.map((tripChain) => tripChain.split('>'));
   const debugObjectiveReservoirQueueSnapshots: Array<Record<string, number | string | boolean>> = [];
   const debugObjectiveReservoirQueueDecisions: Array<Record<string, number | string | boolean>> = [];
+  let debugObjectiveReservoirQueueDecisionWriteIndex = 0;
+  const recordDebugObjectiveReservoirQueueDecision = (decision: Record<string, number | string | boolean>) => {
+    if (debugObjectiveReservoirQueueDecisions.length < 512) {
+      debugObjectiveReservoirQueueDecisions.push(decision);
+      if (debugObjectiveReservoirQueueDecisions.length === 512) debugObjectiveReservoirQueueDecisionWriteIndex = 0;
+      return;
+    }
+    debugObjectiveReservoirQueueDecisions[debugObjectiveReservoirQueueDecisionWriteIndex] = decision;
+    debugObjectiveReservoirQueueDecisionWriteIndex = (debugObjectiveReservoirQueueDecisionWriteIndex + 1) % 512;
+  };
   const debugTripChainSearchTrace = new Map<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
     pathExpandedCountByLegCount: Record<string, number>;
@@ -4292,10 +4302,12 @@ export function findGtfsItinerariesWithStats(
     const priorityPathStreakBefore = queue.reservoirPriorityPathStreak;
     const queuePendingBefore = queue.work.length - queue.workIndex;
     const recordQueueDecision = (work: SearchWork) => {
-      if (!targetCursor || debugObjectiveReservoirQueueDecisions.length >= 512) return;
-      debugObjectiveReservoirQueueDecisions.push({
+      if (!targetCursor) return;
+      recordDebugObjectiveReservoirQueueDecision({
         searchSteps,
         queueOrdinal: queue.queueOrdinal,
+        targetCursorPathKey: targetCursor.path.map((segment) =>
+          `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`).join('>'),
         targetCursorQueueSequence: targetCursor.queueSequence,
         targetCursorBatchesInAgeQuantum: targetCursor.batchesInAgeQuantum,
         targetCursorNextIndex: targetCursor.nextIndex,
@@ -4697,7 +4709,10 @@ export function findGtfsItinerariesWithStats(
     ...(debugObjectiveReservoirQueueSnapshots.length > 0
       ? { debugObjectiveReservoirQueueSnapshots: JSON.stringify(debugObjectiveReservoirQueueSnapshots) } : {}),
     ...(debugObjectiveReservoirQueueDecisions.length > 0
-      ? { debugObjectiveReservoirQueueDecisions: JSON.stringify(debugObjectiveReservoirQueueDecisions) } : {}),
+      ? { debugObjectiveReservoirQueueDecisions: JSON.stringify(debugObjectiveReservoirQueueDecisions.length < 512
+        ? debugObjectiveReservoirQueueDecisions
+        : [...debugObjectiveReservoirQueueDecisions.slice(debugObjectiveReservoirQueueDecisionWriteIndex),
+          ...debugObjectiveReservoirQueueDecisions.slice(0, debugObjectiveReservoirQueueDecisionWriteIndex)]) } : {}),
     queueAdmissionGlobalLimitDrops,
     queueAdmissionPerQueueLimitDrops,
     queueAdmissionPerQueueBorrowed,
