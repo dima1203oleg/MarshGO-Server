@@ -4301,23 +4301,38 @@ export function findGtfsItinerariesWithStats(
       : -1;
     const targetCursor = targetCursorPosition >= queue.workIndex
       ? queue.work[targetCursorPosition] as ChildWork : undefined;
+    const matchesTargetPrefix = (path: readonly GtfsDirectJourney[], target: readonly string[]) =>
+      path.length < target.length && path.every((segment, pathIndex) =>
+        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}` === target[pathIndex]);
+    const targetPathPosition = debugTraceTripChainSet && preferDeepCursor
+      ? queue.work.findIndex((pending, index) => index >= queue.workIndex
+        && pending.kind === 'path'
+        && debugTraceTripChainParts.some((target) => matchesTargetPrefix(pending.path, target)))
+      : -1;
+    const targetPath = targetPathPosition >= queue.workIndex
+      ? queue.work[targetPathPosition] as PathWork : undefined;
     const priorityWorkStreakBefore = queue.reservoirPriorityWorkStreak;
     const queuePendingBefore = queue.work.length - queue.workIndex;
     const recordQueueDecision = (work: SearchWork) => {
-      if (!targetCursor) return;
+      if (!targetCursor && !targetPath) return;
+      const selectedTargetPath = work.kind === 'path'
+        && debugTraceTripChainParts.some((target) => matchesTargetPrefix(work.path, target));
       recordDebugObjectiveReservoirQueueDecision({
         searchSteps,
         queueOrdinal: queue.queueOrdinal,
-        targetCursorPathKey: targetCursor.path.map((segment) =>
-          `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`).join('>'),
-        targetCursorQueueSequence: targetCursor.queueSequence,
-        targetCursorBatchesInAgeQuantum: targetCursor.batchesInAgeQuantum,
-        targetCursorNextIndex: targetCursor.nextIndex,
-        targetCursorPosition,
+        targetCursorPathKey: targetCursor?.path.map((segment) =>
+          `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`).join('>') ?? '',
+        targetCursorQueueSequence: targetCursor?.queueSequence ?? -1,
+        targetCursorBatchesInAgeQuantum: targetCursor?.batchesInAgeQuantum ?? 0,
+        targetCursorNextIndex: targetCursor?.nextIndex ?? -1,
+        targetCursorPosition: targetCursor ? targetCursorPosition : -1,
+        targetPathQueuePosition: targetPath ? targetPathPosition - queue.workIndex : -1,
+        targetPathPriority: targetPath?.priority ?? false,
         selectedWorkKind: work.kind,
         selectedWorkPriority: work.priority,
         selectedChildCursorQueueSequence: work.kind === 'children' ? work.queueSequence : -1,
         selectedTargetCursor: work === targetCursor,
+        selectedTargetPath,
         priorityWorkStreakBefore,
         priorityWorkStreakAfter: queue.reservoirPriorityWorkStreak,
         queuePendingBefore,

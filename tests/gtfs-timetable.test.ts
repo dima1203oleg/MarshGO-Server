@@ -3689,6 +3689,7 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     selectedWorkKind: string; selectedTargetCursor: boolean; targetCursorNextIndex: number;
     targetCursorQueueSequence: number; targetCursorBatchesInAgeQuantum: number; targetCursorPathKey: string;
     selectedWorkPriority: boolean; priorityWorkStreakBefore: number; priorityWorkStreakAfter: number;
+    targetPathQueuePosition: number; targetPathPriority: boolean; selectedTargetPath: boolean;
   }>;
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
@@ -3753,6 +3754,8 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   assert.ok(reservoirQueueDecisions.some((decision) => decision.targetCursorNextIndex > 0
     && decision.selectedWorkKind === 'path' && !decision.selectedTargetCursor),
   'debug trace records competing path service while the target cursor is queued');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedTargetPath),
+    'debug trace records when the exact feasible target prefix receives service');
   assert.ok(reservoirQueueDecisions.some((decision) => decision.targetCursorNextIndex > 0
     && decision.selectedTargetCursor && decision.targetCursorQueueSequence >= 0
     && decision.targetCursorBatchesInAgeQuantum >= 0
