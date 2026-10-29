@@ -38,7 +38,7 @@ const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
 const MAX_OBJECTIVE_RESERVOIR_PRIORITY_PATH_BURST = 1;
-const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 5;
+const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 4;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
 const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
 export const MAX_GTFS_TRANSFERS = 4;
@@ -1707,6 +1707,7 @@ export function findGtfsItinerariesWithStats(
   const debugGeneratedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
   const debugTraceTripChainParts = debugTraceTripChains.map((tripChain) => tripChain.split('>'));
   const debugObjectiveReservoirQueueSnapshots: Array<Record<string, number | string | boolean>> = [];
+  const debugObjectiveReservoirQueueDecisions: Array<Record<string, number | string | boolean>> = [];
   const debugTripChainSearchTrace = new Map<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
     pathExpandedCountByLegCount: Record<string, number>;
@@ -4279,13 +4280,46 @@ export function findGtfsItinerariesWithStats(
     return candidatePoolHasRoom || withinLegObjectiveReservoir;
   };
   const takeNextWork = (queue: RouteSearchQueue, preferDeepCursor: boolean): SearchWork | undefined => {
+    const targetCursorPosition = debugTraceTripChainSet && preferDeepCursor
+      ? queue.work.findIndex((pending, index) => index >= queue.workIndex
+        && pending.kind === 'children'
+        && debugTraceTripChainParts.some((target) => pending.path.length < target.length
+          && pending.path.every((segment, pathIndex) =>
+            `${segment.providerId}:${segment.serviceDate}:${segment.tripId}` === target[pathIndex])))
+      : -1;
+    const targetCursor = targetCursorPosition >= queue.workIndex
+      ? queue.work[targetCursorPosition] as ChildWork : undefined;
+    const priorityPathStreakBefore = queue.reservoirPriorityPathStreak;
+    const queuePendingBefore = queue.work.length - queue.workIndex;
+    const recordQueueDecision = (work: SearchWork) => {
+      if (!targetCursor || debugObjectiveReservoirQueueDecisions.length >= 512) return;
+      debugObjectiveReservoirQueueDecisions.push({
+        searchSteps,
+        queueOrdinal: queue.queueOrdinal,
+        targetCursorQueueSequence: targetCursor.queueSequence,
+        targetCursorBatchesInAgeQuantum: targetCursor.batchesInAgeQuantum,
+        targetCursorNextIndex: targetCursor.nextIndex,
+        targetCursorPosition,
+        selectedWorkKind: work.kind,
+        selectedWorkPriority: work.priority,
+        selectedChildCursorQueueSequence: work.kind === 'children' ? work.queueSequence : -1,
+        selectedTargetCursor: work === targetCursor,
+        priorityPathStreakBefore,
+        priorityPathStreakAfter: queue.reservoirPriorityPathStreak,
+        queuePendingBefore,
+        firstLegIndex: queue.firstLegIndex,
+        firstLegCount: queue.firstLegs.length,
+      });
+    };
     const hasQueuedWork = queue.workIndex < queue.work.length;
     const prioritizeQueuedWork = preferDeepCursor && hasQueuedWork && queue.reservoirQueuedWorkStreak < 2;
     if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length
       && !prioritizeQueuedWork) {
       queue.preferFirstLeg = false;
       queue.reservoirQueuedWorkStreak = 0;
-      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]], priority: false };
+      const work: PathWork = { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]], priority: false };
+      recordQueueDecision(work);
+      return work;
     }
     if (queue.workIndex < queue.work.length) {
       queue.preferFirstLeg = true;
@@ -4325,6 +4359,7 @@ export function findGtfsItinerariesWithStats(
         queue.work.splice(0, queue.workIndex);
         queue.workIndex = 0;
       }
+      recordQueueDecision(work);
       return work;
     }
     if (queue.firstLegIndex < queue.firstLegs.length) {
@@ -4661,6 +4696,8 @@ export function findGtfsItinerariesWithStats(
     maxQueuedSearchWork: maximumQueuedSearchWork,
     ...(debugObjectiveReservoirQueueSnapshots.length > 0
       ? { debugObjectiveReservoirQueueSnapshots: JSON.stringify(debugObjectiveReservoirQueueSnapshots) } : {}),
+    ...(debugObjectiveReservoirQueueDecisions.length > 0
+      ? { debugObjectiveReservoirQueueDecisions: JSON.stringify(debugObjectiveReservoirQueueDecisions) } : {}),
     queueAdmissionGlobalLimitDrops,
     queueAdmissionPerQueueLimitDrops,
     queueAdmissionPerQueueBorrowed,

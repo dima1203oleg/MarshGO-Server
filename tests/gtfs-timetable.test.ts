@@ -3685,6 +3685,10 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     phase: string; targetChain: string; legCount: number; objectiveReservoirStepsElapsed: number;
     queueOrdinal: number; cursorNextIndex: number; queuedWorkAhead: number; queuedPriorityPathsAhead: number;
   }>;
+  const reservoirQueueDecisions = JSON.parse(String(ranked?.debugObjectiveReservoirQueueDecisions ?? '[]')) as Array<{
+    selectedWorkKind: string; selectedTargetCursor: boolean; targetCursorNextIndex: number;
+    targetCursorQueueSequence: number; targetCursorBatchesInAgeQuantum: number;
+  }>;
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
     nextLegFeasibleAtStepByLegCount: Record<string, number>;
@@ -3745,6 +3749,13 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     && snapshot.legCount === 3 && snapshot.cursorNextIndex > 0
     && snapshot.queuedWorkAhead > 0 && snapshot.queuedPriorityPathsAhead > 0),
   'debug trace snapshots the target cursor behind priority work at reservoir activation');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.targetCursorNextIndex > 0
+    && decision.selectedWorkKind === 'path' && !decision.selectedTargetCursor),
+  'debug trace records competing path service while the target cursor is queued');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.targetCursorNextIndex > 0
+    && decision.selectedTargetCursor && decision.targetCursorQueueSequence >= 0
+    && decision.targetCursorBatchesInAgeQuantum >= 0),
+  'debug trace records when the target cursor itself receives service');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
