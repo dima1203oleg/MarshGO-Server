@@ -38,7 +38,6 @@ const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
 const MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST = 1;
-const MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH = 2;
 const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 4;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
 const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
@@ -4114,7 +4113,6 @@ export function findGtfsItinerariesWithStats(
     preferDeepCursor: boolean;
     reservoirQueuedWorkStreak: number;
     reservoirPriorityWorkStreak: number;
-    reservoirFairChildTurnsSincePath: number;
     nextChildCursorSequence: number;
     maxQueuedWork: number;
   };
@@ -4361,21 +4359,16 @@ export function findGtfsItinerariesWithStats(
       queue.preferFirstLeg = true;
       queue.reservoirQueuedWorkStreak = prioritizeQueuedWork
         ? queue.reservoirQueuedWorkStreak + 1 : 0;
-      // Once the deep candidate pool is saturated, bound consecutive priority
-      // selections and give one path turn after a bounded number of child turns.
-      // A feasible prefix may be priority work too, so fairness must cover
-      // paths without starving cursor progress.
+      // Once the deep candidate pool is saturated, alternate bounded priority
+      // work with the oldest non-priority child cursor. If none is waiting,
+      // serve the oldest live cursor so a priority backlog cannot starve it.
       const pendingPriorityWork = queue.work.findIndex((pending, index) => index >= queue.workIndex
         && pending.priority);
-      let pendingNonPriorityWork = -1;
-      let pendingPathWork = -1;
       let pendingChildCursor = -1;
       let pendingNonPriorityChildCursor = -1;
       if (preferDeepCursor) {
         for (let index = queue.workIndex; index < queue.work.length; index++) {
           const pending = queue.work[index]!;
-          if (!pending.priority && pendingNonPriorityWork < 0) pendingNonPriorityWork = index;
-          if (pending.kind === 'path' && pendingPathWork < 0) pendingPathWork = index;
           if (pending.kind !== 'children' || pending.remainingLegs < 1) continue;
           if (pendingChildCursor < 0
             || pending.queueSequence < (queue.work[pendingChildCursor] as ChildWork).queueSequence) {
@@ -4388,36 +4381,20 @@ export function findGtfsItinerariesWithStats(
         }
       }
       const hasPendingPriorityWork = pendingPriorityWork >= queue.workIndex;
-      const forceFairQueueTurn = hasPendingPriorityWork
-        && queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST;
-      const shouldServeNonPriorityWork = pendingNonPriorityWork >= queue.workIndex
-        && (!hasPendingPriorityWork
-          || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
       const shouldServeDeepCursor = pendingChildCursor >= queue.workIndex
         && (!hasPendingPriorityWork
           || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
       const shouldServeNonPriorityCursor = pendingNonPriorityChildCursor >= queue.workIndex
         && (!hasPendingPriorityWork
           || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
-      const fairPathIndex = pendingPathWork >= queue.workIndex ? pendingPathWork : pendingChildCursor;
-      const fairChildIndex = pendingChildCursor >= queue.workIndex ? pendingChildCursor : pendingPathWork;
-      const fairTurnIndex = queue.reservoirFairChildTurnsSincePath >= MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH
-        ? fairPathIndex : fairChildIndex;
-      const pendingIndex = forceFairQueueTurn && fairTurnIndex >= queue.workIndex ? fairTurnIndex
-        : shouldServeNonPriorityWork ? pendingNonPriorityWork
-        : shouldServeNonPriorityCursor ? pendingNonPriorityChildCursor
+      const pendingIndex = shouldServeNonPriorityCursor ? pendingNonPriorityChildCursor
         : shouldServeDeepCursor ? pendingChildCursor
           : hasPendingPriorityWork && queue.reservoirPriorityWorkStreak < MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST
             ? pendingPriorityWork : -1;
       const work = pendingIndex >= queue.workIndex
         ? queue.work.splice(pendingIndex, 1)[0]!
         : queue.work[queue.workIndex++]!;
-      if (forceFairQueueTurn) {
-        queue.reservoirFairChildTurnsSincePath = work.kind === 'path'
-          ? 0 : Math.min(MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH,
-            queue.reservoirFairChildTurnsSincePath + 1);
-      }
-      if (preferDeepCursor && work.priority && !forceFairQueueTurn) queue.reservoirPriorityWorkStreak++;
+      if (preferDeepCursor && work.priority) queue.reservoirPriorityWorkStreak++;
       else if (preferDeepCursor) queue.reservoirPriorityWorkStreak = 0;
       queue.preferDeepCursor = work.kind !== 'children' || work.remainingLegs <= 1;
       queuesPendingWork--;
@@ -4639,7 +4616,6 @@ export function findGtfsItinerariesWithStats(
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
       reservoirQueuedWorkStreak: 0,
       reservoirPriorityWorkStreak: 0,
-      reservoirFairChildTurnsSincePath: 0,
       nextChildCursorSequence: 0,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
