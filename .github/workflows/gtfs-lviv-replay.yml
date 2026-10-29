@@ -65,6 +65,11 @@ on:
         required: false
         type: string
         default: ''
+      debug_diagnostics:
+        description: Enable detailed diagnostics; false measures the uninstrumented frozen-feed path and cannot be combined with trace inputs
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -91,6 +96,7 @@ jobs:
       GTFS_REPLAY_TRACE_TRIP_IDS: ${{ inputs.trace_trip_ids || '' }}
       GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS: ${{ inputs.trace_candidate_trip_ids || '' }}
       GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS: ${{ inputs.objective_reservoir_search_steps || '' }}
+      GTFS_REPLAY_DEBUG_DIAGNOSTICS: ${{ inputs.debug_diagnostics }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@v4
@@ -151,6 +157,7 @@ jobs:
                 GTFS_REPLAY_TRACE_TRIP_IDS="$GTFS_REPLAY_TRACE_TRIP_IDS" \
                 GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS="$GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS" \
                 GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS="$GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS" \
+                GTFS_REPLAY_DEBUG_DIAGNOSTICS="$GTFS_REPLAY_DEBUG_DIAGNOSTICS" \
                 ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
               ) | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))' >> replay-results.jsonl
             done
@@ -159,6 +166,11 @@ jobs:
         run: |
           python3 candidate/scripts/summarize-lviv-replay.py replay-results.jsonl > replay-summary.md
           printf '\nFeed attribution: [Lviv municipal GTFS open data](https://data.gov.ua/en/dataset/lviv-public-transport-gtfs-real-time). The publisher specifies attribution for reuse.\n' >> replay-summary.md
+          summary_bytes=$(wc -c < replay-summary.md)
+          if [ "$summary_bytes" -gt 900000 ]; then
+            echo "Replay summary is ${summary_bytes} bytes; cap is 900000. Full JSON artifact remains available." >&2
+            exit 1
+          fi
           cat replay-summary.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload replay evidence
         uses: actions/upload-artifact@v4
