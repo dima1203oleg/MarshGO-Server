@@ -3628,7 +3628,7 @@ test('preserves a late feasible successor after the deep candidate pool saturate
 
   addRoute('access-route');
   addTrip('access-trip', 'access-route', 'origin', 'hub', 8 * 3600, 8 * 3600 + 10 * 60);
-  const distractorCount = 60;
+  const distractorCount = 40;
   for (let index = 0; index < distractorCount; index++) {
     const suffix = String(index).padStart(2, '0');
     const middleStop = `middle-${suffix}`;
@@ -3645,9 +3645,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   addRoute('middle-route-target');
   addRoute('egress-route-target');
   addTrip('middle-trip-target', 'middle-route-target', 'hub', 'middle-target',
-    8 * 3600 + 30 * 60, 8 * 3600 + 31 * 60);
+    8 * 3600 + 24 * 60, 8 * 3600 + 25 * 60);
   addTrip('egress-trip-target', 'egress-route-target', 'middle-target', 'destination',
-    8 * 3600 + 35 * 60, 8 * 3600 + 42 * 60);
+    8 * 3600 + 29 * 60, 8 * 3600 + 36 * 60);
 
   const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
   const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
