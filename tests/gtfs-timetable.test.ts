@@ -3702,6 +3702,10 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     && targetTrace.nextLegFeasibleAtStepByLegCount['3'] !== undefined,
   'the admitted middle-trip path expands and reaches its feasible final leg');
   assert.ok(candidatePoolReachedAtByLegCount['3'] !== undefined
+    && targetTrace.nextLegFeasibleAtStepByLegCount['2'] !== undefined
+    && targetTrace.nextLegFeasibleAtStepByLegCount['2'] > candidatePoolReachedAtByLegCount['3'],
+  'the late feasible transfer successor is considered after the three-leg pool saturates');
+  assert.ok(candidatePoolReachedAtByLegCount['3'] !== undefined
     && targetTrace.pathExpandedAtStepByLegCount['3'] !== undefined
     && candidatePoolReachedAtByLegCount['3'] < targetTrace.pathExpandedAtStepByLegCount['3'],
   'the late target cursor continues to a complete journey after the three-leg candidate pool saturates');

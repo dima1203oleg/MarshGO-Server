@@ -4280,8 +4280,9 @@ export function findGtfsItinerariesWithStats(
     // within the same search-step window instead of letting early queues use
     // the entire tail budget.
     const objectiveReservoirActive = candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass);
-    const childBatchLimit = maximumLegsForPass >= 3 && !objectiveReservoirActive
-      ? MAX_GTFS_CHILDREN_PER_WORK_TURN * 4 : MAX_GTFS_CHILDREN_PER_WORK_TURN;
+    const childBatchLimit = maximumLegsForPass >= 3
+      ? objectiveReservoirActive ? 1 : MAX_GTFS_CHILDREN_PER_WORK_TURN * 4
+      : MAX_GTFS_CHILDREN_PER_WORK_TURN;
     const nextIndexBefore = work.nextIndex;
     const feasiblePaths: GtfsDirectJourney[][] = [];
     while (processed < childBatchLimit
