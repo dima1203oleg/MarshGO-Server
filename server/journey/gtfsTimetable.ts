@@ -37,6 +37,7 @@ const MAX_ROUTE_GEOMETRY_POINTS = 500;
 const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
+const MAX_OBJECTIVE_RESERVOIR_PRIORITY_PATH_BURST = 2;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
 const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
 export const MAX_GTFS_TRANSFERS = 4;
@@ -4096,6 +4097,7 @@ export function findGtfsItinerariesWithStats(
     preferFirstLeg: boolean;
     preferDeepCursor: boolean;
     reservoirQueuedWorkStreak: number;
+    reservoirPriorityPathStreak: number;
     maxQueuedWork: number;
   };
   let activeQueues: RouteSearchQueue[] = [];
@@ -4233,18 +4235,26 @@ export function findGtfsItinerariesWithStats(
       queue.reservoirQueuedWorkStreak = prioritizeQueuedWork
         ? queue.reservoirQueuedWorkStreak + 1 : 0;
       // Once the deep candidate pool is saturated, service a live deep cursor
-      // alongside queued work. Already-feasible priority paths go first: they
-      // have completed transfer validation and only need bounded expansion to
-      // reach the final leg, while pending cursors may still produce no path.
+      // alongside queued work. Give already-feasible paths a short burst, then
+      // serve the oldest live child cursor so a growing priority backlog cannot
+      // starve its continuation until the objective reservoir closes.
       const pendingPriorityPath = queue.work.findIndex((pending, index) => index >= queue.workIndex
         && pending.kind === 'path' && pending.priority);
-      const pendingIndex = preferDeepCursor && pendingPriorityPath < queue.workIndex
+      const pendingChildCursor = preferDeepCursor
         ? queue.work.findIndex((pending, index) => index >= queue.workIndex
           && pending.kind === 'children' && pending.remainingLegs >= 1)
         : -1;
+      const hasPendingPriorityPath = pendingPriorityPath >= queue.workIndex;
+      const shouldServeDeepCursor = pendingChildCursor >= queue.workIndex
+        && (!hasPendingPriorityPath
+          || queue.reservoirPriorityPathStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_PATH_BURST);
+      const pendingIndex = shouldServeDeepCursor ? pendingChildCursor : -1;
       const work = pendingIndex >= queue.workIndex
         ? queue.work.splice(pendingIndex, 1)[0]!
         : queue.work[queue.workIndex++]!;
+      if (preferDeepCursor && work.kind === 'children') queue.reservoirPriorityPathStreak = 0;
+      else if (preferDeepCursor && work.kind === 'path' && work.priority) queue.reservoirPriorityPathStreak++;
+      else if (preferDeepCursor) queue.reservoirPriorityPathStreak = 0;
       queue.preferDeepCursor = work.kind !== 'children' || work.remainingLegs <= 1;
       queuesPendingWork--;
       if (queue.workIndex >= 128 && queue.workIndex * 2 >= queue.work.length) {
@@ -4444,6 +4454,7 @@ export function findGtfsItinerariesWithStats(
       queueOrdinal,
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
       reservoirQueuedWorkStreak: 0,
+      reservoirPriorityPathStreak: 0,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
     activeQueues = queues;

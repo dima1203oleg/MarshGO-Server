@@ -3733,6 +3733,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     && reservoirCursorTurn.firstLegCount >= reservoirCursorTurn.firstLegIndex
     && reservoirCursorTurn.queuedWorkAhead >= 0,
   'cursor trace exposes its search-step offset and queue service position');
+  assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
+    progress.queuedPriorityPathsAhead > 0),
+  'the late target cursor competes with already validated priority paths');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
