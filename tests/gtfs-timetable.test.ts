@@ -3680,7 +3680,7 @@ function lateSuccessorFixture(dense = false) {
   addRoute('middle-route-target');
   addRoute('egress-route-target');
   addTrip('middle-trip-target', 'middle-route-target', 'hub', 'middle-target',
-    8 * 3600 + 24 * 60, 8 * 3600 + 25 * 60);
+    8 * 3600 + (dense ? 19 : 24) * 60, 8 * 3600 + (dense ? 20 : 25) * 60);
   addTrip('egress-trip-target', 'egress-route-target', 'middle-target', 'destination',
     8 * 3600 + 29 * 60, 8 * 3600 + 36 * 60);
   return timetable;
@@ -3706,12 +3706,44 @@ test('marks dense bounded search partial when it misses the oracle fastest chain
     maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
     maximumTransferWalkingMeters: 10, maximumTransfers: 2, limit: 100,
   };
-  const result = findGtfsItinerariesWithStats(timetable, query,
-    { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 100, maxQueuedSearchWork: 100 });
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+  const previousInfo = console.info;
+  const diagnostics: Array<Record<string, unknown>> = [];
+  const traceKey = 'p1:20261012:access-trip>p1:20261012:middle-trip-target>p1:20261012:egress-trip-target';
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = traceKey;
+  console.info = (...args: unknown[]) => {
+    if (typeof args[0] !== 'string') return;
+    try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
+  };
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    result = findGtfsItinerariesWithStats(timetable, query,
+      { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 150, maxQueuedSearchWork: 100 });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+    if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTrace;
+  }
   assert.ok(result.itineraries.length > 0, 'the bounded search still returns alternatives');
   const targetReturned = result.itineraries.some((journey) => journey.segments.map((segment) => segment.tripId)
     .join('>') === oracleFastest?.tripIds.join('>'));
   if (!targetReturned) {
+    const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
+    const traces = JSON.parse(String(ranked?.debugTripChainSearchTrace ?? '{}')) as Record<string, {
+      queueEventsByLegCount: Record<string, { pathEnqueued: number; pathDropped: number; pathEvicted: number }>;
+      pathExpandedCountByLegCount: Record<string, number>;
+    }>;
+    const targetTrace = traces[traceKey];
+    assert.ok((targetTrace?.queueEventsByLegCount['2']?.pathEnqueued ?? 0) > 0,
+      'the feasible two-leg target prefix was admitted to the search queue');
+    assert.equal(targetTrace?.queueEventsByLegCount['2']?.pathDropped ?? 0, 0);
+    assert.equal(targetTrace?.queueEventsByLegCount['2']?.pathEvicted ?? 0, 0);
+    assert.equal(targetTrace?.pathExpandedCountByLegCount['2'] ?? 0, 0,
+      'the admitted target prefix remained unexpanded at the bounded cutoff');
     const bestReturnedArrival = Math.min(...result.itineraries.map((journey) => journey.arrivalAt.getTime()));
     assert.ok(bestReturnedArrival > oracleFastest!.path.at(-1)!.journey.arrivalAt.getTime(),
       'the returned alternatives arrive later than the independently verified fastest chain');
