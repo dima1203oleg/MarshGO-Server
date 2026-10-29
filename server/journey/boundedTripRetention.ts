@@ -58,6 +58,7 @@ export class BoundedBestK<T> {
  */
 export class BoundedDiverseBestK<T> {
   private readonly items: T[] = [];
+  private readonly retainedCandidateKeys = new Set<string>();
 
   constructor(
     private readonly limit: number,
@@ -74,16 +75,17 @@ export class BoundedDiverseBestK<T> {
     return this.items.length;
   }
 
+  has(candidate: T): boolean {
+    return this.candidateKey !== undefined && this.retainedCandidateKeys.has(this.candidateKey(candidate));
+  }
+
   consider(candidate: T): boolean {
-    if (this.candidateKey) {
-      const key = this.candidateKey(candidate);
-      if (this.items.some((item) => this.candidateKey!(item) === key)) {
-        return false;
-      }
-    }
+    const candidateKey = this.candidateKey?.(candidate);
+    if (candidateKey !== undefined && this.retainedCandidateKeys.has(candidateKey)) return false;
 
     if (this.items.length < this.limit) {
       this.items.push(candidate);
+      if (candidateKey !== undefined) this.retainedCandidateKeys.add(candidateKey);
       return true;
     }
 
@@ -105,8 +107,11 @@ export class BoundedDiverseBestK<T> {
     const worstIndex = this.items.indexOf(worstCandidate);
     if (worstIndex >= 0) {
       this.items.splice(worstIndex, 1);
+      const worstKey = this.candidateKey?.(worstCandidate);
+      if (worstKey !== undefined) this.retainedCandidateKeys.delete(worstKey);
     }
     this.items.push(candidate);
+    if (candidateKey !== undefined) this.retainedCandidateKeys.add(candidateKey);
     return true;
   }
 
