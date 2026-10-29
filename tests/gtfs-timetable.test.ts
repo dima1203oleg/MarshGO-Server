@@ -3444,7 +3444,7 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
     id, name: id, lon, lat,
   });
   addStop('origin', 24.0201, 49.8401);
-  addStop('destination', 24.0301, 49.8501);
+  addStop('destination', 24.1701, 49.9401);
   const addRoute = (routeId: string) => timetable.routes.set(routeId, {
     name: routeId, mode: 'BUS', transportType: 'bus',
   });
@@ -3470,34 +3470,35 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
     const branch = `decoy-${String(index).padStart(2, '0')}`;
     const hubA = `${branch}-a`;
     const hubB = `${branch}-b`;
-    const offset = index * 0.002;
-    addStop(hubA, 24.1000 + offset, 49.9000 + offset);
-    addStop(hubB, 24.1100 + offset, 49.9050 + offset);
+    const offsetLon = index * 0.002;
+    const offsetLat = index * 0.001333;
+    addStop(hubA, 24.0500 + offsetLon, 49.8600 + offsetLat);
+    addStop(hubB, 24.0550 + offsetLon, 49.8630 + offsetLat);
     const middleRoute = `${branch}-middle`;
     const egressRoute = `${branch}-egress`;
     addRoute(middleRoute);
     addRoute(egressRoute);
     addTrip(`${branch}-access`, accessRoute, 'origin', hubA,
-      firstDeparture + index * 5, firstDeparture + index * 5 + 2 * 60);
+      firstDeparture + index * 3, firstDeparture + index * 3 + 8 * 60);
     addTrip(`${branch}-middle-trip`, middleRoute, hubA, hubB,
-      firstDeparture + 10 * 60, firstDeparture + 25 * 60);
+      firstDeparture + 13 * 60, firstDeparture + 25 * 60);
     addTrip(`${branch}-egress-trip`, egressRoute, hubB, 'destination',
-      firstDeparture + 30 * 60, firstDeparture + 80 * 60);
+      firstDeparture + 35 * 60, firstDeparture + 80 * 60);
   }
 
   const target = 'target';
   const targetHubA = `${target}-a`;
   const targetHubB = `${target}-b`;
-  addStop(targetHubA, 24.1010, 49.8990);
-  addStop(targetHubB, 24.1110, 49.9040);
+  addStop(targetHubA, 24.0510, 49.8590);
+  addStop(targetHubB, 24.0560, 49.8620);
   addRoute(`${target}-middle`);
   addRoute(`${target}-egress`);
   addTrip(`${target}-access`, accessRoute, 'origin', targetHubA,
-    firstDeparture + 7 * 60, firstDeparture + 9 * 60);
+    firstDeparture + 7 * 60, firstDeparture + 15 * 60);
   addTrip(`${target}-middle-trip`, `${target}-middle`, targetHubA, targetHubB,
-    firstDeparture + 13 * 60, firstDeparture + 20 * 60);
+    firstDeparture + 20 * 60, firstDeparture + 27 * 60);
   addTrip(`${target}-egress-trip`, `${target}-egress`, targetHubB, 'destination',
-    firstDeparture + 23 * 60, firstDeparture + 33 * 60);
+    firstDeparture + 32 * 60, firstDeparture + 52 * 60);
 
   const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
   const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
@@ -3517,6 +3518,8 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
   try {
     result = findGtfsItinerariesWithStats(timetable, {
       ...request('2026-10-12T04:55:00Z', '2026-10-12T06:30:00Z'),
+      origin: [24.0201, 49.8401],
+      destination: [24.1701, 49.9401],
       maximumAccessWalkingMeters: 100,
       maximumEgressWalkingMeters: 100,
       maximumTransferWalkingMeters: 100,
