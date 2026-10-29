@@ -3433,6 +3433,89 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
     'the fixture demonstrates why a truncated search cannot claim exhaustive strategy winners');
 });
 
+test('round-robins a late faster three-leg branch behind early trips on a dense route', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  const addStop = (id: string, lon: number, lat: number) => timetable.stops.set(id, {
+    id, name: id, lon, lat,
+  });
+  addStop('origin', 24.0201, 49.8401);
+  addStop('destination', 24.0301, 49.8501);
+  const addRoute = (routeId: string) => timetable.routes.set(routeId, {
+    name: routeId, mode: 'BUS', transportType: 'bus',
+  });
+  const addTrip = (tripId: string, routeId: string, from: string, to: string,
+    departureSeconds: number, arrivalSeconds: number) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [from, to].map((stopId, index) => ({
+      stopId, sequence: index + 1,
+      arrivalSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      departureSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+
+  const accessRoute = 'access';
+  addRoute(accessRoute);
+  const firstDeparture = 8 * 3600;
+  const branchCount = 40;
+  for (let index = 0; index < branchCount; index++) {
+    const branch = `decoy-${String(index).padStart(2, '0')}`;
+    const hubA = `${branch}-a`;
+    const hubB = `${branch}-b`;
+    const offset = index * 0.002;
+    addStop(hubA, 24.1000 + offset, 49.9000 + offset);
+    addStop(hubB, 24.1100 + offset, 49.9050 + offset);
+    const middleRoute = `${branch}-middle`;
+    const egressRoute = `${branch}-egress`;
+    addRoute(middleRoute);
+    addRoute(egressRoute);
+    addTrip(`${branch}-access`, accessRoute, 'origin', hubA,
+      firstDeparture + index * 5, firstDeparture + index * 5 + 2 * 60);
+    addTrip(`${branch}-middle-trip`, middleRoute, hubA, hubB,
+      firstDeparture + 10 * 60, firstDeparture + 25 * 60);
+    addTrip(`${branch}-egress-trip`, egressRoute, hubB, 'destination',
+      firstDeparture + 30 * 60, firstDeparture + 80 * 60);
+  }
+
+  const target = 'target';
+  const targetHubA = `${target}-a`;
+  const targetHubB = `${target}-b`;
+  addStop(targetHubA, 24.1010, 49.8990);
+  addStop(targetHubB, 24.1110, 49.9040);
+  addRoute(`${target}-middle`);
+  addRoute(`${target}-egress`);
+  addTrip(`${target}-access`, accessRoute, 'origin', targetHubA,
+    firstDeparture + 7 * 60, firstDeparture + 9 * 60);
+  addTrip(`${target}-middle-trip`, `${target}-middle`, targetHubA, targetHubB,
+    firstDeparture + 13 * 60, firstDeparture + 20 * 60);
+  addTrip(`${target}-egress-trip`, `${target}-egress`, targetHubB, 'destination',
+    firstDeparture + 23 * 60, firstDeparture + 33 * 60);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T06:30:00Z'),
+    maximumAccessWalkingMeters: 100,
+    maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 100,
+    maximumTransfers: 2,
+    limit: 100,
+  }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 160 });
+
+  const targetChain = `${target}-access>${target}-middle-trip>${target}-egress-trip`;
+  const returnedChains = new Set(result.itineraries.map((journey) =>
+    journey.segments.map((segment) => segment.tripId).join('>')));
+  assert.ok(result.truncation.searchBudget, 'the small objective reservoir intentionally bounds the search');
+  assert.ok(returnedChains.has(targetChain),
+    'the later, faster feasible chain survives early slower branches sharing its access route');
+});
+
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
   const timetable = feed();
   timetable.routes.clear();
