@@ -1710,6 +1710,14 @@ export function findGtfsItinerariesWithStats(
     nextLegConsideredCountByLegCount: Record<string, number>;
     nextLegFeasibleAtStepByLegCount: Record<string, number>;
     nextLegFeasibleCountByLegCount: Record<string, number>;
+    queueEventsByLegCount: Record<string, {
+      pathEnqueued: number;
+      pathDropped: number;
+      pathEvicted: number;
+      childCursorEnqueued: number;
+      childCursorDropped: number;
+      childCursorEvicted: number;
+    }>;
     successorPositionsByPath: Record<string, {
       pathSegments: string[];
       choiceCount: number;
@@ -1752,6 +1760,7 @@ export function findGtfsItinerariesWithStats(
         nextLegConsideredCountByLegCount: {},
         nextLegFeasibleAtStepByLegCount: {},
         nextLegFeasibleCountByLegCount: {},
+        queueEventsByLegCount: {},
         successorPositionsByPath: {},
         variantsByStopPair: {},
       };
@@ -1781,6 +1790,44 @@ export function findGtfsItinerariesWithStats(
         }
         if (event === 'next-leg-feasible') variant.nextLegFeasibleAtStep ??= searchSteps;
       }
+      debugTripChainSearchTrace.set(targetKey, trace);
+    }
+  };
+  const recordDebugTripChainQueueEvent = (
+    path: readonly GtfsDirectJourney[],
+    event: 'pathEnqueued' | 'pathDropped' | 'pathEvicted' | 'childCursorEnqueued' | 'childCursorDropped' | 'childCursorEvicted',
+  ) => {
+    if (!debugTraceTripChainSet || path.length > 5) return;
+    for (let index = 0; index < debugTraceTripChainParts.length; index++) {
+      const target = debugTraceTripChainParts[index]!;
+      if (path.length > target.length) continue;
+      let matches = true;
+      for (let leg = 0; leg < path.length; leg++) {
+        const segment = path[leg]!;
+        if (`${segment.providerId}:${segment.serviceDate}:${segment.tripId}` !== target[leg]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+      const targetKey = debugTraceTripChains[index]!;
+      const trace = debugTripChainSearchTrace.get(targetKey) ?? {
+        pathExpandedAtStepByLegCount: {},
+        pathExpandedCountByLegCount: {},
+        nextLegConsideredAtStepByLegCount: {},
+        nextLegConsideredCountByLegCount: {},
+        nextLegFeasibleAtStepByLegCount: {},
+        nextLegFeasibleCountByLegCount: {},
+        queueEventsByLegCount: {},
+        successorPositionsByPath: {},
+        variantsByStopPair: {},
+      };
+      const legCount = String(path.length);
+      const counts = trace.queueEventsByLegCount[legCount] ??= {
+        pathEnqueued: 0, pathDropped: 0, pathEvicted: 0,
+        childCursorEnqueued: 0, childCursorDropped: 0, childCursorEvicted: 0,
+      };
+      counts[event]++;
       debugTripChainSearchTrace.set(targetKey, trace);
     }
   };
@@ -3955,7 +4002,9 @@ export function findGtfsItinerariesWithStats(
   const truncatedDepthPasses = new Set<number>();
   const evictOldestQueuedPath = (queue: RouteSearchQueue) => {
     for (let index = queue.workIndex; index < queue.work.length; index++) {
-      if (queue.work[index].kind !== 'path') continue;
+      const evicted = queue.work[index]!;
+      if (evicted.kind !== 'path') continue;
+      recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
       queue.work.splice(index, 1);
       queuesPendingWork--;
       queueWorkDropped = true;
@@ -3972,6 +4021,7 @@ export function findGtfsItinerariesWithStats(
       if (evictOldestQueuedPath(queue)) pendingInQueue--;
     }
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
+      recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathDropped' : 'childCursorDropped');
       queueWorkDropped = true;
       return;
     }
@@ -3980,6 +4030,7 @@ export function findGtfsItinerariesWithStats(
     maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
       queuesPendingWork + 1);
     queuesPendingWork++;
+    recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathEnqueued' : 'childCursorEnqueued');
   };
   let queuesPendingWork = 0;
   const canContinueCandidateSearch = (legCount: number) => {

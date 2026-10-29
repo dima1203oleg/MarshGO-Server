@@ -3685,6 +3685,10 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
   assert.equal(result.truncation.searchBudget, false, 'the small fixture completes within the bounded queue');
   const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
+    queueEventsByLegCount: Record<string, {
+      pathEnqueued: number; pathDropped: number; pathEvicted: number;
+      childCursorEnqueued: number; childCursorDropped: number; childCursorEvicted: number;
+    }>;
     successorPositionsByPath: Record<string, { targetSuccessors: Array<{ tripKey: string; cursorOffset: number; transferFeasible: boolean }> }>;
   }>;
   const targetTrace = trace[`p1:20261012:access-trip>p1:20261012:middle-trip-target>p1:20261012:egress-trip-target`];
@@ -3693,6 +3697,8 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
     variant.targetSuccessors.some((successor) => successor.tripKey === 'p1:20261012:middle-trip-target'
       && successor.cursorOffset > 6 && successor.transferFeasible)),
   'the feasible target lies beyond the six-item queue share');
+  assert.ok((targetTrace.queueEventsByLegCount['2']?.pathEnqueued ?? 0) > 0,
+    'queue diagnostics record when the feasible target path prefix is admitted');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
