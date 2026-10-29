@@ -6,6 +6,7 @@ import { Pool, PoolClient } from 'pg';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createClient } from 'redis';
 import { RedisRateLimitStore } from './redisRateLimitStore';
+import { getBuildInfo } from './buildInfo';
 import type { Duplex } from 'node:stream';
 import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from './routing';
@@ -324,6 +325,10 @@ function requireStaff(req: AuthenticatedRequest, res: Response, next: NextFuncti
 }
 
 app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
+app.get('/version', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(getBuildInfo());
+});
 app.get('/readyz', asyncHandler(async (_req, res) => {
   await pool.query('SELECT 1');
   const redisReady = !process.env.REDIS_URL || realtimeRedis?.isReady === true;
