@@ -38,6 +38,7 @@ const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
 const MAX_OBJECTIVE_RESERVOIR_PRIORITY_PATH_BURST = 1;
+const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 2;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
 const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
 export const MAX_GTFS_TRANSFERS = 4;
@@ -4088,6 +4089,7 @@ export function findGtfsItinerariesWithStats(
     previousIds: Set<string>;
     visitedStops: Set<string>;
     queueSequence: number;
+    batchesInAgeQuantum: number;
   };
   type SearchWork = PathWork | ChildWork;
   type RouteSearchQueue = {
@@ -4357,7 +4359,7 @@ export function findGtfsItinerariesWithStats(
     if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return undefined;
     recordDebugTargetSuccessorPositions(path, choices, low, latestNext);
     const work: ChildWork = { kind: 'children', priority, path, last, choices, nextIndex: low, latestNext,
-      remainingLegs, previousIds, visitedStops, queueSequence: queue.nextChildCursorSequence++ };
+      remainingLegs, previousIds, visitedStops, queueSequence: queue.nextChildCursorSequence++, batchesInAgeQuantum: 0 };
     if (remainingLegs === 1) return work;
     enqueueWork(queue, work);
     return undefined;
@@ -4416,7 +4418,13 @@ export function findGtfsItinerariesWithStats(
     }
     const hasNextBeforeHorizon = work.nextIndex < work.choices.length
       && work.choices[work.nextIndex]!.departureAt.getTime() <= work.latestNext;
-    if (hasNextBeforeHorizon) work.queueSequence = queue.nextChildCursorSequence++;
+    if (hasNextBeforeHorizon) {
+      work.batchesInAgeQuantum++;
+      if (work.batchesInAgeQuantum >= MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM) {
+        work.queueSequence = queue.nextChildCursorSequence++;
+        work.batchesInAgeQuantum = 0;
+      }
+    }
     const continuationQueued = hasNextBeforeHorizon ? enqueueWork(queue, work) : false;
     // The popped cursor freed a bounded queue slot. Reinsert its continuation
     // first so feasible descendants generated during this batch cannot evict
