@@ -4000,21 +4000,17 @@ export function findGtfsItinerariesWithStats(
   };
   const pausedDepthPassQueues = new Map<number, RouteSearchQueue[]>();
   const truncatedDepthPasses = new Set<number>();
-  const evictOldestQueuedPath = (queue: RouteSearchQueue, protectPriority: boolean) => {
-    const evict = (allowPriority: boolean) => {
-      for (let index = queue.workIndex; index < queue.work.length; index++) {
-        const evicted = queue.work[index]!;
-        if (evicted.kind !== 'path' || (!allowPriority && evicted.priority)) continue;
-        recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-        queue.work.splice(index, 1);
-        queuesPendingWork--;
-        queueWorkDropped = true;
-        return true;
-      }
-      return false;
-    };
-    if (evict(false)) return true;
-    return protectPriority ? false : evict(true);
+  const evictOldestQueuedPath = (queue: RouteSearchQueue) => {
+    for (let index = queue.workIndex; index < queue.work.length; index++) {
+      const evicted = queue.work[index]!;
+      if (evicted.kind !== 'path' || evicted.priority) continue;
+      recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
+      queue.work.splice(index, 1);
+      queuesPendingWork--;
+      queueWorkDropped = true;
+      return true;
+    }
+    return false;
   };
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false) => {
     const queuedWork: SearchWork = work.kind === 'path' ? { ...work, priority: prioritize } : work;
@@ -4023,7 +4019,7 @@ export function findGtfsItinerariesWithStats(
       // Preserve forward progress when a bounded queue is saturated: replace
       // an older ordinary path first. A newly feasible path must not evict an
       // already admitted feasible path before either has a chance to expand.
-      if (evictOldestQueuedPath(queue, queuedWork.kind === 'path' && queuedWork.priority)) pendingInQueue--;
+      if (evictOldestQueuedPath(queue)) pendingInQueue--;
     }
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
       recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathDropped' : 'childCursorDropped');
