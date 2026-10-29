@@ -45,15 +45,29 @@ const departureWindowMinutes = Number(process.env.GTFS_REPLAY_DEPARTURE_WINDOW_M
 if (!Number.isInteger(departureWindowMinutes) || departureWindowMinutes < 1 || departureWindowMinutes > 180) {
   throw new Error('GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES must be an integer from 1 to 180.');
 }
+const objectiveReservoirSearchStepsValue = process.env.GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
+const objectiveReservoirSearchSteps = objectiveReservoirSearchStepsValue === undefined || objectiveReservoirSearchStepsValue === ''
+  ? undefined
+  : Number(objectiveReservoirSearchStepsValue);
+if (objectiveReservoirSearchSteps !== undefined
+  && (!Number.isSafeInteger(objectiveReservoirSearchSteps) || objectiveReservoirSearchSteps < 1 || objectiveReservoirSearchSteps > 200_000)) {
+  throw new Error('GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS must be an integer from 1 to 200000.');
+}
 const latestDeparture = new Date(earliestDeparture.getTime() + departureWindowMinutes * 60_000);
 const traceRouteIds = new Set((process.env.GTFS_REPLAY_TRACE_ROUTE_IDS ?? '')
   .split(',').map((routeId) => routeId.trim()).filter(Boolean));
 const traceTripIds = new Set((process.env.GTFS_REPLAY_TRACE_TRIP_IDS ?? '')
   .split(',').map((tripId) => tripId.trim()).filter(Boolean));
+const traceTripChains = (process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS ?? '')
+  .split('|').map((tripChain) => tripChain.trim()).filter(Boolean);
 const traceCandidateTripIds = new Set((process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS ?? '')
   .split(',').map((tripId) => tripId.trim()).filter(Boolean));
 if (traceCandidateTripIds.size > 2) {
   throw new Error('GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS accepts at most two trip IDs.');
+}
+const debugDiagnosticsEnabled = process.env.GTFS_REPLAY_DEBUG_DIAGNOSTICS !== 'false';
+if (!debugDiagnosticsEnabled && [traceTripChains.length, traceRouteIds.size, traceTripIds.size, traceCandidateTripIds.size].some((size) => size > 0)) {
+  throw new Error('GTFS_REPLAY_DEBUG_DIAGNOSTICS=false cannot be combined with trace inputs.');
 }
 const retainedTripGroupsByRoute = new Map<string, Map<string, { serviceDate: string; tripId: string; segments: number }>>();
 const retainedSegmentsByTripId = new Map<string, Map<string, {
@@ -65,12 +79,64 @@ const retainedSegmentsByTripId = new Map<string, Map<string, {
   departureAt: string;
   arrivalAt: string;
 }>>();
-const graphObserver = traceRouteIds.size > 0 || traceTripIds.size > 0
+let targetChainGraphTrace: Record<string, unknown> | undefined;
+const graphObserver = traceRouteIds.size > 0 || traceTripIds.size > 0 || traceTripChains.length > 0
   ? (graph: { segments: readonly { id: string; journey: {
-    routeId: string; serviceDate: string; tripId: string;
+    providerId: string; routeId: string; serviceDate: string; tripId: string;
     originStop: { id: string }; destinationStop: { id: string };
     departureAt: Date; arrivalAt: Date;
-  } }[] }) => {
+  } }[]; firstLegIds: readonly string[];
+    successors(previousId: string, remainingLegs: number): readonly string[];
+    transferDecision(previousId: string, nextId: string): { feasible: boolean; requiredSeconds: number;
+      minimumBufferSeconds: number; measure: { walkingMeters: number; walkingSeconds: number } };
+  }) => {
+    if (traceTripChains.length > 0) {
+      const tripKey = (journey: { providerId: string; serviceDate: string; tripId: string }) =>
+        `${journey.providerId}:${journey.serviceDate}:${journey.tripId}`;
+      const byId = new Map(graph.segments.map((segment) => [segment.id, segment]));
+      targetChainGraphTrace = Object.fromEntries(traceTripChains.map((tripChain) => {
+        const targetTrips = tripChain.split('>');
+        const targetSegments = targetTrips.map((key) => graph.segments
+          .filter((segment) => tripKey(segment.journey) === key));
+        const firstLegIds = new Set(graph.firstLegIds);
+        const firstCandidates = targetSegments[0]?.filter((segment) => firstLegIds.has(segment.id)) ?? [];
+        let paths = firstCandidates.map((segment) => [segment.id]);
+        const transitions = [];
+        for (let index = 0; index < targetTrips.length - 1; index++) {
+          const nextIds = new Set((targetSegments[index + 1] ?? []).map((segment) => segment.id));
+          const matchingEdges: Array<Record<string, unknown>> = [];
+          const nextPaths: string[][] = [];
+          for (const path of paths) {
+            const previousId = path.at(-1)!;
+            const previous = byId.get(previousId)!;
+            for (const nextId of graph.successors(previousId, targetTrips.length - index - 1)) {
+              if (!nextIds.has(nextId)) continue;
+              const next = byId.get(nextId)!;
+              const availableSeconds = Math.floor((next.journey.departureAt.getTime()
+                - previous.journey.arrivalAt.getTime()) / 1000);
+              const decision = graph.transferDecision(previousId, nextId);
+              matchingEdges.push({ previous: previousId, next: nextId,
+                fromStopId: previous.journey.destinationStop.id, toStopId: next.journey.originStop.id,
+                previousArrivalAt: previous.journey.arrivalAt.toISOString(),
+                nextDepartureAt: next.journey.departureAt.toISOString(), availableSeconds,
+                withinWaitHorizon: availableSeconds >= 0 && availableSeconds <= 4 * 60 * 60,
+                transferFeasible: decision.feasible, requiredSeconds: decision.requiredSeconds,
+                minimumBufferSeconds: decision.minimumBufferSeconds,
+                walkingMeters: decision.measure.walkingMeters, walkingSeconds: decision.measure.walkingSeconds });
+              if (availableSeconds >= 0 && availableSeconds <= 4 * 60 * 60 && decision.feasible) {
+                nextPaths.push([...path, nextId]);
+              }
+            }
+          }
+          transitions.push({ fromTrip: targetTrips[index], toTrip: targetTrips[index + 1],
+            predecessorStates: paths.length, matchingSuccessorEdges: matchingEdges.length, edges: matchingEdges });
+          paths = nextPaths;
+        }
+        return [tripChain, { retainedSegmentCounts: targetSegments.map((segments) => segments.length),
+          firstLegCandidateCount: firstCandidates.length, feasiblePathCount: paths.length,
+          paths: paths.slice(0, 16), transitions }];
+      }));
+    }
     for (const { id, journey } of graph.segments) {
       if (traceRouteIds.has(journey.routeId)) {
         const routeGroups = retainedTripGroupsByRoute.get(journey.routeId) ?? new Map();
@@ -104,7 +170,8 @@ const originalConsoleInfo = console.info.bind(console);
 const previousDebugSetting = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
 const previousTraceSetting = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
 const previousCandidateTraceSetting = process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
-process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+if (debugDiagnosticsEnabled) process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+else delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
 if (process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS) {
   process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS;
 } else {
@@ -162,7 +229,9 @@ try {
     maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
     maximumWaitSeconds: 4 * 60 * 60, limit: 100,
     now: new Date('2026-10-22T08:00:00.000Z'),
-  }, {}, graphObserver);
+  }, objectiveReservoirSearchSteps === undefined
+    ? {}
+    : { maxObjectiveReservoirSearchSteps: objectiveReservoirSearchSteps }, graphObserver);
 } finally {
   console.info = originalConsoleInfo;
   if (previousDebugSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
@@ -172,6 +241,9 @@ try {
   if (previousCandidateTraceSetting === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
   else process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = previousCandidateTraceSetting;
 }
+// Stop the search timer before ranking projections, summary metrics, and JSON
+// serialization so diagnostic-report cost cannot distort the paired replay.
+const searchMs = Number((performance.now() - startedAt).toFixed(2));
 if (process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS && process.env.REPLAY_GROUP === 'candidate') {
   if (searchCandidateTraceError) throw new Error(`Invalid candidate trip trace: ${searchCandidateTraceError}`);
   if (searchCandidateTrace === undefined) {
@@ -185,6 +257,66 @@ const strategyRecommendations = selectStrategyAlternatives(rankedCandidates, ava
 const winnerFor = (strategy: typeof userFacingStrategies[number]) =>
   strategyRecommendations.find((candidate) => candidate.strategyRanks?.[strategy] === 1)?.journey;
 const signature = (item: typeof rankedCandidates[number] | undefined) => item?.id ?? null;
+const winnerSummary = (strategy: typeof userFacingStrategies[number]) => {
+  const item = winnerFor(strategy);
+  if (!item) return null;
+  return {
+    id: item.id,
+    departureAt: item.itinerary.departureAt.toISOString(),
+    arrivalAt: item.itinerary.arrivalAt.toISOString(),
+    durationSeconds: item.durationSeconds,
+    priceMinor: item.priceMinor,
+    transfers: item.transfers,
+    walkingMeters: item.walkingMeters,
+    modes: item.legs.map((leg) => leg.mode),
+    routeIds: item.itinerary.segments.map((segment) => `${segment.providerId}:${segment.routeId}`),
+    tripIds: item.itinerary.segments.map((segment) => `${segment.providerId}:${segment.tripId}`),
+    legs: item.itinerary.segments.map((segment) => ({
+      providerId: segment.providerId,
+      routeId: segment.routeId,
+      routeName: segment.routeName,
+      tripId: segment.tripId,
+      serviceDate: segment.serviceDate,
+      mode: segment.mode,
+      originStop: { id: segment.originStop.id, name: segment.originStop.name },
+      destinationStop: { id: segment.destinationStop.id, name: segment.destinationStop.name },
+      departureAt: segment.departureAt.toISOString(),
+      arrivalAt: segment.arrivalAt.toISOString(),
+      scheduleSemantics: segment.scheduleSemantics,
+    })),
+  };
+};
+// Keep diagnostic scoring inputs for the bounded returned page only. This is
+// deliberately not described as the complete search candidate set.
+const returnedItineraryMetrics = rankedCandidates.map((item) => ({
+  id: item.id,
+  departureAt: item.itinerary.departureAt.toISOString(),
+  arrivalAt: item.itinerary.arrivalAt.toISOString(),
+  durationSeconds: item.durationSeconds,
+  priceMinor: item.priceMinor,
+  fareCurrency: item.itinerary.fare?.currency ?? null,
+  fareSource: item.itinerary.fare?.source ?? null,
+  fareAllocations: item.itinerary.fare?.allocations.map((allocation) => ({
+    priceMinor: allocation.priceMinor,
+    currency: allocation.currency,
+    fareProductId: allocation.fareProductId,
+    includedByPreviousFare: allocation.includedByPreviousFare,
+  })) ?? null,
+  transfers: item.transfers,
+  walkingMeters: item.walkingMeters,
+  transferWalkingMeters: item.itinerary.transferWalkingMeters,
+  legs: item.itinerary.segments.map((segment) => ({
+    providerId: segment.providerId,
+    routeId: segment.routeId,
+    tripId: segment.tripId,
+    serviceDate: segment.serviceDate,
+    mode: segment.mode,
+    originStopId: segment.originStop.id,
+    destinationStopId: segment.destinationStop.id,
+    departureAt: segment.departureAt.toISOString(),
+    arrivalAt: segment.arrivalAt.toISOString(),
+  })),
+}));
 const details = result as typeof result & Record<string, unknown>;
 console.log(JSON.stringify({
   comparisonGroup: process.env.REPLAY_GROUP ?? null,
@@ -195,7 +327,7 @@ console.log(JSON.stringify({
   departureWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
   archiveSha256,
   runtime: process.version,
-  searchMs: Number((performance.now() - startedAt).toFixed(2)),
+  searchMs,
   heapUsedBytes: process.memoryUsage().heapUsed,
   rssBytes: process.memoryUsage().rss,
   returned: result.itineraries.length,
@@ -206,12 +338,19 @@ console.log(JSON.stringify({
   uniqueRouteChains: new Set(result.itineraries.map((item) => item.segments.map((segment) => segment.routeId).join(','))).size,
   rankingMethod: 'production-paretoFrontier+selectStrategyAlternatives',
   rankingScope: 'gtfs-only-candidates; shared with API projection and scorer',
+  objectiveReservoirSearchStepsOverride: objectiveReservoirSearchSteps ?? null,
   availableStrategies,
   strategyCandidates: {
     balanced: signature(winnerFor('BALANCED')),
     fastest: signature(winnerFor('FASTEST')),
     cheapest: signature(winnerFor('CHEAPEST')),
   },
+  strategyWinners: {
+    BALANCED: winnerSummary('BALANCED'),
+    FASTEST: winnerSummary('FASTEST'),
+    CHEAPEST: winnerSummary('CHEAPEST'),
+  },
+  returnedItineraryMetrics,
   searchTruncated: details.searchTruncated,
   candidateGraphTruncated: details.candidateGraphTruncated,
   truncation: result.truncation,
@@ -224,6 +363,7 @@ console.log(JSON.stringify({
       .sort((left, right) => left.departureAt.localeCompare(right.departureAt)
         || left.originStopId.localeCompare(right.originStopId)
         || left.destinationStopId.localeCompare(right.destinationStopId))])) } : {}),
+  ...(targetChainGraphTrace ? { targetChainGraphTrace } : {}),
   ...(searchCandidateTrace !== undefined ? { searchCandidateTrace } : {}),
   searchDiagnosticsByStage,
   searchTimingsByStage,

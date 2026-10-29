@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsDeterministicOverflowSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, objectiveReservoirChildTurnsBeforeTransferPath, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsDeterministicOverflowSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch, shouldBorrowGtfsQueueShare } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 import { queryDirectedEventIndexPrototype, validateEventIndexCandidatesWithProductionTransfers } from './helpers/gtfs-event-label-prototype';
@@ -291,6 +291,34 @@ const request = (earliest: string, latest: string) => ({
   earliestDeparture: new Date(earliest), latestDeparture: new Date(latest), now: new Date('2026-10-08T00:00:00Z'),
 });
 
+test('child cursors borrow idle queue share only below global admission and hard caps', () => {
+  const base = {
+    queueShareReached: true, priorityPath: false, childCursor: true,
+    globalAdmissionLimitReached: false, globalHardLimitReached: false,
+  };
+  assert.equal(shouldBorrowGtfsQueueShare(base), true,
+    'ordinary cursor work may use globally available capacity beyond its local fairness share');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, globalAdmissionLimitReached: true }), false,
+    'ordinary cursor work preserves the reserved global priority capacity');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, globalHardLimitReached: true }), false,
+    'no queue may borrow beyond the hard global frontier cap');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, childCursor: false }), false,
+    'ordinary non-priority paths cannot borrow the queue share');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, priorityPath: true, childCursor: false }), true,
+    'validated priority paths retain their existing borrowing behavior');
+  assert.equal(shouldBorrowGtfsQueueShare({ ...base, queueShareReached: false }), false,
+    'borrowing is unnecessary while the local fairness share has room');
+});
+
+test('adapts objective-reservoir cursor cadence to the transfer-path backlog', () => {
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(0), 16);
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(7), 16);
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(8), 2);
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(15), 2);
+  assert.equal(objectiveReservoirChildTurnsBeforeTransferPath(16), 4);
+  assert.throws(() => objectiveReservoirChildTurnsBeforeTransferPath(-1), RangeError);
+});
+
 /**
  * Deliberately small independent oracle for the one-transfer fixtures below.
  * It independently enumerates every origin-to-interchange and
@@ -577,6 +605,12 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.ok(Array.isArray(JSON.parse(String(graph.routeBudgetUnderfillSample))));
   assert.equal(typeof ranked.searchStepLimit, 'number');
   assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
+  const depthPasses = JSON.parse(String(ranked.debugDepthPasses)) as Array<Record<string, unknown>>;
+  assert.equal(depthPasses.length, 1, 'debug output should expose the single zero-transfer depth pass');
+  assert.equal(depthPasses[0]?.legCount, 1);
+  assert.equal(typeof depthPasses[0]?.stepDelta, 'number');
+  assert.equal(typeof depthPasses[0]?.queueCount, 'number');
+  assert.equal(typeof depthPasses[0]?.scannedQueueItems, 'number');
   assert.equal(ranked.debugTripChainPresence, undefined, 'exact graph tracing stays absent without target IDs');
 });
 
@@ -1441,6 +1475,130 @@ test('keeps a multi-transfer connector ahead of an earlier dead-end endpoint tri
       bounded.itineraries.map(chainId))}`);
 });
 
+test('retains hash-ranked middle groups needed only by a four-leg chain under a tight graph budget', () => {
+  const { timetable, targetTripId } = timeFeasibleChainWithHashCompetingTrips();
+  timetable.stops.set('hub-c', { id: 'hub-c', name: 'Hub C', lon: 24.0285, lat: 49.8480 });
+  timetable.routes.set('middle-2', { name: 'Second middle', mode: 'BUS', transportType: 'bus' });
+
+  const egress = timetable.stopTimes.get('egress-trip')!;
+  egress[0]!.stopId = 'hub-c';
+  egress[0]!.arrivalSeconds = 8 * 3600 + 55 * 60;
+  egress[0]!.departureSeconds = 8 * 3600 + 55 * 60;
+  egress[1]!.arrivalSeconds = 9 * 3600 + 15 * 60;
+  egress[1]!.departureSeconds = 9 * 3600 + 15 * 60;
+  const secondMiddle = [
+    { stopId: 'hub-b', sequence: 1, arrivalSeconds: 8 * 3600 + 35 * 60,
+      departureSeconds: 8 * 3600 + 35 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: 'hub-c', sequence: 2, arrivalSeconds: 8 * 3600 + 45 * 60,
+      departureSeconds: 8 * 3600 + 45 * 60, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.trips.set('second-middle-trip', { routeId: 'middle-2', serviceId: 'weekday', headsign: 'Hub C' });
+  timetable.stopTimes.set('second-middle-trip', secondMiddle);
+
+  // The first middle trip is query-feasible only as part of the complete
+  // access -> middle -> second-middle -> egress chain. It cannot connect
+  // directly to the destination-side retention frontier at hub-b.
+  const rebuildStopTimesByStop = (feed: GtfsTimetableFeed) => {
+    feed.stopTimesByStop = new Map();
+    for (const [tripId, entries] of feed.stopTimes) entries.forEach((entry, index) => {
+      feed.stopTimesByStop.set(entry.stopId, [
+        ...(feed.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index },
+      ]);
+    });
+  };
+  rebuildStopTimesByStop(timetable);
+
+  const input = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0200, 49.8400] as [number, number],
+    destination: [24.0300, 49.8500] as [number, number],
+    maximumAccessWalkingMeters: 100,
+    maximumEgressWalkingMeters: 100,
+    maximumTransferWalkingMeters: 100,
+    maximumTransfers: 3,
+    maximumJourneySeconds: 2 * 60 * 60,
+    maximumWaitSeconds: 2 * 60 * 60,
+  };
+  const identify = (journey: GtfsItinerary) => journey.segments.map((segment) => segment.tripId).join(',');
+  const expected = `access-trip,${targetTripId},second-middle-trip,egress-trip`;
+  const exhaustive = findGtfsItinerariesWithStats(timetable, input, { totalSegments: 100, segmentsPerRoute: 100 });
+  assert.deepEqual(exhaustive.itineraries.map(identify), [expected], 'the exhaustive oracle contains the only feasible four-leg chain');
+
+  const runBounded = (feed: GtfsTimetableFeed, traceTripId?: string) => {
+    const graphs: GtfsCandidateGraphSnapshot[] = [];
+    const diagnostics: Array<Record<string, unknown>> = [];
+    const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+    const previousInfo = console.info;
+    let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+    try {
+      if (traceTripId) {
+        process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+        process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = traceTripId;
+        console.info = (...args: unknown[]) => {
+          try { diagnostics.push(JSON.parse(String(args[0])) as Record<string, unknown>); } catch { /* unrelated logs */ }
+        };
+      }
+      result = findGtfsItinerariesWithStats(feed, input, { totalSegments: 4, segmentsPerRoute: 1 },
+        (snapshot) => graphs.push(snapshot));
+    } finally {
+      console.info = previousInfo;
+      if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+      else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+      if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+      else process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = previousTrace;
+    }
+    return { result, graphs, diagnostics };
+  };
+  const bounded = runBounded(timetable, `${targetTripId},second-middle-trip`);
+  const boundedIds = bounded.result.itineraries.map(identify);
+  assert.equal(bounded.result.truncation.candidateGraph, true, 'the bounded graph reports truncation');
+  assert.ok(bounded.graphs[0]!.segments.length <= 4, 'the global graph cap is respected');
+  assert.ok(bounded.graphs[0]!.segments.every((segment) => segment.journey), 'the retained graph contains valid GTFS segments');
+  const graphTraceEvent = bounded.diagnostics.find((entry) => entry.stage === 'segments-built');
+  assert.ok(graphTraceEvent);
+  const trace = JSON.parse(String(graphTraceEvent.debugCandidateTripTrace)) as {
+    trips: Array<{ tripId: string; retentionTier: number | null; retentionPriorityTier: number | null;
+      retainedWholeTripGroup: boolean }>;
+  };
+  const targetTrace = trace.trips.find((trip) => trip.tripId === targetTripId);
+  assert.ok(targetTrace, 'debug trace contains the target middle trip');
+  assert.equal(targetTrace.retentionTier, 3, 'the middle trip is not an endpoint-serving trip');
+  assert.equal(targetTrace.retentionPriorityTier, 5,
+    'one-sided origin-frontier feasibility ranks this multi-hop middle trip ahead of hash-only groups');
+  const secondMiddleTrace = trace.trips.find((trip) => trip.tripId === 'second-middle-trip');
+  assert.ok(secondMiddleTrace, 'debug trace contains the destination-side middle trip');
+  assert.equal(secondMiddleTrace.retentionTier, 3, 'the destination-side middle trip is not an endpoint-serving trip');
+  assert.equal(secondMiddleTrace.retentionPriorityTier, 5,
+    'one-sided destination-frontier feasibility ranks this multi-hop middle trip ahead of hash-only groups');
+  assert.ok(bounded.graphs[0]!.segments.some((segment) => segment.journey.tripId === targetTripId),
+    'the bounded graph keeps the query-reachable middle trip instead of the hash-only decoy');
+
+  const reversed = structuredClone(timetable);
+  reversed.trips = new Map([...reversed.trips].reverse());
+  reversed.stopTimes = new Map([...reversed.stopTimes].reverse());
+  for (const [stopId, entries] of reversed.stopTimesByStop) reversed.stopTimesByStop.set(stopId, [...entries].reverse());
+  assert.deepEqual(runBounded(reversed).result.itineraries.map(identify), boundedIds,
+    'the bounded result is deterministic when GTFS trip/map enumeration order is reversed');
+
+  assert.ok(boundedIds.includes(expected),
+    `the bounded graph must preserve the exact four-leg chain; got ${JSON.stringify(boundedIds)}; `
+      + `segments=${JSON.stringify(bounded.graphs[0]!.segments.map(({ journey }) => ({
+        tripId: journey.tripId, routeId: journey.routeId, from: journey.originStop.id, to: journey.destinationStop.id,
+      })))}`);
+
+  const endpointBounded = runBounded(timetable, 'access-trip,egress-trip');
+  const endpointTraceEvent = endpointBounded.diagnostics.find((entry) => entry.stage === 'segments-built');
+  assert.ok(endpointTraceEvent);
+  const endpointTrace = JSON.parse(String(endpointTraceEvent.debugCandidateTripTrace)) as {
+    trips: Array<{ tripId: string; retentionPriorityTier: number | null }>;
+  };
+  assert.equal(endpointTrace.trips.find((trip) => trip.tripId === 'access-trip')?.retentionPriorityTier, 3,
+    'the one-sided middle tier must not demote the baseline origin-endpoint tier');
+  assert.equal(endpointTrace.trips.find((trip) => trip.tripId === 'egress-trip')?.retentionPriorityTier, 4,
+    'the one-sided middle tier must not demote the baseline destination-endpoint tier');
+});
+
 test('retains a trip-specific in-seat feeder with a sub-buffer connection under a tight graph budget', () => {
   const { timetable } = timeFeasibleChainWithHashCompetingTrips();
   timetable.routes.clear();
@@ -1748,6 +1906,95 @@ test('connector reservoir keeps a CHEAPEST winner behind faster fare-diverse con
       + `results=${JSON.stringify(expanded.result.itineraries.map(chainId))}; stats=${JSON.stringify(expanded.graph)}`);
   assert.equal(cheapestWinner(expanded.result), exhaustiveCheapestWinner,
     'the expanded connector and per-route budgets must restore the exact exhaustive CHEAPEST winner');
+});
+
+test('production connector default preserves exhaustive winners across nine distinct hubs', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.transfers = [];
+  timetable.pathways = [];
+  timetable.fareProducts = new Map();
+  timetable.fareRules = new Map();
+  timetable.stops.set('origin', { id: 'origin', name: 'Origin', lon: 24.000, lat: 49.840 });
+  timetable.stops.set('destination', { id: 'destination', name: 'Destination', lon: 24.080, lat: 49.840 });
+  for (let index = 0; index <= 9; index++) {
+    const stopId = `hub-${index}`;
+    timetable.stops.set(stopId, { id: stopId, name: `Hub ${index}`, lon: 24.0025 + index * 0.007, lat: 49.840 });
+  }
+  const addTrip = (tripId: string, routeId: string, stops: Array<[string, number]>) => {
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Destination' });
+    timetable.stopTimes.set(tripId, stops.map(([stopId, seconds], index) => ({
+      stopId, sequence: index + 1, arrivalSeconds: seconds, departureSeconds: seconds, pickupType: 0, dropOffType: 0,
+    })));
+  };
+  const fare = (id: string, routeId: string, priceMinor: number) => {
+    timetable.fareProducts!.set(id, { id, priceMinor, currency: 'UAH', transfers: 0, transferDurationSeconds: null });
+    timetable.fareRules!.set(id, [{ fareId: id, routeId }]);
+  };
+  addTrip('access-trip', 'access', [['origin', 8 * 3600], ['hub-0', 8 * 3600 + 5 * 60]]);
+  addTrip('middle-trip', 'middle', Array.from({ length: 10 }, (_, index) => [
+    `hub-${index}`, 8 * 3600 + (10 + index) * 60,
+  ] as [string, number]));
+
+  const egressArrivalMinutes = [18, 24, 27, 30, 22, 32, 34, 35, 36];
+  const egressPrices = [5_000, 3_000, 3_000, 3_000, 1_000, 3_000, 3_000, 3_000, 1];
+  for (let index = 0; index < 9; index++) {
+    const routeId = `egress-${index}`;
+    const tripId = `egress-trip-${index}`;
+    const departureSeconds = 8 * 3600 + (14 + index) * 60;
+    const arrivalSeconds = 8 * 3600 + egressArrivalMinutes[index]! * 60;
+    addTrip(tripId, routeId, [[`hub-${index + 1}`, departureSeconds], ['destination', arrivalSeconds]]);
+    fare(`fare-${index}`, routeId, egressPrices[index]!);
+  }
+  fare('access-fare', 'access', 100);
+  fare('middle-fare', 'middle', 100);
+
+  timetable.stopTimesByStop = new Map();
+  for (const [tripId, stops] of timetable.stopTimes) stops.forEach((stop, index) => {
+    timetable.stopTimesByStop.set(stop.stopId, [...(timetable.stopTimesByStop.get(stop.stopId) ?? []), { tripId, index }]);
+  });
+  const input = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.000, 49.840] as [number, number], destination: [24.080, 49.840] as [number, number],
+    maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100, maximumTransferWalkingMeters: 0,
+    maximumTransfers: 2, maximumJourneySeconds: 2 * 60 * 60, maximumWaitSeconds: 2 * 60 * 60,
+  };
+  const chainId = (journey: GtfsItinerary) => journey.segments.map((segment) => segment.tripId).join('>');
+  const toScorable = (journey: GtfsItinerary) => ({
+    id: chainId(journey), durationSeconds: journey.durationSeconds,
+    priceMinor: journey.fare?.currency === 'UAH' ? journey.fare.priceMinor : null,
+    transfers: journey.transfers, walkingMeters: journey.walkingMeters, reliability: null,
+    transferRisk: journey.transfers > 0 ? 0.3 : 0, comfort: null,
+    legs: journey.segments.map((segment) => ({ mode: segment.mode })),
+  });
+  const graphLimits = { totalSegments: 1_000, segmentsPerRoute: 100 };
+  const exhaustive = findGtfsItinerariesWithStats(timetable, input, graphLimits);
+  let boundedSnapshot: GtfsCandidateGraphSnapshot | undefined;
+  // Deliberately leave maxRouteOverflowConnectors unset to exercise its production default.
+  const bounded = findGtfsItinerariesWithStats(timetable, input, graphLimits, (snapshot) => { boundedSnapshot = snapshot; });
+  const winners = (result: ReturnType<typeof findGtfsItinerariesWithStats>) => Object.fromEntries(
+    (['FASTEST', 'CHEAPEST', 'BALANCED'] as const).map((strategy) => [strategy,
+      scoreJourneys(result.itineraries.map(toScorable), strategy)[0]?.journey.id ?? null]),
+  );
+
+  assert.equal(exhaustive.searchTruncated, false, 'the all-candidate tiny feed is a complete oracle');
+  assert.deepEqual(winners(exhaustive), {
+    FASTEST: 'access-trip>middle-trip>egress-trip-0',
+    CHEAPEST: 'access-trip>middle-trip>egress-trip-8',
+    BALANCED: 'access-trip>middle-trip>egress-trip-4',
+  }, 'the fixture gives each user strategy a distinct exhaustive winner beyond eight hubs');
+  assert.equal(bounded.truncation.candidateGraph, false,
+    `all nine connector hubs fit under the production default: ${JSON.stringify(bounded.truncation)}`);
+  const retainedHubs = new Set(boundedSnapshot!.segments
+    .filter(({ journey }) => journey.tripId === 'middle-trip' && journey.originStop.id === 'hub-0')
+    .map(({ journey }) => journey.destinationStop.id));
+  assert.equal(retainedHubs.size, 9, 'all nine distinct query-feasible connector hubs are retained');
+  assert.deepEqual(winners(bounded), winners(exhaustive), 'all three production-default strategy winners match the exhaustive oracle');
 });
 
 test('duplicate same-trip early-hub candidates cannot hide a later feasible hub at connector cap=2', () => {
@@ -2348,6 +2595,26 @@ test('bounded objective overflow sample is stable across candidate arrival order
       retainGtfsDeterministicOverflowSample(sample, candidate, 1), [] as GtfsItinerary[]);
     assert.deepEqual(retained.map(({ id }) => id), expected, `sample is order-independent (permutation ${index})`);
   }
+});
+
+test('bounded overflow sample refreshes a cached priority when an itinerary ID changes', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const mutable = { ...base, id: 'before-id-change' };
+  const other = { ...base, id: 'competing-id' };
+  retainGtfsDeterministicOverflowSample([], mutable, 1);
+
+  mutable.id = 'after-id-change';
+  const actual = retainGtfsDeterministicOverflowSample(
+    retainGtfsDeterministicOverflowSample([], mutable, 1), other, 1,
+  ).map(({ id }) => id);
+  const freshObject = { ...mutable };
+  const expected = retainGtfsDeterministicOverflowSample(
+    retainGtfsDeterministicOverflowSample([], freshObject, 1), other, 1,
+  ).map(({ id }) => id);
+  assert.deepEqual(actual, expected);
 });
 
 test('cross-provider GTFS cap preserves slow cheapest routes before filling by arrival', () => {
@@ -3305,8 +3572,372 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
   assert.equal(deliberatelyTightSearch.searchTruncated, true);
   assert.ok([...expected.keys()].some((chain) => !deliberatelyTightChains.has(chain)),
     'the exhaustive oracle identifies a feasible chain omitted by the deliberately tight bounds');
-  assert.ok(Object.values(exhaustiveWinnerIds).some((winnerId) => !deliberatelyTightChains.has(winnerId)),
-    'the fixture demonstrates why a truncated search cannot claim exhaustive strategy winners');
+});
+
+test('round-robins a late faster three-leg branch behind early trips on a dense route', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  const addStop = (id: string, lon: number, lat: number) => timetable.stops.set(id, {
+    id, name: id, lon, lat,
+  });
+  addStop('origin', 24.0201, 49.8401);
+  addStop('destination', 24.1701, 49.9401);
+  const addRoute = (routeId: string) => timetable.routes.set(routeId, {
+    name: routeId, mode: 'BUS', transportType: 'bus',
+  });
+  const addTrip = (tripId: string, routeId: string, from: string, to: string,
+    departureSeconds: number, arrivalSeconds: number) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [from, to].map((stopId, index) => ({
+      stopId, sequence: index + 1,
+      arrivalSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      departureSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+
+  const accessRoute = 'access';
+  addRoute(accessRoute);
+  const firstDeparture = 8 * 3600;
+  const branchCount = 40;
+  for (let index = 0; index < branchCount; index++) {
+    const branch = `decoy-${String(index).padStart(2, '0')}`;
+    const hubA = `${branch}-a`;
+    const hubB = `${branch}-b`;
+    const offsetLon = index * 0.002;
+    const offsetLat = index * 0.001333;
+    addStop(hubA, 24.0500 + offsetLon, 49.8600 + offsetLat);
+    addStop(hubB, 24.0550 + offsetLon, 49.8630 + offsetLat);
+    const middleRoute = `${branch}-middle`;
+    const egressRoute = `${branch}-egress`;
+    addRoute(middleRoute);
+    addRoute(egressRoute);
+    addTrip(`${branch}-access`, accessRoute, 'origin', hubA,
+      firstDeparture + index * 3, firstDeparture + index * 3 + 8 * 60);
+    addTrip(`${branch}-middle-trip`, middleRoute, hubA, hubB,
+      firstDeparture + 13 * 60, firstDeparture + 25 * 60);
+    addTrip(`${branch}-egress-trip`, egressRoute, hubB, 'destination',
+      firstDeparture + 35 * 60, firstDeparture + 80 * 60);
+  }
+
+  const target = 'target';
+  const targetHubA = `${target}-a`;
+  const targetHubB = `${target}-b`;
+  addStop(targetHubA, 24.0510, 49.8590);
+  addStop(targetHubB, 24.0560, 49.8620);
+  addRoute(`${target}-middle`);
+  addRoute(`${target}-egress`);
+  addTrip(`${target}-access`, accessRoute, 'origin', targetHubA,
+    firstDeparture + 7 * 60, firstDeparture + 15 * 60);
+  addTrip(`${target}-middle-trip`, `${target}-middle`, targetHubA, targetHubB,
+    firstDeparture + 20 * 60, firstDeparture + 27 * 60);
+  addTrip(`${target}-egress-trip`, `${target}-egress`, targetHubB, 'destination',
+    firstDeparture + 32 * 60, firstDeparture + 52 * 60);
+
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+  const previousCandidateTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+  const previousInfo = console.info;
+  const diagnostics: Array<Record<string, unknown>> = [];
+  const targetTrace = [`${target}-access`, `${target}-middle-trip`, `${target}-egress-trip`]
+    .map((tripId) => `p1:20261012:${tripId}`).join('>');
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = targetTrace;
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = `${target}-access,${target}-middle-trip`;
+  console.info = (...args: unknown[]) => {
+    if (typeof args[0] !== 'string') return;
+    try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
+  };
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    result = findGtfsItinerariesWithStats(timetable, {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T06:30:00Z'),
+      origin: [24.0201, 49.8401],
+      destination: [24.1701, 49.9401],
+      maximumAccessWalkingMeters: 100,
+      maximumEgressWalkingMeters: 100,
+      maximumTransferWalkingMeters: 100,
+      maximumTransfers: 2,
+      limit: 100,
+    }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 160, maxQueuedSearchWork: 128 });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+    if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTrace;
+    if (previousCandidateTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = previousCandidateTrace;
+  }
+
+  const targetChain = `${target}-access>${target}-middle-trip>${target}-egress-trip`;
+  const returnedChains = new Set(result.itineraries.map((journey) =>
+    journey.segments.map((segment) => segment.tripId).join('>')));
+  const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
+  const trace = ranked?.debugTripChainPresence;
+  const searchTrace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
+    pathExpandedAtStepByLegCount: Record<string, number>;
+    pathExpandedCountByLegCount: Record<string, number>;
+    nextLegConsideredAtStepByLegCount: Record<string, number>;
+    nextLegConsideredCountByLegCount: Record<string, number>;
+    nextLegFeasibleAtStepByLegCount: Record<string, number>;
+    nextLegFeasibleCountByLegCount: Record<string, number>;
+    successorPositionsByPath: Record<string, {
+      pathSegments: string[];
+      choiceCount: number;
+      firstChoiceIndex: number;
+      targetSuccessors: Array<{
+        tripKey: string;
+        choiceIndex: number;
+        cursorOffset: number;
+        withinMaxWait: boolean;
+        transferFeasible: boolean;
+      }>;
+    }>;
+    variantsByStopPair: Record<string, {
+      pathSegments: string[];
+      pathExpandedAtStep?: number;
+      nextLegConsideredAtStep?: number;
+      nextLegFeasibleAtStep?: number;
+      nextLegRejectionCounts: Record<string, number>;
+    }>;
+  }>;
+  const candidateTrace = diagnostics.find((entry) => entry.stage === 'segments-built')?.debugCandidateTripTrace;
+  assert.ok(returnedChains.has(targetChain),
+    `the later, faster feasible chain survives early slower branches; trace=${String(trace)}; candidates=${String(candidateTrace)}`);
+  assert.equal(result.truncation.searchBudget, false,
+    'the fair scheduler exhausts this bounded fixture instead of leaving the late branch pending');
+  const targetSearchTrace = searchTrace[`p1:20261012:${target}-access>p1:20261012:${target}-middle-trip>p1:20261012:${target}-egress-trip`];
+  assert.ok(targetSearchTrace, 'opt-in search tracing captures the requested target chain');
+  assert.deepEqual(Object.keys(targetSearchTrace.pathExpandedAtStepByLegCount).sort(), ['1', '2', '3']);
+  assert.deepEqual(Object.keys(targetSearchTrace.nextLegConsideredAtStepByLegCount).sort(), ['2', '3']);
+  assert.deepEqual(Object.keys(targetSearchTrace.nextLegFeasibleAtStepByLegCount).sort(), ['2', '3']);
+  assert.ok(targetSearchTrace.pathExpandedCountByLegCount['1'] > 0
+    && targetSearchTrace.pathExpandedCountByLegCount['2'] > 0
+    && targetSearchTrace.pathExpandedCountByLegCount['3'] > 0
+    && targetSearchTrace.nextLegConsideredCountByLegCount['2'] > 0
+    && targetSearchTrace.nextLegConsideredCountByLegCount['3'] > 0
+    && targetSearchTrace.nextLegFeasibleCountByLegCount['2'] > 0
+    && targetSearchTrace.nextLegFeasibleCountByLegCount['3'] > 0,
+  'trace counts target-chain prefix expansions and feasible successors at each depth');
+  assert.ok(targetSearchTrace.pathExpandedAtStepByLegCount['1'] < targetSearchTrace.nextLegConsideredAtStepByLegCount['2']
+    && targetSearchTrace.nextLegConsideredAtStepByLegCount['2'] < targetSearchTrace.pathExpandedAtStepByLegCount['2']
+    && targetSearchTrace.pathExpandedAtStepByLegCount['2'] < targetSearchTrace.nextLegConsideredAtStepByLegCount['3']
+    && targetSearchTrace.nextLegConsideredAtStepByLegCount['3'] <= targetSearchTrace.pathExpandedAtStepByLegCount['3'],
+  'trace orders intermediate expansion and records final-path admission after its last feasible successor');
+  assert.ok(Object.values(targetSearchTrace.variantsByStopPair).some((variant) =>
+    variant.pathSegments.length === 3 && variant.pathExpandedAtStep !== undefined),
+  'trace identifies the exact stop-pair variant that expands the complete target chain');
+  assert.ok(Object.values(targetSearchTrace.successorPositionsByPath).some((variant) =>
+    variant.targetSuccessors.some((successor) => successor.tripKey === `p1:20261012:${target}-middle-trip`
+      && successor.withinMaxWait && successor.transferFeasible)),
+  'trace reports the sorted choice position for a feasible target successor');
+});
+
+test('preserves a late feasible successor after the deep candidate pool saturates', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  const addStop = (id: string, lon: number, lat: number) => timetable.stops.set(id, { id, name: id, lon, lat });
+  addStop('origin', 24.0200, 49.8400);
+  addStop('hub', 24.0500, 49.8600);
+  addStop('destination', 24.1700, 49.9400);
+  const addRoute = (routeId: string) => timetable.routes.set(routeId, {
+    name: routeId, mode: 'BUS', transportType: 'bus',
+  });
+  const addTrip = (tripId: string, routeId: string, from: string, to: string,
+    departureSeconds: number, arrivalSeconds: number) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: to });
+    const entries = [from, to].map((stopId, index) => ({
+      stopId, sequence: index + 1,
+      arrivalSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      departureSeconds: index === 0 ? departureSeconds : arrivalSeconds,
+      pickupType: 0, dropOffType: 0,
+    }));
+    timetable.stopTimes.set(tripId, entries);
+    entries.forEach((entry, index) => timetable.stopTimesByStop.set(entry.stopId,
+      [...(timetable.stopTimesByStop.get(entry.stopId) ?? []), { tripId, index }]));
+  };
+
+  addRoute('access-route');
+  addTrip('access-trip', 'access-route', 'origin', 'hub', 8 * 3600, 8 * 3600 + 10 * 60);
+  const distractorCount = 40;
+  for (let index = 0; index < distractorCount; index++) {
+    const suffix = String(index).padStart(2, '0');
+    const middleStop = `middle-${suffix}`;
+    addStop(middleStop, 24.0700 + index * 0.002, 49.8700 + index * 0.0012);
+    addRoute(`middle-route-${suffix}`);
+    addRoute(`egress-route-${suffix}`);
+    const middleDeparture = 8 * 3600 + 13 * 60 + index * 20;
+    addTrip(`middle-trip-${suffix}`, `middle-route-${suffix}`, 'hub', middleStop,
+      middleDeparture, middleDeparture + 60);
+    addTrip(`egress-trip-${suffix}`, `egress-route-${suffix}`, middleStop, 'destination',
+      middleDeparture + 4 * 60, middleDeparture + 45 * 60);
+  }
+  addStop('middle-target', 24.1400, 49.9100);
+  addRoute('middle-route-target');
+  addRoute('egress-route-target');
+  addTrip('middle-trip-target', 'middle-route-target', 'hub', 'middle-target',
+    8 * 3600 + 24 * 60, 8 * 3600 + 25 * 60);
+  addTrip('egress-trip-target', 'egress-route-target', 'middle-target', 'destination',
+    8 * 3600 + 29 * 60, 8 * 3600 + 36 * 60);
+
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+  const previousInfo = console.info;
+  const diagnostics: Array<Record<string, unknown>> = [];
+  const targetChain = 'access-trip>middle-trip-target>egress-trip-target';
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = targetChain.split('>')
+    .map((tripId) => `p1:20261012:${tripId}`).join('>');
+  console.info = (...args: unknown[]) => {
+    if (typeof args[0] !== 'string') return;
+    try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
+  };
+  let result: ReturnType<typeof findGtfsItinerariesWithStats>;
+  try {
+    result = findGtfsItinerariesWithStats(timetable, {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T06:30:00Z'),
+      origin: [24.0200, 49.8400], destination: [24.1700, 49.9400],
+      maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
+      maximumTransferWalkingMeters: 10, maximumTransfers: 2, limit: 100,
+    }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 100, maxQueuedSearchWork: 100 });
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+    if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTrace;
+  }
+
+  const returnedChains = new Set(result.itineraries.map((journey) => journey.segments
+    .map((segment) => segment.tripId).join('>')));
+  const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
+  const candidatePoolReachedAtByLegCount = JSON.parse(String(ranked?.candidatePoolReachedAtStepByLegCount)) as Record<string, number>;
+  const reservoirQueueSnapshots = JSON.parse(String(ranked?.debugObjectiveReservoirQueueSnapshots ?? '[]')) as Array<{
+    phase: string; targetChain: string; legCount: number; objectiveReservoirStepsElapsed: number;
+    queueOrdinal: number; cursorNextIndex: number; queuedWorkAhead: number; queuedPriorityPathsAhead: number;
+  }>;
+  const reservoirQueueDecisions = JSON.parse(String(ranked?.debugObjectiveReservoirQueueDecisions ?? '[]')) as Array<{
+    selectedWorkKind: string; selectedTargetCursor: boolean; targetCursorNextIndex: number;
+    targetCursorQueueSequence: number; targetCursorBatchesInAgeQuantum: number; targetCursorPathKey: string;
+    selectedWorkPriority: boolean; priorityWorkStreakBefore: number; priorityWorkStreakAfter: number;
+    targetPathQueuePosition: number; targetPathPriority: boolean; selectedTargetPath: boolean;
+    pendingTransferPathCount: number; fairChildTurnsBeforePath: number; transferPathTurnLimit: number;
+    forcedTransferPathTurn: boolean; forcedPriorityFairTurn: boolean; hasPendingPriorityWork: boolean;
+    preferDeepCursor: boolean; queueSelectionScan: boolean;
+  }>;
+  const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
+    pathExpandedAtStepByLegCount: Record<string, number>;
+    nextLegFeasibleAtStepByLegCount: Record<string, number>;
+    queueEventsByLegCount: Record<string, {
+      pathEnqueued: number; pathDropped: number; pathEvicted: number;
+      childCursorEnqueued: number; childCursorDropped: number; childCursorEvicted: number;
+    }>;
+    cursorProgressByPath: Record<string, Array<{
+      searchSteps: number; objectiveReservoirStepsElapsed: number; queueOrdinal: number;
+      firstLegIndex: number; firstLegCount: number; queuedWorkPosition: number;
+      queuedWorkAhead: number; queuedChildCursorsAhead: number; queuedPriorityPathsAhead: number;
+      queuedWorkStreak: number;
+      nextIndexBefore: number; nextIndexAfter: number; nextIndexStart: number; choiceCount: number;
+      batchProcessed: number; remainingStepBudget: number; queuePending: number; queueLimit: number;
+      globalPending: number; globalLimit: number; priority: boolean; continuationQueued: boolean; stopReason: string;
+    }>>;
+    successorPositionsByPath: Record<string, { targetSuccessors: Array<{ tripKey: string; cursorOffset: number; transferFeasible: boolean }> }>;
+  }>;
+  const targetTrace = trace[`p1:20261012:access-trip>p1:20261012:middle-trip-target>p1:20261012:egress-trip-target`];
+  assert.ok(returnedChains.has(targetChain),
+    `the latest feasible chain survives bounded cursor pressure; trace=${JSON.stringify(targetTrace)}`);
+  assert.ok(targetTrace?.pathExpandedAtStepByLegCount['2'] !== undefined
+    && targetTrace.nextLegFeasibleAtStepByLegCount['3'] !== undefined,
+  'the admitted middle-trip path expands and reaches its feasible final leg');
+  assert.ok(candidatePoolReachedAtByLegCount['3'] !== undefined
+    && targetTrace.nextLegFeasibleAtStepByLegCount['2'] !== undefined
+    && targetTrace.nextLegFeasibleAtStepByLegCount['2'] > candidatePoolReachedAtByLegCount['3'],
+  'the late feasible transfer successor is considered after the three-leg pool saturates');
+  assert.ok(candidatePoolReachedAtByLegCount['3'] !== undefined
+    && targetTrace.pathExpandedAtStepByLegCount['3'] !== undefined
+    && candidatePoolReachedAtByLegCount['3'] < targetTrace.pathExpandedAtStepByLegCount['3'],
+  'the late target cursor continues to a complete journey after the three-leg candidate pool saturates');
+  assert.ok(targetTrace, 'the target chain trace is present');
+  assert.ok(Object.values(targetTrace.successorPositionsByPath).some((variant) =>
+    variant.targetSuccessors.some((successor) => successor.tripKey === 'p1:20261012:middle-trip-target'
+      && successor.cursorOffset > 6 && successor.transferFeasible)),
+  'the feasible target lies beyond the six-item queue share');
+  assert.ok((targetTrace.queueEventsByLegCount['2']?.pathEnqueued ?? 0) > 0,
+    'the feasible two-leg prefix is admitted using idle global queue capacity');
+  assert.equal(targetTrace.queueEventsByLegCount['2']?.pathEvicted ?? 0, 0,
+    'the prefix is not evicted merely because its first-leg queue reached its soft share');
+  assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
+    progress.nextIndexAfter > progress.nextIndexBefore),
+  'target child cursor diagnostics show bounded forward progress');
+  const reservoirCursorTurn = Object.values(targetTrace.cursorProgressByPath).flat().find((progress) =>
+    progress.objectiveReservoirStepsElapsed > 0);
+  assert.ok(reservoirCursorTurn, 'cursor trace captures turns taken after the objective reservoir begins');
+  assert.ok(reservoirCursorTurn.searchSteps > candidatePoolReachedAtByLegCount['3']!
+    && reservoirCursorTurn.queueOrdinal >= 0
+    && reservoirCursorTurn.firstLegCount >= reservoirCursorTurn.firstLegIndex
+    && reservoirCursorTurn.queuedWorkAhead >= 0,
+  'cursor trace exposes its search-step offset and queue service position');
+  assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
+    progress.queuedPriorityPathsAhead > 0),
+  'the late target cursor competes with already validated priority paths');
+  assert.ok(reservoirQueueSnapshots.some((snapshot) => snapshot.phase === 'activated'
+    && snapshot.targetChain.includes('access-trip>p1:20261012:middle-trip-target')
+    && snapshot.legCount === 3 && snapshot.cursorNextIndex > 0
+    && snapshot.queuedWorkAhead > 0 && snapshot.queuedPriorityPathsAhead > 0),
+  'debug trace snapshots the target cursor behind priority work at reservoir activation');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.targetCursorNextIndex > 0
+    && decision.selectedWorkKind === 'path' && !decision.selectedTargetCursor),
+  'debug trace records competing path service while the target cursor is queued');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.forcedPriorityFairTurn
+    && decision.hasPendingPriorityWork && decision.selectedTargetCursor && !decision.selectedWorkPriority),
+  'a forced fairness turn serves the waiting non-priority target cursor ahead of replenished priority cursors');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedTargetPath),
+    'debug trace records when the exact feasible target prefix receives service');
+  const schedulingEvidence = reservoirQueueDecisions.slice(-12).map((decision) => ({
+    pendingTransferPathCount: decision.pendingTransferPathCount,
+    fairChildTurnsBeforePath: decision.fairChildTurnsBeforePath,
+    transferPathTurnLimit: decision.transferPathTurnLimit,
+    forcedTransferPathTurn: decision.forcedTransferPathTurn,
+    hasPendingPriorityWork: decision.hasPendingPriorityWork,
+    selectedWorkKind: decision.selectedWorkKind,
+  }));
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.forcedTransferPathTurn
+    && decision.pendingTransferPathCount >= 16 && decision.transferPathTurnLimit === 4
+    && decision.fairChildTurnsBeforePath >= 4 && decision.selectedWorkKind === 'path'),
+  `very large transfer-path backlog gives four cursor turns per path turn; ${JSON.stringify(schedulingEvidence)}`);
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.pendingTransferPathCount >= 8
+    && decision.pendingTransferPathCount < 16 && decision.transferPathTurnLimit === 2),
+  'large but bounded transfer-path queues keep the two-child-turn cadence');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.pendingTransferPathCount < 8
+    && decision.transferPathTurnLimit === 16),
+  'small transfer-path queues keep the lower-frequency sixteen-turn cadence');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.targetCursorNextIndex > 0
+    && decision.selectedTargetCursor && decision.targetCursorQueueSequence >= 0
+    && decision.targetCursorBatchesInAgeQuantum >= 0
+    && decision.targetCursorPathKey.includes('access-trip')),
+  'debug trace records when the exact target cursor receives service');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedWorkPriority
+    && decision.priorityWorkStreakAfter > decision.priorityWorkStreakBefore),
+  'priority work consumes the same bounded burst regardless of work kind');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedWorkPriority
+    && decision.preferDeepCursor && !decision.forcedTransferPathTurn && !decision.forcedPriorityFairTurn
+    && !decision.queueSelectionScan),
+  'ordinary priority turns skip queue-wide cursor and transfer-path selection scans');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedTargetCursor
+    && !decision.selectedWorkPriority && decision.priorityWorkStreakBefore >= 1),
+  'an aged non-priority cursor gets service after a priority item');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
@@ -3594,7 +4225,7 @@ test('graph-relative lazy search matches production itinerary materialization, c
   assert.equal(lazy.searchTruncated, false, 'tiny lazy request remains complete');
   assert.equal(production.searchTruncated, false, 'tiny production request remains complete');
   const boundedProduction = findGtfsItinerariesWithStats(connectingFeed(), {
-    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 1,
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 2,
   }, { maxQueuedSearchWork: 0 });
   assert.equal(boundedProduction.truncation.searchBudget, true,
     'production reports queued GTFS work dropped at its explicit frontier bound');

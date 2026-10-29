@@ -1,3 +1,6 @@
 route_id,agency_id,route_short_name,route_long_name,route_type
 fixture-bus,fixture,99,Fixture bus,3
 fixture-tram,fixture,8,Fixture tram,0
+fixture-bus-fast,fixture,100,Fixture fastest bus,3
+fixture-bus-balanced,fixture,101,Fixture balanced bus,3
+fixture-bus-cheap,fixture,102,Fixture cheapest bus,3

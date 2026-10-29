@@ -60,6 +60,21 @@ on:
         required: false
         type: string
         default: ''
+      objective_reservoir_search_steps:
+        description: Optional diagnostic override for objective-reservoir search steps (1-200000); omit to use the production default
+        required: false
+        type: string
+        default: ''
+      debug_diagnostics:
+        description: Collect detailed per-stage/queue diagnostics; disable for production-mode timing
+        required: false
+        type: boolean
+        default: true
+      cpu_profile:
+        description: Capture Node CPU profiles for candidate replays only; profiled timings are not comparable
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -85,6 +100,9 @@ jobs:
       GTFS_REPLAY_TRACE_ROUTE_IDS: ${{ inputs.trace_route_ids || '' }}
       GTFS_REPLAY_TRACE_TRIP_IDS: ${{ inputs.trace_trip_ids || '' }}
       GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS: ${{ inputs.trace_candidate_trip_ids || '' }}
+      GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS: ${{ inputs.objective_reservoir_search_steps || '' }}
+      GTFS_REPLAY_DEBUG_DIAGNOSTICS: ${{ inputs.debug_diagnostics }}
+      GTFS_REPLAY_CPU_PROFILE: ${{ inputs.cpu_profile }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@v4
@@ -124,6 +142,9 @@ jobs:
         run: |
           set -euo pipefail
           : > replay-results.jsonl
+          if [ "$GTFS_REPLAY_CPU_PROFILE" = "true" ]; then
+            mkdir -p "$RUNNER_TEMP/marshgo-cpu-profiles"
+          fi
           for revision in baseline candidate; do
             if [ "$revision" = baseline ]; then
               replay_sha="$BASELINE_SHA"
@@ -131,6 +152,10 @@ jobs:
               replay_sha="$CANDIDATE_SHA"
             fi
             for iteration in 1 2 3; do
+              profile_node_options=''
+              if [ "$revision" = candidate ] && [ "$GTFS_REPLAY_CPU_PROFILE" = "true" ]; then
+                profile_node_options="--cpu-prof --cpu-prof-dir=$RUNNER_TEMP/marshgo-cpu-profiles"
+              fi
               (
                 cd "$revision"
                 REPLAY_GROUP="$revision" \
@@ -140,9 +165,12 @@ jobs:
                 GTFS_REPLAY_EXPECTED_SHA256="$GTFS_REPLAY_EXPECTED_SHA256" \
                 GTFS_REPLAY_DEPARTURE_START_UTC="$GTFS_REPLAY_DEPARTURE_START_UTC" \
                 GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES="$GTFS_REPLAY_DEPARTURE_WINDOW_MINUTES" \
+                GTFS_REPLAY_TRACE_TRIP_CHAINS="$GTFS_REPLAY_TRACE_TRIP_CHAINS" \
                 GTFS_REPLAY_TRACE_ROUTE_IDS="$GTFS_REPLAY_TRACE_ROUTE_IDS" \
                 GTFS_REPLAY_TRACE_TRIP_IDS="$GTFS_REPLAY_TRACE_TRIP_IDS" \
                 GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS="$GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS" \
+                GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS="$GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS" \
+                NODE_OPTIONS="$profile_node_options" \
                 ./node_modules/.bin/tsx ../candidate/scripts/replay-lviv-gtfs.mts
               ) | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), separators=(",", ":")))' >> replay-results.jsonl
             done
@@ -151,7 +179,29 @@ jobs:
         run: |
           python3 candidate/scripts/summarize-lviv-replay.py replay-results.jsonl > replay-summary.md
           printf '\nFeed attribution: [Lviv municipal GTFS open data](https://data.gov.ua/en/dataset/lviv-public-transport-gtfs-real-time). The publisher specifies attribution for reuse.\n' >> replay-summary.md
-          cat replay-summary.md >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          from pathlib import Path
+
+          report = Path("replay-summary.md").read_text().splitlines()
+          max_line_bytes = 12_000
+          max_summary_bytes = 800 * 1024
+          selected = []
+          total_bytes = 0
+          omitted_lines = 0
+          for line in report:
+              encoded = (line + "\n").encode()
+              if len(encoded) > max_line_bytes or total_bytes + len(encoded) > max_summary_bytes:
+                  omitted_lines += 1
+                  continue
+              selected.append(line)
+              total_bytes += len(encoded)
+          if omitted_lines:
+              selected.extend([
+                  "",
+                  f"{omitted_lines} oversized diagnostic line(s) omitted from this summary; the complete replay-summary.md and JSONL are attached as workflow artifacts.",
+              ])
+          print("\n".join(selected))
+          PY
       - name: Upload replay evidence
         uses: actions/upload-artifact@v4
         with:
@@ -160,3 +210,11 @@ jobs:
             replay-results.jsonl
             replay-summary.md
           retention-days: 14
+      - name: Upload candidate CPU profiles
+        if: ${{ inputs.cpu_profile }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: frozen-lviv-gtfs-cpu-profiles-${{ inputs.candidate_sha || github.sha }}
+          path: ${{ runner.temp }}/marshgo-cpu-profiles/*.cpuprofile
+          if-no-files-found: error
+          retention-days: 3

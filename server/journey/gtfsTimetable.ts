@@ -36,6 +36,14 @@ const MAX_ROUTE_GEOMETRY_POINTS = 500;
 // preserves a fair slice for each line and makes truncation explicit.
 const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
+const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
+const MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST = 1;
+const MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH = 16;
+const MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH = 2;
+const MAX_OBJECTIVE_RESERVOIR_HIGH_BACKLOG_CHILD_TURNS_BEFORE_PATH = 4;
+const OBJECTIVE_RESERVOIR_TRANSFER_PATH_BACKLOG_THRESHOLD = 8;
+const OBJECTIVE_RESERVOIR_TRANSFER_PATH_HIGH_BACKLOG_THRESHOLD = 16;
+const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 4;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
 const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
 export const MAX_GTFS_TRANSFERS = 4;
@@ -46,6 +54,32 @@ export const DEFAULT_MAX_EGRESS_WALKING_METERS = 1000;
 export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
 const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
 const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
+
+/** Allow bounded queues to borrow unused local share only before their global admission ceiling. */
+export function shouldBorrowGtfsQueueShare(input: {
+  queueShareReached: boolean;
+  priorityPath: boolean;
+  childCursor: boolean;
+  globalAdmissionLimitReached: boolean;
+  globalHardLimitReached: boolean;
+}): boolean {
+  return input.queueShareReached && !input.globalAdmissionLimitReached && !input.globalHardLimitReached
+    && (input.priorityPath || input.childCursor);
+}
+
+/** Balance cursor discovery against prefix completion as the reservoir backlog grows. */
+export function objectiveReservoirChildTurnsBeforeTransferPath(pendingTransferPaths: number): number {
+  if (!Number.isSafeInteger(pendingTransferPaths) || pendingTransferPaths < 0) {
+    throw new RangeError('pendingTransferPaths must be a non-negative safe integer');
+  }
+  if (pendingTransferPaths >= OBJECTIVE_RESERVOIR_TRANSFER_PATH_HIGH_BACKLOG_THRESHOLD) {
+    return MAX_OBJECTIVE_RESERVOIR_HIGH_BACKLOG_CHILD_TURNS_BEFORE_PATH;
+  }
+  if (pendingTransferPaths >= OBJECTIVE_RESERVOIR_TRANSFER_PATH_BACKLOG_THRESHOLD) {
+    return MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH;
+  }
+  return MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH;
+}
 
 type CsvRow = Record<string, string>;
 export type TransitJourneyMode = 'BUS' | 'MINIBUS' | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'FERRY' | 'FUNICULAR';
@@ -479,7 +513,7 @@ type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
 const MAX_ROUTE_OVERFLOW_SEGMENTS = 200;
 // Keep connector discovery independent from endpoint fallbacks, but prevent
 // dense routes from expanding the search graph with hundreds of middle trips.
-const MAX_ROUTE_OVERFLOW_CONNECTORS = 8;
+const MAX_ROUTE_OVERFLOW_CONNECTORS = 9;
 
 // Keep the same deterministic, order-independent sample for a feed snapshot.
 // GTFS feeds are often written in departure-time order, so a simple prefix cap
@@ -490,6 +524,16 @@ function gtfsSegmentRetentionPriority(key: string): number {
     hash = Math.imul(hash ^ key.charCodeAt(index), 0x01000193);
   }
   return hash >>> 0;
+}
+
+const gtfsItineraryRetentionPriorities = new WeakMap<GtfsItinerary, { id: string; priority: number }>();
+
+function gtfsItineraryRetentionPriority(itinerary: GtfsItinerary): number {
+  const cached = gtfsItineraryRetentionPriorities.get(itinerary);
+  if (cached?.id === itinerary.id) return cached.priority;
+  const priority = gtfsSegmentRetentionPriority(itinerary.id);
+  gtfsItineraryRetentionPriorities.set(itinerary, { id: itinerary.id, priority });
+  return priority;
 }
 
 /**
@@ -599,9 +643,10 @@ export function retainGtfsDeterministicOverflowSample(
   // the retained candidates are ranked by the shared scorer after collection.
   // Compute each ID's hash once per update. Re-hashing both sides of the sort
   // comparator for every comparison made the hot overflow path needlessly
-  // expensive on dense feeds.
+  // expensive on dense feeds. Itineraries can remain in the bounded sample
+  // across many updates, so reuse their stable identity hash as well.
   return [...unique.values()]
-    .map((itinerary) => ({ itinerary, priority: gtfsSegmentRetentionPriority(itinerary.id) }))
+    .map((itinerary) => ({ itinerary, priority: gtfsItineraryRetentionPriority(itinerary) }))
     .sort((left, right) => left.priority - right.priority
       || compareStableId(left.itinerary.id, right.itinerary.id))
     .slice(0, maximum)
@@ -1687,6 +1732,14 @@ export function findGtfsItinerariesWithStats(
   observeCandidateGraph?: GtfsCandidateGraphObserver,
 ): GtfsItinerarySearchResult {
   const debugStartedAt = Date.now();
+  const debugDepthPassSummaries: Array<Record<string, number | string | boolean>> = [];
+  let activeDebugDepthPass: {
+    queueRounds: number;
+    visitedQueues: number;
+    scannedQueueItems: number;
+    middleQueueRemovals: number;
+    peakPendingWork: number;
+  } | undefined;
   const debugStage = (stage: string, details: Record<string, number | string> = {}) => {
     if (process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1') {
       const memory = process.memoryUsage();
@@ -1694,6 +1747,7 @@ export function findGtfsItinerariesWithStats(
         heapUsedBytes: memory.heapUsed, rssBytes: memory.rss, ...details }));
     }
   };
+  let searchSteps = 0;
   const debugTraceTripChains = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
     ? (process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS ?? '').split('|')
       .filter((tripChain) => tripChain.length > 0 && tripChain.length <= 512).slice(0, 16)
@@ -1701,6 +1755,272 @@ export function findGtfsItinerariesWithStats(
   const debugTraceTripChainSet = debugTraceTripChains.length > 0 ? new Set(debugTraceTripChains) : undefined;
   const debugCompletedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
   const debugGeneratedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
+  const debugTraceTripChainParts = debugTraceTripChains.map((tripChain) => tripChain.split('>'));
+  const debugObjectiveReservoirQueueSnapshots: Array<Record<string, number | string | boolean>> = [];
+  const debugObjectiveReservoirQueueDecisions: Array<Record<string, number | string | boolean>> = [];
+  let debugObjectiveReservoirQueueDecisionWriteIndex = 0;
+  const recordDebugObjectiveReservoirQueueDecision = (decision: Record<string, number | string | boolean>) => {
+    if (debugObjectiveReservoirQueueDecisions.length < 512) {
+      debugObjectiveReservoirQueueDecisions.push(decision);
+      if (debugObjectiveReservoirQueueDecisions.length === 512) debugObjectiveReservoirQueueDecisionWriteIndex = 0;
+      return;
+    }
+    debugObjectiveReservoirQueueDecisions[debugObjectiveReservoirQueueDecisionWriteIndex] = decision;
+    debugObjectiveReservoirQueueDecisionWriteIndex = (debugObjectiveReservoirQueueDecisionWriteIndex + 1) % 512;
+  };
+  const debugTripChainSearchTrace = new Map<string, {
+    pathExpandedAtStepByLegCount: Record<string, number>;
+    pathExpandedCountByLegCount: Record<string, number>;
+    nextLegConsideredAtStepByLegCount: Record<string, number>;
+    nextLegConsideredCountByLegCount: Record<string, number>;
+    nextLegFeasibleAtStepByLegCount: Record<string, number>;
+    nextLegFeasibleCountByLegCount: Record<string, number>;
+    queueEventsByLegCount: Record<string, {
+      pathEnqueued: number;
+      pathDropped: number;
+      pathEvicted: number;
+      childCursorEnqueued: number;
+      childCursorDropped: number;
+      childCursorEvicted: number;
+    }>;
+    queueAdmissionDropsByLegCount: Record<string, Array<{
+      globalPending: number;
+      globalLimit: number;
+      queuePending: number;
+      queueLimit: number;
+      globalLimitReached: boolean;
+      queueLimitReached: boolean;
+    }>>;
+    cursorProgressByPath: Record<string, Array<{
+      searchSteps: number;
+      objectiveReservoirStepsElapsed: number;
+      queueOrdinal: number;
+      firstLegIndex: number;
+      firstLegCount: number;
+      queuedWorkPosition: number;
+      queuedWorkAhead: number;
+      queuedChildCursorsAhead: number;
+      queuedPriorityPathsAhead: number;
+      queuedWorkStreak: number;
+      nextIndexBefore: number;
+      nextIndexAfter: number;
+      nextIndexStart: number;
+      choiceCount: number;
+      batchProcessed: number;
+      remainingStepBudget: number;
+      queuePending: number;
+      queueLimit: number;
+      globalPending: number;
+      globalLimit: number;
+      priority: boolean;
+      continuationQueued: boolean;
+      stopReason: string;
+    }>>;
+    successorPositionsByPath: Record<string, {
+      pathSegments: string[];
+      choiceCount: number;
+      firstChoiceIndex: number;
+      targetSuccessors: Array<{
+        tripKey: string;
+        choiceIndex: number;
+        cursorOffset: number;
+        withinMaxWait: boolean;
+        transferFeasible: boolean;
+      }>;
+    }>;
+    variantsByStopPair: Record<string, {
+      pathSegments: string[];
+      pathExpandedAtStep?: number;
+      nextLegConsideredAtStep?: number;
+      nextLegFeasibleAtStep?: number;
+      nextLegRejectionCounts: Record<string, number>;
+    }>;
+  }>();
+  const recordDebugTripChainSearch = (path: readonly GtfsDirectJourney[], event: 'path-expanded' | 'next-leg-considered' | 'next-leg-feasible', rejectionReasons: readonly string[] = []) => {
+    if (!debugTraceTripChainSet || path.length > 5) return;
+    for (let index = 0; index < debugTraceTripChainParts.length; index++) {
+      const target = debugTraceTripChainParts[index]!;
+      if (path.length > target.length) continue;
+      let matches = true;
+      for (let leg = 0; leg < path.length; leg++) {
+        const segment = path[leg]!;
+        if (`${segment.providerId}:${segment.serviceDate}:${segment.tripId}` !== target[leg]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+      const targetKey = debugTraceTripChains[index]!;
+      const trace = debugTripChainSearchTrace.get(targetKey) ?? {
+        pathExpandedAtStepByLegCount: {},
+        pathExpandedCountByLegCount: {},
+        nextLegConsideredAtStepByLegCount: {},
+        nextLegConsideredCountByLegCount: {},
+        nextLegFeasibleAtStepByLegCount: {},
+        nextLegFeasibleCountByLegCount: {},
+        queueEventsByLegCount: {},
+        queueAdmissionDropsByLegCount: {},
+        cursorProgressByPath: {},
+        successorPositionsByPath: {},
+        variantsByStopPair: {},
+      };
+      const legCount = String(path.length);
+      const field = event === 'path-expanded' ? trace.pathExpandedAtStepByLegCount
+        : event === 'next-leg-considered' ? trace.nextLegConsideredAtStepByLegCount
+          : trace.nextLegFeasibleAtStepByLegCount;
+      const countField = event === 'path-expanded' ? trace.pathExpandedCountByLegCount
+        : event === 'next-leg-considered' ? trace.nextLegConsideredCountByLegCount
+          : trace.nextLegFeasibleCountByLegCount;
+      field[legCount] ??= searchSteps;
+      countField[legCount] = (countField[legCount] ?? 0) + 1;
+      const pathSegments = path.map((segment) =>
+        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`);
+      const variantKey = pathSegments.join('>');
+      let variant = trace.variantsByStopPair[variantKey];
+      if (!variant && Object.keys(trace.variantsByStopPair).length < 128) {
+        variant = trace.variantsByStopPair[variantKey] = { pathSegments, nextLegRejectionCounts: {} };
+      }
+      if (variant) {
+        if (event === 'path-expanded') variant.pathExpandedAtStep ??= searchSteps;
+        if (event === 'next-leg-considered') {
+          variant.nextLegConsideredAtStep ??= searchSteps;
+          for (const reason of rejectionReasons) {
+            variant.nextLegRejectionCounts[reason] = (variant.nextLegRejectionCounts[reason] ?? 0) + 1;
+          }
+        }
+        if (event === 'next-leg-feasible') variant.nextLegFeasibleAtStep ??= searchSteps;
+      }
+      debugTripChainSearchTrace.set(targetKey, trace);
+    }
+  };
+  const recordDebugTripChainQueueEvent = (
+    path: readonly GtfsDirectJourney[],
+    event: 'pathEnqueued' | 'pathDropped' | 'pathEvicted' | 'childCursorEnqueued' | 'childCursorDropped' | 'childCursorEvicted',
+    admission?: {
+      globalPending: number;
+      globalLimit: number;
+      globalAdmissionLimit?: number;
+      queuePending: number;
+      queueLimit: number;
+    },
+  ) => {
+    if (!debugTraceTripChainSet || path.length > 5) return;
+    for (let index = 0; index < debugTraceTripChainParts.length; index++) {
+      const target = debugTraceTripChainParts[index]!;
+      if (path.length > target.length) continue;
+      let matches = true;
+      for (let leg = 0; leg < path.length; leg++) {
+        const segment = path[leg]!;
+        if (`${segment.providerId}:${segment.serviceDate}:${segment.tripId}` !== target[leg]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+      const targetKey = debugTraceTripChains[index]!;
+      const trace = debugTripChainSearchTrace.get(targetKey) ?? {
+        pathExpandedAtStepByLegCount: {},
+        pathExpandedCountByLegCount: {},
+        nextLegConsideredAtStepByLegCount: {},
+        nextLegConsideredCountByLegCount: {},
+        nextLegFeasibleAtStepByLegCount: {},
+        nextLegFeasibleCountByLegCount: {},
+        queueEventsByLegCount: {},
+        queueAdmissionDropsByLegCount: {},
+        cursorProgressByPath: {},
+        successorPositionsByPath: {},
+        variantsByStopPair: {},
+      };
+      const legCount = String(path.length);
+      const counts = trace.queueEventsByLegCount[legCount] ??= {
+        pathEnqueued: 0, pathDropped: 0, pathEvicted: 0,
+        childCursorEnqueued: 0, childCursorDropped: 0, childCursorEvicted: 0,
+      };
+      counts[event]++;
+      if (admission && (event === 'pathDropped' || event === 'childCursorDropped')) {
+        const drops = trace.queueAdmissionDropsByLegCount[legCount] ??= [];
+        if (drops.length < 16) drops.push({
+          ...admission,
+          globalLimitReached: admission.globalPending >= admission.globalLimit,
+          queueLimitReached: admission.queuePending >= admission.queueLimit,
+        });
+      }
+      debugTripChainSearchTrace.set(targetKey, trace);
+    }
+  };
+  const recordDebugTripChainCursorProgress = (
+    path: readonly GtfsDirectJourney[],
+    progress: {
+      searchSteps: number; objectiveReservoirStepsElapsed: number; queueOrdinal: number;
+      firstLegIndex: number; firstLegCount: number; queuedWorkPosition: number;
+      queuedWorkAhead: number; queuedChildCursorsAhead: number; queuedPriorityPathsAhead: number;
+      queuedWorkStreak: number;
+      nextIndexBefore: number; nextIndexAfter: number; nextIndexStart: number; choiceCount: number;
+      batchProcessed: number; remainingStepBudget: number; queuePending: number; queueLimit: number;
+      globalPending: number; globalLimit: number; priority: boolean; continuationQueued: boolean; stopReason: string;
+    },
+  ) => {
+    if (!debugTraceTripChainSet || path.length > 5) return;
+    for (let index = 0; index < debugTraceTripChainParts.length; index++) {
+      const target = debugTraceTripChainParts[index]!;
+      if (path.length >= target.length) continue;
+      let matches = true;
+      for (let leg = 0; leg < path.length; leg++) {
+        const segment = path[leg]!;
+        if (`${segment.providerId}:${segment.serviceDate}:${segment.tripId}` !== target[leg]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+      const targetKey = debugTraceTripChains[index]!;
+      const trace = debugTripChainSearchTrace.get(targetKey);
+      if (!trace) continue;
+      const pathSegments = path.map((segment) =>
+        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`);
+      const pathKey = pathSegments.join('>');
+      if (Object.keys(trace.cursorProgressByPath).length >= 128 && !trace.cursorProgressByPath[pathKey]) continue;
+      const snapshots = trace.cursorProgressByPath[pathKey] ??= [];
+      if (snapshots.length < 24) snapshots.push(progress);
+      debugTripChainSearchTrace.set(targetKey, trace);
+    }
+  };
+  const recordDebugTargetSuccessorPositions = (path: readonly GtfsDirectJourney[], choices: readonly GtfsDirectJourney[], firstChoiceIndex: number, latestNext: number) => {
+    if (!debugTraceTripChainSet || path.length >= 5) return;
+    for (let targetIndex = 0; targetIndex < debugTraceTripChainParts.length; targetIndex++) {
+      const target = debugTraceTripChainParts[targetIndex]!;
+      if (path.length >= target.length) continue;
+      let matches = true;
+      for (let leg = 0; leg < path.length; leg++) {
+        const segment = path[leg]!;
+        if (`${segment.providerId}:${segment.serviceDate}:${segment.tripId}` !== target[leg]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+      const targetKey = debugTraceTripChains[targetIndex]!;
+      const trace = debugTripChainSearchTrace.get(targetKey);
+      if (!trace) continue;
+      const pathSegments = path.map((segment) =>
+        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`);
+      const pathKey = pathSegments.join('>');
+      if (Object.keys(trace.successorPositionsByPath).length >= 128
+        && !trace.successorPositionsByPath[pathKey]) continue;
+      const targetTripKey = target[path.length];
+      const targetSuccessors: Array<{ tripKey: string; choiceIndex: number; cursorOffset: number; withinMaxWait: boolean; transferFeasible: boolean }> = [];
+      for (let choiceIndex = firstChoiceIndex; choiceIndex < choices.length; choiceIndex++) {
+        const candidate = choices[choiceIndex]!;
+        const tripKey = `${candidate.providerId}:${candidate.serviceDate}:${candidate.tripId}`;
+        if (tripKey !== targetTripKey) continue;
+        targetSuccessors.push({ tripKey, choiceIndex, cursorOffset: choiceIndex - firstChoiceIndex,
+          withinMaxWait: candidate.departureAt.getTime() <= latestNext,
+          transferFeasible: candidate.departureAt.getTime() <= latestNext && transferDecision(path.at(-1)!, candidate).feasible });
+      }
+      trace.successorPositionsByPath[pathKey] = { pathSegments, choiceCount: choices.length,
+        firstChoiceIndex, targetSuccessors };
+    }
+  };
   const debugTraceCandidateTrips = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
     ? [...new Set((process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS ?? '')
       .split(',').map((tripId) => tripId.trim())
@@ -2211,14 +2531,23 @@ export function findGtfsItinerariesWithStats(
   // reach, so a different platform stop ID can participate in the bounded
   // retention hint without scanning the full event set per candidate segment.
   const originRetentionEventsByReachableStop = new Map<string, QueryReachabilityEvent[]>();
-  const indexedOriginEvents = new Set<QueryReachabilityEvent>();
+  const seenOriginEvents = new Set<QueryReachabilityEvent>();
+  const indexOriginEventAtStop = (event: QueryReachabilityEvent, stopId: string) => {
+    const reachableEvents = originRetentionEventsByReachableStop.get(stopId) ?? [];
+    reachableEvents.push(event);
+    originRetentionEventsByReachableStop.set(stopId, reachableEvents);
+  };
   for (const events of originRetentionEvents.values()) for (const event of events) {
-    if (indexedOriginEvents.has(event)) continue;
-    indexedOriginEvents.add(event);
-    for (const stopId of new Set([event.canonicalStopId, event.stopId, ...reachablePathwayNodes(event.pathwayStopId)])) {
-      const reachableEvents = originRetentionEventsByReachableStop.get(stopId) ?? [];
-      reachableEvents.push(event);
-      originRetentionEventsByReachableStop.set(stopId, reachableEvents);
+    if (seenOriginEvents.has(event)) continue;
+    seenOriginEvents.add(event);
+    // The former union Set copied every reachable pathway node into a second
+    // Set per event. The pathway result is already a Set; skip only its two
+    // possible direct IDs while preserving the original insertion order.
+    indexOriginEventAtStop(event, event.canonicalStopId);
+    if (event.stopId !== event.canonicalStopId) indexOriginEventAtStop(event, event.stopId);
+    for (const stopId of reachablePathwayNodes(event.pathwayStopId)) {
+      if (stopId === event.canonicalStopId || stopId === event.stopId) continue;
+      indexOriginEventAtStop(event, stopId);
     }
   }
   // The journey search permits a same-provider walking transfer between
@@ -2259,9 +2588,8 @@ export function findGtfsItinerariesWithStats(
   for (const events of destinationRetentionEvents.values()) for (const event of events) {
     const eventStop = feed.stops.get(event.canonicalStopId);
     if (!eventStop) continue;
-    for (const stopId of new Set([event.canonicalStopId, ...reachablePathwayNodes(event.pathwayStopId)])) {
-      indexDestinationEvent(event, stopId);
-    }
+    indexDestinationEvent(event, event.canonicalStopId);
+    for (const stopId of reachablePathwayNodes(event.pathwayStopId)) indexDestinationEvent(event, stopId);
     for (const nearbyStopId of nearbyTransferStopIds(eventStop, event.routeId)) indexDestinationEvent(event, nearbyStopId);
   }
   for (const events of originRetentionEventsByReachableStop.values()) events.sort((a, b) => a.at - b.at
@@ -2821,6 +3149,7 @@ export function findGtfsItinerariesWithStats(
         const evaluatedConnectorHubs = new Set<string>();
         const diverseConnectorProbeHubs = new Set<string>();
         let temporallyConnectsQueryEnds = false;
+        let connectsOneQueryFrontier = false;
         let bestConnector: { segment: RetainedGtfsSegment; arrivalAt: number } | undefined;
         let feasibleConnectorEvaluations = 0;
         let connectorScanCursor = 0;
@@ -2851,17 +3180,17 @@ export function findGtfsItinerariesWithStats(
           }
           if (!isDiverseConnectorProbe && bestConnector
             && candidate.arrivalAt.getTime() > bestConnector.arrivalAt) continue;
-          if (hasPriorEvent(candidate, minimumTransferBufferSeconds)) {
+          const connectsFromOriginFrontier = hasPriorEvent(candidate, minimumTransferBufferSeconds);
+          if (connectsFromOriginFrontier) {
+            connectsOneQueryFrontier = true;
             const onwardArrival = earliestQueryArrivalAfterSegment(candidate, minimumTransferBufferSeconds);
             if (onwardArrival !== null) {
               feasibleConnectorEvaluations++;
               evaluatedConnectorHubs.add(canonicalTransferHubKey(candidate));
               debugConnectorEvalIndex?.set(candidate, feasibleConnectorEvaluations);
               temporallyConnectsQueryEnds = true;
-              const retainedConnectors = connectorOverflow.toSortedArray();
-              const connectorReservoirWasFull = retainedConnectors.length >= connectorOverflowCapacity;
-              const candidateAlreadyRetained = retainedConnectors.some((retained) =>
-                retainedCandidateKey(retained) === retainedCandidateKey(candidate));
+              const connectorReservoirWasFull = connectorOverflow.length >= connectorOverflowCapacity;
+              const candidateAlreadyRetained = connectorOverflow.has(candidate);
               connectorOverflow.consider(candidate);
               // A bounded connector sample can omit a feasible alternative even
               // when the estimated graph budget itself is not exhausted. Only
@@ -2874,6 +3203,12 @@ export function findGtfsItinerariesWithStats(
                 bestConnector = { segment: candidate, arrivalAt: onwardArrival };
               }
             }
+          } else if (!connectsOneQueryFrontier && hasNextEvent(candidate, minimumTransferBufferSeconds)) {
+            // A middle leg in a multi-transfer journey may only be reachable
+            // from the origin side, or may only feed the destination side.
+            // Keep that one-sided frontier evidence even when this segment
+            // cannot directly bridge both query frontiers on its own.
+            connectsOneQueryFrontier = true;
           }
         }
         overflowSegmentsByRoute.set(trip.routeId, overflow);
@@ -2903,7 +3238,8 @@ export function findGtfsItinerariesWithStats(
           : connectsOppositeQueryFrontier ? 1
             : temporallyConnectsQueryEnds ? 2
               : retentionTier === 1 ? 3
-                : retentionTier === 2 ? 4 : 5;
+                : retentionTier === 2 ? 4
+                  : connectsOneQueryFrontier ? 5 : 6;
         const routeCandidates = segmentsByRoute.get(trip.routeId) ?? [];
         // When a bounded route budget cannot retain every origin-serving trip,
         // prefer earlier arrivals at query-relevant corridor stops. A direct
@@ -3447,7 +3783,7 @@ export function findGtfsItinerariesWithStats(
   // Once a leg-count pool is full, keep searching a bounded window so late
   // objective improvements can enter the reservoirs without scanning the
   // entire dense feed. Any remaining work is still reported as truncated.
-  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = graphLimits.maxObjectiveReservoirSearchSteps ?? 25_000;
+  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = graphLimits.maxObjectiveReservoirSearchSteps ?? 30_000;
   if (!Number.isSafeInteger(MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS) || MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS < 0) {
     throw new RangeError('maxObjectiveReservoirSearchSteps must be a non-negative safe integer');
   }
@@ -3705,7 +4041,6 @@ export function findGtfsItinerariesWithStats(
   // Bound both graph expansion and queued alternatives. Search is round-robin
   // across first-leg route groups: a dense early route cannot spend the whole
   // budget before later lines contribute candidates to fastest/cheapest/balanced.
-  let searchSteps = 0;
   // Dense urban feeds can require hundreds of thousands of bounded cursor
   // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
   // but do not cut off ordinary city results at the first-route frontier.
@@ -3718,6 +4053,12 @@ export function findGtfsItinerariesWithStats(
   // pending frontier bounded independently, and disclose any dropped work via
   // the existing search-budget truncation flag.
   const MAX_QUEUED_SEARCH_WORK = graphLimits.maxQueuedSearchWork ?? 10_000;
+  // Keep a bounded slice of the global frontier available for paths whose
+  // transfers are already validated; ordinary cursors cannot occupy the whole
+  // hard cap before those high-value prefixes are discovered.
+  const PRIORITY_SEARCH_WORK_RESERVE = Math.min(1_000, Math.floor(MAX_QUEUED_SEARCH_WORK / 10));
+  const REGULAR_QUEUED_SEARCH_WORK_LIMIT = Math.max(0,
+    MAX_QUEUED_SEARCH_WORK - PRIORITY_SEARCH_WORK_RESERVE);
   let queueWorkDropped = false;
   let globalBudgetPreventedDepthPass = false;
   let maximumQueuedSearchWork = 0;
@@ -3802,9 +4143,10 @@ export function findGtfsItinerariesWithStats(
     observeCandidateGraph(snapshot);
   }
 
-  type PathWork = { kind: 'path'; path: GtfsDirectJourney[] };
+  type PathWork = { kind: 'path'; path: GtfsDirectJourney[]; priority: boolean };
   type ChildWork = {
     kind: 'children';
+    priority: boolean;
     path: GtfsDirectJourney[];
     last: GtfsDirectJourney;
     choices: GtfsDirectJourney[];
@@ -3813,28 +4155,230 @@ export function findGtfsItinerariesWithStats(
     remainingLegs: number;
     previousIds: Set<string>;
     visitedStops: Set<string>;
+    queueSequence: number;
+    batchesInAgeQuantum: number;
   };
   type SearchWork = PathWork | ChildWork;
   type RouteSearchQueue = {
+    queueOrdinal: number;
     firstLegs: GtfsDirectJourney[];
     firstLegIndex: number;
     work: SearchWork[];
     workIndex: number;
     preferFirstLeg: boolean;
+    preferDeepCursor: boolean;
+    reservoirQueuedWorkStreak: number;
+    reservoirPriorityWorkStreak: number;
+    reservoirFairChildTurnsSinceTransferPathTurn: number;
+    nextChildCursorSequence: number;
+    pendingTransferPathCount: number;
+    maxQueuedWork: number;
   };
+  const isTransferPathWork = (work: SearchWork): work is PathWork =>
+    work.kind === 'path' && work.path.length > 1;
+  const assertQueueTransferPathCount = (queue: RouteSearchQueue) => {
+    if (process.env.MARSHGO_GTFS_SEARCH_DEBUG !== '1') return;
+    let actualCount = 0;
+    for (let index = queue.workIndex; index < queue.work.length; index++) {
+      if (isTransferPathWork(queue.work[index]!)) actualCount++;
+    }
+    if (actualCount !== queue.pendingTransferPathCount) {
+      throw new Error(`GTFS pending transfer-path count mismatch: ${queue.pendingTransferPathCount} !== ${actualCount}`);
+    }
+  };
+  const removeQueuedWorkAt = (queue: RouteSearchQueue, index: number): SearchWork => {
+    const [removed] = queue.work.splice(index, 1);
+    if (!removed) throw new Error('Cannot remove missing GTFS queued work');
+    if (isTransferPathWork(removed)) queue.pendingTransferPathCount--;
+    assertQueueTransferPathCount(queue);
+    return removed;
+  };
+  const recordDebugObjectiveReservoirQueueSnapshot = (
+    phase: 'activated' | 'cutoff', legCount: number, queues: RouteSearchQueue[], reservoirStartedAt: number,
+  ) => {
+    if (!debugTraceTripChainSet) return;
+    const snapshotsByTarget = new Map<number, number>();
+    for (const queue of queues) {
+      for (let workIndex = queue.workIndex; workIndex < queue.work.length; workIndex++) {
+        if (debugObjectiveReservoirQueueSnapshots.length >= 256) return;
+        const work = queue.work[workIndex]!;
+        if (work.kind !== 'children') continue;
+        let targetIndex = -1;
+        for (let index = 0; index < debugTraceTripChainParts.length; index++) {
+          const target = debugTraceTripChainParts[index]!;
+          if (work.path.length >= target.length) continue;
+          let matches = true;
+          for (let leg = 0; leg < work.path.length; leg++) {
+            const segment = work.path[leg]!;
+            if (`${segment.providerId}:${segment.serviceDate}:${segment.tripId}` !== target[leg]) {
+              matches = false;
+              break;
+            }
+          }
+          if (matches) { targetIndex = index; break; }
+        }
+        if (targetIndex < 0 || (snapshotsByTarget.get(targetIndex) ?? 0) >= 8) continue;
+        const queuedWorkAhead = workIndex - queue.workIndex;
+        const queuedWorkBeforeCursor = queue.work.slice(queue.workIndex, workIndex);
+        const pathKey = work.path.map((segment) =>
+          `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`).join('>');
+        debugObjectiveReservoirQueueSnapshots.push({
+          phase,
+          targetChain: debugTraceTripChains[targetIndex]!,
+          legCount,
+          searchSteps,
+          objectiveReservoirStepsElapsed: searchSteps - reservoirStartedAt,
+          queueOrdinal: queue.queueOrdinal,
+          pathKey,
+          cursorNextIndex: work.nextIndex,
+          cursorChoiceCount: work.choices.length,
+          queuedWorkPosition: workIndex,
+          queuedWorkAhead,
+          queuedChildCursorsAhead: queuedWorkBeforeCursor.filter((pending) => pending.kind === 'children').length,
+          queuedPriorityPathsAhead: queuedWorkBeforeCursor.filter((pending) => pending.kind === 'path' && pending.priority).length,
+          queuePending: queue.work.length - queue.workIndex,
+          firstLegIndex: queue.firstLegIndex,
+          firstLegCount: queue.firstLegs.length,
+          priorityWorkStreak: queue.reservoirPriorityWorkStreak,
+        });
+        snapshotsByTarget.set(targetIndex, (snapshotsByTarget.get(targetIndex) ?? 0) + 1);
+      }
+    }
+  };
+  let activeQueues: RouteSearchQueue[] = [];
   const pausedDepthPassQueues = new Map<number, RouteSearchQueue[]>();
   const truncatedDepthPasses = new Set<number>();
-  const enqueueWork = (queue: RouteSearchQueue, work: SearchWork) => {
-    if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK) {
+  const evictOldestQueuedPath = (queue: RouteSearchQueue) => {
+    for (let index = queue.workIndex; index < queue.work.length; index++) {
+      const evicted = queue.work[index]!;
+      if (evicted.kind !== 'path' || evicted.priority) continue;
+      recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
+      removeQueuedWorkAt(queue, index);
+      queuesPendingWork--;
       queueWorkDropped = true;
-      return;
+      return true;
     }
-    queue.work.push(work);
+    return false;
+  };
+  const evictDeeperPriorityPath = (queue: RouteSearchQueue, cursorDepth: number) => {
+    for (let index = queue.workIndex; index < queue.work.length; index++) {
+      const evicted = queue.work[index]!;
+      if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length <= cursorDepth) continue;
+      recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
+      removeQueuedWorkAt(queue, index);
+      queuesPendingWork--;
+      queueWorkDropped = true;
+      return true;
+    }
+    return false;
+  };
+  const evictComparablePriorityPath = (queue: RouteSearchQueue, incomingDepth: number) => {
+    for (let index = queue.workIndex; index < queue.work.length; index++) {
+      const evicted = queue.work[index]!;
+      if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length < incomingDepth) continue;
+      recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
+      removeQueuedWorkAt(queue, index);
+      queuesPendingWork--;
+      queueWorkDropped = true;
+      return true;
+    }
+    return false;
+  };
+  const evictGlobalDeeperPriorityPath = (incomingDepth: number) => {
+    for (const activeQueue of activeQueues) {
+      for (let index = activeQueue.workIndex; index < activeQueue.work.length; index++) {
+        const evicted = activeQueue.work[index]!;
+        if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length <= incomingDepth) continue;
+        recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
+        removeQueuedWorkAt(activeQueue, index);
+        queuesPendingWork--;
+        queueWorkDropped = true;
+        return true;
+      }
+    }
+    return false;
+  };
+  const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false): boolean => {
+    const queuedWork: SearchWork = work.kind === 'path' ? { ...work, priority: prioritize } : work;
+    let pendingInQueue = queue.work.length - queue.workIndex;
+    const priorityWork = queuedWork.priority;
+    const globalAdmissionLimit = priorityWork ? MAX_QUEUED_SEARCH_WORK : REGULAR_QUEUED_SEARCH_WORK_LIMIT;
+    const admissionLimitReachedBeforeAdmission = queuesPendingWork >= globalAdmissionLimit;
+    const hardGlobalLimitReachedBeforeAdmission = queuesPendingWork >= MAX_QUEUED_SEARCH_WORK;
+    if (admissionLimitReachedBeforeAdmission || pendingInQueue >= queue.maxQueuedWork) {
+      // Preserve shallower exploration before its derivable descendants: evict
+      // ordinary paths first; then preserve shallow cursors over derivable
+      // deeper paths. A feasible path may borrow a queue's unused global share,
+      // so comparable priority paths are replaceable only at the global cap.
+      // Priority work remains FIFO after admission.
+      const evicted = evictOldestQueuedPath(queue)
+        || (queuedWork.kind === 'children' && evictDeeperPriorityPath(queue, queuedWork.path.length))
+        || (hardGlobalLimitReachedBeforeAdmission && queuedWork.kind === 'path' && queuedWork.priority
+          && (evictComparablePriorityPath(queue, queuedWork.path.length)
+            || evictGlobalDeeperPriorityPath(queuedWork.path.length)));
+      if (evicted) pendingInQueue--;
+    }
+    const globalLimitReached = queuesPendingWork >= MAX_QUEUED_SEARCH_WORK;
+    const globalAdmissionLimitReached = queuesPendingWork >= globalAdmissionLimit;
+    const queueLimitReached = pendingInQueue >= queue.maxQueuedWork;
+    // The per-first-leg share is a fairness target, not a hard ceiling for
+    // already-feasible journey prefixes. Let those borrow idle global slots;
+    // the global cap remains the hard memory/work bound.
+    const mayBorrowQueueShare = shouldBorrowGtfsQueueShare({
+      queueShareReached: queueLimitReached,
+      priorityPath: priorityWork,
+      childCursor: queuedWork.kind === 'children',
+      globalAdmissionLimitReached,
+      globalHardLimitReached: globalLimitReached,
+    });
+    if (globalLimitReached || globalAdmissionLimitReached || (queueLimitReached && !mayBorrowQueueShare)) {
+      if (globalLimitReached || globalAdmissionLimitReached) queueAdmissionGlobalLimitDrops++;
+      if (queueLimitReached) queueAdmissionPerQueueLimitDrops++;
+      recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathDropped' : 'childCursorDropped', {
+        globalPending: queuesPendingWork,
+        globalLimit: MAX_QUEUED_SEARCH_WORK,
+        globalAdmissionLimit,
+        queuePending: pendingInQueue,
+        queueLimit: queue.maxQueuedWork,
+      });
+      queueWorkDropped = true;
+      return false;
+    }
+    if (queueLimitReached) {
+      queueAdmissionPerQueueBorrowed++;
+      if (queuedWork.kind === 'children') queueAdmissionPerQueueChildCursorBorrowed++;
+    }
+    if (priorityWork) {
+      let priorityEnd = queue.workIndex;
+      while (priorityEnd < queue.work.length) {
+        const pending = queue.work[priorityEnd]!;
+        if (!pending.priority) break;
+        if (queuedWork.kind === 'path' && queuedWork.path.length > 1) {
+          // Keep shallow paths FIFO, but place a feasible prefix before
+          // deeper paths and waiting child cursors that could otherwise
+          // fill the reservoir before this prefix is expanded.
+          if ((pending.kind === 'path' && pending.path.length > queuedWork.path.length)
+            || pending.kind === 'children') break;
+        }
+        priorityEnd++;
+      }
+      queue.work.splice(priorityEnd, 0, queuedWork);
+    } else queue.work.push(queuedWork);
+    if (isTransferPathWork(queuedWork)) queue.pendingTransferPathCount++;
+    assertQueueTransferPathCount(queue);
     maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
       queuesPendingWork + 1);
     queuesPendingWork++;
+    if (activeDebugDepthPass) activeDebugDepthPass.peakPendingWork = Math.max(
+      activeDebugDepthPass.peakPendingWork, queuesPendingWork);
+    recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathEnqueued' : 'childCursorEnqueued');
+    return true;
   };
   let queuesPendingWork = 0;
+  let queueAdmissionGlobalLimitDrops = 0;
+  let queueAdmissionPerQueueLimitDrops = 0;
+  let queueAdmissionPerQueueBorrowed = 0;
+  let queueAdmissionPerQueueChildCursorBorrowed = 0;
   const canContinueCandidateSearch = (legCount: number) => {
     const candidatePoolHasRoom = results.size < MAX_SEARCH_RESULTS
       && (resultCountByLegCount.get(legCount) ?? 0) < MAX_CANDIDATES_PER_LEG_COUNT;
@@ -3843,37 +4387,179 @@ export function findGtfsItinerariesWithStats(
       || searchSteps - legReservoirReachedAt < MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS;
     return candidatePoolHasRoom || withinLegObjectiveReservoir;
   };
-  const takeNextWork = (queue: RouteSearchQueue): SearchWork | undefined => {
-    if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length) {
+  const takeNextWork = (queue: RouteSearchQueue, preferDeepCursor: boolean): SearchWork | undefined => {
+    const targetCursorPosition = debugTraceTripChainSet && preferDeepCursor
+      ? queue.work.findIndex((pending, index) => index >= queue.workIndex
+        && pending.kind === 'children'
+        && debugTraceTripChainParts.some((target) => pending.path.length < target.length
+          && pending.path.every((segment, pathIndex) =>
+            `${segment.providerId}:${segment.serviceDate}:${segment.tripId}` === target[pathIndex])))
+      : -1;
+    const targetCursor = targetCursorPosition >= queue.workIndex
+      ? queue.work[targetCursorPosition] as ChildWork : undefined;
+    const matchesTargetPrefix = (path: readonly GtfsDirectJourney[], target: readonly string[]) =>
+      path.length < target.length && path.every((segment, pathIndex) =>
+        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}` === target[pathIndex]);
+    const targetPathPosition = debugTraceTripChainSet && preferDeepCursor
+      ? queue.work.findIndex((pending, index) => index >= queue.workIndex
+        && pending.kind === 'path'
+        && debugTraceTripChainParts.some((target) => matchesTargetPrefix(pending.path, target)))
+      : -1;
+    const targetPath = targetPathPosition >= queue.workIndex
+      ? queue.work[targetPathPosition] as PathWork : undefined;
+    const priorityWorkStreakBefore = queue.reservoirPriorityWorkStreak;
+    const queuePendingBefore = queue.work.length - queue.workIndex;
+    const recordQueueDecision = (work: SearchWork, scheduling: Record<string, number | boolean> = {}) => {
+      if (!targetCursor && !targetPath) return;
+      const selectedTargetPath = work.kind === 'path'
+        && debugTraceTripChainParts.some((target) => matchesTargetPrefix(work.path, target));
+      recordDebugObjectiveReservoirQueueDecision({
+        searchSteps,
+        queueOrdinal: queue.queueOrdinal,
+        targetCursorPathKey: targetCursor?.path.map((segment) =>
+          `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`).join('>') ?? '',
+        targetCursorQueueSequence: targetCursor?.queueSequence ?? -1,
+        targetCursorBatchesInAgeQuantum: targetCursor?.batchesInAgeQuantum ?? 0,
+        targetCursorNextIndex: targetCursor?.nextIndex ?? -1,
+        targetCursorPosition: targetCursor ? targetCursorPosition : -1,
+        targetPathQueuePosition: targetPath ? targetPathPosition - queue.workIndex : -1,
+        targetPathPriority: targetPath?.priority ?? false,
+        selectedWorkKind: work.kind,
+        selectedWorkPriority: work.priority,
+        selectedChildCursorQueueSequence: work.kind === 'children' ? work.queueSequence : -1,
+        selectedTargetCursor: work === targetCursor,
+        selectedTargetPath,
+        priorityWorkStreakBefore,
+        priorityWorkStreakAfter: queue.reservoirPriorityWorkStreak,
+        queuePendingBefore,
+        firstLegIndex: queue.firstLegIndex,
+        firstLegCount: queue.firstLegs.length,
+        ...scheduling,
+      });
+    };
+    const hasQueuedWork = queue.workIndex < queue.work.length;
+    const prioritizeQueuedWork = preferDeepCursor && hasQueuedWork && queue.reservoirQueuedWorkStreak < 2;
+    if (queue.preferFirstLeg && queue.firstLegIndex < queue.firstLegs.length
+      && !prioritizeQueuedWork) {
       queue.preferFirstLeg = false;
-      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]] };
+      queue.reservoirQueuedWorkStreak = 0;
+      const work: PathWork = { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]], priority: false };
+      recordQueueDecision(work);
+      return work;
     }
     if (queue.workIndex < queue.work.length) {
       queue.preferFirstLeg = true;
-      const work = queue.work[queue.workIndex++];
+      queue.reservoirQueuedWorkStreak = prioritizeQueuedWork
+        ? queue.reservoirQueuedWorkStreak + 1 : 0;
+      // Once the deep candidate pool is saturated, alternate bounded priority
+      // work with the oldest non-priority child cursor. If none is waiting,
+      // serve the oldest live cursor so a priority backlog cannot starve it.
+      // enqueueWork keeps priority items in a contiguous prefix; a priority
+      // item cannot follow an ordinary item, so the head identifies the prefix.
+      const pendingPriorityWork = queue.workIndex < queue.work.length
+        && queue.work[queue.workIndex]!.priority ? queue.workIndex : -1;
+      const hasPendingPriorityWork = pendingPriorityWork >= queue.workIndex;
+      const forceFairQueueTurn = hasPendingPriorityWork
+        && queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST;
+      const pendingTransferPathCount = preferDeepCursor ? queue.pendingTransferPathCount : 0;
+      const childTurnsBeforePath = objectiveReservoirChildTurnsBeforeTransferPath(pendingTransferPathCount);
+      const forceTransferPathTurn = preferDeepCursor && pendingTransferPathCount > 0
+        && queue.reservoirFairChildTurnsSinceTransferPathTurn >= childTurnsBeforePath;
+      const needsCursorSelection = preferDeepCursor && (forceFairQueueTurn || !hasPendingPriorityWork);
+      let pendingChildCursor = -1;
+      let pendingNonPriorityChildCursor = -1;
+      let pendingTransferPath = -1;
+      if (needsCursorSelection || forceTransferPathTurn) {
+        for (let index = queue.workIndex; index < queue.work.length; index++) {
+          if (activeDebugDepthPass) activeDebugDepthPass.scannedQueueItems++;
+          const pending = queue.work[index]!;
+          if (forceTransferPathTurn && pendingTransferPath < 0 && isTransferPathWork(pending)) {
+            pendingTransferPath = index;
+          }
+          if (!needsCursorSelection) {
+            if (pendingTransferPath >= 0) break;
+            continue;
+          }
+          if (pending.kind !== 'children' || pending.remainingLegs < 1) continue;
+          if (pendingChildCursor < 0
+            || pending.queueSequence < (queue.work[pendingChildCursor] as ChildWork).queueSequence) {
+            pendingChildCursor = index;
+          }
+          if (!pending.priority && (pendingNonPriorityChildCursor < 0
+            || pending.queueSequence < (queue.work[pendingNonPriorityChildCursor] as ChildWork).queueSequence)) {
+            pendingNonPriorityChildCursor = index;
+          }
+        }
+      }
+      const shouldServeDeepCursor = pendingChildCursor >= queue.workIndex
+        && (!hasPendingPriorityWork
+          || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
+      const shouldServeNonPriorityCursor = pendingNonPriorityChildCursor >= queue.workIndex
+        && (!hasPendingPriorityWork
+          || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
+      // Guarantee transfer-path service independently of priority streaks:
+      // shorten the cursor cadence as the prefix backlog grows, while a small
+      // backlog waits longer so cursor discovery keeps moving.
+      const fairChildTurnsBeforePath = queue.reservoirFairChildTurnsSinceTransferPathTurn;
+      const pendingIndex = forceTransferPathTurn ? pendingTransferPath
+        : forceFairQueueTurn && pendingNonPriorityChildCursor >= queue.workIndex ? pendingNonPriorityChildCursor
+        : forceFairQueueTurn && pendingChildCursor >= queue.workIndex ? pendingChildCursor
+        : shouldServeNonPriorityCursor ? pendingNonPriorityChildCursor
+        : shouldServeDeepCursor ? pendingChildCursor
+          : hasPendingPriorityWork && queue.reservoirPriorityWorkStreak < MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST
+            ? pendingPriorityWork : -1;
+      const removeFromMiddle = pendingIndex > queue.workIndex;
+      const work = removeFromMiddle
+        ? (() => {
+          if (activeDebugDepthPass) activeDebugDepthPass.middleQueueRemovals++;
+          return removeQueuedWorkAt(queue, pendingIndex);
+        })()
+        : queue.work[queue.workIndex++]!;
+      if (!removeFromMiddle && isTransferPathWork(work)) queue.pendingTransferPathCount--;
+      if (!removeFromMiddle) assertQueueTransferPathCount(queue);
+      if (preferDeepCursor) {
+        queue.reservoirFairChildTurnsSinceTransferPathTurn = forceTransferPathTurn
+          ? 0 : queue.reservoirFairChildTurnsSinceTransferPathTurn;
+      }
+      if (preferDeepCursor && work.priority && !forceFairQueueTurn) queue.reservoirPriorityWorkStreak++;
+      else if (preferDeepCursor) queue.reservoirPriorityWorkStreak = 0;
+      queue.preferDeepCursor = work.kind !== 'children' || work.remainingLegs <= 1;
       queuesPendingWork--;
       if (queue.workIndex >= 128 && queue.workIndex * 2 >= queue.work.length) {
         queue.work.splice(0, queue.workIndex);
         queue.workIndex = 0;
+        assertQueueTransferPathCount(queue);
       }
+      recordQueueDecision(work, {
+        pendingTransferPathCount,
+        fairChildTurnsBeforePath,
+        transferPathTurnLimit: childTurnsBeforePath,
+        forcedTransferPathTurn: forceTransferPathTurn,
+        forcedPriorityFairTurn: forceFairQueueTurn,
+        hasPendingPriorityWork,
+        preferDeepCursor,
+        queueSelectionScan: needsCursorSelection || forceTransferPathTurn,
+      });
       return work;
     }
     if (queue.firstLegIndex < queue.firstLegs.length) {
       queue.preferFirstLeg = false;
-      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]] };
+      return { kind: 'path', path: [queue.firstLegs[queue.firstLegIndex++]], priority: false };
     }
     return undefined;
   };
   const hasQueuedWork = (queues: RouteSearchQueue[]) => queues.some((queue) =>
     queue.firstLegIndex < queue.firstLegs.length || queue.workIndex < queue.work.length);
-  const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number) => {
+  const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number,
+    stepLimit: number, priority = false): ChildWork | undefined => {
     searchSteps++;
+    recordDebugTripChainSearch(path, 'path-expanded');
     const last = path.at(-1)!;
     if (destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
       addPath(path, maximumLegsForPass);
     }
     const remainingLegs = maximumLegsForPass - path.length;
-    if (remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return;
+    if (remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return undefined;
     const previousIds = new Set(path.map((segment) => segment.tripId));
     const visitedStops = new Set(path.map((segment) => segment.originStop.id));
     visitedStops.add(last.destinationStop.id);
@@ -3885,38 +4571,188 @@ export function findGtfsItinerariesWithStats(
       if (choices[middle].departureAt.getTime() < last.arrivalAt.getTime()) low = middle + 1;
       else high = middle;
     }
-    if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
-    enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
-      remainingLegs, previousIds, visitedStops });
+    if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return undefined;
+    recordDebugTargetSuccessorPositions(path, choices, low, latestNext);
+    const work: ChildWork = { kind: 'children', priority, path, last, choices, nextIndex: low, latestNext,
+      remainingLegs, previousIds, visitedStops, queueSequence: queue.nextChildCursorSequence++, batchesInAgeQuantum: 0 };
+    if (remainingLegs === 1) return work;
+    enqueueWork(queue, work);
+    return undefined;
   };
-  const expandNextChild = (work: ChildWork, queue: RouteSearchQueue) => {
-    searchSteps++;
-    const next = work.choices[work.nextIndex++];
-    if (next.departureAt.getTime() <= work.latestNext
-      && reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id)
-      && !work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
-      && transferDecision(work.last, next).feasible) {
-      enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
+  const expandNextChild = (work: ChildWork, queue: RouteSearchQueue, maximumLegsForPass: number, stepLimit: number) => {
+    let processed = 0;
+    // Deeper chains need more opportunities to reach later feasible transfers
+    // before the shared bounded reservoir closes. Keep the finer scheduling
+    // quantum for direct and one-transfer searches, where responsiveness and
+    // fairness matter most.
+    // Before the candidate pool fills, use a wider quantum to discover useful
+    // transfers efficiently. Once the bounded objective reservoir is active,
+    // shrink the quantum so more queued first-leg groups receive service
+    // within the same search-step window instead of letting early queues use
+    // the entire tail budget.
+    const objectiveReservoirActive = candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass);
+    const childBatchLimit = maximumLegsForPass >= 3 && !objectiveReservoirActive
+      ? MAX_GTFS_CHILDREN_PER_WORK_TURN * 4 : MAX_GTFS_CHILDREN_PER_WORK_TURN;
+    if (objectiveReservoirActive) {
+      queue.reservoirFairChildTurnsSinceTransferPathTurn = Math.min(MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH,
+        queue.reservoirFairChildTurnsSinceTransferPathTurn + 1);
     }
-    if (work.nextIndex < work.choices.length
-      && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
-      enqueueWork(queue, work);
+    const nextIndexBefore = work.nextIndex;
+    const feasiblePaths: GtfsDirectJourney[][] = [];
+    while (processed < childBatchLimit
+      && searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
+      && canContinueCandidateSearch(maximumLegsForPass)
+      && work.nextIndex < work.choices.length
+      && work.choices[work.nextIndex]!.departureAt.getTime() <= work.latestNext) {
+      searchSteps++;
+      processed++;
+      const next = work.choices[work.nextIndex++]!;
+      const canReachDestination = reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id);
+      const distinctTrip = !work.previousIds.has(next.tripId);
+      const noStopCycle = !work.visitedStops.has(next.destinationStop.id);
+      const transferFeasible = canReachDestination && distinctTrip && noStopCycle
+        ? transferDecision(work.last, next).feasible : false;
+      const feasible = canReachDestination && distinctTrip && noStopCycle && transferFeasible;
+      const candidatePath = debugTraceTripChainSet ? [...work.path, next] : undefined;
+      if (candidatePath) {
+        const rejectionReasons = [
+          ...(!canReachDestination ? ['cannot-reach-destination'] : []),
+          ...(!distinctTrip ? ['repeated-trip'] : []),
+          ...(!noStopCycle ? ['stop-cycle'] : []),
+          ...(canReachDestination && distinctTrip && noStopCycle && !transferFeasible ? ['transfer-infeasible'] : []),
+        ];
+        recordDebugTripChainSearch(candidatePath, 'next-leg-considered', rejectionReasons);
+      }
+      if (feasible) {
+        const path = candidatePath ?? [...work.path, next];
+        if (candidatePath) recordDebugTripChainSearch(candidatePath, 'next-leg-feasible');
+        if (work.remainingLegs === 1 && destinationStopIds.has(next.destinationStop.id)) {
+          // A complete, already validated journey should not compete with
+          // unfinished search work for a bounded queue slot. Add it to the
+          // candidate reservoir immediately; queue caps still bound discovery.
+          if (candidatePath) recordDebugTripChainSearch(candidatePath, 'path-expanded');
+          addPath(path, maximumLegsForPass);
+        } else feasiblePaths.push(path);
+      }
     }
+    const hasNextBeforeHorizon = work.nextIndex < work.choices.length
+      && work.choices[work.nextIndex]!.departureAt.getTime() <= work.latestNext;
+    if (hasNextBeforeHorizon) {
+      work.batchesInAgeQuantum++;
+      if (work.batchesInAgeQuantum >= MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM) {
+        work.queueSequence = queue.nextChildCursorSequence++;
+        work.batchesInAgeQuantum = 0;
+      }
+    }
+    const continuationQueued = hasNextBeforeHorizon ? enqueueWork(queue, work) : false;
+    // The popped cursor freed a bounded queue slot. Reinsert its continuation
+    // first so feasible descendants generated during this batch cannot evict
+    // the only remaining path that will discover later successors.
+    for (const path of feasiblePaths) enqueueWork(queue, { kind: 'path', path, priority: false }, true);
+    const queuedWorkPosition = debugTraceTripChainSet && continuationQueued
+      ? queue.work.findIndex((pending, index) => index >= queue.workIndex && pending === work) : -1;
+    const queuedWorkAhead = queuedWorkPosition < 0 ? 0 : queuedWorkPosition - queue.workIndex;
+    const queuedWorkBeforeCursor = queuedWorkPosition < 0
+      ? undefined : queue.work.slice(queue.workIndex, queuedWorkPosition);
+    const reservoirStartedAt = debugTraceTripChainSet
+      ? candidatePoolReachedAtStepByLegCount.get(maximumLegsForPass) : undefined;
+    const stopReason = !hasNextBeforeHorizon ? (work.nextIndex >= work.choices.length ? 'choices-exhausted' : 'past-wait-horizon')
+      : searchSteps >= MAX_SEARCH_STEPS ? 'global-search-step-limit'
+        : searchSteps >= stepLimit ? 'depth-pass-step-limit'
+          : !canContinueCandidateSearch(maximumLegsForPass) ? 'candidate-pool-cutoff'
+          : processed >= childBatchLimit ? 'child-batch-limit' : 'unknown';
+    recordDebugTripChainCursorProgress(work.path, {
+      searchSteps,
+      objectiveReservoirStepsElapsed: reservoirStartedAt === undefined ? 0 : searchSteps - reservoirStartedAt,
+      queueOrdinal: queue.queueOrdinal,
+      firstLegIndex: queue.firstLegIndex,
+      firstLegCount: queue.firstLegs.length,
+      queuedWorkPosition,
+      queuedWorkAhead,
+      queuedChildCursorsAhead: queuedWorkBeforeCursor?.filter((pending) => pending.kind === 'children').length ?? 0,
+      queuedPriorityPathsAhead: queuedWorkBeforeCursor?.filter((pending) => pending.kind === 'path' && pending.priority).length ?? 0,
+      queuedWorkStreak: queue.reservoirQueuedWorkStreak,
+      nextIndexBefore,
+      nextIndexAfter: work.nextIndex,
+      nextIndexStart: nextIndexBefore,
+      choiceCount: work.choices.length,
+      batchProcessed: processed,
+      remainingStepBudget: Math.max(0, Math.min(stepLimit, MAX_SEARCH_STEPS) - searchSteps),
+      queuePending: queue.work.length - queue.workIndex,
+      queueLimit: queue.maxQueuedWork,
+      globalPending: queuesPendingWork,
+      globalLimit: MAX_QUEUED_SEARCH_WORK,
+      priority: work.priority,
+      continuationQueued,
+      stopReason,
+    });
   };
-  const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number) => {
+  const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number, resumed = false) => {
+    const debugEnabled = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1';
+    const stepsBefore = searchSteps;
+    const pendingBefore = debugEnabled ? countPendingWork(queues) : 0;
+    const globalDropsBefore = queueAdmissionGlobalLimitDrops;
+    const perQueueDropsBefore = queueAdmissionPerQueueLimitDrops;
+    const passMetrics = debugEnabled ? {
+      queueRounds: 0,
+      visitedQueues: 0,
+      scannedQueueItems: 0,
+      middleQueueRemovals: 0,
+      peakPendingWork: pendingBefore,
+    } : undefined;
+    activeDebugDepthPass = passMetrics;
+    let reservoirSnapshotCaptured = false;
     while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
       && canContinueCandidateSearch(maximumLegsForPass)) {
+      if (passMetrics) passMetrics.queueRounds++;
       let processed = false;
       for (const queue of queues) {
+        if (passMetrics) passMetrics.visitedQueues++;
         if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS
           || !canContinueCandidateSearch(maximumLegsForPass)) break;
-        const work = takeNextWork(queue);
+        const reservoirActive = maximumLegsForPass >= 3
+          && candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass);
+        if (reservoirActive && !reservoirSnapshotCaptured) {
+          const reservoirStartedAt = candidatePoolReachedAtStepByLegCount.get(maximumLegsForPass);
+          if (reservoirStartedAt !== undefined) {
+            recordDebugObjectiveReservoirQueueSnapshot('activated', maximumLegsForPass, queues, reservoirStartedAt);
+          }
+          reservoirSnapshotCaptured = true;
+        }
+        const work = takeNextWork(queue, reservoirActive);
         if (!work) continue;
         processed = true;
-        if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass);
-        else expandNextChild(work, queue);
+        if (work.kind === 'path') {
+          const finalLegCursor = expandPath(work.path, queue, maximumLegsForPass, stepLimit, work.priority);
+          if (finalLegCursor) expandNextChild(finalLegCursor, queue, maximumLegsForPass, stepLimit);
+        } else expandNextChild(work, queue, maximumLegsForPass, stepLimit);
       }
       if (!processed) break;
+    }
+    const reservoirStartedAt = candidatePoolReachedAtStepByLegCount.get(maximumLegsForPass);
+    if (reservoirStartedAt !== undefined && !canContinueCandidateSearch(maximumLegsForPass)) {
+      recordDebugObjectiveReservoirQueueSnapshot('cutoff', maximumLegsForPass, queues, reservoirStartedAt);
+    }
+    if (passMetrics) {
+      activeDebugDepthPass = undefined;
+      debugDepthPassSummaries.push({
+        legCount: maximumLegsForPass,
+        resumed,
+        queueCount: queues.length,
+        stepLimit,
+        stepsBefore,
+        stepsAfter: searchSteps,
+        stepDelta: searchSteps - stepsBefore,
+        pendingBefore,
+        pendingAfter: countPendingWork(queues),
+        peakPendingWork: passMetrics.peakPendingWork,
+        queueRounds: passMetrics.queueRounds,
+        visitedQueues: passMetrics.visitedQueues,
+        scannedQueueItems: passMetrics.scannedQueueItems,
+        middleQueueRemovals: passMetrics.middleQueueRemovals,
+        globalQueueDrops: queueAdmissionGlobalLimitDrops - globalDropsBefore,
+        perQueueDrops: queueAdmissionPerQueueLimitDrops - perQueueDropsBefore,
+      });
     }
   };
   const countPendingWork = (queues: RouteSearchQueue[]) => queues.reduce((count, queue) =>
@@ -3940,15 +4776,27 @@ export function findGtfsItinerariesWithStats(
         Math.floor((MAX_SEARCH_STEPS - searchSteps) * depthWeights[depthIndex] / remainingWeight)));
     const firstLegGroups = new Map<string, GtfsDirectJourney[]>();
     for (const segment of firstLegs) {
-      const key = `${segment.providerId}:${segment.routeId}`;
+      // Keep each scheduled trip instance independently schedulable so a
+      // frequent route cannot bury a later useful trip behind earlier service.
+      const key = `${segment.providerId}:${segment.routeId}:${segment.serviceDate}:${segment.tripId}`;
       const group = firstLegGroups.get(key) ?? [];
       group.push(segment);
       firstLegGroups.set(key, group);
     }
     queuesPendingWork = 0;
-    const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
-      firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true,
+    const maxQueuedWorkPerFirstLegQueue = Math.max(1,
+      Math.floor(MAX_QUEUED_SEARCH_WORK / Math.max(1, firstLegGroups.size)));
+    const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group, queueOrdinal) => ({
+      queueOrdinal,
+      firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
+      reservoirQueuedWorkStreak: 0,
+      reservoirPriorityWorkStreak: 0,
+      reservoirFairChildTurnsSinceTransferPathTurn: 0,
+      nextChildCursorSequence: 0,
+      pendingTransferPathCount: 0,
+      maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
+    activeQueues = queues;
     runDepthPass(queues, maximumLegsForPass, stepLimit);
     if (hasQueuedWork(queues)) {
       truncatedDepthPasses.add(maximumLegsForPass);
@@ -3976,7 +4824,7 @@ export function findGtfsItinerariesWithStats(
         : Math.min(MAX_SEARCH_STEPS, searchSteps + Math.max(1,
           Math.floor((MAX_SEARCH_STEPS - searchSteps) * weight / remainingWeight)));
       queuesPendingWork = countPendingWork(queues);
-      runDepthPass(queues, depth, stepLimit);
+      runDepthPass(queues, depth, stepLimit, true);
       if (!hasQueuedWork(queues)) truncatedDepthPasses.delete(depth);
       remainingWeight -= weight;
     }
@@ -4066,6 +4914,18 @@ export function findGtfsItinerariesWithStats(
     candidatePoolReachedAtStepByLegCount: JSON.stringify(Object.fromEntries(candidatePoolReachedAtStepByLegCount)),
     candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
     maxQueuedSearchWork: maximumQueuedSearchWork,
+    ...(debugObjectiveReservoirQueueSnapshots.length > 0
+      ? { debugObjectiveReservoirQueueSnapshots: JSON.stringify(debugObjectiveReservoirQueueSnapshots) } : {}),
+    ...(debugObjectiveReservoirQueueDecisions.length > 0
+      ? { debugObjectiveReservoirQueueDecisions: JSON.stringify(debugObjectiveReservoirQueueDecisions.length < 512
+        ? debugObjectiveReservoirQueueDecisions
+        : [...debugObjectiveReservoirQueueDecisions.slice(debugObjectiveReservoirQueueDecisionWriteIndex),
+          ...debugObjectiveReservoirQueueDecisions.slice(0, debugObjectiveReservoirQueueDecisionWriteIndex)]) } : {}),
+    queueAdmissionGlobalLimitDrops,
+    queueAdmissionPerQueueLimitDrops,
+    queueAdmissionPerQueueBorrowed,
+    queueAdmissionPerQueueChildCursorBorrowed,
+    ...(debugDepthPassSummaries.length > 0 ? { debugDepthPasses: JSON.stringify(debugDepthPassSummaries) } : {}),
     ...(debugTraceTripChains.length > 0 ? { debugTripChainPresence: (() => {
       const requestedTripKeys = new Set(debugTraceTripChains.flatMap((tripChain) => tripChain.split('>')));
       const retainedTargetTripKeys = new Set<string>();
@@ -4185,6 +5045,7 @@ export function findGtfsItinerariesWithStats(
         }];
       })));
     })() } : {}),
+    ...(debugTripChainSearchTrace.size > 0 ? { debugTripChainSearchTrace: JSON.stringify(Object.fromEntries(debugTripChainSearchTrace)) } : {}),
     searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });

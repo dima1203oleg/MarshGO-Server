@@ -5,3 +5,9 @@ tram-trip,08:30:00,08:30:00,tram-transfer,1,0,0
 tram-trip,08:55:00,08:55:00,destination,2,0,0
 tram-trip-later,09:00:00,09:00:00,tram-transfer,1,0,0
 tram-trip-later,09:25:00,09:25:00,destination,2,0,0
+fast-direct-trip,06:05:00,06:05:00,origin,1,0,0
+fast-direct-trip,06:35:00,06:35:00,destination,2,0,0
+balanced-direct-trip,06:05:00,06:05:00,origin,1,0,0
+balanced-direct-trip,06:50:00,06:50:00,destination,2,0,0
+cheap-direct-trip,06:05:00,06:05:00,origin,1,0,0
+cheap-direct-trip,07:20:00,07:20:00,destination,2,0,0
