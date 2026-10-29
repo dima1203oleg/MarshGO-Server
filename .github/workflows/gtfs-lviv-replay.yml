@@ -71,7 +71,7 @@ on:
         type: boolean
         default: true
       cpu_profile:
-        description: Capture candidate-only Node CPU profiles; profiled timings are not comparable
+        description: Capture Node CPU profiles for both revisions; profiled timings are not comparable
         required: false
         type: boolean
         default: false
@@ -153,7 +153,7 @@ jobs:
             fi
             for iteration in 1 2 3; do
               profile_node_options=''
-              if [ "$revision" = "candidate" ] && [ "$GTFS_REPLAY_CPU_PROFILE" = "true" ]; then
+              if [ "$GTFS_REPLAY_CPU_PROFILE" = "true" ]; then
                 profile_node_options="--cpu-prof --cpu-prof-dir=$RUNNER_TEMP/marshgo-cpu-profiles"
               fi
               (
@@ -181,7 +181,7 @@ jobs:
           python3 candidate/scripts/summarize-lviv-replay.py replay-results.jsonl > replay-summary.md
           printf '\nFeed attribution: [Lviv municipal GTFS open data](https://data.gov.ua/en/dataset/lviv-public-transport-gtfs-real-time). The publisher specifies attribution for reuse.\n' >> replay-summary.md
           if [ "$GTFS_REPLAY_CPU_PROFILE" = "true" ]; then
-            printf '\nCandidate Node CPU profiles were collected; profiled timings are not comparable to an unprofiled replay.\n' >> replay-summary.md
+            printf '\nNode CPU profiles were collected for baseline and candidate; profiled timings are not comparable to unprofiled replays.\n' >> replay-summary.md
           fi
           summary_bytes=$(wc -c < replay-summary.md)
           if [ "$summary_bytes" -gt 900000 ]; then
