@@ -4070,6 +4070,7 @@ export function findGtfsItinerariesWithStats(
     preferDeepCursor: boolean;
     maxQueuedWork: number;
   };
+  let activeQueues: RouteSearchQueue[] = [];
   const pausedDepthPassQueues = new Map<number, RouteSearchQueue[]>();
   const truncatedDepthPasses = new Set<number>();
   const evictOldestQueuedPath = (queue: RouteSearchQueue) => {
@@ -4108,6 +4109,20 @@ export function findGtfsItinerariesWithStats(
     }
     return false;
   };
+  const evictGlobalDeeperPriorityPath = (incomingDepth: number) => {
+    for (const activeQueue of activeQueues) {
+      for (let index = activeQueue.workIndex; index < activeQueue.work.length; index++) {
+        const evicted = activeQueue.work[index]!;
+        if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length <= incomingDepth) continue;
+        recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
+        activeQueue.work.splice(index, 1);
+        queuesPendingWork--;
+        queueWorkDropped = true;
+        return true;
+      }
+    }
+    return false;
+  };
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork, prioritize = false): boolean => {
     const queuedWork: SearchWork = work.kind === 'path' ? { ...work, priority: prioritize } : work;
     let pendingInQueue = queue.work.length - queue.workIndex;
@@ -4121,7 +4136,8 @@ export function findGtfsItinerariesWithStats(
       const evicted = evictOldestQueuedPath(queue)
         || (queuedWork.kind === 'children' && evictDeeperPriorityPath(queue, queuedWork.path.length))
         || (globalLimitReachedBeforeAdmission && queuedWork.kind === 'path' && queuedWork.priority
-          && evictComparablePriorityPath(queue, queuedWork.path.length));
+          && (evictComparablePriorityPath(queue, queuedWork.path.length)
+            || evictGlobalDeeperPriorityPath(queuedWork.path.length)));
       if (evicted) pendingInQueue--;
     }
     const globalLimitReached = queuesPendingWork >= MAX_QUEUED_SEARCH_WORK;
@@ -4373,6 +4389,7 @@ export function findGtfsItinerariesWithStats(
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
+    activeQueues = queues;
     runDepthPass(queues, maximumLegsForPass, stepLimit);
     if (hasQueuedWork(queues)) {
       truncatedDepthPasses.add(maximumLegsForPass);
