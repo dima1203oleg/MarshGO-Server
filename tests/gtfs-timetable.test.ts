@@ -3687,6 +3687,10 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
       pathEnqueued: number; pathDropped: number; pathEvicted: number;
       childCursorEnqueued: number; childCursorDropped: number; childCursorEvicted: number;
     }>;
+    queueAdmissionDropsByLegCount: Record<string, Array<{
+      globalPending: number; globalLimit: number; queuePending: number; queueLimit: number;
+      globalLimitReached: boolean; queueLimitReached: boolean;
+    }>>;
     successorPositionsByPath: Record<string, { targetSuccessors: Array<{ tripKey: string; cursorOffset: number; transferFeasible: boolean }> }>;
   }>;
   const targetTrace = trace[`p1:20261012:access-trip>p1:20261012:middle-trip-target>p1:20261012:egress-trip-target`];
@@ -3704,6 +3708,8 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
   'the feasible target lies beyond the six-item queue share');
   assert.ok((targetTrace.queueEventsByLegCount['2']?.pathEnqueued ?? 0) > 0,
     'queue diagnostics record when the feasible target path prefix is admitted');
+  assert.ok(Number(ranked?.queueAdmissionGlobalLimitDrops) + Number(ranked?.queueAdmissionPerQueueLimitDrops) > 0,
+    'bounded queue diagnostics identify which global or per-queue work cap rejected admission');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {

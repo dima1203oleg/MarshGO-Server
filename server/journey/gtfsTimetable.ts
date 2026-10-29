@@ -1719,6 +1719,14 @@ export function findGtfsItinerariesWithStats(
       childCursorDropped: number;
       childCursorEvicted: number;
     }>;
+    queueAdmissionDropsByLegCount: Record<string, Array<{
+      globalPending: number;
+      globalLimit: number;
+      queuePending: number;
+      queueLimit: number;
+      globalLimitReached: boolean;
+      queueLimitReached: boolean;
+    }>>;
     successorPositionsByPath: Record<string, {
       pathSegments: string[];
       choiceCount: number;
@@ -1762,6 +1770,7 @@ export function findGtfsItinerariesWithStats(
         nextLegFeasibleAtStepByLegCount: {},
         nextLegFeasibleCountByLegCount: {},
         queueEventsByLegCount: {},
+        queueAdmissionDropsByLegCount: {},
         successorPositionsByPath: {},
         variantsByStopPair: {},
       };
@@ -1797,6 +1806,7 @@ export function findGtfsItinerariesWithStats(
   const recordDebugTripChainQueueEvent = (
     path: readonly GtfsDirectJourney[],
     event: 'pathEnqueued' | 'pathDropped' | 'pathEvicted' | 'childCursorEnqueued' | 'childCursorDropped' | 'childCursorEvicted',
+    admission?: { globalPending: number; globalLimit: number; queuePending: number; queueLimit: number },
   ) => {
     if (!debugTraceTripChainSet || path.length > 5) return;
     for (let index = 0; index < debugTraceTripChainParts.length; index++) {
@@ -1820,6 +1830,7 @@ export function findGtfsItinerariesWithStats(
         nextLegFeasibleAtStepByLegCount: {},
         nextLegFeasibleCountByLegCount: {},
         queueEventsByLegCount: {},
+        queueAdmissionDropsByLegCount: {},
         successorPositionsByPath: {},
         variantsByStopPair: {},
       };
@@ -1829,6 +1840,14 @@ export function findGtfsItinerariesWithStats(
         childCursorEnqueued: 0, childCursorDropped: 0, childCursorEvicted: 0,
       };
       counts[event]++;
+      if (admission && (event === 'pathDropped' || event === 'childCursorDropped')) {
+        const drops = trace.queueAdmissionDropsByLegCount[legCount] ??= [];
+        if (drops.length < 16) drops.push({
+          ...admission,
+          globalLimitReached: admission.globalPending >= admission.globalLimit,
+          queueLimitReached: admission.queuePending >= admission.queueLimit,
+        });
+      }
       debugTripChainSearchTrace.set(targetKey, trace);
     }
   };
@@ -4052,7 +4071,14 @@ export function findGtfsItinerariesWithStats(
       if (evicted) pendingInQueue--;
     }
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
-      recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathDropped' : 'childCursorDropped');
+      if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK) queueAdmissionGlobalLimitDrops++;
+      if (pendingInQueue >= queue.maxQueuedWork) queueAdmissionPerQueueLimitDrops++;
+      recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathDropped' : 'childCursorDropped', {
+        globalPending: queuesPendingWork,
+        globalLimit: MAX_QUEUED_SEARCH_WORK,
+        queuePending: pendingInQueue,
+        queueLimit: queue.maxQueuedWork,
+      });
       queueWorkDropped = true;
       return;
     }
@@ -4071,6 +4097,8 @@ export function findGtfsItinerariesWithStats(
     recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathEnqueued' : 'childCursorEnqueued');
   };
   let queuesPendingWork = 0;
+  let queueAdmissionGlobalLimitDrops = 0;
+  let queueAdmissionPerQueueLimitDrops = 0;
   const canContinueCandidateSearch = (legCount: number) => {
     const candidatePoolHasRoom = results.size < MAX_SEARCH_RESULTS
       && (resultCountByLegCount.get(legCount) ?? 0) < MAX_CANDIDATES_PER_LEG_COUNT;
@@ -4338,6 +4366,8 @@ export function findGtfsItinerariesWithStats(
     candidatePoolReachedAtStepByLegCount: JSON.stringify(Object.fromEntries(candidatePoolReachedAtStepByLegCount)),
     candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
     maxQueuedSearchWork: maximumQueuedSearchWork,
+    queueAdmissionGlobalLimitDrops,
+    queueAdmissionPerQueueLimitDrops,
     ...(debugTraceTripChains.length > 0 ? { debugTripChainPresence: (() => {
       const requestedTripKeys = new Set(debugTraceTripChains.flatMap((tripChain) => tripChain.split('>')));
       const retainedTargetTripKeys = new Set<string>();
