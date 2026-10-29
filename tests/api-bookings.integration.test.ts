@@ -420,7 +420,9 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
           ...body,
           origin: { name: 'Fixture origin', coordinates: [24.0029933, 49.8681678] },
           destination: { name: 'Fixture destination', coordinates: [24.057585, 49.794117] },
-          departureAt: multiSearchDeparture,
+          // Keep the strategy-only direct routes separate from the existing
+          // 08:00 bus-to-tram composition assertion in the same fixture feed.
+          departureAt: new Date(new Date(multiSearchDeparture).getTime() - 2 * 60 * 60_000).toISOString(),
           strategy: 'BALANCED',
           preferences: { allowCommunity: false, allowedTransportTypes: ['bus'] },
         }),
