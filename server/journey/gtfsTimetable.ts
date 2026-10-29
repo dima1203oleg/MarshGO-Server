@@ -4070,9 +4070,15 @@ export function findGtfsItinerariesWithStats(
           && evictComparablePriorityPath(queue, queuedWork.path.length));
       if (evicted) pendingInQueue--;
     }
-    if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
-      if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK) queueAdmissionGlobalLimitDrops++;
-      if (pendingInQueue >= queue.maxQueuedWork) queueAdmissionPerQueueLimitDrops++;
+    const globalLimitReached = queuesPendingWork >= MAX_QUEUED_SEARCH_WORK;
+    const queueLimitReached = pendingInQueue >= queue.maxQueuedWork;
+    // The per-first-leg share is a fairness target, not a hard ceiling for
+    // already-feasible journey prefixes. Let those borrow idle global slots;
+    // the global cap remains the hard memory/work bound.
+    const mayBorrowQueueShare = queuedWork.kind === 'path' && queuedWork.priority && !globalLimitReached;
+    if (globalLimitReached || (queueLimitReached && !mayBorrowQueueShare)) {
+      if (globalLimitReached) queueAdmissionGlobalLimitDrops++;
+      if (queueLimitReached) queueAdmissionPerQueueLimitDrops++;
       recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathDropped' : 'childCursorDropped', {
         globalPending: queuesPendingWork,
         globalLimit: MAX_QUEUED_SEARCH_WORK,
@@ -4082,6 +4088,7 @@ export function findGtfsItinerariesWithStats(
       queueWorkDropped = true;
       return;
     }
+    if (queueLimitReached) queueAdmissionPerQueueBorrowed++;
     if (queuedWork.kind === 'path' && queuedWork.priority) {
       let priorityEnd = queue.workIndex;
       while (priorityEnd < queue.work.length) {
@@ -4099,6 +4106,7 @@ export function findGtfsItinerariesWithStats(
   let queuesPendingWork = 0;
   let queueAdmissionGlobalLimitDrops = 0;
   let queueAdmissionPerQueueLimitDrops = 0;
+  let queueAdmissionPerQueueBorrowed = 0;
   const canContinueCandidateSearch = (legCount: number) => {
     const candidatePoolHasRoom = results.size < MAX_SEARCH_RESULTS
       && (resultCountByLegCount.get(legCount) ?? 0) < MAX_CANDIDATES_PER_LEG_COUNT;
@@ -4368,6 +4376,7 @@ export function findGtfsItinerariesWithStats(
     maxQueuedSearchWork: maximumQueuedSearchWork,
     queueAdmissionGlobalLimitDrops,
     queueAdmissionPerQueueLimitDrops,
+    queueAdmissionPerQueueBorrowed,
     ...(debugTraceTripChains.length > 0 ? { debugTripChainPresence: (() => {
       const requestedTripKeys = new Set(debugTraceTripChains.flatMap((tripChain) => tripChain.split('>')));
       const retainedTargetTripKeys = new Set<string>();
