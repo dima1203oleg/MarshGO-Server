@@ -1705,6 +1705,7 @@ export function findGtfsItinerariesWithStats(
   const debugCompletedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
   const debugGeneratedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
   const debugTraceTripChainParts = debugTraceTripChains.map((tripChain) => tripChain.split('>'));
+  const debugObjectiveReservoirQueueSnapshots: Array<Record<string, number | string | boolean>> = [];
   const debugTripChainSearchTrace = new Map<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
     pathExpandedCountByLegCount: Record<string, number>;
@@ -4100,6 +4101,58 @@ export function findGtfsItinerariesWithStats(
     reservoirPriorityPathStreak: number;
     maxQueuedWork: number;
   };
+  const recordDebugObjectiveReservoirQueueSnapshot = (
+    phase: 'activated' | 'cutoff', legCount: number, queues: RouteSearchQueue[], reservoirStartedAt: number,
+  ) => {
+    if (!debugTraceTripChainSet) return;
+    const snapshotsByTarget = new Map<number, number>();
+    for (const queue of queues) {
+      for (let workIndex = queue.workIndex; workIndex < queue.work.length; workIndex++) {
+        if (debugObjectiveReservoirQueueSnapshots.length >= 256) return;
+        const work = queue.work[workIndex]!;
+        if (work.kind !== 'children') continue;
+        let targetIndex = -1;
+        for (let index = 0; index < debugTraceTripChainParts.length; index++) {
+          const target = debugTraceTripChainParts[index]!;
+          if (work.path.length >= target.length) continue;
+          let matches = true;
+          for (let leg = 0; leg < work.path.length; leg++) {
+            const segment = work.path[leg]!;
+            if (`${segment.providerId}:${segment.serviceDate}:${segment.tripId}` !== target[leg]) {
+              matches = false;
+              break;
+            }
+          }
+          if (matches) { targetIndex = index; break; }
+        }
+        if (targetIndex < 0 || (snapshotsByTarget.get(targetIndex) ?? 0) >= 8) continue;
+        const queuedWorkAhead = workIndex - queue.workIndex;
+        const queuedWorkBeforeCursor = queue.work.slice(queue.workIndex, workIndex);
+        const pathKey = work.path.map((segment) =>
+          `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`).join('>');
+        debugObjectiveReservoirQueueSnapshots.push({
+          phase,
+          targetChain: debugTraceTripChains[targetIndex]!,
+          legCount,
+          searchSteps,
+          objectiveReservoirStepsElapsed: searchSteps - reservoirStartedAt,
+          queueOrdinal: queue.queueOrdinal,
+          pathKey,
+          cursorNextIndex: work.nextIndex,
+          cursorChoiceCount: work.choices.length,
+          queuedWorkPosition: workIndex,
+          queuedWorkAhead,
+          queuedChildCursorsAhead: queuedWorkBeforeCursor.filter((pending) => pending.kind === 'children').length,
+          queuedPriorityPathsAhead: queuedWorkBeforeCursor.filter((pending) => pending.kind === 'path' && pending.priority).length,
+          queuePending: queue.work.length - queue.workIndex,
+          firstLegIndex: queue.firstLegIndex,
+          firstLegCount: queue.firstLegs.length,
+          priorityPathStreak: queue.reservoirPriorityPathStreak,
+        });
+        snapshotsByTarget.set(targetIndex, (snapshotsByTarget.get(targetIndex) ?? 0) + 1);
+      }
+    }
+  };
   let activeQueues: RouteSearchQueue[] = [];
   const pausedDepthPassQueues = new Map<number, RouteSearchQueue[]>();
   const truncatedDepthPasses = new Set<number>();
@@ -4398,6 +4451,7 @@ export function findGtfsItinerariesWithStats(
     });
   };
   const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number) => {
+    let reservoirSnapshotCaptured = false;
     while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
       && canContinueCandidateSearch(maximumLegsForPass)) {
       let processed = false;
@@ -4406,6 +4460,13 @@ export function findGtfsItinerariesWithStats(
           || !canContinueCandidateSearch(maximumLegsForPass)) break;
         const reservoirActive = maximumLegsForPass >= 3
           && candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass);
+        if (reservoirActive && !reservoirSnapshotCaptured) {
+          const reservoirStartedAt = candidatePoolReachedAtStepByLegCount.get(maximumLegsForPass);
+          if (reservoirStartedAt !== undefined) {
+            recordDebugObjectiveReservoirQueueSnapshot('activated', maximumLegsForPass, queues, reservoirStartedAt);
+          }
+          reservoirSnapshotCaptured = true;
+        }
         const work = takeNextWork(queue, reservoirActive);
         if (!work) continue;
         processed = true;
@@ -4415,6 +4476,10 @@ export function findGtfsItinerariesWithStats(
         } else expandNextChild(work, queue, maximumLegsForPass, stepLimit);
       }
       if (!processed) break;
+    }
+    const reservoirStartedAt = candidatePoolReachedAtStepByLegCount.get(maximumLegsForPass);
+    if (reservoirStartedAt !== undefined && !canContinueCandidateSearch(maximumLegsForPass)) {
+      recordDebugObjectiveReservoirQueueSnapshot('cutoff', maximumLegsForPass, queues, reservoirStartedAt);
     }
   };
   const countPendingWork = (queues: RouteSearchQueue[]) => queues.reduce((count, queue) =>
@@ -4575,6 +4640,8 @@ export function findGtfsItinerariesWithStats(
     candidatePoolReachedAtStepByLegCount: JSON.stringify(Object.fromEntries(candidatePoolReachedAtStepByLegCount)),
     candidateSamplingTruncated: Number(candidateSamplingTruncated), segmentGraphTruncated: Number(segmentGraphTruncated),
     maxQueuedSearchWork: maximumQueuedSearchWork,
+    ...(debugObjectiveReservoirQueueSnapshots.length > 0
+      ? { debugObjectiveReservoirQueueSnapshots: JSON.stringify(debugObjectiveReservoirQueueSnapshots) } : {}),
     queueAdmissionGlobalLimitDrops,
     queueAdmissionPerQueueLimitDrops,
     queueAdmissionPerQueueBorrowed,

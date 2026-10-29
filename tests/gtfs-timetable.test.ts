@@ -3681,6 +3681,10 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     .map((segment) => segment.tripId).join('>')));
   const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
   const candidatePoolReachedAtByLegCount = JSON.parse(String(ranked?.candidatePoolReachedAtStepByLegCount)) as Record<string, number>;
+  const reservoirQueueSnapshots = JSON.parse(String(ranked?.debugObjectiveReservoirQueueSnapshots ?? '[]')) as Array<{
+    phase: string; targetChain: string; legCount: number; objectiveReservoirStepsElapsed: number;
+    queueOrdinal: number; cursorNextIndex: number; queuedWorkAhead: number; queuedPriorityPathsAhead: number;
+  }>;
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
     nextLegFeasibleAtStepByLegCount: Record<string, number>;
@@ -3736,6 +3740,11 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
     progress.queuedPriorityPathsAhead > 0),
   'the late target cursor competes with already validated priority paths');
+  assert.ok(reservoirQueueSnapshots.some((snapshot) => snapshot.phase === 'activated'
+    && snapshot.targetChain.includes('access-trip>p1:20261012:middle-trip-target')
+    && snapshot.legCount === 3 && snapshot.cursorNextIndex > 0
+    && snapshot.queuedWorkAhead > 0 && snapshot.queuedPriorityPathsAhead > 0),
+  'debug trace snapshots the target cursor behind priority work at reservoir activation');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
