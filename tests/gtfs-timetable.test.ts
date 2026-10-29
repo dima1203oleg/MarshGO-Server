@@ -3690,6 +3690,8 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     targetCursorQueueSequence: number; targetCursorBatchesInAgeQuantum: number; targetCursorPathKey: string;
     selectedWorkPriority: boolean; priorityWorkStreakBefore: number; priorityWorkStreakAfter: number;
     targetPathQueuePosition: number; targetPathPriority: boolean; selectedTargetPath: boolean;
+    pendingTransferPathCount: number; fairChildTurnsBeforePath: number; transferPathTurnLimit: number;
+    forcedTransferPathTurn: boolean; hasPendingPriorityWork: boolean;
   }>;
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
@@ -3756,6 +3758,20 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   'debug trace records competing path service while the target cursor is queued');
   assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedTargetPath),
     'debug trace records when the exact feasible target prefix receives service');
+  const schedulingEvidence = reservoirQueueDecisions.slice(-12).map((decision) => ({
+    pendingTransferPathCount: decision.pendingTransferPathCount,
+    fairChildTurnsBeforePath: decision.fairChildTurnsBeforePath,
+    transferPathTurnLimit: decision.transferPathTurnLimit,
+    forcedTransferPathTurn: decision.forcedTransferPathTurn,
+    hasPendingPriorityWork: decision.hasPendingPriorityWork,
+    selectedWorkKind: decision.selectedWorkKind,
+  }));
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.pendingTransferPathCount >= 8
+    && decision.transferPathTurnLimit === 4 && decision.selectedWorkKind === 'path'),
+  `transfer-path backlog uses its four-turn cadence; ${JSON.stringify(schedulingEvidence)}`);
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.pendingTransferPathCount < 8
+    && decision.transferPathTurnLimit === 16),
+  'small transfer-path queues keep the lower-frequency sixteen-turn cadence');
   assert.ok(reservoirQueueDecisions.some((decision) => decision.targetCursorNextIndex > 0
     && decision.selectedTargetCursor && decision.targetCursorQueueSequence >= 0
     && decision.targetCursorBatchesInAgeQuantum >= 0
