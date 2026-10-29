@@ -3501,12 +3501,14 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
 
   const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
   const previousTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
+  const previousCandidateTrace = process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
   const previousInfo = console.info;
   const diagnostics: Array<Record<string, unknown>> = [];
   const targetTrace = [`${target}-access`, `${target}-middle-trip`, `${target}-egress-trip`]
     .map((tripId) => `p1:20261012:${tripId}`).join('>');
   process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
   process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = targetTrace;
+  process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = `${target}-access,${target}-middle-trip`;
   console.info = (...args: unknown[]) => {
     if (typeof args[0] !== 'string') return;
     try { diagnostics.push(JSON.parse(args[0]) as Record<string, unknown>); } catch { /* unrelated logs */ }
@@ -3527,6 +3529,8 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
     else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
     if (previousTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
     else process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = previousTrace;
+    if (previousCandidateTrace === undefined) delete process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
+    else process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS = previousCandidateTrace;
   }
 
   const targetChain = `${target}-access>${target}-middle-trip>${target}-egress-trip`;
@@ -3534,8 +3538,9 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
     journey.segments.map((segment) => segment.tripId).join('>')));
   const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
   const trace = ranked?.debugTripChainPresence;
+  const candidateTrace = diagnostics.find((entry) => entry.stage === 'segments-built')?.debugCandidateTripTrace;
   assert.ok(returnedChains.has(targetChain),
-    `the later, faster feasible chain survives early slower branches; trace=${String(trace)}`);
+    `the later, faster feasible chain survives early slower branches; trace=${String(trace)}; candidates=${String(candidateTrace)}`);
   assert.equal(result.truncation.searchBudget, false,
     'the fair scheduler exhausts this bounded fixture instead of leaving the late branch pending');
 });
