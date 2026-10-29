@@ -4163,7 +4163,27 @@ export function findGtfsItinerariesWithStats(
     reservoirPriorityWorkStreak: number;
     reservoirFairChildTurnsSinceTransferPathTurn: number;
     nextChildCursorSequence: number;
+    pendingTransferPathCount: number;
     maxQueuedWork: number;
+  };
+  const isTransferPathWork = (work: SearchWork): work is PathWork =>
+    work.kind === 'path' && work.path.length > 1;
+  const assertQueueTransferPathCount = (queue: RouteSearchQueue) => {
+    if (process.env.MARSHGO_GTFS_SEARCH_DEBUG !== '1') return;
+    let actualCount = 0;
+    for (let index = queue.workIndex; index < queue.work.length; index++) {
+      if (isTransferPathWork(queue.work[index]!)) actualCount++;
+    }
+    if (actualCount !== queue.pendingTransferPathCount) {
+      throw new Error(`GTFS pending transfer-path count mismatch: ${queue.pendingTransferPathCount} !== ${actualCount}`);
+    }
+  };
+  const removeQueuedWorkAt = (queue: RouteSearchQueue, index: number): SearchWork => {
+    const [removed] = queue.work.splice(index, 1);
+    if (!removed) throw new Error('Cannot remove missing GTFS queued work');
+    if (isTransferPathWork(removed)) queue.pendingTransferPathCount--;
+    assertQueueTransferPathCount(queue);
+    return removed;
   };
   const recordDebugObjectiveReservoirQueueSnapshot = (
     phase: 'activated' | 'cutoff', legCount: number, queues: RouteSearchQueue[], reservoirStartedAt: number,
@@ -4225,7 +4245,7 @@ export function findGtfsItinerariesWithStats(
       const evicted = queue.work[index]!;
       if (evicted.kind !== 'path' || evicted.priority) continue;
       recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-      queue.work.splice(index, 1);
+      removeQueuedWorkAt(queue, index);
       queuesPendingWork--;
       queueWorkDropped = true;
       return true;
@@ -4237,7 +4257,7 @@ export function findGtfsItinerariesWithStats(
       const evicted = queue.work[index]!;
       if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length <= cursorDepth) continue;
       recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-      queue.work.splice(index, 1);
+      removeQueuedWorkAt(queue, index);
       queuesPendingWork--;
       queueWorkDropped = true;
       return true;
@@ -4249,7 +4269,7 @@ export function findGtfsItinerariesWithStats(
       const evicted = queue.work[index]!;
       if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length < incomingDepth) continue;
       recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-      queue.work.splice(index, 1);
+      removeQueuedWorkAt(queue, index);
       queuesPendingWork--;
       queueWorkDropped = true;
       return true;
@@ -4262,7 +4282,7 @@ export function findGtfsItinerariesWithStats(
         const evicted = activeQueue.work[index]!;
         if (evicted.kind !== 'path' || !evicted.priority || evicted.path.length <= incomingDepth) continue;
         recordDebugTripChainQueueEvent(evicted.path, 'pathEvicted');
-        activeQueue.work.splice(index, 1);
+        removeQueuedWorkAt(activeQueue, index);
         queuesPendingWork--;
         queueWorkDropped = true;
         return true;
@@ -4336,6 +4356,8 @@ export function findGtfsItinerariesWithStats(
       }
       queue.work.splice(priorityEnd, 0, queuedWork);
     } else queue.work.push(queuedWork);
+    if (isTransferPathWork(queuedWork)) queue.pendingTransferPathCount++;
+    assertQueueTransferPathCount(queue);
     maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
       queuesPendingWork + 1);
     queuesPendingWork++;
@@ -4428,17 +4450,27 @@ export function findGtfsItinerariesWithStats(
       // item cannot follow an ordinary item, so the head identifies the prefix.
       const pendingPriorityWork = queue.workIndex < queue.work.length
         && queue.work[queue.workIndex]!.priority ? queue.workIndex : -1;
+      const hasPendingPriorityWork = pendingPriorityWork >= queue.workIndex;
+      const forceFairQueueTurn = hasPendingPriorityWork
+        && queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST;
+      const pendingTransferPathCount = preferDeepCursor ? queue.pendingTransferPathCount : 0;
+      const childTurnsBeforePath = objectiveReservoirChildTurnsBeforeTransferPath(pendingTransferPathCount);
+      const forceTransferPathTurn = preferDeepCursor && pendingTransferPathCount > 0
+        && queue.reservoirFairChildTurnsSinceTransferPathTurn >= childTurnsBeforePath;
+      const needsCursorSelection = preferDeepCursor && (forceFairQueueTurn || !hasPendingPriorityWork);
       let pendingChildCursor = -1;
       let pendingNonPriorityChildCursor = -1;
       let pendingTransferPath = -1;
-      let pendingTransferPathCount = 0;
-      if (preferDeepCursor) {
+      if (needsCursorSelection || forceTransferPathTurn) {
         for (let index = queue.workIndex; index < queue.work.length; index++) {
           if (activeDebugDepthPass) activeDebugDepthPass.scannedQueueItems++;
           const pending = queue.work[index]!;
-          if (pending.kind === 'path' && pending.path.length > 1) {
-            pendingTransferPathCount++;
-            if (pendingTransferPath < 0) pendingTransferPath = index;
+          if (forceTransferPathTurn && pendingTransferPath < 0 && isTransferPathWork(pending)) {
+            pendingTransferPath = index;
+          }
+          if (!needsCursorSelection) {
+            if (pendingTransferPath >= 0) break;
+            continue;
           }
           if (pending.kind !== 'children' || pending.remainingLegs < 1) continue;
           if (pendingChildCursor < 0
@@ -4451,21 +4483,15 @@ export function findGtfsItinerariesWithStats(
           }
         }
       }
-      const hasPendingPriorityWork = pendingPriorityWork >= queue.workIndex;
-      const forceFairQueueTurn = hasPendingPriorityWork
-        && queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST;
       const shouldServeDeepCursor = pendingChildCursor >= queue.workIndex
         && (!hasPendingPriorityWork
           || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
       const shouldServeNonPriorityCursor = pendingNonPriorityChildCursor >= queue.workIndex
         && (!hasPendingPriorityWork
           || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
-      const childTurnsBeforePath = objectiveReservoirChildTurnsBeforeTransferPath(pendingTransferPathCount);
       // Guarantee transfer-path service independently of priority streaks:
       // shorten the cursor cadence as the prefix backlog grows, while a small
       // backlog waits longer so cursor discovery keeps moving.
-      const forceTransferPathTurn = pendingTransferPath >= queue.workIndex
-        && queue.reservoirFairChildTurnsSinceTransferPathTurn >= childTurnsBeforePath;
       const fairChildTurnsBeforePath = queue.reservoirFairChildTurnsSinceTransferPathTurn;
       const pendingIndex = forceTransferPathTurn ? pendingTransferPath
         : forceFairQueueTurn && pendingNonPriorityChildCursor >= queue.workIndex ? pendingNonPriorityChildCursor
@@ -4474,12 +4500,15 @@ export function findGtfsItinerariesWithStats(
         : shouldServeDeepCursor ? pendingChildCursor
           : hasPendingPriorityWork && queue.reservoirPriorityWorkStreak < MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST
             ? pendingPriorityWork : -1;
-      const work = pendingIndex > queue.workIndex
+      const removeFromMiddle = pendingIndex > queue.workIndex;
+      const work = removeFromMiddle
         ? (() => {
           if (activeDebugDepthPass) activeDebugDepthPass.middleQueueRemovals++;
-          return queue.work.splice(pendingIndex, 1)[0]!;
+          return removeQueuedWorkAt(queue, pendingIndex);
         })()
         : queue.work[queue.workIndex++]!;
+      if (!removeFromMiddle && isTransferPathWork(work)) queue.pendingTransferPathCount--;
+      if (!removeFromMiddle) assertQueueTransferPathCount(queue);
       if (preferDeepCursor) {
         queue.reservoirFairChildTurnsSinceTransferPathTurn = forceTransferPathTurn
           ? 0 : queue.reservoirFairChildTurnsSinceTransferPathTurn;
@@ -4491,6 +4520,7 @@ export function findGtfsItinerariesWithStats(
       if (queue.workIndex >= 128 && queue.workIndex * 2 >= queue.work.length) {
         queue.work.splice(0, queue.workIndex);
         queue.workIndex = 0;
+        assertQueueTransferPathCount(queue);
       }
       recordQueueDecision(work, {
         pendingTransferPathCount,
@@ -4499,6 +4529,8 @@ export function findGtfsItinerariesWithStats(
         forcedTransferPathTurn: forceTransferPathTurn,
         forcedPriorityFairTurn: forceFairQueueTurn,
         hasPendingPriorityWork,
+        preferDeepCursor,
+        queueSelectionScan: needsCursorSelection || forceTransferPathTurn,
       });
       return work;
     }
@@ -4753,6 +4785,7 @@ export function findGtfsItinerariesWithStats(
       reservoirPriorityWorkStreak: 0,
       reservoirFairChildTurnsSinceTransferPathTurn: 0,
       nextChildCursorSequence: 0,
+      pendingTransferPathCount: 0,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
     activeQueues = queues;

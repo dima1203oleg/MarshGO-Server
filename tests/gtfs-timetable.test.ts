@@ -3746,6 +3746,7 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     targetPathQueuePosition: number; targetPathPriority: boolean; selectedTargetPath: boolean;
     pendingTransferPathCount: number; fairChildTurnsBeforePath: number; transferPathTurnLimit: number;
     forcedTransferPathTurn: boolean; forcedPriorityFairTurn: boolean; hasPendingPriorityWork: boolean;
+    preferDeepCursor: boolean; queueSelectionScan: boolean;
   }>;
   const trace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
     pathExpandedAtStepByLegCount: Record<string, number>;
@@ -3841,6 +3842,10 @@ test('preserves a late feasible successor after the deep candidate pool saturate
   assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedWorkPriority
     && decision.priorityWorkStreakAfter > decision.priorityWorkStreakBefore),
   'priority work consumes the same bounded burst regardless of work kind');
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedWorkPriority
+    && decision.preferDeepCursor && !decision.forcedTransferPathTurn && !decision.forcedPriorityFairTurn
+    && !decision.queueSelectionScan),
+  'ordinary priority turns skip queue-wide cursor and transfer-path selection scans');
   assert.ok(reservoirQueueDecisions.some((decision) => decision.selectedTargetCursor
     && !decision.selectedWorkPriority && decision.priorityWorkStreakBefore >= 1),
   'an aged non-priority cursor gets service after a priority item');
