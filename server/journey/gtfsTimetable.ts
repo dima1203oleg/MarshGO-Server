@@ -4465,7 +4465,10 @@ export function findGtfsItinerariesWithStats(
       const childTurnsBeforePath = objectiveReservoirChildTurnsBeforeTransferPath(pendingTransferPathCount);
       const forceTransferPathTurn = preferDeepCursor && pendingTransferPathCount > 0
         && queue.reservoirFairChildTurnsSinceTransferPathTurn >= childTurnsBeforePath;
-      const needsCursorSelection = preferDeepCursor && (forceFairQueueTurn || !hasPendingPriorityWork);
+      // Preserve targeted fairness turns, but otherwise let FIFO serve the oldest
+      // queued work. Scanning the full backlog whenever there is no priority
+      // prefix repeatedly rescanned work that FIFO could serve directly.
+      const needsCursorSelection = preferDeepCursor && forceFairQueueTurn;
       let pendingChildCursor = -1;
       let pendingNonPriorityChildCursor = -1;
       let pendingTransferPath = -1;
