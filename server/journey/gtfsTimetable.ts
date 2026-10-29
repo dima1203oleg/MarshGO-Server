@@ -4116,7 +4116,7 @@ export function findGtfsItinerariesWithStats(
     preferDeepCursor: boolean;
     reservoirQueuedWorkStreak: number;
     reservoirPriorityWorkStreak: number;
-    reservoirFairChildTurnsSincePath: number;
+    reservoirFairChildTurnsSinceTransferPathTurn: number;
     nextChildCursorSequence: number;
     maxQueuedWork: number;
   };
@@ -4407,8 +4407,8 @@ export function findGtfsItinerariesWithStats(
       // a large prefix backlog gets a slot after four cursor turns, while a
       // small backlog waits longer so cursor discovery keeps moving.
       const forceTransferPathTurn = pendingTransferPath >= queue.workIndex
-        && queue.reservoirFairChildTurnsSincePath >= childTurnsBeforePath;
-      const fairChildTurnsBeforePath = queue.reservoirFairChildTurnsSincePath;
+        && queue.reservoirFairChildTurnsSinceTransferPathTurn >= childTurnsBeforePath;
+      const fairChildTurnsBeforePath = queue.reservoirFairChildTurnsSinceTransferPathTurn;
       const pendingIndex = forceTransferPathTurn ? pendingTransferPath
         : forceFairQueueTurn && pendingChildCursor >= queue.workIndex ? pendingChildCursor
         : shouldServeNonPriorityCursor ? pendingNonPriorityChildCursor
@@ -4419,11 +4419,8 @@ export function findGtfsItinerariesWithStats(
         ? queue.work.splice(pendingIndex, 1)[0]!
         : queue.work[queue.workIndex++]!;
       if (preferDeepCursor) {
-        queue.reservoirFairChildTurnsSincePath = work.kind === 'path' && work.path.length > 1
-          ? 0 : work.kind === 'children'
-            ? Math.min(MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH,
-              queue.reservoirFairChildTurnsSincePath + 1)
-            : queue.reservoirFairChildTurnsSincePath;
+        queue.reservoirFairChildTurnsSinceTransferPathTurn = forceTransferPathTurn
+          ? 0 : queue.reservoirFairChildTurnsSinceTransferPathTurn;
       }
       if (preferDeepCursor && work.priority && !forceFairQueueTurn) queue.reservoirPriorityWorkStreak++;
       else if (preferDeepCursor) queue.reservoirPriorityWorkStreak = 0;
@@ -4493,6 +4490,10 @@ export function findGtfsItinerariesWithStats(
     const objectiveReservoirActive = candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass);
     const childBatchLimit = maximumLegsForPass >= 3 && !objectiveReservoirActive
       ? MAX_GTFS_CHILDREN_PER_WORK_TURN * 4 : MAX_GTFS_CHILDREN_PER_WORK_TURN;
+    if (objectiveReservoirActive) {
+      queue.reservoirFairChildTurnsSinceTransferPathTurn = Math.min(MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH,
+        queue.reservoirFairChildTurnsSinceTransferPathTurn + 1);
+    }
     const nextIndexBefore = work.nextIndex;
     const feasiblePaths: GtfsDirectJourney[][] = [];
     while (processed < childBatchLimit
@@ -4653,7 +4654,7 @@ export function findGtfsItinerariesWithStats(
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true, preferDeepCursor: true,
       reservoirQueuedWorkStreak: 0,
       reservoirPriorityWorkStreak: 0,
-      reservoirFairChildTurnsSincePath: 0,
+      reservoirFairChildTurnsSinceTransferPathTurn: 0,
       nextChildCursorSequence: 0,
       maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));

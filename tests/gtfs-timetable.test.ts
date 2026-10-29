@@ -3766,8 +3766,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     hasPendingPriorityWork: decision.hasPendingPriorityWork,
     selectedWorkKind: decision.selectedWorkKind,
   }));
-  assert.ok(reservoirQueueDecisions.some((decision) => decision.pendingTransferPathCount >= 8
-    && decision.transferPathTurnLimit === 4 && decision.selectedWorkKind === 'path'),
+  assert.ok(reservoirQueueDecisions.some((decision) => decision.forcedTransferPathTurn
+    && decision.pendingTransferPathCount >= 8 && decision.transferPathTurnLimit === 4
+    && decision.fairChildTurnsBeforePath >= 4 && decision.selectedWorkKind === 'path'),
   `transfer-path backlog uses its four-turn cadence; ${JSON.stringify(schedulingEvidence)}`);
   assert.ok(reservoirQueueDecisions.some((decision) => decision.pendingTransferPathCount < 8
     && decision.transferPathTurnLimit === 16),
