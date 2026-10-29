@@ -3687,6 +3687,11 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
       pathEnqueued: number; pathDropped: number; pathEvicted: number;
       childCursorEnqueued: number; childCursorDropped: number; childCursorEvicted: number;
     }>;
+    cursorProgressByPath: Record<string, Array<{
+      nextIndexBefore: number; nextIndexAfter: number; nextIndexStart: number; choiceCount: number;
+      batchProcessed: number; remainingStepBudget: number; queuePending: number; queueLimit: number;
+      globalPending: number; globalLimit: number; priority: boolean; continuationQueued: boolean; stopReason: string;
+    }>>;
     successorPositionsByPath: Record<string, { targetSuccessors: Array<{ tripKey: string; cursorOffset: number; transferFeasible: boolean }> }>;
   }>;
   const targetTrace = trace[`p1:20261012:access-trip>p1:20261012:middle-trip-target>p1:20261012:egress-trip-target`];
@@ -3704,6 +3709,9 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
   'the feasible target lies beyond the six-item queue share');
   assert.ok((targetTrace.queueEventsByLegCount['2']?.pathEnqueued ?? 0) > 0,
     'queue diagnostics record when the feasible target path prefix is admitted');
+  assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
+    progress.nextIndexAfter > progress.nextIndexBefore && progress.continuationQueued),
+  'target child cursor diagnostics show bounded forward progress and a queued continuation');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
