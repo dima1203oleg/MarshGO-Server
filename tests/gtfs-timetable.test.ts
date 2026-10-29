@@ -2508,6 +2508,26 @@ test('bounded objective overflow sample is stable across candidate arrival order
   }
 });
 
+test('bounded overflow sample refreshes a cached priority when an itinerary ID changes', () => {
+  const base = findGtfsItineraries(feed(), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  })[0];
+  assert.ok(base);
+  const mutable = { ...base, id: 'before-id-change' };
+  const other = { ...base, id: 'competing-id' };
+  retainGtfsDeterministicOverflowSample([], mutable, 1);
+
+  mutable.id = 'after-id-change';
+  const actual = retainGtfsDeterministicOverflowSample(
+    retainGtfsDeterministicOverflowSample([], mutable, 1), other, 1,
+  ).map(({ id }) => id);
+  const freshObject = { ...mutable };
+  const expected = retainGtfsDeterministicOverflowSample(
+    retainGtfsDeterministicOverflowSample([], freshObject, 1), other, 1,
+  ).map(({ id }) => id);
+  assert.deepEqual(actual, expected);
+});
+
 test('cross-provider GTFS cap preserves slow cheapest routes before filling by arrival', () => {
   const base = findGtfsItineraries(feed(), {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,

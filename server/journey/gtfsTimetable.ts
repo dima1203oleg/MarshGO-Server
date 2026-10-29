@@ -526,6 +526,16 @@ function gtfsSegmentRetentionPriority(key: string): number {
   return hash >>> 0;
 }
 
+const gtfsItineraryRetentionPriorities = new WeakMap<GtfsItinerary, { id: string; priority: number }>();
+
+function gtfsItineraryRetentionPriority(itinerary: GtfsItinerary): number {
+  const cached = gtfsItineraryRetentionPriorities.get(itinerary);
+  if (cached?.id === itinerary.id) return cached.priority;
+  const priority = gtfsSegmentRetentionPriority(itinerary.id);
+  gtfsItineraryRetentionPriorities.set(itinerary, { id: itinerary.id, priority });
+  return priority;
+}
+
 /**
  * Keep a balanced sample of GTFS candidates for the cross-provider scorer.
  * When comparable fares exist, an unknown fare must not receive the same
@@ -633,9 +643,10 @@ export function retainGtfsDeterministicOverflowSample(
   // the retained candidates are ranked by the shared scorer after collection.
   // Compute each ID's hash once per update. Re-hashing both sides of the sort
   // comparator for every comparison made the hot overflow path needlessly
-  // expensive on dense feeds.
+  // expensive on dense feeds. Itineraries can remain in the bounded sample
+  // across many updates, so reuse their stable identity hash as well.
   return [...unique.values()]
-    .map((itinerary) => ({ itinerary, priority: gtfsSegmentRetentionPriority(itinerary.id) }))
+    .map((itinerary) => ({ itinerary, priority: gtfsItineraryRetentionPriority(itinerary) }))
     .sort((left, right) => left.priority - right.priority
       || compareStableId(left.itinerary.id, right.itinerary.id))
     .slice(0, maximum)
