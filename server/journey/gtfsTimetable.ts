@@ -4472,9 +4472,9 @@ export function findGtfsItinerariesWithStats(
         : shouldServeDeepCursor ? pendingChildCursor
           : hasPendingPriorityWork && queue.reservoirPriorityWorkStreak < MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST
             ? pendingPriorityWork : -1;
-      const work = pendingIndex >= queue.workIndex
+      const work = pendingIndex > queue.workIndex
         ? (() => {
-          if (activeDebugDepthPass && pendingIndex > queue.workIndex) activeDebugDepthPass.middleQueueRemovals++;
+          if (activeDebugDepthPass) activeDebugDepthPass.middleQueueRemovals++;
           return queue.work.splice(pendingIndex, 1)[0]!;
         })()
         : queue.work[queue.workIndex++]!;
