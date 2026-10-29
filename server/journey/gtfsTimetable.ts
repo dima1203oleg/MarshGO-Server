@@ -4246,8 +4246,15 @@ export function findGtfsItinerariesWithStats(
         recordDebugTripChainSearch(candidatePath, 'next-leg-considered', rejectionReasons);
       }
       if (feasible) {
+        const path = candidatePath ?? [...work.path, next];
         if (candidatePath) recordDebugTripChainSearch(candidatePath, 'next-leg-feasible');
-        feasiblePaths.push([...work.path, next]);
+        if (work.remainingLegs === 1 && destinationStopIds.has(next.destinationStop.id)) {
+          // A complete, already validated journey should not compete with
+          // unfinished search work for a bounded queue slot. Add it to the
+          // candidate reservoir immediately; queue caps still bound discovery.
+          if (candidatePath) recordDebugTripChainSearch(candidatePath, 'path-expanded');
+          addPath(path, maximumLegsForPass);
+        } else feasiblePaths.push(path);
       }
     }
     const hasNextBeforeHorizon = work.nextIndex < work.choices.length
