@@ -937,14 +937,31 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
   }
 
   let stopSelectionTruncated = false;
-  const closestStops = (point: [number, number], radius: number) => {
+  const closestStops = (point: [number, number], radius: number, toward: [number, number]) => {
     const ranked = [...feed.stops.values()]
       .filter((stop) => feed.stopTimesByStop.has(stop.id))
-      .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]), types: new Set<GtfsTransportType>() }))
+      .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]),
+        onwardDistance: distanceMeters(toward, [stop.lon, stop.lat]), types: new Set<GtfsTransportType>() }))
       .filter(({ distance }) => distance <= radius)
-      .sort((a, b) => a.distance - b.distance);
+      .sort((a, b) => a.distance - b.distance || a.stop.id.localeCompare(b.stop.id));
     const selected = new Map<string, typeof ranked[number]>();
-    for (const item of ranked.slice(0, MAX_STOPS_PER_SIDE)) selected.set(item.stop.id, item);
+    // Retain a nearest-stop anchor set for low access/egress walking, then use
+    // the remaining endpoint slots for stops that make progress toward the
+    // other end of the requested trip. This keeps the same bounded candidate
+    // count while avoiding an endpoint pool selected only by radial distance.
+    const nearestCount = Math.ceil(MAX_STOPS_PER_SIDE * 0.75);
+    for (const item of ranked.slice(0, nearestCount)) selected.set(item.stop.id, item);
+    const directionRanked = [...ranked].sort((a, b) =>
+      (a.distance + 0.25 * a.onwardDistance) - (b.distance + 0.25 * b.onwardDistance)
+      || a.distance - b.distance || a.stop.id.localeCompare(b.stop.id));
+    for (const item of directionRanked) {
+      if (selected.size >= MAX_STOPS_PER_SIDE) break;
+      selected.set(item.stop.id, item);
+    }
+    for (const item of ranked) {
+      if (selected.size >= MAX_STOPS_PER_SIDE) break;
+      selected.set(item.stop.id, item);
+    }
     const selectedByType = new Map<GtfsTransportType, number>();
     for (const item of ranked) {
       for (const entry of feed.stopTimesByStop.get(item.stop.id) ?? []) {
@@ -965,8 +982,8 @@ export function findGtfsItinerariesWithStats(feed: GtfsTimetableFeed, input: Gtf
     if (selected.size < ranked.length) stopSelectionTruncated = true;
     return [...selected.values()];
   };
-  const originStops = closestStops(input.origin, accessRadius);
-  const destinationStops = closestStops(input.destination, egressRadius);
+  const originStops = closestStops(input.origin, accessRadius, input.destination);
+  const destinationStops = closestStops(input.destination, egressRadius, input.origin);
   debugStage('stops-selected', { originStops: originStops.length, destinationStops: destinationStops.length });
   if (!originStops.length || !destinationStops.length) {
     return { itineraries: [], searchTruncated: false, resultLimitReached: false };
