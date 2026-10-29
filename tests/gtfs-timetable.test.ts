@@ -3746,6 +3746,9 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     && reservoirCursorTurn.queuedWorkAhead >= 0,
   'cursor trace exposes its search-step offset and queue service position');
   assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
+    progress.objectiveReservoirStepsElapsed > 0 && progress.batchProcessed === 4),
+  'deep-search cursors use a smaller batch while the bounded objective reservoir is active');
+  assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
     progress.queuedPriorityPathsAhead > 0),
   'the late target cursor competes with already validated priority paths');
   assert.ok(reservoirQueueSnapshots.some((snapshot) => snapshot.phase === 'activated'
