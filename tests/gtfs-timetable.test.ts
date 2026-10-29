@@ -3541,11 +3541,37 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
     journey.segments.map((segment) => segment.tripId).join('>')));
   const ranked = diagnostics.find((entry) => entry.stage === 'itineraries-ranked');
   const trace = ranked?.debugTripChainPresence;
+  const searchTrace = JSON.parse(String(ranked?.debugTripChainSearchTrace)) as Record<string, {
+    pathExpandedAtStepByLegCount: Record<string, number>;
+    pathExpandedCountByLegCount: Record<string, number>;
+    nextLegConsideredAtStepByLegCount: Record<string, number>;
+    nextLegConsideredCountByLegCount: Record<string, number>;
+    nextLegFeasibleAtStepByLegCount: Record<string, number>;
+    nextLegFeasibleCountByLegCount: Record<string, number>;
+  }>;
   const candidateTrace = diagnostics.find((entry) => entry.stage === 'segments-built')?.debugCandidateTripTrace;
   assert.ok(returnedChains.has(targetChain),
     `the later, faster feasible chain survives early slower branches; trace=${String(trace)}; candidates=${String(candidateTrace)}`);
   assert.equal(result.truncation.searchBudget, false,
     'the fair scheduler exhausts this bounded fixture instead of leaving the late branch pending');
+  const targetSearchTrace = searchTrace[`p1:20261012:${target}-access>p1:20261012:${target}-middle-trip>p1:20261012:${target}-egress-trip`];
+  assert.ok(targetSearchTrace, 'opt-in search tracing captures the requested target chain');
+  assert.deepEqual(Object.keys(targetSearchTrace.pathExpandedAtStepByLegCount).sort(), ['1', '2', '3']);
+  assert.deepEqual(Object.keys(targetSearchTrace.nextLegConsideredAtStepByLegCount).sort(), ['2', '3']);
+  assert.deepEqual(Object.keys(targetSearchTrace.nextLegFeasibleAtStepByLegCount).sort(), ['2', '3']);
+  assert.ok(targetSearchTrace.pathExpandedCountByLegCount['1'] > 0
+    && targetSearchTrace.pathExpandedCountByLegCount['2'] > 0
+    && targetSearchTrace.pathExpandedCountByLegCount['3'] > 0
+    && targetSearchTrace.nextLegConsideredCountByLegCount['2'] > 0
+    && targetSearchTrace.nextLegConsideredCountByLegCount['3'] > 0
+    && targetSearchTrace.nextLegFeasibleCountByLegCount['2'] > 0
+    && targetSearchTrace.nextLegFeasibleCountByLegCount['3'] > 0,
+  'trace counts target-chain prefix expansions and feasible successors at each depth');
+  assert.ok(targetSearchTrace.pathExpandedAtStepByLegCount['1'] < targetSearchTrace.nextLegConsideredAtStepByLegCount['2']
+    && targetSearchTrace.nextLegConsideredAtStepByLegCount['2'] < targetSearchTrace.pathExpandedAtStepByLegCount['2']
+    && targetSearchTrace.pathExpandedAtStepByLegCount['2'] < targetSearchTrace.nextLegConsideredAtStepByLegCount['3']
+    && targetSearchTrace.nextLegConsideredAtStepByLegCount['3'] < targetSearchTrace.pathExpandedAtStepByLegCount['3'],
+  'trace orders each exact feasible successor before its expanded path prefix');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {

@@ -1694,6 +1694,7 @@ export function findGtfsItinerariesWithStats(
         heapUsedBytes: memory.heapUsed, rssBytes: memory.rss, ...details }));
     }
   };
+  let searchSteps = 0;
   const debugTraceTripChains = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
     ? (process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS ?? '').split('|')
       .filter((tripChain) => tripChain.length > 0 && tripChain.length <= 512).slice(0, 16)
@@ -1701,6 +1702,50 @@ export function findGtfsItinerariesWithStats(
   const debugTraceTripChainSet = debugTraceTripChains.length > 0 ? new Set(debugTraceTripChains) : undefined;
   const debugCompletedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
   const debugGeneratedTripChains = debugTraceTripChains.length > 0 ? new Set<string>() : undefined;
+  const debugTraceTripChainParts = debugTraceTripChains.map((tripChain) => tripChain.split('>'));
+  const debugTripChainSearchTrace = new Map<string, {
+    pathExpandedAtStepByLegCount: Record<string, number>;
+    pathExpandedCountByLegCount: Record<string, number>;
+    nextLegConsideredAtStepByLegCount: Record<string, number>;
+    nextLegConsideredCountByLegCount: Record<string, number>;
+    nextLegFeasibleAtStepByLegCount: Record<string, number>;
+    nextLegFeasibleCountByLegCount: Record<string, number>;
+  }>();
+  const recordDebugTripChainSearch = (path: readonly GtfsDirectJourney[], event: 'path-expanded' | 'next-leg-considered' | 'next-leg-feasible') => {
+    if (!debugTraceTripChainSet || path.length > 5) return;
+    for (let index = 0; index < debugTraceTripChainParts.length; index++) {
+      const target = debugTraceTripChainParts[index]!;
+      if (path.length > target.length) continue;
+      let matches = true;
+      for (let leg = 0; leg < path.length; leg++) {
+        const segment = path[leg]!;
+        if (`${segment.providerId}:${segment.serviceDate}:${segment.tripId}` !== target[leg]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+      const targetKey = debugTraceTripChains[index]!;
+      const trace = debugTripChainSearchTrace.get(targetKey) ?? {
+        pathExpandedAtStepByLegCount: {},
+        pathExpandedCountByLegCount: {},
+        nextLegConsideredAtStepByLegCount: {},
+        nextLegConsideredCountByLegCount: {},
+        nextLegFeasibleAtStepByLegCount: {},
+        nextLegFeasibleCountByLegCount: {},
+      };
+      const legCount = String(path.length);
+      const field = event === 'path-expanded' ? trace.pathExpandedAtStepByLegCount
+        : event === 'next-leg-considered' ? trace.nextLegConsideredAtStepByLegCount
+          : trace.nextLegFeasibleAtStepByLegCount;
+      const countField = event === 'path-expanded' ? trace.pathExpandedCountByLegCount
+        : event === 'next-leg-considered' ? trace.nextLegConsideredCountByLegCount
+          : trace.nextLegFeasibleCountByLegCount;
+      field[legCount] ??= searchSteps;
+      countField[legCount] = (countField[legCount] ?? 0) + 1;
+      debugTripChainSearchTrace.set(targetKey, trace);
+    }
+  };
   const debugTraceCandidateTrips = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
     ? [...new Set((process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS ?? '')
       .split(',').map((tripId) => tripId.trim())
@@ -3715,7 +3760,6 @@ export function findGtfsItinerariesWithStats(
   // Bound both graph expansion and queued alternatives. Search is round-robin
   // across first-leg route groups: a dense early route cannot spend the whole
   // budget before later lines contribute candidates to fastest/cheapest/balanced.
-  let searchSteps = 0;
   // Dense urban feeds can require hundreds of thousands of bounded cursor
   // steps before the diverse 2/3-leg pool is complete. Keep a finite ceiling,
   // but do not cut off ordinary city results at the first-route frontier.
@@ -3878,6 +3922,7 @@ export function findGtfsItinerariesWithStats(
     queue.firstLegIndex < queue.firstLegs.length || queue.workIndex < queue.work.length);
   const expandPath = (path: GtfsDirectJourney[], queue: RouteSearchQueue, maximumLegsForPass: number) => {
     searchSteps++;
+    recordDebugTripChainSearch(path, 'path-expanded');
     const last = path.at(-1)!;
     if (destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
       addPath(path, maximumLegsForPass);
@@ -3902,10 +3947,13 @@ export function findGtfsItinerariesWithStats(
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue) => {
     searchSteps++;
     const next = work.choices[work.nextIndex++];
-    if (next.departureAt.getTime() <= work.latestNext
+    const feasible = next.departureAt.getTime() <= work.latestNext
       && reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id)
       && !work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
-      && transferDecision(work.last, next).feasible) {
+      && transferDecision(work.last, next).feasible;
+    if (debugTraceTripChainSet) recordDebugTripChainSearch([...work.path, next], 'next-leg-considered');
+    if (feasible) {
+      if (debugTraceTripChainSet) recordDebugTripChainSearch([...work.path, next], 'next-leg-feasible');
       enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
     }
     if (work.nextIndex < work.choices.length
@@ -4199,6 +4247,7 @@ export function findGtfsItinerariesWithStats(
         }];
       })));
     })() } : {}),
+    ...(debugTripChainSearchTrace.size > 0 ? { debugTripChainSearchTrace: JSON.stringify(Object.fromEntries(debugTripChainSearchTrace)) } : {}),
     searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
