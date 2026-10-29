@@ -59,7 +59,7 @@ const traceRouteIds = new Set((process.env.GTFS_REPLAY_TRACE_ROUTE_IDS ?? '')
 const traceTripIds = new Set((process.env.GTFS_REPLAY_TRACE_TRIP_IDS ?? '')
   .split(',').map((tripId) => tripId.trim()).filter(Boolean));
 const traceTripChains = (process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS ?? '')
-  .split(',').map((tripChain) => tripChain.trim()).filter(Boolean);
+  .split('|').map((tripChain) => tripChain.trim()).filter(Boolean);
 const traceCandidateTripIds = new Set((process.env.GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS ?? '')
   .split(',').map((tripId) => tripId.trim()).filter(Boolean));
 if (traceCandidateTripIds.size > 2) {
