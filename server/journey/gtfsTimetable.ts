@@ -4413,8 +4413,7 @@ export function findGtfsItinerariesWithStats(
       // Once the deep candidate pool is saturated, alternate bounded priority
       // work with the oldest non-priority child cursor. If none is waiting,
       // serve the oldest live cursor so a priority backlog cannot starve it.
-      const pendingPriorityWork = queue.work.findIndex((pending, index) => index >= queue.workIndex
-        && pending.priority);
+      let pendingPriorityWork = -1;
       let pendingChildCursor = -1;
       let pendingNonPriorityChildCursor = -1;
       let pendingTransferPath = -1;
@@ -4423,6 +4422,7 @@ export function findGtfsItinerariesWithStats(
         for (let index = queue.workIndex; index < queue.work.length; index++) {
           if (activeDebugDepthPass) activeDebugDepthPass.scannedQueueItems++;
           const pending = queue.work[index]!;
+          if (pendingPriorityWork < queue.workIndex && pending.priority) pendingPriorityWork = index;
           if (pending.kind === 'path' && pending.path.length > 1) {
             pendingTransferPathCount++;
             if (pendingTransferPath < 0) pendingTransferPath = index;
@@ -4437,6 +4437,9 @@ export function findGtfsItinerariesWithStats(
             pendingNonPriorityChildCursor = index;
           }
         }
+      } else {
+        pendingPriorityWork = queue.work.findIndex((pending, index) => index >= queue.workIndex
+          && pending.priority);
       }
       const hasPendingPriorityWork = pendingPriorityWork >= queue.workIndex;
       const forceFairQueueTurn = hasPendingPriorityWork
