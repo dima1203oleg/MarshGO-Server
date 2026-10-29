@@ -38,6 +38,7 @@ const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
 const MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST = 1;
+const MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH = 2;
 const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 4;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
 const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
@@ -4339,7 +4340,7 @@ export function findGtfsItinerariesWithStats(
       queue.reservoirQueuedWorkStreak = prioritizeQueuedWork
         ? queue.reservoirQueuedWorkStreak + 1 : 0;
       // Once the deep candidate pool is saturated, bound consecutive priority
-      // selections and give one path turn after up to four child-cursor turns.
+      // selections and give one path turn after a bounded number of child turns.
       // A feasible prefix may be priority work too, so fairness must cover
       // paths without starving cursor progress.
       const pendingPriorityWork = queue.work.findIndex((pending, index) => index >= queue.workIndex
@@ -4378,7 +4379,8 @@ export function findGtfsItinerariesWithStats(
           || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
       const fairPathIndex = pendingPathWork >= queue.workIndex ? pendingPathWork : pendingChildCursor;
       const fairChildIndex = pendingChildCursor >= queue.workIndex ? pendingChildCursor : pendingPathWork;
-      const fairTurnIndex = queue.reservoirFairChildTurnsSincePath >= 4 ? fairPathIndex : fairChildIndex;
+      const fairTurnIndex = queue.reservoirFairChildTurnsSincePath >= MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH
+        ? fairPathIndex : fairChildIndex;
       const pendingIndex = forceFairQueueTurn && fairTurnIndex >= queue.workIndex ? fairTurnIndex
         : shouldServeNonPriorityWork ? pendingNonPriorityWork
         : shouldServeNonPriorityCursor ? pendingNonPriorityChildCursor
@@ -4390,7 +4392,8 @@ export function findGtfsItinerariesWithStats(
         : queue.work[queue.workIndex++]!;
       if (forceFairQueueTurn) {
         queue.reservoirFairChildTurnsSincePath = work.kind === 'path'
-          ? 0 : Math.min(4, queue.reservoirFairChildTurnsSincePath + 1);
+          ? 0 : Math.min(MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH,
+            queue.reservoirFairChildTurnsSincePath + 1);
       }
       if (preferDeepCursor && work.priority && !forceFairQueueTurn) queue.reservoirPriorityWorkStreak++;
       else if (preferDeepCursor) queue.reservoirPriorityWorkStreak = 0;
