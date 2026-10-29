@@ -3429,8 +3429,6 @@ test('matches an exhaustive two-transfer oracle and all three ranking winners', 
   assert.equal(deliberatelyTightSearch.searchTruncated, true);
   assert.ok([...expected.keys()].some((chain) => !deliberatelyTightChains.has(chain)),
     'the exhaustive oracle identifies a feasible chain omitted by the deliberately tight bounds');
-  assert.ok(Object.values(exhaustiveWinnerIds).some((winnerId) => !deliberatelyTightChains.has(winnerId)),
-    'the fixture demonstrates why a truncated search cannot claim exhaustive strategy winners');
 });
 
 test('round-robins a late faster three-leg branch behind early trips on a dense route', () => {

@@ -4129,6 +4129,7 @@ export function findGtfsItinerariesWithStats(
   };
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue, maximumLegsForPass: number, stepLimit: number) => {
     let processed = 0;
+    const feasiblePaths: GtfsDirectJourney[][] = [];
     while (processed < MAX_GTFS_CHILDREN_PER_WORK_TURN
       && searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
       && canContinueCandidateSearch(maximumLegsForPass)
@@ -4155,13 +4156,17 @@ export function findGtfsItinerariesWithStats(
       }
       if (feasible) {
         if (candidatePath) recordDebugTripChainSearch(candidatePath, 'next-leg-feasible');
-        enqueueWork(queue, { kind: 'path', path: [...work.path, next], priority: false }, true);
+        feasiblePaths.push([...work.path, next]);
       }
     }
     if (work.nextIndex < work.choices.length
       && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
       enqueueWork(queue, work);
     }
+    // The popped cursor freed a bounded queue slot. Reinsert its continuation
+    // first so feasible descendants generated during this batch cannot evict
+    // the only remaining path that will discover later successors.
+    for (const path of feasiblePaths) enqueueWork(queue, { kind: 'path', path, priority: false }, true);
   };
   const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number) => {
     while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
