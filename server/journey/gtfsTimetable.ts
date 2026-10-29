@@ -4219,15 +4219,9 @@ export function findGtfsItinerariesWithStats(
   };
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue, maximumLegsForPass: number, stepLimit: number) => {
     let processed = 0;
-    // Deeper chains need more opportunities to reach later feasible transfers
-    // before the shared bounded reservoir closes. Keep the finer scheduling
-    // quantum for direct and one-transfer searches, where responsiveness and
-    // fairness matter most.
-    const childBatchLimit = maximumLegsForPass >= 3 ? MAX_GTFS_CHILDREN_PER_WORK_TURN * 4
-      : MAX_GTFS_CHILDREN_PER_WORK_TURN;
     const nextIndexBefore = work.nextIndex;
     const feasiblePaths: GtfsDirectJourney[][] = [];
-    while (processed < childBatchLimit
+    while (processed < MAX_GTFS_CHILDREN_PER_WORK_TURN
       && searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
       && canContinueCandidateSearch(maximumLegsForPass)
       && work.nextIndex < work.choices.length
@@ -4267,7 +4261,7 @@ export function findGtfsItinerariesWithStats(
       : searchSteps >= MAX_SEARCH_STEPS ? 'global-search-step-limit'
         : searchSteps >= stepLimit ? 'depth-pass-step-limit'
           : !canContinueCandidateSearch(maximumLegsForPass) ? 'candidate-pool-cutoff'
-          : processed >= childBatchLimit ? 'child-batch-limit' : 'unknown';
+            : processed >= MAX_GTFS_CHILDREN_PER_WORK_TURN ? 'child-batch-limit' : 'unknown';
     recordDebugTripChainCursorProgress(work.path, {
       nextIndexBefore,
       nextIndexAfter: work.nextIndex,
