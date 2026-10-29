@@ -19,7 +19,7 @@ if set(by_revision) != expected_revisions or any(len(items) != 3 for items in by
 
 stable_fields = (
     "origin", "destination", "departureWindow", "idHash", "uniqueTripChains", "uniqueRouteChains", "rankingMethod", "rankingScope", "availableStrategies", "strategyCandidates",
-    "tripChainIds", "strategyWinners", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
+    "tripChainIds", "strategyWinners", "returnedItineraryMetrics", "searchTruncated", "candidateGraphTruncated", "truncation", "searchDiagnosticsByStage",
 )
 for revision, items in by_revision.items():
     for field in stable_fields:
@@ -47,6 +47,28 @@ def stage_duration_samples(items, stage, previous_stage=None):
             return None
         samples.append(elapsed - previous)
     return samples
+
+
+def print_returned_page_objective_ranges(revision, record):
+    itineraries = record.get("returnedItineraryMetrics")
+    if not isinstance(itineraries, list):
+        print(f"- {revision}: per-itinerary metrics unavailable (older artifact)")
+        return
+    print(f"- {revision}: {len(itineraries)} returned itineraries; this is the response page, not the full search candidate set")
+    objectives = (
+        ("shortest duration", "durationSeconds", lambda item: isinstance(item.get("durationSeconds"), (int, float))),
+        ("lowest known fare", "priceMinor", lambda item: isinstance(item.get("priceMinor"), int)),
+        ("fewest transfers", "transfers", lambda item: isinstance(item.get("transfers"), int)),
+        ("least walking", "walkingMeters", lambda item: isinstance(item.get("walkingMeters"), (int, float))),
+    )
+    for label, field, available in objectives:
+        candidates = [item for item in itineraries if available(item)]
+        if not candidates:
+            print(f"  - {label}: unavailable")
+            continue
+        winner = min(candidates, key=lambda item: (item[field], item["id"]))
+        suffix = " minor units" if field == "priceMinor" else ""
+        print(f"  - {label}: {winner[field]}{suffix} (`{winner['id']}`)")
 
 print("# Frozen Lviv GTFS replay")
 print()
@@ -97,5 +119,8 @@ for revision, items in (("baseline", baseline), ("candidate", candidate)):
                 f"({leg['routeName']}); trip `{leg['providerId']}:{leg['serviceDate']}:{leg['tripId']}`; "
                 f"schedule `{leg['scheduleSemantics']}`"
             )
+    print()
+    print(f"### {revision.capitalize()} returned-page objective ranges")
+    print_returned_page_objective_ranges(revision, items[0])
 print()
 print("This is one static Lviv OD and a diagnostic comparison, not a live GPS, realtime, staging, production, or complete-routing acceptance test.")

@@ -283,6 +283,37 @@ const winnerSummary = (strategy: typeof userFacingStrategies[number]) => {
     })),
   };
 };
+// Keep diagnostic scoring inputs for the bounded returned page only. This is
+// deliberately not described as the complete search candidate set.
+const returnedItineraryMetrics = rankedCandidates.map((item) => ({
+  id: item.id,
+  departureAt: item.itinerary.departureAt.toISOString(),
+  arrivalAt: item.itinerary.arrivalAt.toISOString(),
+  durationSeconds: item.durationSeconds,
+  priceMinor: item.priceMinor,
+  fareCurrency: item.itinerary.fare?.currency ?? null,
+  fareSource: item.itinerary.fare?.source ?? null,
+  fareAllocations: item.itinerary.fare?.allocations.map((allocation) => ({
+    priceMinor: allocation.priceMinor,
+    currency: allocation.currency,
+    fareProductId: allocation.fareProductId,
+    includedByPreviousFare: allocation.includedByPreviousFare,
+  })) ?? null,
+  transfers: item.transfers,
+  walkingMeters: item.walkingMeters,
+  transferWalkingMeters: item.itinerary.transferWalkingMeters,
+  legs: item.itinerary.segments.map((segment) => ({
+    providerId: segment.providerId,
+    routeId: segment.routeId,
+    tripId: segment.tripId,
+    serviceDate: segment.serviceDate,
+    mode: segment.mode,
+    originStopId: segment.originStop.id,
+    destinationStopId: segment.destinationStop.id,
+    departureAt: segment.departureAt.toISOString(),
+    arrivalAt: segment.arrivalAt.toISOString(),
+  })),
+}));
 const details = result as typeof result & Record<string, unknown>;
 console.log(JSON.stringify({
   comparisonGroup: process.env.REPLAY_GROUP ?? null,
@@ -316,6 +347,7 @@ console.log(JSON.stringify({
     FASTEST: winnerSummary('FASTEST'),
     CHEAPEST: winnerSummary('CHEAPEST'),
   },
+  returnedItineraryMetrics,
   searchTruncated: details.searchTruncated,
   candidateGraphTruncated: details.candidateGraphTruncated,
   truncation: result.truncation,
