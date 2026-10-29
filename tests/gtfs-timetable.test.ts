@@ -4003,7 +4003,7 @@ test('graph-relative lazy search matches production itinerary materialization, c
   assert.equal(lazy.searchTruncated, false, 'tiny lazy request remains complete');
   assert.equal(production.searchTruncated, false, 'tiny production request remains complete');
   const boundedProduction = findGtfsItinerariesWithStats(connectingFeed(), {
-    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 1,
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 2,
   }, { maxQueuedSearchWork: 0 });
   assert.equal(boundedProduction.truncation.searchBudget, true,
     'production reports queued GTFS work dropped at its explicit frontier bound');
