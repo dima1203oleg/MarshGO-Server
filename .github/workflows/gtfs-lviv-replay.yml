@@ -65,6 +65,11 @@ on:
         required: false
         type: string
         default: ''
+      debug_diagnostics:
+        description: Collect detailed per-stage/queue diagnostics; disable for production-mode timing
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -91,6 +96,7 @@ jobs:
       GTFS_REPLAY_TRACE_TRIP_IDS: ${{ inputs.trace_trip_ids || '' }}
       GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS: ${{ inputs.trace_candidate_trip_ids || '' }}
       GTFS_REPLAY_OBJECTIVE_RESERVOIR_SEARCH_STEPS: ${{ inputs.objective_reservoir_search_steps || '' }}
+      GTFS_REPLAY_DEBUG_DIAGNOSTICS: ${{ inputs.debug_diagnostics }}
     steps:
       - name: Checkout candidate
         uses: actions/checkout@v4

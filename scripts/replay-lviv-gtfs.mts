@@ -65,6 +65,10 @@ const traceCandidateTripIds = new Set((process.env.GTFS_REPLAY_TRACE_CANDIDATE_T
 if (traceCandidateTripIds.size > 2) {
   throw new Error('GTFS_REPLAY_TRACE_CANDIDATE_TRIP_IDS accepts at most two trip IDs.');
 }
+const debugDiagnosticsEnabled = process.env.GTFS_REPLAY_DEBUG_DIAGNOSTICS !== 'false';
+if (!debugDiagnosticsEnabled && [traceTripChains.length, traceRouteIds.size, traceTripIds.size, traceCandidateTripIds.size].some((size) => size > 0)) {
+  throw new Error('GTFS_REPLAY_DEBUG_DIAGNOSTICS=false cannot be combined with trace inputs.');
+}
 const retainedTripGroupsByRoute = new Map<string, Map<string, { serviceDate: string; tripId: string; segments: number }>>();
 const retainedSegmentsByTripId = new Map<string, Map<string, {
   routeId: string;
@@ -166,7 +170,8 @@ const originalConsoleInfo = console.info.bind(console);
 const previousDebugSetting = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
 const previousTraceSetting = process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS;
 const previousCandidateTraceSetting = process.env.MARSHGO_GTFS_SEARCH_TRACE_CANDIDATE_TRIPS;
-process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+if (debugDiagnosticsEnabled) process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+else delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
 if (process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS) {
   process.env.MARSHGO_GTFS_SEARCH_TRACE_TRIP_CHAINS = process.env.GTFS_REPLAY_TRACE_TRIP_CHAINS;
 } else {
