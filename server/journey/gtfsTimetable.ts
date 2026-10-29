@@ -3949,11 +3949,13 @@ export function findGtfsItinerariesWithStats(
     work: SearchWork[];
     workIndex: number;
     preferFirstLeg: boolean;
+    maxQueuedWork: number;
   };
   const pausedDepthPassQueues = new Map<number, RouteSearchQueue[]>();
   const truncatedDepthPasses = new Set<number>();
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork) => {
-    if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK) {
+    const pendingInQueue = queue.work.length - queue.workIndex;
+    if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
       queueWorkDropped = true;
       return;
     }
@@ -4096,8 +4098,11 @@ export function findGtfsItinerariesWithStats(
       firstLegGroups.set(key, group);
     }
     queuesPendingWork = 0;
+    const maxQueuedWorkPerFirstLegQueue = Math.max(1,
+      Math.floor(MAX_QUEUED_SEARCH_WORK / Math.max(1, firstLegGroups.size)));
     const queues: RouteSearchQueue[] = [...firstLegGroups.values()].map((group) => ({
       firstLegs: group, firstLegIndex: 0, work: [], workIndex: 0, preferFirstLeg: true,
+      maxQueuedWork: maxQueuedWorkPerFirstLegQueue,
     }));
     runDepthPass(queues, maximumLegsForPass, stepLimit);
     if (hasQueuedWork(queues)) {

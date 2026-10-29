@@ -3525,7 +3525,7 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
       maximumTransferWalkingMeters: 100,
       maximumTransfers: 2,
       limit: 100,
-    }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 160 });
+    }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 160, maxQueuedSearchWork: 128 });
   } finally {
     console.info = previousInfo;
     if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
