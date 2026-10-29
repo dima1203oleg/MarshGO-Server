@@ -1710,8 +1710,15 @@ export function findGtfsItinerariesWithStats(
     nextLegConsideredCountByLegCount: Record<string, number>;
     nextLegFeasibleAtStepByLegCount: Record<string, number>;
     nextLegFeasibleCountByLegCount: Record<string, number>;
+    variantsByStopPair: Record<string, {
+      pathSegments: string[];
+      pathExpandedAtStep?: number;
+      nextLegConsideredAtStep?: number;
+      nextLegFeasibleAtStep?: number;
+      nextLegRejectionCounts: Record<string, number>;
+    }>;
   }>();
-  const recordDebugTripChainSearch = (path: readonly GtfsDirectJourney[], event: 'path-expanded' | 'next-leg-considered' | 'next-leg-feasible') => {
+  const recordDebugTripChainSearch = (path: readonly GtfsDirectJourney[], event: 'path-expanded' | 'next-leg-considered' | 'next-leg-feasible', rejectionReasons: readonly string[] = []) => {
     if (!debugTraceTripChainSet || path.length > 5) return;
     for (let index = 0; index < debugTraceTripChainParts.length; index++) {
       const target = debugTraceTripChainParts[index]!;
@@ -1733,6 +1740,7 @@ export function findGtfsItinerariesWithStats(
         nextLegConsideredCountByLegCount: {},
         nextLegFeasibleAtStepByLegCount: {},
         nextLegFeasibleCountByLegCount: {},
+        variantsByStopPair: {},
       };
       const legCount = String(path.length);
       const field = event === 'path-expanded' ? trace.pathExpandedAtStepByLegCount
@@ -1743,6 +1751,23 @@ export function findGtfsItinerariesWithStats(
           : trace.nextLegFeasibleCountByLegCount;
       field[legCount] ??= searchSteps;
       countField[legCount] = (countField[legCount] ?? 0) + 1;
+      const pathSegments = path.map((segment) =>
+        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`);
+      const variantKey = pathSegments.join('>');
+      let variant = trace.variantsByStopPair[variantKey];
+      if (!variant && Object.keys(trace.variantsByStopPair).length < 128) {
+        variant = trace.variantsByStopPair[variantKey] = { pathSegments, nextLegRejectionCounts: {} };
+      }
+      if (variant) {
+        if (event === 'path-expanded') variant.pathExpandedAtStep ??= searchSteps;
+        if (event === 'next-leg-considered') {
+          variant.nextLegConsideredAtStep ??= searchSteps;
+          for (const reason of rejectionReasons) {
+            variant.nextLegRejectionCounts[reason] = (variant.nextLegRejectionCounts[reason] ?? 0) + 1;
+          }
+        }
+        if (event === 'next-leg-feasible') variant.nextLegFeasibleAtStep ??= searchSteps;
+      }
       debugTripChainSearchTrace.set(targetKey, trace);
     }
   };
@@ -3947,13 +3972,26 @@ export function findGtfsItinerariesWithStats(
   const expandNextChild = (work: ChildWork, queue: RouteSearchQueue) => {
     searchSteps++;
     const next = work.choices[work.nextIndex++];
-    const feasible = next.departureAt.getTime() <= work.latestNext
-      && reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id)
-      && !work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
-      && transferDecision(work.last, next).feasible;
-    if (debugTraceTripChainSet) recordDebugTripChainSearch([...work.path, next], 'next-leg-considered');
+    const withinSchedule = next.departureAt.getTime() <= work.latestNext;
+    const canReachDestination = reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id);
+    const distinctTrip = !work.previousIds.has(next.tripId);
+    const noStopCycle = !work.visitedStops.has(next.destinationStop.id);
+    const transferFeasible = withinSchedule && canReachDestination && distinctTrip && noStopCycle
+      ? transferDecision(work.last, next).feasible : false;
+    const feasible = withinSchedule && canReachDestination && distinctTrip && noStopCycle && transferFeasible;
+    const candidatePath = debugTraceTripChainSet ? [...work.path, next] : undefined;
+    if (candidatePath) {
+      const rejectionReasons = [
+        ...(!withinSchedule ? ['outside-wait-window'] : []),
+        ...(!canReachDestination ? ['cannot-reach-destination'] : []),
+        ...(!distinctTrip ? ['repeated-trip'] : []),
+        ...(!noStopCycle ? ['stop-cycle'] : []),
+        ...(withinSchedule && canReachDestination && distinctTrip && noStopCycle && !transferFeasible ? ['transfer-infeasible'] : []),
+      ];
+      recordDebugTripChainSearch(candidatePath, 'next-leg-considered', rejectionReasons);
+    }
     if (feasible) {
-      if (debugTraceTripChainSet) recordDebugTripChainSearch([...work.path, next], 'next-leg-feasible');
+      if (candidatePath) recordDebugTripChainSearch(candidatePath, 'next-leg-feasible');
       enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
     }
     if (work.nextIndex < work.choices.length

@@ -3548,6 +3548,13 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
     nextLegConsideredCountByLegCount: Record<string, number>;
     nextLegFeasibleAtStepByLegCount: Record<string, number>;
     nextLegFeasibleCountByLegCount: Record<string, number>;
+    variantsByStopPair: Record<string, {
+      pathSegments: string[];
+      pathExpandedAtStep?: number;
+      nextLegConsideredAtStep?: number;
+      nextLegFeasibleAtStep?: number;
+      nextLegRejectionCounts: Record<string, number>;
+    }>;
   }>;
   const candidateTrace = diagnostics.find((entry) => entry.stage === 'segments-built')?.debugCandidateTripTrace;
   assert.ok(returnedChains.has(targetChain),
@@ -3572,6 +3579,9 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
     && targetSearchTrace.pathExpandedAtStepByLegCount['2'] < targetSearchTrace.nextLegConsideredAtStepByLegCount['3']
     && targetSearchTrace.nextLegConsideredAtStepByLegCount['3'] < targetSearchTrace.pathExpandedAtStepByLegCount['3'],
   'trace orders each exact feasible successor before its expanded path prefix');
+  assert.ok(Object.values(targetSearchTrace.variantsByStopPair).some((variant) =>
+    variant.pathSegments.length === 3 && variant.pathExpandedAtStep !== undefined),
+  'trace identifies the exact stop-pair variant that expands the complete target chain');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
