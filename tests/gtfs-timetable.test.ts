@@ -605,6 +605,12 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.ok(Array.isArray(JSON.parse(String(graph.routeBudgetUnderfillSample))));
   assert.equal(typeof ranked.searchStepLimit, 'number');
   assert.equal(typeof ranked.candidatePoolReachedAtStepByLegCount, 'string');
+  const depthPasses = JSON.parse(String(ranked.debugDepthPasses)) as Array<Record<string, unknown>>;
+  assert.equal(depthPasses.length, 1, 'debug output should expose the single zero-transfer depth pass');
+  assert.equal(depthPasses[0]?.legCount, 1);
+  assert.equal(typeof depthPasses[0]?.stepDelta, 'number');
+  assert.equal(typeof depthPasses[0]?.queueCount, 'number');
+  assert.equal(typeof depthPasses[0]?.scannedQueueItems, 'number');
   assert.equal(ranked.debugTripChainPresence, undefined, 'exact graph tracing stays absent without target IDs');
 });
 

@@ -1721,6 +1721,14 @@ export function findGtfsItinerariesWithStats(
   observeCandidateGraph?: GtfsCandidateGraphObserver,
 ): GtfsItinerarySearchResult {
   const debugStartedAt = Date.now();
+  const debugDepthPassSummaries: Array<Record<string, number | string | boolean>> = [];
+  let activeDebugDepthPass: {
+    queueRounds: number;
+    visitedQueues: number;
+    scannedQueueItems: number;
+    middleQueueRemovals: number;
+    peakPendingWork: number;
+  } | undefined;
   const debugStage = (stage: string, details: Record<string, number | string> = {}) => {
     if (process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1') {
       const memory = process.memoryUsage();
@@ -4322,6 +4330,8 @@ export function findGtfsItinerariesWithStats(
     maximumQueuedSearchWork = Math.max(maximumQueuedSearchWork,
       queuesPendingWork + 1);
     queuesPendingWork++;
+    if (activeDebugDepthPass) activeDebugDepthPass.peakPendingWork = Math.max(
+      activeDebugDepthPass.peakPendingWork, queuesPendingWork);
     recordDebugTripChainQueueEvent(work.path, work.kind === 'path' ? 'pathEnqueued' : 'childCursorEnqueued');
     return true;
   };
@@ -4413,6 +4423,7 @@ export function findGtfsItinerariesWithStats(
       let pendingTransferPathCount = 0;
       if (preferDeepCursor) {
         for (let index = queue.workIndex; index < queue.work.length; index++) {
+          if (activeDebugDepthPass) activeDebugDepthPass.scannedQueueItems++;
           const pending = queue.work[index]!;
           if (pending.kind === 'path' && pending.path.length > 1) {
             pendingTransferPathCount++;
@@ -4453,7 +4464,10 @@ export function findGtfsItinerariesWithStats(
           : hasPendingPriorityWork && queue.reservoirPriorityWorkStreak < MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST
             ? pendingPriorityWork : -1;
       const work = pendingIndex >= queue.workIndex
-        ? queue.work.splice(pendingIndex, 1)[0]!
+        ? (() => {
+          if (activeDebugDepthPass && pendingIndex > queue.workIndex) activeDebugDepthPass.middleQueueRemovals++;
+          return queue.work.splice(pendingIndex, 1)[0]!;
+        })()
         : queue.work[queue.workIndex++]!;
       if (preferDeepCursor) {
         queue.reservoirFairChildTurnsSinceTransferPathTurn = forceTransferPathTurn
@@ -4622,12 +4636,27 @@ export function findGtfsItinerariesWithStats(
       stopReason,
     });
   };
-  const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number) => {
+  const runDepthPass = (queues: RouteSearchQueue[], maximumLegsForPass: number, stepLimit: number, resumed = false) => {
+    const debugEnabled = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1';
+    const stepsBefore = searchSteps;
+    const pendingBefore = debugEnabled ? countPendingWork(queues) : 0;
+    const globalDropsBefore = queueAdmissionGlobalLimitDrops;
+    const perQueueDropsBefore = queueAdmissionPerQueueLimitDrops;
+    const passMetrics = debugEnabled ? {
+      queueRounds: 0,
+      visitedQueues: 0,
+      scannedQueueItems: 0,
+      middleQueueRemovals: 0,
+      peakPendingWork: pendingBefore,
+    } : undefined;
+    activeDebugDepthPass = passMetrics;
     let reservoirSnapshotCaptured = false;
     while (searchSteps < stepLimit && searchSteps < MAX_SEARCH_STEPS
       && canContinueCandidateSearch(maximumLegsForPass)) {
+      if (passMetrics) passMetrics.queueRounds++;
       let processed = false;
       for (const queue of queues) {
+        if (passMetrics) passMetrics.visitedQueues++;
         if (searchSteps >= stepLimit || searchSteps >= MAX_SEARCH_STEPS
           || !canContinueCandidateSearch(maximumLegsForPass)) break;
         const reservoirActive = maximumLegsForPass >= 3
@@ -4653,6 +4682,27 @@ export function findGtfsItinerariesWithStats(
     if (reservoirStartedAt !== undefined && !canContinueCandidateSearch(maximumLegsForPass)) {
       recordDebugObjectiveReservoirQueueSnapshot('cutoff', maximumLegsForPass, queues, reservoirStartedAt);
     }
+    if (passMetrics) {
+      activeDebugDepthPass = undefined;
+      debugDepthPassSummaries.push({
+        legCount: maximumLegsForPass,
+        resumed,
+        queueCount: queues.length,
+        stepLimit,
+        stepsBefore,
+        stepsAfter: searchSteps,
+        stepDelta: searchSteps - stepsBefore,
+        pendingBefore,
+        pendingAfter: countPendingWork(queues),
+        peakPendingWork: passMetrics.peakPendingWork,
+        queueRounds: passMetrics.queueRounds,
+        visitedQueues: passMetrics.visitedQueues,
+        scannedQueueItems: passMetrics.scannedQueueItems,
+        middleQueueRemovals: passMetrics.middleQueueRemovals,
+        globalQueueDrops: queueAdmissionGlobalLimitDrops - globalDropsBefore,
+        perQueueDrops: queueAdmissionPerQueueLimitDrops - perQueueDropsBefore,
+      });
+    }
   };
   const countPendingWork = (queues: RouteSearchQueue[]) => queues.reduce((count, queue) =>
     count + queue.work.length - queue.workIndex, 0);
@@ -4675,11 +4725,9 @@ export function findGtfsItinerariesWithStats(
         Math.floor((MAX_SEARCH_STEPS - searchSteps) * depthWeights[depthIndex] / remainingWeight)));
     const firstLegGroups = new Map<string, GtfsDirectJourney[]>();
     for (const segment of firstLegs) {
-      // Keep each exact start segment independently schedulable. A route or
-      // trip queue can still bury a useful stop-pair behind many earlier
-      // departures/pairs after the bounded objective reservoir is reached.
-      const key = `${segment.providerId}:${segment.routeId}:${segment.serviceDate}:${segment.tripId}`
-        + `:${segment.originStop.id}:${segment.destinationStop.id}:${segment.departureAt.getTime()}`;
+      // Keep each scheduled trip instance independently schedulable so a
+      // frequent route cannot bury a later useful trip behind earlier service.
+      const key = `${segment.providerId}:${segment.routeId}:${segment.serviceDate}:${segment.tripId}`;
       const group = firstLegGroups.get(key) ?? [];
       group.push(segment);
       firstLegGroups.set(key, group);
@@ -4724,7 +4772,7 @@ export function findGtfsItinerariesWithStats(
         : Math.min(MAX_SEARCH_STEPS, searchSteps + Math.max(1,
           Math.floor((MAX_SEARCH_STEPS - searchSteps) * weight / remainingWeight)));
       queuesPendingWork = countPendingWork(queues);
-      runDepthPass(queues, depth, stepLimit);
+      runDepthPass(queues, depth, stepLimit, true);
       if (!hasQueuedWork(queues)) truncatedDepthPasses.delete(depth);
       remainingWeight -= weight;
     }
@@ -4825,6 +4873,7 @@ export function findGtfsItinerariesWithStats(
     queueAdmissionPerQueueLimitDrops,
     queueAdmissionPerQueueBorrowed,
     queueAdmissionPerQueueChildCursorBorrowed,
+    ...(debugDepthPassSummaries.length > 0 ? { debugDepthPasses: JSON.stringify(debugDepthPassSummaries) } : {}),
     ...(debugTraceTripChains.length > 0 ? { debugTripChainPresence: (() => {
       const requestedTripKeys = new Set(debugTraceTripChains.flatMap((tripChain) => tripChain.split('>')));
       const retainedTargetTripKeys = new Set<string>();
