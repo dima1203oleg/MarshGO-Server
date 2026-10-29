@@ -3965,11 +3965,10 @@ export function findGtfsItinerariesWithStats(
   };
   const enqueueWork = (queue: RouteSearchQueue, work: SearchWork) => {
     let pendingInQueue = queue.work.length - queue.workIndex;
-    if (work.kind === 'children'
-      && (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork)) {
-      // A child cursor is the only record of unvisited successors for its path.
-      // Keep it moving under pressure by evicting the oldest deferred path first;
-      // the search still reports that discarded branch as truncated.
+    if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
+      // Preserve forward progress when a bounded queue is saturated: replace
+      // its oldest deferred path with the next path/cursor, and report the
+      // discarded branch as truncation rather than silently losing the queue.
       if (evictOldestQueuedPath(queue)) pendingInQueue--;
     }
     if (queuesPendingWork >= MAX_QUEUED_SEARCH_WORK || pendingInQueue >= queue.maxQueuedWork) {
