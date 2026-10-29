@@ -4226,8 +4226,14 @@ export function findGtfsItinerariesWithStats(
     // before the shared bounded reservoir closes. Keep the finer scheduling
     // quantum for direct and one-transfer searches, where responsiveness and
     // fairness matter most.
-    const childBatchLimit = maximumLegsForPass >= 3 ? MAX_GTFS_CHILDREN_PER_WORK_TURN * 4
-      : MAX_GTFS_CHILDREN_PER_WORK_TURN;
+    // Before the candidate pool fills, use a wider quantum to discover useful
+    // transfers efficiently. Once the bounded objective reservoir is active,
+    // shrink the quantum so more queued first-leg groups receive service
+    // within the same search-step window instead of letting early queues use
+    // the entire tail budget.
+    const objectiveReservoirActive = candidatePoolReachedAtStepByLegCount.has(maximumLegsForPass);
+    const childBatchLimit = maximumLegsForPass >= 3 && !objectiveReservoirActive
+      ? MAX_GTFS_CHILDREN_PER_WORK_TURN * 4 : MAX_GTFS_CHILDREN_PER_WORK_TURN;
     const nextIndexBefore = work.nextIndex;
     const feasiblePaths: GtfsDirectJourney[][] = [];
     while (processed < childBatchLimit
