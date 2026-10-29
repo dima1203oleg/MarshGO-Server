@@ -3598,7 +3598,7 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
   'trace reports the sorted choice position for a feasible target successor');
 });
 
-test('preserves a late feasible successor cursor under a small bounded queue', () => {
+test('preserves a late feasible successor after the deep candidate pool saturates', () => {
   const timetable = feed();
   timetable.routes.clear();
   timetable.trips.clear();
@@ -3668,7 +3668,7 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
       origin: [24.0200, 49.8400], destination: [24.1700, 49.9400],
       maximumAccessWalkingMeters: 100, maximumEgressWalkingMeters: 100,
       maximumTransferWalkingMeters: 10, maximumTransfers: 2, limit: 100,
-    }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 1_000, maxQueuedSearchWork: 100 });
+    }, { maxCandidatesPerLegCount: 1, maxObjectiveReservoirSearchSteps: 100, maxQueuedSearchWork: 100 });
   } finally {
     console.info = previousInfo;
     if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
