@@ -1822,7 +1822,13 @@ export function findGtfsItinerariesWithStats(
   const recordDebugTripChainQueueEvent = (
     path: readonly GtfsDirectJourney[],
     event: 'pathEnqueued' | 'pathDropped' | 'pathEvicted' | 'childCursorEnqueued' | 'childCursorDropped' | 'childCursorEvicted',
-    admission?: { globalPending: number; globalLimit: number; queuePending: number; queueLimit: number },
+    admission?: {
+      globalPending: number;
+      globalLimit: number;
+      globalAdmissionLimit?: number;
+      queuePending: number;
+      queueLimit: number;
+    },
   ) => {
     if (!debugTraceTripChainSet || path.length > 5) return;
     for (let index = 0; index < debugTraceTripChainParts.length; index++) {
