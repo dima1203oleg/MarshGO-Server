@@ -39,6 +39,8 @@ const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 const MAX_GTFS_CHILDREN_PER_WORK_TURN = 8;
 const MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST = 1;
 const MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH = 16;
+const MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH = 4;
+const OBJECTIVE_RESERVOIR_TRANSFER_PATH_BACKLOG_THRESHOLD = 8;
 const MAX_CHILD_CURSOR_BATCHES_PER_AGE_QUANTUM = 4;
 const GTFS_RETENTION_PRIORITY_TIER_STRIDE = 2 ** 45;
 const GTFS_RETENTION_ARRIVAL_BUCKET_STRIDE = 2 ** 32;
@@ -4369,11 +4371,13 @@ export function findGtfsItinerariesWithStats(
       let pendingChildCursor = -1;
       let pendingNonPriorityChildCursor = -1;
       let pendingTransferPath = -1;
+      let pendingTransferPathCount = 0;
       if (preferDeepCursor) {
         for (let index = queue.workIndex; index < queue.work.length; index++) {
           const pending = queue.work[index]!;
-          if (pending.kind === 'path' && pending.path.length > 1 && pendingTransferPath < 0) {
-            pendingTransferPath = index;
+          if (pending.kind === 'path' && pending.path.length > 1) {
+            pendingTransferPathCount++;
+            if (pendingTransferPath < 0) pendingTransferPath = index;
           }
           if (pending.kind !== 'children' || pending.remainingLegs < 1) continue;
           if (pendingChildCursor < 0
@@ -4395,7 +4399,10 @@ export function findGtfsItinerariesWithStats(
       const shouldServeNonPriorityCursor = pendingNonPriorityChildCursor >= queue.workIndex
         && (!hasPendingPriorityWork
           || queue.reservoirPriorityWorkStreak >= MAX_OBJECTIVE_RESERVOIR_PRIORITY_WORK_BURST);
-      const fairTurnIndex = queue.reservoirFairChildTurnsSincePath >= MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH
+      const childTurnsBeforePath = pendingTransferPathCount >= OBJECTIVE_RESERVOIR_TRANSFER_PATH_BACKLOG_THRESHOLD
+        ? MAX_OBJECTIVE_RESERVOIR_BACKLOG_CHILD_TURNS_BEFORE_PATH
+        : MAX_OBJECTIVE_RESERVOIR_CHILD_TURNS_BEFORE_PATH;
+      const fairTurnIndex = queue.reservoirFairChildTurnsSincePath >= childTurnsBeforePath
         ? (pendingTransferPath >= queue.workIndex ? pendingTransferPath : pendingChildCursor)
         : pendingChildCursor >= queue.workIndex ? pendingChildCursor : pendingTransferPath;
       const pendingIndex = forceFairQueueTurn && fairTurnIndex >= queue.workIndex ? fairTurnIndex
