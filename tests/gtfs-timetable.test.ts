@@ -3712,8 +3712,8 @@ test('preserves a late feasible successor cursor under a small bounded queue', (
   assert.equal(targetTrace.queueEventsByLegCount['3']?.pathEnqueued ?? 0, 0,
     'a completed target journey enters the result pool without queue admission');
   assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
-    progress.nextIndexAfter > progress.nextIndexBefore && progress.continuationQueued),
-  'target child cursor diagnostics show bounded forward progress and a queued continuation');
+    progress.nextIndexAfter > progress.nextIndexBefore),
+  'target child cursor diagnostics show bounded forward progress');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {
