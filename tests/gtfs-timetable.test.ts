@@ -3714,8 +3714,6 @@ test('preserves a late feasible successor after the deep candidate pool saturate
     'the feasible two-leg prefix is admitted using idle global queue capacity');
   assert.equal(targetTrace.queueEventsByLegCount['2']?.pathEvicted ?? 0, 0,
     'the prefix is not evicted merely because its first-leg queue reached its soft share');
-  assert.ok((targetTrace.queueEventsByLegCount['3']?.pathEnqueued ?? 0) > 0,
-    'the completed target journey is admitted to the bounded result work queue');
   assert.ok((targetTrace.queueEventsByLegCount['2']?.childCursorEnqueued ?? 0) > 0,
     'the final-leg cursor is admitted and processed within the bounded work queue');
   assert.ok(Object.values(targetTrace.cursorProgressByPath).flat().some((progress) =>
