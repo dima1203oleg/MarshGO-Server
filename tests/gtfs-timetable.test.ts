@@ -3548,6 +3548,18 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
     nextLegConsideredCountByLegCount: Record<string, number>;
     nextLegFeasibleAtStepByLegCount: Record<string, number>;
     nextLegFeasibleCountByLegCount: Record<string, number>;
+    successorPositionsByPath: Record<string, {
+      pathSegments: string[];
+      choiceCount: number;
+      firstChoiceIndex: number;
+      targetSuccessors: Array<{
+        tripKey: string;
+        choiceIndex: number;
+        cursorOffset: number;
+        withinMaxWait: boolean;
+        transferFeasible: boolean;
+      }>;
+    }>;
     variantsByStopPair: Record<string, {
       pathSegments: string[];
       pathExpandedAtStep?: number;
@@ -3582,6 +3594,10 @@ test('round-robins a late faster three-leg branch behind early trips on a dense 
   assert.ok(Object.values(targetSearchTrace.variantsByStopPair).some((variant) =>
     variant.pathSegments.length === 3 && variant.pathExpandedAtStep !== undefined),
   'trace identifies the exact stop-pair variant that expands the complete target chain');
+  assert.ok(Object.values(targetSearchTrace.successorPositionsByPath).some((variant) =>
+    variant.targetSuccessors.some((successor) => successor.tripKey === `p1:20261012:${target}-middle-trip`
+      && successor.withinMaxWait && successor.transferFeasible)),
+  'trace reports the sorted choice position for a feasible target successor');
 });
 
 test('reports the bounded per-leg objective-reservoir cutoff while search work remains', () => {

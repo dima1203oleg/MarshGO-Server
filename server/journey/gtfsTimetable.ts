@@ -1710,6 +1710,18 @@ export function findGtfsItinerariesWithStats(
     nextLegConsideredCountByLegCount: Record<string, number>;
     nextLegFeasibleAtStepByLegCount: Record<string, number>;
     nextLegFeasibleCountByLegCount: Record<string, number>;
+    successorPositionsByPath: Record<string, {
+      pathSegments: string[];
+      choiceCount: number;
+      firstChoiceIndex: number;
+      targetSuccessors: Array<{
+        tripKey: string;
+        choiceIndex: number;
+        cursorOffset: number;
+        withinMaxWait: boolean;
+        transferFeasible: boolean;
+      }>;
+    }>;
     variantsByStopPair: Record<string, {
       pathSegments: string[];
       pathExpandedAtStep?: number;
@@ -1740,6 +1752,7 @@ export function findGtfsItinerariesWithStats(
         nextLegConsideredCountByLegCount: {},
         nextLegFeasibleAtStepByLegCount: {},
         nextLegFeasibleCountByLegCount: {},
+        successorPositionsByPath: {},
         variantsByStopPair: {},
       };
       const legCount = String(path.length);
@@ -1769,6 +1782,42 @@ export function findGtfsItinerariesWithStats(
         if (event === 'next-leg-feasible') variant.nextLegFeasibleAtStep ??= searchSteps;
       }
       debugTripChainSearchTrace.set(targetKey, trace);
+    }
+  };
+  const recordDebugTargetSuccessorPositions = (path: readonly GtfsDirectJourney[], choices: readonly GtfsDirectJourney[], firstChoiceIndex: number, latestNext: number) => {
+    if (!debugTraceTripChainSet || path.length >= 5) return;
+    for (let targetIndex = 0; targetIndex < debugTraceTripChainParts.length; targetIndex++) {
+      const target = debugTraceTripChainParts[targetIndex]!;
+      if (path.length >= target.length) continue;
+      let matches = true;
+      for (let leg = 0; leg < path.length; leg++) {
+        const segment = path[leg]!;
+        if (`${segment.providerId}:${segment.serviceDate}:${segment.tripId}` !== target[leg]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+      const targetKey = debugTraceTripChains[targetIndex]!;
+      const trace = debugTripChainSearchTrace.get(targetKey);
+      if (!trace) continue;
+      const pathSegments = path.map((segment) =>
+        `${segment.providerId}:${segment.serviceDate}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}@${segment.departureAt.getTime()}-${segment.arrivalAt.getTime()}`);
+      const pathKey = pathSegments.join('>');
+      if (Object.keys(trace.successorPositionsByPath).length >= 128
+        && !trace.successorPositionsByPath[pathKey]) continue;
+      const targetTripKey = target[path.length];
+      const targetSuccessors: Array<{ tripKey: string; choiceIndex: number; cursorOffset: number; withinMaxWait: boolean; transferFeasible: boolean }> = [];
+      for (let choiceIndex = firstChoiceIndex; choiceIndex < choices.length; choiceIndex++) {
+        const candidate = choices[choiceIndex]!;
+        const tripKey = `${candidate.providerId}:${candidate.serviceDate}:${candidate.tripId}`;
+        if (tripKey !== targetTripKey) continue;
+        targetSuccessors.push({ tripKey, choiceIndex, cursorOffset: choiceIndex - firstChoiceIndex,
+          withinMaxWait: candidate.departureAt.getTime() <= latestNext,
+          transferFeasible: candidate.departureAt.getTime() <= latestNext && transferDecision(path.at(-1)!, candidate).feasible });
+      }
+      trace.successorPositionsByPath[pathKey] = { pathSegments, choiceCount: choices.length,
+        firstChoiceIndex, targetSuccessors };
     }
   };
   const debugTraceCandidateTrips = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1'
@@ -3966,6 +4015,7 @@ export function findGtfsItinerariesWithStats(
       else high = middle;
     }
     if (low >= choices.length || choices[low].departureAt.getTime() > latestNext) return;
+    recordDebugTargetSuccessorPositions(path, choices, low, latestNext);
     enqueueWork(queue, { kind: 'children', path, last, choices, nextIndex: low, latestNext,
       remainingLegs, previousIds, visitedStops });
   };
