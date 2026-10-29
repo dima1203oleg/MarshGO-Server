@@ -4424,8 +4424,10 @@ export function findGtfsItinerariesWithStats(
       // Once the deep candidate pool is saturated, alternate bounded priority
       // work with the oldest non-priority child cursor. If none is waiting,
       // serve the oldest live cursor so a priority backlog cannot starve it.
-      const pendingPriorityWork = queue.work.findIndex((pending, index) => index >= queue.workIndex
-        && pending.priority);
+      // enqueueWork keeps priority items in a contiguous prefix; a priority
+      // item cannot follow an ordinary item, so the head identifies the prefix.
+      const pendingPriorityWork = queue.workIndex < queue.work.length
+        && queue.work[queue.workIndex]!.priority ? queue.workIndex : -1;
       let pendingChildCursor = -1;
       let pendingNonPriorityChildCursor = -1;
       let pendingTransferPath = -1;
