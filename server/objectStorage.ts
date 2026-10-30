@@ -45,7 +45,7 @@ export function isAllowedVerificationEvidenceType(value: unknown): value is stri
 const localDir = process.env.LOCAL_STORAGE_DIR || path.resolve(process.cwd(), '.uploads');
 
 function localFilePath(key: string): string {
-  const safeKey = path.normalize(key).replace(/^(\.\.[\/\\])+/, '');
+  const safeKey = path.normalize(key).replace(/^(\.\.[/\\])+/, '');
   const root = path.resolve(localDir);
   const resolved = path.resolve(root, safeKey);
   if (!resolved.startsWith(root)) {
@@ -179,7 +179,7 @@ export async function putPhotoObject(key: unknown, body: unknown, contentType: u
   try {
     const { client: s3Client, bucket } = s3();
     await s3Client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType }));
-  } catch (error) {
+  } catch (_error) {
     // If S3 is not available in local environment, fallback to storing locally
     const filePath = localFilePath(key);
     await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
@@ -195,7 +195,7 @@ export async function deleteStoredVehiclePhoto(key: string) {
   try {
     const { client: s3Client, bucket } = s3();
     await s3Client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
-  } catch {}
+  } catch { /* ignored */ }
 }
 
 export async function getVerificationEvidenceUrl(key: string) {

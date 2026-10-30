@@ -16,7 +16,6 @@ import { parseBearerToken } from './auth/bearer';
 import { validateEmail, validatePassword, hashPassword, verifyPassword, generateResetToken } from './auth/passwords';
 import type { Duplex } from 'node:stream';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { sendVerificationCode, SmsProviderUnavailableError } from './sms';
 import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, getWalkingRoute, RoutingUnavailableError } from './routing';
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
@@ -267,7 +266,7 @@ app.use('/api', rateLimit({
 
 type AuthenticatedRequest = Request & { userId?: string; sessionId?: string };
 function sha256(value: string) { return crypto.createHash('sha256').update(value).digest('hex'); }
-function otpHash(phone: string, code: string) { return crypto.createHmac('sha256', sessionSecret).update(`${phone}:${code}`).digest('hex'); }
+function _otpHash(phone: string, code: string) { return crypto.createHmac('sha256', sessionSecret).update(`${phone}:${code}`).digest('hex'); }
 function token() { return crypto.randomBytes(32).toString('base64url'); }
 type BookingTicketClaims = { bookingId: string; expiresAt: number; nonce: string; version: 1 };
 function createBookingTicket(bookingId: string, departureAt: Date) {
@@ -1792,7 +1791,7 @@ async function expireStaleProposals() {
   ));
 }
 
-async function grantConfiguredAdmin(client: PoolClient, userId: string, phone: string): Promise<boolean> {
+async function _grantConfiguredAdmin(client: PoolClient, userId: string, phone: string): Promise<boolean> {
   if (!shouldGrantAdmin(phone)) return false;
   const inserted = await client.query('INSERT INTO user_roles(user_id,role) VALUES ($1,$2) ON CONFLICT DO NOTHING', [userId, 'admin']);
   await client.query(`UPDATE users SET roles=(SELECT ARRAY(SELECT DISTINCT unnest(roles || ARRAY['admin']::text[]) ORDER BY 1)) WHERE id=$1 AND NOT ('admin' = ANY(roles))`, [userId]);
