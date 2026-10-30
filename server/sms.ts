@@ -1,4 +1,4 @@
-export type SmsDelivery = { provider: 'development'; testCode: string } | { provider: 'twilio' } | { provider: 'getotp' };
+export type SmsDelivery = { provider: 'development'; testCode: string } | { provider: 'twilio' };
 
 export class SmsProviderUnavailableError extends Error {
   constructor() { super('SMS provider is not configured'); }
@@ -11,25 +11,11 @@ export async function sendVerificationCode(phone: string, code: string): Promise
   }
 
   if (process.env.SMS_PROVIDER === 'getotp') {
-    const apiKey = process.env.GETOTP_API_KEY;
-    if (!apiKey) throw new SmsProviderUnavailableError();
+    // The API contract for this provider has not been verified; never send OTPs or credentials to an assumed endpoint.
+    throw new SmsProviderUnavailableError();
+  }
 
-    // Using a typical structure for getotp.co API, assuming they take api_key, phone, and otp.
-    // Replace the URL and payload if their actual API docs differ.
-    const response = await fetch('https://getotp.co/api/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: apiKey,
-        channel: 'whatsapp',
-        phone: phone,
-        otp: code,
-      }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!response.ok) throw new Error(`GetOtp API returned ${response.status}`);
-    return { provider: 'getotp' };
-  } else if (process.env.SMS_PROVIDER === 'twilio') {
+  if (process.env.SMS_PROVIDER === 'twilio') {
     const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER } = process.env;
     if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) throw new SmsProviderUnavailableError();
 

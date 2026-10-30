@@ -30,6 +30,19 @@ services:
       timeout: 3s
       retries: 20
 
+  # Disposable L2 cache only. Critical sessions, rate limits, realtime and
+  # booking tickets continue to use the separate `redis` service above.
+  redis-cache:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   marshgo-postgres:
   marshgo-redis:

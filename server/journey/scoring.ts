@@ -1,4 +1,5 @@
 import type { JourneyOption, JourneyStrategy } from './types';
+import { compareStableId } from './stableOrdering';
 
 export interface ScoreWeights {
   time: number;
@@ -9,10 +10,13 @@ export interface ScoreWeights {
   comfort: number;
 }
 
+/** Generalized-cost penalty for the effort and uncertainty of each transfer. */
+export const TRANSFER_TIME_PENALTY_SECONDS = 8 * 60;
+
 export const JOURNEY_SCORE_WEIGHTS: Record<JourneyStrategy, ScoreWeights> = {
   FASTEST:  { time: 0.62, price: 0.08, transfers: 0.08, walking: 0.04, risk: 0.12, comfort: 0.06 },
   CHEAPEST: { time: 0.10, price: 0.62, transfers: 0.09, walking: 0.04, risk: 0.10, comfort: 0.05 },
-  BALANCED: { time: 0.35, price: 0.25, transfers: 0.10, walking: 0.10, risk: 0.20, comfort: 0 },
+  BALANCED: { time: 0.48, price: 0.22, transfers: 0.08, walking: 0.08, risk: 0.14, comfort: 0 },
   PREMIUM:  { time: 0.14, price: 0.10, transfers: 0.15, walking: 0.19, risk: 0.15, comfort: 0.27 },
   RELIABLE: { time: 0.20, price: 0.10, transfers: 0.10, walking: 0.06, risk: 0.46, comfort: 0.08 },
   CUSTOM:   { time: 0.34, price: 0.24, transfers: 0.12, walking: 0.08, risk: 0.14, comfort: 0.08 },
@@ -24,13 +28,13 @@ export interface ScoredJourney<T extends JourneyOption = JourneyOption> {
   strategy: JourneyStrategy;
 }
 
-/** CHEAPEST is a global promise, so suppress its label if any candidate lacks a fare. */
+/** CHEAPEST compares only candidates with a known, comparable fare. */
 export function strategiesWithComparablePrices<T extends JourneyOption>(
   journeys: readonly T[],
   strategies: readonly JourneyStrategy[],
 ): JourneyStrategy[] {
-  const hasUnknownFare = journeys.some((journey) => journey.priceMinor === null);
-  return hasUnknownFare ? strategies.filter((strategy) => strategy !== 'CHEAPEST') : [...strategies];
+  const hasComparableFare = journeys.some((journey) => journey.priceMinor !== null);
+  return hasComparableFare ? [...strategies] : strategies.filter((strategy) => strategy !== 'CHEAPEST');
 }
 
 type Metric = 'durationSeconds' | 'priceMinor' | 'transfers' | 'walkingMeters' | 'risk' | 'comfortPenalty';
@@ -78,9 +82,14 @@ export function selectStrategyAlternatives<T extends JourneyOption>(
   const frontier = paretoFrontier(journeys);
   const alternatives = new Map<string, StrategyRecommendation<T>>();
   for (const strategy of strategies) {
+    // An unknown fare is not a zero or a comparable amount. Keep such routes
+    // available to other strategies, but never include them in CHEAPEST.
+    const strategyCandidates = strategy === 'CHEAPEST'
+      ? frontier.filter((journey) => journey.priceMinor !== null)
+      : frontier;
     const chainCounts = new Map<string, number>();
     let rank = 0;
-    for (const { journey, score } of scoreJourneys(frontier, strategy)) {
+    for (const { journey, score } of scoreJourneys(strategyCandidates, strategy)) {
       const modeChain = journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.mode).join('>') || 'WALK';
       const diversityKey = journey.diversityKey ?? modeChain;
       const count = chainCounts.get(diversityKey) ?? 0;
@@ -151,7 +160,11 @@ export function scoreJourneys<T extends JourneyOption>(
   }
 
   const metrics: Record<Metric, (journey: T) => number> = {
-    durationSeconds: (journey) => journey.durationSeconds,
+    // Composite strategies compare perceived time, while the FASTEST promise
+    // below continues to sort by the actual door-to-door duration. This makes
+    // transfer effort a stable 8-minute generalized-cost penalty instead of a
+    // data-set-dependent normalized count alone.
+    durationSeconds: (journey) => journey.durationSeconds + journey.transfers * TRANSFER_TIME_PENALTY_SECONDS,
     priceMinor: (journey) => journey.priceMinor ?? Number.MAX_SAFE_INTEGER,
     transfers: (journey) => journey.transfers,
     walkingMeters: (journey) => journey.walkingMeters,
@@ -166,7 +179,7 @@ export function scoreJourneys<T extends JourneyOption>(
 
   const scored = journeys.map((journey) => {
     const values: Record<Metric, number> = {
-      durationSeconds: journey.durationSeconds,
+      durationSeconds: metrics.durationSeconds(journey),
       priceMinor: metrics.priceMinor(journey),
       transfers: journey.transfers,
       walkingMeters: journey.walkingMeters,
@@ -194,7 +207,7 @@ export function scoreJourneys<T extends JourneyOption>(
         return a.journey.priceMinor - b.journey.priceMinor;
       }
     }
-    return a.score - b.score || a.journey.id.localeCompare(b.journey.id);
+    return a.score - b.score || compareStableId(a.journey.id, b.journey.id);
   });
 }
 

@@ -10,6 +10,25 @@ export interface JourneySearchRequest {
   preferences: JourneyPreferences;
 }
 
+export interface JourneySearchTruncationState {
+  resultsTruncated: boolean;
+  candidateGenerationTruncated: boolean;
+  resultSamplingTruncated: boolean;
+}
+
+export function getJourneySearchTruncationState(input: {
+  candidateGenerationTruncated: boolean;
+  resultSamplingTruncated: boolean;
+  rankedAlternativesOmitted: boolean;
+}): JourneySearchTruncationState {
+  const resultSamplingTruncated = input.resultSamplingTruncated || input.rankedAlternativesOmitted;
+  return {
+    resultsTruncated: input.candidateGenerationTruncated || resultSamplingTruncated,
+    candidateGenerationTruncated: input.candidateGenerationTruncated,
+    resultSamplingTruncated,
+  };
+}
+
 export type JourneySearchPartialReason =
   | 'candidate_generation_truncated'
   | 'provider_error'

@@ -2,3 +2,9 @@ node_modules/
 .env
 coverage/
 *.log
+
+.tmp*
+*.tmp*
+.uploads/
+scratch*
+server/journey/.tmp*

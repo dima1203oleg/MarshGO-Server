@@ -1,0 +1,7 @@
+trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type
+bus-trip,08:00:00,08:00:00,origin,1,0,0
+bus-trip,08:20:00,08:20:00,bus-transfer,2,0,0
+tram-trip,08:30:00,08:30:00,tram-transfer,1,0,0
+tram-trip,08:55:00,08:55:00,destination,2,0,0
+tram-trip-later,09:00:00,09:00:00,tram-transfer,1,0,0
+tram-trip-later,09:25:00,09:25:00,destination,2,0,0

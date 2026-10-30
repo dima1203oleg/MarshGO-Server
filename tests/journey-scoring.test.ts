@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { JOURNEY_SCORE_WEIGHTS, paretoFrontier, scoreJourneys, selectRepresentativeJourneys, selectStrategyAlternatives, selectStrategyRecommendations, strategiesWithComparablePrices } from '../server/journey/scoring';
+import { JOURNEY_SCORE_WEIGHTS, paretoFrontier, scoreJourneys, selectRepresentativeJourneys, selectStrategyAlternatives, selectStrategyRecommendations, strategiesWithComparablePrices, TRANSFER_TIME_PENALTY_SECONDS } from '../server/journey/scoring';
 import type { JourneyOption } from '../server/journey/types';
 
 const candidates: JourneyOption[] = [
@@ -15,10 +15,30 @@ describe('Journey strategy scoring', () => {
     assert.equal(scoreJourneys(candidates, 'CHEAPEST')[0].journey.id, 'bus');
   });
 
+  it('uses locale-independent IDs to break equal-score ties regardless of input order', () => {
+    const tied = ['Z', 'a', 'Б', 'А', '10', '2'].map((id) => ({ ...candidates[0]!, id }));
+    const forward = scoreJourneys(tied, 'BALANCED').map(({ journey }) => journey.id);
+    const reversed = scoreJourneys([...tied].reverse(), 'BALANCED').map(({ journey }) => journey.id);
+    assert.deepEqual(forward, ['10', '2', 'Z', 'a', 'А', 'Б']);
+    assert.deepEqual(reversed, forward);
+  });
+
   it('uses the documented normalized weights for the default balanced mode', () => {
     assert.deepEqual(JOURNEY_SCORE_WEIGHTS.BALANCED, {
-      time: 0.35, price: 0.25, transfers: 0.10, walking: 0.10, risk: 0.20, comfort: 0,
+      time: 0.48, price: 0.22, transfers: 0.08, walking: 0.08, risk: 0.14, comfort: 0,
     });
+  });
+
+  it('applies an 8-minute perceived-time transfer penalty only to composite ranking, not the factual FASTEST winner', () => {
+    const direct: JourneyOption = { ...candidates[0]!, id: 'direct', durationSeconds: 3_000, priceMinor: 10_000, transfers: 0 };
+    const connection: JourneyOption = { ...candidates[0]!, id: 'one-transfer', durationSeconds: 2_700, priceMinor: 10_000, transfers: 1 };
+    const timeOnly = { time: 1, price: 0, transfers: 0, walking: 0, risk: 0, comfort: 0 };
+
+    assert.equal(TRANSFER_TIME_PENALTY_SECONDS, 480);
+    assert.equal(scoreJourneys([direct, connection], 'BALANCED', timeOnly)[0]?.journey.id, 'direct',
+      'a 5-minute actual saving does not outweigh the fixed 8-minute transfer effort in a composite strategy');
+    assert.equal(scoreJourneys([direct, connection], 'FASTEST', timeOnly)[0]?.journey.id, 'one-transfer',
+      'FASTEST remains strictly ordered by real duration');
   });
 
   it('keeps the Pareto frontier and never treats an unknown fare as zero', () => {
@@ -114,10 +134,14 @@ describe('Journey strategy scoring', () => {
     assert.ok(scoreJourneys([chain, cheapestSlow, fastestExpensive, unknownFare], 'CHEAPEST').at(-1)?.journey.priceMinor === null);
   });
 
-  it('does not label a route CHEAPEST while any compared provider fare is unknown', () => {
+  it('keeps CHEAPEST available for comparable fares and excludes candidates with unknown fares', () => {
     const unknownFare: JourneyOption = { ...candidates[0], id: 'unknown-fare', priceMinor: null };
     assert.ok(strategiesWithComparablePrices(candidates, ['CHEAPEST', 'FASTEST']).includes('CHEAPEST'));
-    assert.deepEqual(strategiesWithComparablePrices([...candidates, unknownFare], ['CHEAPEST', 'FASTEST']), ['FASTEST']);
+    assert.deepEqual(strategiesWithComparablePrices([...candidates, unknownFare], ['CHEAPEST', 'FASTEST']), ['CHEAPEST', 'FASTEST']);
+    assert.deepEqual(strategiesWithComparablePrices([unknownFare], ['CHEAPEST', 'FASTEST']), ['FASTEST']);
+    const selected = selectStrategyAlternatives([candidates[0]!, unknownFare], ['CHEAPEST'], 12);
+    assert.ok(selected.length > 0);
+    assert.ok(selected.every(({ journey }) => journey.priceMinor !== null));
   });
 
   it('selects representative alternatives and suppresses near-identical routes', () => {

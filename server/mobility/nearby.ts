@@ -1,5 +1,8 @@
 import { loadGbfsSnapshot, type GbfsSnapshot } from './gbfs';
+import type { GbfsGeofenceRule } from './gbfsGeofences';
 import type { MobilityAsset, MobilityAssetType, MobilityStation } from './types';
+import { z } from 'zod';
+import { smartCache } from '../cache/cacheService';
 
 const EARTH_RADIUS_M = 6_371_000;
 export function distanceMeters(a: [number, number], b: [number, number]): number {
@@ -37,18 +40,34 @@ export function selectNearby(
   return { assets: assets.slice(0, limit), stations: stations.slice(0, limit), totalAssets: assets.length };
 }
 
-const cache = new Map<string, { at: number; expiresAt: number; promise: Promise<GbfsSnapshot> }>();
-/** Singleflight and GBFS TTL-aware server cache; ttl=0 uses a short shared poll window instead of per-user requests. */
-export function cachedSnapshot(providerId: string, url: string): Promise<GbfsSnapshot> {
-  const hit = cache.get(providerId);
-  if (hit && Date.now() < hit.expiresAt) return hit.promise;
-  const promise = loadGbfsSnapshot(providerId, url);
-  const entry = { at: Date.now(), expiresAt: Date.now() + 1000, promise };
-  cache.set(providerId, entry);
-  promise.then((snapshot) => {
-    const sourceTtlMs = snapshot.ttlSeconds === null || snapshot.ttlSeconds === undefined ? 30_000 : snapshot.ttlSeconds === 0 ? 3_000 : snapshot.ttlSeconds * 1000;
-    const freshnessMs = (snapshot.staleAfterSeconds ?? 60) * 1000;
-    entry.expiresAt = Date.now() + Math.max(1000, Math.min(sourceTtlMs, freshnessMs, 60_000));
-  }).catch(() => cache.delete(providerId));
-  return promise;
+const coordinateSchema = z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)]);
+const gbfsRuleSchema: z.ZodType<GbfsGeofenceRule> = z.object({
+  vehicleTypeIds: z.array(z.string()).nullable(), rideStartAllowed: z.boolean().nullable(), rideEndAllowed: z.boolean().nullable(),
+  rideThroughAllowed: z.boolean().nullable(), maximumSpeedKph: z.number().nullable(), startAt: z.number().nullable(), endAt: z.number().nullable(),
+});
+const gbfsSnapshotSchema: z.ZodType<GbfsSnapshot> = z.object({
+  assets: z.array(z.object({ id: z.string().min(1), providerId: z.string().min(1), type: z.enum(['BIKE','EBIKE','SCOOTER','MOPED','CARSHARING','TAXI']),
+    location: coordinateSchema, available: z.boolean(), batteryPercent: z.number().optional(), rangeMeters: z.number().optional(), stationId: z.string().optional(),
+    lastUpdated: z.string().optional(), vehicleTypeId: z.string().optional(), pricingPlanId: z.string().optional(), rentalUris: z.record(z.string(), z.string()).optional() })),
+  stations: z.array(z.object({ id: z.string().min(1), providerId: z.string().min(1), name: z.string(), location: coordinateSchema,
+    capacity: z.number().optional(), availableAssets: z.number().optional(), returnAllowed: z.boolean().optional(), sourceUpdatedAt: z.string().optional() })),
+  geofences: z.array(z.object({ id: z.string().min(1), geometry: z.object({ type: z.enum(['Polygon','MultiPolygon']), coordinates: z.unknown() }), rules: z.array(gbfsRuleSchema), startAt: z.number().nullable().optional(), endAt: z.number().nullable().optional() })).optional(),
+  globalRules: z.array(gbfsRuleSchema).optional(),
+  pricingPlans: z.record(z.string(), z.object({ planId: z.string(), name: z.string().nullable(), currency: z.string().nullable(), price: z.number().nullable(),
+    perMinutePricing: z.array(z.object({ start: z.number(), rate: z.number(), interval: z.number() })) })).optional(),
+  fetchedAt: z.number().finite(), lastUpdated: z.number().nullable().optional(), ttlSeconds: z.number().nonnegative().nullable().optional(), staleAfterSeconds: z.number().positive().optional(),
+});
+
+/** Versioned provider snapshot cache. TTL is capped by the source TTL and the normalized stale-after boundary. */
+export function cachedSnapshot(providerId: string, url: string, expectedCountry?: string): Promise<GbfsSnapshot> {
+  return smartCache.getOrLoad('gbfs_snapshot', { providerId, sourceUrl: url, expectedCountry: expectedCountry ?? null }, gbfsSnapshotSchema, {
+    ttlMs: 15_000,
+    l1TtlMs: 15_000,
+    ttlForValue: (snapshot) => {
+      const sourceTtlMs = snapshot.ttlSeconds == null ? 15_000 : snapshot.ttlSeconds === 0 ? 3_000 : snapshot.ttlSeconds * 1000;
+      const freshnessMs = (snapshot.staleAfterSeconds ?? 60) * 1000;
+      return Math.max(1_000, Math.min(sourceTtlMs, freshnessMs, 15_000));
+    },
+    lockTtlMs: 12_000,
+  }, () => loadGbfsSnapshot(providerId, url, expectedCountry));
 }

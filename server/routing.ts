@@ -1,18 +1,28 @@
 // Compatibility boundary for existing offers, journey and navigation services.
 import { decodePolyline6 } from '../shared/navigation/geometry';
 import { OsrmRoutingProvider } from './routing/providers/OsrmRoutingProvider';
+import { RoutingUnavailableError } from './routing/providers/osrmTransport';
 import type { RouteRequest, RouteResult } from '../shared/navigation/contracts';
+import type { RoutingPriority } from './routing/osrmGateway';
+import { requestOsrmRoute } from './routing/osrmGateway';
 export { RoutingUnavailableError } from './routing/providers/osrmTransport';
 export type { RoadRoute, RoadRouteLeg } from './routing/providers/osrmTransport';
 import type { RoadRoute } from './routing/providers/osrmTransport';
 export async function getRoadRoute(origin: [number, number], destination: [number, number]): Promise<RoadRoute> {
   return getRoadRouteThroughPoints([origin,destination]);
 }
-export async function getRoadRouteThroughPoints(points: [number, number][]): Promise<RoadRoute> {
+export async function getRoadRouteThroughPoints(points: [number, number][], _priority: RoutingPriority = 'interactive'): Promise<RoadRoute> {
+  if (points.length < 2 || points.length > 32) throw new RoutingUnavailableError('A road route needs 2–32 valid waypoint coordinates');
   const provider = new OsrmRoutingProvider(process.env.OSRM_URL || process.env.ROUTING_ENGINE_URL);
-  const route = await provider.route({ origin: points[0], destination: points.at(-1)!, waypoints: points.slice(1,-1), profile: { mode: 'CAR' }, requestId: crypto.randomUUID() });
+  const route = await provider.route({ origin: points[0]!, destination: points.at(-1)!, waypoints: points.slice(1,-1), profile: { mode: 'CAR' }, requestId: crypto.randomUUID() }, _priority);
   return { geometry: decodePolyline6(route.geometry.value), distanceMeters: route.distanceMeters, durationSeconds: route.durationSeconds,
     ...(route.legs.length ? { legs: route.legs } : {}), ...(route.maneuvers.length ? { maneuvers: route.maneuvers } : {}) };
+}
+
+export async function getWalkingRoute(origin: [number, number], destination: [number, number]): Promise<RoadRoute> {
+  const endpoint = process.env.WALKING_ROUTING_URL;
+  if (!endpoint) throw new RoutingUnavailableError('Walking routing is not configured');
+  return requestOsrmRoute([origin, destination], endpoint, { profile: 'FOOT', priority: 'interactive' });
 }
 
 export async function calculateCanonicalRoute(request: RouteRequest): Promise<RouteResult> {

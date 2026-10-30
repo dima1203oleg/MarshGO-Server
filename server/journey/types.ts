@@ -40,6 +40,8 @@ export interface JourneyOption {
   comfort: number | null;
   /** Stable grouping key used to avoid filling the result list with near-identical runs. */
   diversityKey?: string | null;
+  /** Indicates whether the candidate search was truncated or pruned due to resource/depth limits. */
+  searchTruncated?: boolean;
   legs: Array<{ mode: JourneyLegMode; providerId?: string | null }>;
 }
 

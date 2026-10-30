@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from './safeFetch';
 import { bboxOf, type ConnectionReport } from './types';
@@ -38,7 +39,12 @@ function table(text: string): Array<Record<string, string>> {
   return lines.slice(1).map((line) => { const values = parseCsvLine(line); const row: Record<string, string> = {}; header.forEach((name, index) => { row[name] = values[index] ?? ''; }); return row; });
 }
 
-export interface GtfsSummary { stopPoints: Array<[number, number]>; agencies: number; stops: number; routes: number; trips: number; stopTimeRows: number; badStops: number; routeTypes: Record<string, number>; hasCalendar: boolean; hasUpcomingService: boolean; hasShapes: boolean; missingFiles: string[] }
+function isValidTimezone(timezone: string): boolean {
+  try { new Intl.DateTimeFormat('en', { timeZone: timezone }).format(0); return true; }
+  catch { return false; }
+}
+
+export interface GtfsSummary { stopPoints: Array<[number, number]>; agencies: number; stops: number; routes: number; trips: number; stopTimeRows: number; badStops: number; routeTypes: Record<string, number>; hasCalendar: boolean; hasValidTimezone: boolean; hasUpcomingService: boolean; hasShapes: boolean; missingFiles: string[] }
 
 function dateStringAfter(date: string, days: number): string {
   const value = new Date(Date.UTC(Number(date.slice(0, 4)), Number(date.slice(4, 6)) - 1, Number(date.slice(6, 8)) + days));
@@ -51,7 +57,8 @@ function hasUpcomingService(files: Record<string, Uint8Array>, now: Date, days =
   const calendars = table(text('calendar.txt'));
   const exceptions = table(text('calendar_dates.txt'));
   const trips = table(text('trips.txt'));
-  const timezone = agencies[0]?.agency_timezone?.trim() || 'UTC';
+  const timezone = agencies[0]?.agency_timezone?.trim() ?? '';
+  if (!isValidTimezone(timezone)) return false;
   let formatter: Intl.DateTimeFormat;
   try {
     formatter = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' });
@@ -94,6 +101,7 @@ export function summarizeGtfs(files: Record<string, Uint8Array>, now = new Date(
   const badStops = stops.filter((stop) => { const lat = Number(stop.stop_lat), lon = Number(stop.stop_lon); return !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180 || (lat === 0 && lon === 0); }).length;
   const stopPoints = stops.flatMap((stop): Array<[number, number]> => { const lat = Number(stop.stop_lat), lon = Number(stop.stop_lon); return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0) ? [[lon, lat]] : []; });
   const routes = table(text('routes.txt'));
+  const agencyTimezone = table(text('agency.txt'))[0]?.agency_timezone?.trim() ?? '';
   const routeTypes: Record<string, number> = {};
   for (const route of routes) { const label = routeTypeLabel(Number(route.route_type), `${route.route_short_name ?? ''} ${route.route_long_name ?? ''} ${route.route_desc ?? ''}`); routeTypes[label] = (routeTypes[label] ?? 0) + 1; }
   const stopTimeText = text('stop_times.txt');
@@ -102,6 +110,7 @@ export function summarizeGtfs(files: Record<string, Uint8Array>, now = new Date(
     trips: Math.max(0, text('trips.txt').split(/\r?\n/).filter(Boolean).length - 1),
     stopTimeRows: Math.max(0, stopTimeText.split('\n').filter((line) => line.length > 1).length - 1),
     badStops, routeTypes, hasCalendar: Boolean(files['calendar.txt'] || files['calendar_dates.txt']),
+    hasValidTimezone: isValidTimezone(agencyTimezone),
     hasUpcomingService: hasUpcomingService(files, now), hasShapes: Boolean(files['shapes.txt']), missingFiles,
   };
 }
@@ -126,11 +135,20 @@ export async function testGtfsConnection(url: string): Promise<ConnectionReport>
   const stopTolerance = Math.max(2, Math.floor(summary.stops * 0.02));
   checks.push({ name: 'Stops', ok: summary.stops > 0 && summary.badStops <= stopTolerance, detail: `${summary.stops} stops, ${summary.badStops} with invalid coordinates` });
   checks.push({ name: 'Routes and trips', ok: summary.routes > 0 && summary.trips > 0, detail: `${summary.routes} routes, ${summary.trips} trips` });
+  checks.push({ name: 'Agency timezone', ok: summary.hasValidTimezone,
+    detail: summary.hasValidTimezone ? 'valid IANA timezone' : 'missing or invalid agency_timezone; schedule cannot be evaluated safely' });
   checks.push({ name: 'Calendar', ok: summary.hasCalendar });
   checks.push({ name: 'Scheduled service in next 7 days', ok: summary.hasUpcomingService,
     detail: summary.hasUpcomingService ? 'at least one trip is scheduled' : 'no active trip service in the next 7 days' });
   const counts: Record<string, number> = { stops: summary.stops, routes: summary.routes, trips: summary.trips, stopTimes: summary.stopTimeRows, ...Object.fromEntries(Object.entries(summary.routeTypes).map(([type, count]) => [`routes_${type}`, count])) };
   const critical = summary.missingFiles.length === 0 && summary.stops > 0 && summary.routes > 0 && summary.trips > 0;
-  const healthy = critical && summary.badStops <= stopTolerance && summary.hasCalendar && summary.hasUpcomingService;
-  return { health: healthy ? 'healthy' : !summary.hasUpcomingService ? 'offline' : critical ? 'degraded' : 'offline', checks, counts, responseMs: Date.now() - started, ...(bboxOf(summary.stopPoints) ? { bbox: bboxOf(summary.stopPoints) } : {}), ...(critical && summary.hasUpcomingService ? {} : { error: !summary.hasUpcomingService ? 'GTFS feed has no service scheduled in the next 7 days' : 'GTFS feed is incomplete' }) };
+  const healthy = critical && summary.badStops <= stopTolerance && summary.hasCalendar && summary.hasValidTimezone && summary.hasUpcomingService;
+  const error = !summary.hasValidTimezone
+    ? 'GTFS feed must include a valid agency_timezone'
+    : !summary.hasUpcomingService
+      ? 'GTFS feed has no service scheduled in the next 7 days'
+      : 'GTFS feed is incomplete';
+  return { health: healthy ? 'healthy' : !summary.hasUpcomingService || !summary.hasValidTimezone ? 'offline' : critical ? 'degraded' : 'offline', checks, counts,
+    responseMs: Date.now() - started, sourceVersion: createHash('sha256').update(data).digest('hex'),
+    ...(bboxOf(summary.stopPoints) ? { bbox: bboxOf(summary.stopPoints) } : {}), ...(healthy ? {} : { error }) };
 }
