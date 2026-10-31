@@ -15,6 +15,11 @@ type CacheOptions<T = unknown> = {
   scope?: string;
   /** Disable cross-process Redis reads, locks, and writes when the source has no stable version. */
   shared?: boolean;
+  /**
+   * Serve the previous L1 value for this long after its TTL lapses while refreshing it in the background.
+   * Off unless set: an opt-out keeps the old blocking behaviour for categories whose value must not age.
+   */
+  staleTtlMs?: number;
 };
 
 const releaseLockScript = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
@@ -42,6 +47,7 @@ export type CacheStats = {
   loadErrors: number; l2Errors: number; invalidEntries: number; evictions: number;
   lockTimeouts: number; l1Entries: number; l1Bytes: number; redisConnected: boolean;
   l2ReadLatencyMs: number; l2ReadCount: number; l2WriteLatencyMs: number; l2WriteCount: number;
+  staleHits: number; backgroundRevalidations: number; backgroundRevalidationErrors: number;
 };
 
 const defaultStats = (): CacheStats => ({
@@ -49,12 +55,14 @@ const defaultStats = (): CacheStats => ({
   loads: 0, loadErrors: 0, l2Errors: 0, invalidEntries: 0, evictions: 0, lockTimeouts: 0,
   l1Entries: 0, l1Bytes: 0, redisConnected: false, l2ReadLatencyMs: 0, l2ReadCount: 0,
   l2WriteLatencyMs: 0, l2WriteCount: 0,
+  staleHits: 0, backgroundRevalidations: 0, backgroundRevalidationErrors: 0,
 });
 
 /** Fail-open, bounded L1 + optional isolated Redis L2 cache for non-authoritative data. */
 export class CacheService {
-  private readonly l1 = new Map<string, { expiresAt: number; payload: string; bytes: number }>();
+  private readonly l1 = new Map<string, { expiresAt: number; staleExpiresAt: number; nextRevalidationAt: number; payload: string; bytes: number }>();
   private readonly inFlight = new Map<string, Promise<unknown>>();
+  private readonly revalidating = new Set<string>();
   private readonly stats = defaultStats();
   private readonly l2ReadSamples: number[] = [];
   private readonly l2WriteSamples: number[] = [];
@@ -103,8 +111,15 @@ export class CacheService {
     const key = cacheKey(category, { parameters, ...(options.scope ? { scope: options.scope } : {}) });
     const ttl = Math.max(0, Math.floor(options.ttlMs));
     if (!ttl) return loader();
-    const hit = await this.read<T>(key, schema, options.shared !== false);
-    if (hit !== undefined) return hit;
+    const staleMs = Math.max(0, Math.floor(options.staleTtlMs ?? 0));
+    const shared = options.shared !== false;
+    const hit = await this.read<T>(key, schema, { shared, allowStale: staleMs > 0, staleMs });
+    if (hit && !hit.stale) return hit.value;
+    if (hit) {
+      // Ageing data beats making a passenger's map wait for a provider that is already known to be slow.
+      this.revalidateInBackground(key, schema, { ...options, ttlMs: ttl }, loader);
+      return hit.value;
+    }
 
     const existing = this.inFlight.get(key);
     if (existing) {
@@ -135,6 +150,7 @@ export class CacheService {
       ['singleflight_local_total', s.localCoalesced], ['singleflight_distributed_total', s.distributedCoalesced],
       ['loader_calls_total', s.loads], ['loader_errors_total', s.loadErrors], ['redis_errors_total', s.l2Errors],
       ['invalid_entries_total', s.invalidEntries], ['evictions_total', s.evictions], ['lock_timeouts_total', s.lockTimeouts],
+      ['stale_hits_total', s.staleHits], ['background_revalidations_total', s.backgroundRevalidations], ['background_revalidation_errors_total', s.backgroundRevalidationErrors],
     ];
     return [
       ...counters.map(([name, value]) => `marshgo_cache_${name} ${value}`),
@@ -155,16 +171,17 @@ export class CacheService {
     const waitMs = Math.max(0, Math.min(30_000, options.waitForLockMs ?? 5_000));
     const deadline = Date.now() + waitMs;
     let ownsLock = false;
+    const freshOnly = { shared: true as const, allowStale: false as const, staleMs: 0 };
     try {
       while (true) {
-        const hit = await this.read<T>(key, schema);
-        if (hit !== undefined) return hit;
+        const hit = await this.read<T>(key, schema, freshOnly);
+        if (hit) return hit.value;
         try { ownsLock = (await redis.set(lockKey, owner, { NX: true, PX: lockTtl })) === 'OK'; }
         catch { this.stats.l2Errors += 1; break; }
         if (ownsLock) {
           // Another caller may have populated L2 between the previous read and SET NX.
-          const raced = await this.read<T>(key, schema);
-          if (raced !== undefined) return raced;
+          const raced = await this.read<T>(key, schema, freshOnly);
+          if (raced) return raced.value;
           return await this.loadAndStore(key, schema, options, loader);
         }
         if (Date.now() >= deadline) {
@@ -192,7 +209,7 @@ export class CacheService {
       const ttlMs = Math.max(0, Math.floor(options.ttlForValue?.(value) ?? options.ttlMs));
       if (ttlMs <= 0) return schema.parse(JSON.parse(payload));
       const l1Ttl = Math.max(1, Math.min(ttlMs, options.l1TtlMs ?? ttlMs));
-      this.storeL1(key, payload, l1Ttl);
+      this.storeL1(key, payload, l1Ttl, Math.max(0, Math.floor(options.staleTtlMs ?? 0)));
       const redis = options.shared === false ? undefined : this.isRedisReady() ? this.redis : undefined;
       const maxL2Bytes = Math.max(1024, Math.min(64 * 1024 * 1024, options.maxL2Bytes ?? (Number(process.env.CACHE_L2_MAX_ENTRY_BYTES) || 2 * 1024 * 1024)));
       if (redis && Buffer.byteLength(payload) <= maxL2Bytes) {
@@ -211,18 +228,24 @@ export class CacheService {
     }
   }
 
-  private async read<T>(key: string, schema: z.ZodType<T>, shared = true): Promise<T | undefined> {
+  private async read<T>(key: string, schema: z.ZodType<T>, policy: { shared: boolean; allowStale: boolean; staleMs: number }): Promise<{ value: T; stale: boolean } | undefined> {
     const now = Date.now();
     const local = this.l1.get(key);
-    if (local && local.expiresAt > now) {
-      this.l1.delete(key); this.l1.set(key, local); this.stats.l1Hits += 1;
-      try { return schema.parse(JSON.parse(local.payload)); }
-      catch { this.stats.invalidEntries += 1; this.removeL1(key); }
+    if (local) {
+      const fresh = local.expiresAt > now;
+      const stale = !fresh && policy.allowStale && local.staleExpiresAt > now;
+      if (fresh || stale) {
+        this.l1.delete(key); this.l1.set(key, local);
+        if (fresh) this.stats.l1Hits += 1; else this.stats.staleHits += 1;
+        try { return { value: schema.parse(JSON.parse(local.payload)), stale }; }
+        catch { this.stats.invalidEntries += 1; this.removeL1(key); }
+      } else {
+        this.removeL1(key); this.stats.l1Misses += 1;
+      }
     } else {
-      if (local) this.removeL1(key);
       this.stats.l1Misses += 1;
     }
-    const redis = shared && this.isRedisReady() ? this.redis : undefined;
+    const redis = policy.shared && this.isRedisReady() ? this.redis : undefined;
     if (!redis) return undefined;
     const started = Date.now();
     let payload: string | null;
@@ -237,9 +260,9 @@ export class CacheService {
       this.stats.l2Hits += 1;
       try {
         const remainingTtl = await redis.pTTL(key);
-        if (remainingTtl > 0) this.storeL1(key, payload, Math.min(60_000, remainingTtl));
+        if (remainingTtl > 0) this.storeL1(key, payload, Math.min(60_000, remainingTtl), policy.staleMs);
       } catch { this.stats.l2Errors += 1; }
-      return schema.parse(JSON.parse(payload));
+      return { value: schema.parse(JSON.parse(payload)), stale: false };
     } catch {
       this.stats.invalidEntries += 1;
       try { await redis.del([key]); } catch { this.stats.l2Errors += 1; }
@@ -250,7 +273,7 @@ export class CacheService {
     }
   }
 
-  private storeL1(key: string, payload: string, ttlMs: number): void {
+  private storeL1(key: string, payload: string, ttlMs: number, staleMs = 0): void {
     const bytes = Buffer.byteLength(payload);
     const maxEntries = Math.max(1, Math.min(100_000, this.limits.maxEntries ?? (Number(process.env.CACHE_L1_MAX_ENTRIES) || 5000)));
     const maxBytes = Math.max(1024, Math.min(512 * 1024 * 1024, this.limits.maxBytes ?? (Number(process.env.CACHE_L1_MAX_BYTES) || 16 * 1024 * 1024)));
@@ -261,8 +284,29 @@ export class CacheService {
       if (!oldest) break;
       this.removeL1(oldest); this.stats.evictions += 1;
     }
-    this.l1.set(key, { expiresAt: Date.now() + ttlMs, payload, bytes });
+    const expiresAt = Date.now() + ttlMs;
+    this.l1.set(key, { expiresAt, staleExpiresAt: expiresAt + Math.max(0, staleMs), nextRevalidationAt: 0, payload, bytes });
     this.l1Bytes += bytes;
+  }
+
+  /**
+   * Refresh an entry that is being served stale. Guarded by the entry itself, so a provider that keeps failing is retried
+   * at most once per TTL instead of on every request, and by `revalidating` so one key never loads twice at once.
+   */
+  private revalidateInBackground<T>(key: string, schema: z.ZodType<T>, options: CacheOptions<T>, loader: () => Promise<T>): void {
+    const entry = this.l1.get(key);
+    if (!entry || this.revalidating.has(key)) return;
+    const now = Date.now();
+    if (entry.nextRevalidationAt > now) return;
+    entry.nextRevalidationAt = now + Math.max(1_000, Math.min(60_000, options.ttlMs));
+    this.stats.backgroundRevalidations += 1;
+    this.revalidating.add(key);
+    void this.loadWithLock(key, schema, options, loader)
+      .catch((error) => {
+        this.stats.backgroundRevalidationErrors += 1;
+        console.warn(JSON.stringify({ level: 'warn', event: 'cache.background_revalidation_failed', message: error instanceof Error ? error.message : 'unknown_error' }));
+      })
+      .finally(() => { this.revalidating.delete(key); });
   }
 
   private removeL1(key: string): void {

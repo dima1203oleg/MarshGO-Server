@@ -371,6 +371,9 @@ export function cachedGtfsRouteTypes(providerId: string, url: string, sourceVers
     // A provider with no source version keeps the index in L1 only, so L1 has to outlive one background refresh interval —
     // otherwise the next live-map poll pays for the whole zip download again, inside the request.
     l1TtlMs: 20 * 60_000,
+    // Route names and categories age slowly, so an expired index still classifies a vehicle better than making the map wait
+    // (or dropping the vehicle as unclassified). The stale copy is served while a background pass refetches it.
+    staleTtlMs: 24 * 60 * 60_000,
     maxL2Bytes: 4 * 1024 * 1024,
     shared: Boolean(version),
   }, () => loadGtfsRouteTypes(url));
