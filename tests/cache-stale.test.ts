@@ -78,3 +78,28 @@ test('the route-type index is the opted-in category', () => {
   assert.match(block, /staleTtlMs:\s*\d+/, 'the vehicle-classification index must declare a stale window');
   assert.doesNotMatch(block, /staleTtlMs:\s*0\b/);
 });
+
+test('a stale cycle is visible in the server log and leaks no request parameters', async () => {
+  const cache = new CacheService();
+  const lines: string[] = [];
+  const original = console.info;
+  console.info = (line?: unknown) => { lines.push(String(line)); };
+  try {
+    let loads = 0;
+    const loader = async () => { loads += 1; await wait(30); return { value: loads }; };
+    await cache.getOrLoad('gtfs_route_types', params, schema, { ttlMs: 40, l1TtlMs: 40, staleTtlMs: 60_000 }, loader);
+    await wait(60);
+    await cache.getOrLoad('gtfs_route_types', params, schema, { ttlMs: 40, l1TtlMs: 40, staleTtlMs: 60_000 }, loader);
+    await wait(80);
+  } finally { console.info = original; }
+
+  const events = lines.map((line) => JSON.parse(line) as { event: string; category: string; staleForMs?: number; durationMs?: number });
+  const served = events.filter((event) => event.event === 'cache.stale_served');
+  const revalidated = events.filter((event) => event.event === 'cache.background_revalidated');
+  assert.equal(served.length, 1);
+  assert.equal(served[0]!.category, 'gtfs_route_types');
+  assert.ok((served[0]!.staleForMs ?? -1) >= 0, 'the log must say how old the served snapshot was');
+  assert.equal(revalidated.length, 1);
+  assert.ok((revalidated[0]!.durationMs ?? 0) > 0);
+  assert.ok(!lines.some((line) => line.includes('lviv')), 'cache logs must not carry the cache parameters');
+});

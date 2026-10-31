@@ -117,7 +117,8 @@ export class CacheService {
     if (hit && !hit.stale) return hit.value;
     if (hit) {
       // Ageing data beats making a passenger's map wait for a provider that is already known to be slow.
-      this.revalidateInBackground(key, schema, { ...options, ttlMs: ttl }, loader);
+      console.info(JSON.stringify({ level: 'info', event: 'cache.stale_served', category, staleForMs: hit.staleForMs ?? 0 }));
+      this.revalidateInBackground(category, key, schema, { ...options, ttlMs: ttl }, loader);
       return hit.value;
     }
 
@@ -228,7 +229,7 @@ export class CacheService {
     }
   }
 
-  private async read<T>(key: string, schema: z.ZodType<T>, policy: { shared: boolean; allowStale: boolean; staleMs: number }): Promise<{ value: T; stale: boolean } | undefined> {
+  private async read<T>(key: string, schema: z.ZodType<T>, policy: { shared: boolean; allowStale: boolean; staleMs: number }): Promise<{ value: T; stale: boolean; staleForMs?: number } | undefined> {
     const now = Date.now();
     const local = this.l1.get(key);
     if (local) {
@@ -237,7 +238,7 @@ export class CacheService {
       if (fresh || stale) {
         this.l1.delete(key); this.l1.set(key, local);
         if (fresh) this.stats.l1Hits += 1; else this.stats.staleHits += 1;
-        try { return { value: schema.parse(JSON.parse(local.payload)), stale }; }
+        try { return { value: schema.parse(JSON.parse(local.payload)), stale, ...(stale ? { staleForMs: now - local.expiresAt } : {}) }; }
         catch { this.stats.invalidEntries += 1; this.removeL1(key); }
       } else {
         this.removeL1(key); this.stats.l1Misses += 1;
@@ -293,7 +294,7 @@ export class CacheService {
    * Refresh an entry that is being served stale. Guarded by the entry itself, so a provider that keeps failing is retried
    * at most once per TTL instead of on every request, and by `revalidating` so one key never loads twice at once.
    */
-  private revalidateInBackground<T>(key: string, schema: z.ZodType<T>, options: CacheOptions<T>, loader: () => Promise<T>): void {
+  private revalidateInBackground<T>(category: CacheCategory, key: string, schema: z.ZodType<T>, options: CacheOptions<T>, loader: () => Promise<T>): void {
     const entry = this.l1.get(key);
     if (!entry || this.revalidating.has(key)) return;
     const now = Date.now();
@@ -301,10 +302,14 @@ export class CacheService {
     entry.nextRevalidationAt = now + Math.max(1_000, Math.min(60_000, options.ttlMs));
     this.stats.backgroundRevalidations += 1;
     this.revalidating.add(key);
+    const started = Date.now();
     void this.loadWithLock(key, schema, options, loader)
+      .then(() => {
+        console.info(JSON.stringify({ level: 'info', event: 'cache.background_revalidated', category, durationMs: Date.now() - started }));
+      })
       .catch((error) => {
         this.stats.backgroundRevalidationErrors += 1;
-        console.warn(JSON.stringify({ level: 'warn', event: 'cache.background_revalidation_failed', message: error instanceof Error ? error.message : 'unknown_error' }));
+        console.warn(JSON.stringify({ level: 'warn', event: 'cache.background_revalidation_failed', category, message: error instanceof Error ? error.message : 'unknown_error' }));
       })
       .finally(() => { this.revalidating.delete(key); });
   }
