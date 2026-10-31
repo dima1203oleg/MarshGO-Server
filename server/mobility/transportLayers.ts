@@ -6,7 +6,7 @@ import { fetchBinary, fetchJson, UnsafeUrlError } from './safeFetch';
 import { parseCsvLine, routeTypeLabel } from './gtfs';
 import { extractVehicleList, vehicleTransportLabel } from './jsonVehicles';
 import { bboxOf, type Bbox } from './types';
-import { isFreshMobilityTimestamp, parseMobilityTimestamp } from './timestamps';
+import { isFreshMobilityTimestamp, LIVE_MOBILITY_MAX_AGE_MS, parseMobilityTimestamp } from './timestamps';
 
 /**
  * Map data for the 2D transport layers. Everything is loaded per viewport (bbox) and per layer, never as one "whole transport world":
@@ -266,6 +266,43 @@ export function selectFreshVehicles(received: LiveVehicle[], box: Bbox, types: r
   const visible = fresh.filter((vehicle) => inBbox(box, vehicle.lon, vehicle.lat));
   const unclassified = visible.filter((vehicle) => vehicle.type === 'other').length;
   return { vehicles: visible.filter((vehicle) => types.includes(vehicle.type)), stale: received.length - fresh.length, unclassified };
+}
+
+/**
+ * ТЗ-MG-TRANSPORT-12 requires every served feature to say how its data was obtained.
+ * LIVE is a provider-stamped position inside the freshness window, STALE is one that aged out,
+ * ESTIMATED has no stamp to verify, SCHEDULED is static feed geometry, UNKNOWN labels nothing.
+ */
+export type DataQuality = 'LIVE' | 'SCHEDULED' | 'ESTIMATED' | 'STALE' | 'UNKNOWN';
+const QUALITY_SEVERITY: readonly DataQuality[] = ['STALE', 'UNKNOWN', 'ESTIMATED', 'SCHEDULED', 'LIVE'];
+
+export type QualityEntry = { level: DataQuality; ageMs: number | null };
+
+export function vehicleDataQuality(timestamp: Date | null, now = Date.now()): QualityEntry {
+  if (!timestamp) return { level: 'ESTIMATED', ageMs: null };
+  const ageMs = Math.max(0, now - timestamp.getTime());
+  return { level: isFreshVehicleTimestamp(timestamp, now) ? 'LIVE' : 'STALE', ageMs };
+}
+
+/** The response is only as fresh as its least fresh marker, but the counts keep the mix visible. */
+export function aggregateDataQuality(entries: readonly QualityEntry[]): {
+  level: DataQuality; counts: Partial<Record<DataQuality, number>>; oldestAgeMs: number | null; newestAgeMs: number | null; freshnessWindowMs: number;
+} {
+  const counts: Partial<Record<DataQuality, number>> = {};
+  for (const entry of entries) counts[entry.level] = (counts[entry.level] ?? 0) + 1;
+  const ages = entries.map((entry) => entry.ageMs).filter((age): age is number => age !== null);
+  return {
+    level: QUALITY_SEVERITY.find((level) => (counts[level] ?? 0) > 0) ?? 'UNKNOWN',
+    counts,
+    oldestAgeMs: ages.length > 0 ? Math.max(...ages) : null,
+    newestAgeMs: ages.length > 0 ? Math.min(...ages) : null,
+    freshnessWindowMs: LIVE_MOBILITY_MAX_AGE_MS,
+  };
+}
+
+/** Route lines and stop positions come from static feeds, so they must never be presented as live data. */
+export function scheduledDataQuality(featureCount: number) {
+  return aggregateDataQuality(Array.from({ length: featureCount }, () => ({ level: 'SCHEDULED' as const, ageMs: null })));
 }
 
 const VEHICLE_TTL_MS = 10_000;

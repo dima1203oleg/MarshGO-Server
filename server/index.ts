@@ -35,7 +35,7 @@ import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePri
 import { journeyTransportTypeSelected, type JourneyLegMode, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
-import { cachedGeoJsonNetwork, cachedGtfsRouteTypes, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isLineType, isRequestedVehicleType, layerFailures, mergeRouteTypeEntries, parseBbox, providerFailureReason, redactFeedUrls, routeInBbox, selectFreshVehicles, type LineType, type NetworkRoute, type RequestedVehicleType } from './mobility/transportLayers';
+import { aggregateDataQuality, cachedGeoJsonNetwork, cachedGtfsRouteTypes, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isLineType, isRequestedVehicleType, layerFailures, mergeRouteTypeEntries, parseBbox, providerFailureReason, redactFeedUrls, routeInBbox, scheduledDataQuality, selectFreshVehicles, vehicleDataQuality, type LineType, type NetworkRoute, type RequestedVehicleType } from './mobility/transportLayers';
 import { buildTransportCities } from './mobility/cities';
 import { buildTransportLayerAvailability } from './mobility/transportLayerAvailability';
 import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
@@ -862,7 +862,9 @@ app.get('/api/v1/transport/routes', requireAuth, asyncHandler(async (req, res) =
   const { settled, loaded } = await loadRoutes(box, types);
   const features = loaded.flatMap(({ row, network }) => network.routes.filter((route: NetworkRoute) => types.includes(route.type) && routeInBbox(route, box))
     .map((route) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${route.id}`, name: route.name, direction: route.direction, stopCount: route.stopCount, transport: route.type, provider: row.name.split(' — ')[0] }, geometry: { type: 'LineString' as const, coordinates: route.coordinates } })));
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 600) }, meta: { failedProviders: layerFailures(settled), failedProviderCount: settled.length - loaded.length, truncated: features.length > 600 } });
+  const served = features.slice(0, 600);
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: served }, meta: { failedProviders: layerFailures(settled), failedProviderCount: settled.length - loaded.length, truncated: features.length > 600,
+    dataQuality: scheduledDataQuality(served.length) } });
 }));
 
 app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) => {
@@ -976,12 +978,16 @@ app.get('/api/v1/transport/vehicles', requireAuth, asyncHandler(async (req, res)
   const settled = await Promise.all(realtime.map(async (row) => ({ row, layer: 'positions', ...(await layerFetch(cachedVehicles(row.id, row.source_type, row.feed_url, names), layerContext(row, 'positions'))) })));
   const received = settled.flatMap((item) => item.ok ? item.value : []);
   const { vehicles, stale, unclassified } = selectFreshVehicles(received, box, types);
-  const features = vehicles.slice(0, 1500).map((vehicle) => ({ type: 'Feature' as const, properties: { id: vehicle.id, route: vehicle.route, transport: vehicle.type,
-    bearing: vehicle.bearing, speed: vehicle.speed, updatedAt: vehicle.timestamp?.toISOString() }, geometry: { type: 'Point' as const, coordinates: [vehicle.lon, vehicle.lat] } }));
+  const served = vehicles.slice(0, 1500);
+  const qualities = served.map((vehicle) => vehicleDataQuality(vehicle.timestamp));
+  const features = served.map((vehicle, index) => ({ type: 'Feature' as const, properties: { id: vehicle.id, route: vehicle.route, transport: vehicle.type,
+    bearing: vehicle.bearing, speed: vehicle.speed, updatedAt: vehicle.timestamp?.toISOString(),
+    dataQuality: qualities[index]!.level, positionAgeMs: qualities[index]!.ageMs }, geometry: { type: 'Point' as const, coordinates: [vehicle.lon, vehicle.lat] } }));
   sendLayerJson(req, res, { data: { type: 'FeatureCollection', features }, meta: { failedProviders: layerFailures([...indexes, ...geoJsonNetworks, ...settled]),
     failedProviderCount: [...indexes, ...geoJsonNetworks, ...settled].filter((item) => !item.ok).length,
     providersQueried: { positions: settled.length, routeIndexes: indexes.length + geoJsonNetworks.length },
-    filteredStaleVehicles: stale, unclassifiedVehicles: unclassified, truncated: vehicles.length > 1500 } });
+    filteredStaleVehicles: stale, unclassifiedVehicles: unclassified, truncated: vehicles.length > 1500,
+    dataQuality: aggregateDataQuality(qualities) } });
 }));
 
 app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req, res) => {
