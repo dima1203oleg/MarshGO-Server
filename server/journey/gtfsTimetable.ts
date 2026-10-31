@@ -805,8 +805,15 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
   const stopTimes: GtfsTimetableFeed['stopTimes'] = new Map();
   for (const row of csvRows(text('stop_times.txt'))) {
     if (!trips.has(row.trip_id) || !stops.has(row.stop_id)) continue;
-    const arrivalSeconds = gtfsTime(row.arrival_time), departureSeconds = gtfsTime(row.departure_time);
-    if (arrivalSeconds === null || departureSeconds === null) continue;
+    const declaredArrival = gtfsTime(row.arrival_time), declaredDeparture = gtfsTime(row.departure_time);
+    // GTFS leaves arrival_time off the first stop and departure_time off the last,
+    // and Dozor feeds also omit departure_time at pass-through stops. Requiring
+    // both silently dropped 90 % of those stop calls, so most stops were
+    // unroutable and legs reported only the board/alight pair. Treat the missing
+    // side as the same time point instead of discarding the stop.
+    if (declaredArrival === null && declaredDeparture === null) continue;
+    const arrivalSeconds = declaredArrival ?? declaredDeparture as number;
+    const departureSeconds = declaredDeparture ?? declaredArrival as number;
     const list = stopTimes.get(row.trip_id) ?? [];
     const sourceStop = stops.get(row.stop_id);
     list.push({ stopId: row.stop_id, sourceStopId: row.stop_id,

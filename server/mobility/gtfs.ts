@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from './safeFetch';
+import { pointIsInsideUkraine } from './gbfs';
 import { bboxOf, type ConnectionReport } from './types';
 
 /** GTFS route_type → MARSHGO transport label (basic and extended route types). */
@@ -101,7 +102,12 @@ export function summarizeGtfs(files: Record<string, Uint8Array>, now = new Date(
   const badStops = stops.filter((stop) => { const lat = Number(stop.stop_lat), lon = Number(stop.stop_lon); return !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180 || (lat === 0 && lon === 0); }).length;
   const stopPoints = stops.flatMap((stop): Array<[number, number]> => { const lat = Number(stop.stop_lat), lon = Number(stop.stop_lon); return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && !(lat === 0 && lon === 0) ? [[lon, lat]] : []; });
   const routes = table(text('routes.txt'));
-  const agencyTimezone = table(text('agency.txt'))[0]?.agency_timezone?.trim() ?? '';
+  const agencyRows = table(text('agency.txt'));
+  const agencyTimezone = agencyRows[0]?.agency_timezone?.trim() ?? '';
+  // Mirror parseGtfsTimetable(): the GTFS spec allows an empty agency.txt for
+  // single-agency feeds, and the planner then falls back to Europe/Kyiv when
+  // every stop is inside Ukraine. The probe must not be stricter than routing.
+  const timezoneFallback = agencyRows.length === 0 && stopPoints.length > 0 && stopPoints.every((point) => pointIsInsideUkraine(point));
   const routeTypes: Record<string, number> = {};
   for (const route of routes) { const label = routeTypeLabel(Number(route.route_type), `${route.route_short_name ?? ''} ${route.route_long_name ?? ''} ${route.route_desc ?? ''}`); routeTypes[label] = (routeTypes[label] ?? 0) + 1; }
   const stopTimeText = text('stop_times.txt');
@@ -110,7 +116,7 @@ export function summarizeGtfs(files: Record<string, Uint8Array>, now = new Date(
     trips: Math.max(0, text('trips.txt').split(/\r?\n/).filter(Boolean).length - 1),
     stopTimeRows: Math.max(0, stopTimeText.split('\n').filter((line) => line.length > 1).length - 1),
     badStops, routeTypes, hasCalendar: Boolean(files['calendar.txt'] || files['calendar_dates.txt']),
-    hasValidTimezone: isValidTimezone(agencyTimezone),
+    hasValidTimezone: isValidTimezone(agencyTimezone) || timezoneFallback,
     hasUpcomingService: hasUpcomingService(files, now), hasShapes: Boolean(files['shapes.txt']), missingFiles,
   };
 }
@@ -136,7 +142,9 @@ export async function testGtfsConnection(url: string): Promise<ConnectionReport>
   checks.push({ name: 'Stops', ok: summary.stops > 0 && summary.badStops <= stopTolerance, detail: `${summary.stops} stops, ${summary.badStops} with invalid coordinates` });
   checks.push({ name: 'Routes and trips', ok: summary.routes > 0 && summary.trips > 0, detail: `${summary.routes} routes, ${summary.trips} trips` });
   checks.push({ name: 'Agency timezone', ok: summary.hasValidTimezone,
-    detail: summary.hasValidTimezone ? 'valid IANA timezone' : 'missing or invalid agency_timezone; schedule cannot be evaluated safely' });
+    detail: summary.hasValidTimezone
+      ? (summary.agencies === 0 ? 'empty agency.txt (single-agency feed); planner falls back to Europe/Kyiv for all-Ukraine stops' : 'valid IANA timezone')
+      : 'missing or invalid agency_timezone; schedule cannot be evaluated safely' });
   checks.push({ name: 'Calendar', ok: summary.hasCalendar });
   checks.push({ name: 'Scheduled service in next 7 days', ok: summary.hasUpcomingService,
     detail: summary.hasUpcomingService ? 'at least one trip is scheduled' : 'no active trip service in the next 7 days' });

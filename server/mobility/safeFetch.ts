@@ -78,14 +78,43 @@ export async function probeUrl(raw: string, timeoutMs = 8000): Promise<{ status:
   return { status: response.status, contentType: response.headers.get('content-type'), ms: Date.now() - started };
 }
 
-/** Downloads a binary feed (GTFS zip, GTFS-RT protobuf) with the same SSRF guard and a hard size cap. */
+/**
+ * Downloads a binary feed (GTFS zip, GTFS-RT protobuf) with the same SSRF guard and a hard size cap.
+ * Live layers poll this every ten seconds, so one 429, 5xx or connection blip would blank a city's vehicles for a cycle;
+ * a single delayed retry keeps a transient provider hiccup from being reported as an outage.
+ */
 export async function fetchBinary(raw: string, maxBytes: number, timeoutMs = 20000): Promise<{ data: Uint8Array; ms: number }> {
   const started = Date.now();
-  const response = await fetchPublic(raw, { headers: { 'user-agent': 'MARSHGO-Mobility/1.0' } }, timeoutMs);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const declared = Number(response.headers.get('content-length') ?? 0);
-  if (declared > maxBytes) throw new Error('Feed is too large');
-  const data = new Uint8Array(await response.arrayBuffer());
-  if (data.byteLength > maxBytes) throw new Error('Feed is too large');
-  return { data, ms: Date.now() - started };
+  const init = { headers: { 'user-agent': 'MARSHGO-Mobility/1.0' } };
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await fetchPublic(raw, init, timeoutMs);
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        if ((response.status === 429 || response.status >= 500) && attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          continue;
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const declared = Number(response.headers.get('content-length') ?? 0);
+      if (declared > maxBytes) throw new Error('Feed is too large');
+      const data = new Uint8Array(await response.arrayBuffer());
+      if (data.byteLength > maxBytes) throw new Error('Feed is too large');
+      // content-length describes the encoded body, so it only bounds the decoded bytes when nothing was encoded.
+      // A server that closes mid-body otherwise yields a short buffer, which decodes as a confusing protobuf RangeError.
+      const encoded = (response.headers.get('content-encoding') ?? 'identity').toLowerCase() !== 'identity';
+      if (!encoded && declared > 0 && data.byteLength < declared) throw new Error(`Feed response is incomplete (${data.byteLength} of ${declared} bytes)`);
+      return { data, ms: Date.now() - started };
+    } catch (error) {
+      lastError = error;
+      const retryable = !(error instanceof UnsafeUrlError) && error instanceof Error
+        && (error.name === 'TimeoutError' || error.name === 'AbortError'
+          || /fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|terminated|other side closed|socket hang up|incomplete/.test(error.message));
+      if (!retryable || attempt > 0) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Feed is unreachable');
 }
