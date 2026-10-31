@@ -581,8 +581,12 @@ app.get('/api/v1/mobility/nearby', requireAuth, placeSearchLimiter, asyncHandler
     `SELECT id,name,feed_url FROM mobility_providers WHERE status='enabled' AND health='healthy' AND source_type='gbfs' AND provider_type = ANY($1) ORDER BY priority`, [config.providerTypes]);
   const settled = await Promise.allSettled(providers.map(async (provider) => ({ providerId: provider.id, providerName: provider.name, snapshot: await cachedSnapshot(provider.id, provider.feed_url) })));
   const snapshots = settled.flatMap((item) => item.status === 'fulfilled' ? [item.value] : []);
+  // A count alone cannot tell an operator which rental feed broke; each failure is named with a redacted reason code.
+  const failures = settled.flatMap((item, index) => item.status === 'fulfilled' ? [] : [{
+    id: providers[index].id, name: providers[index].name.split(' — ')[0], sourceType: 'gbfs', layer: 'availability', reason: providerFailureReason(item.reason),
+  }]);
   const result = selectNearby(snapshots, [lon, lat], radiusM, config.assetTypes);
-  res.json({ data: { mode, radiusM, providers: providers.length, failedProviders: settled.length - snapshots.length, ...result } });
+  res.json({ data: { mode, radiusM, providers: providers.length, failedProviders: failures, failedProviderCount: failures.length, ...result } });
 }));
 
 /** Canonical service-operator registry; legacy feed registry remains available at /mobility/providers. */
@@ -846,10 +850,9 @@ const loadRoutes = async (box: [number, number, number, number], types: LineType
   // Skip feeds that contain none of the requested transport types (e.g. a national rail feed when the user asked for trams).
   const hasTypes = (row: LayerProviderRow) => types.length === 0 || types.some((type) => (row.last_report?.counts?.[`routes_${type}`] ?? 0) > 0);
   const providers = (await layerProviders(['gtfs', 'geojson'], ['public_transit'])).filter((row) => providerTouches(row, box) && hasTypes(row));
-  const settled = await Promise.all(providers.map((row) => layerFetch((row.source_type === 'gtfs'
-    ? cachedNetwork(row.id, row.feed_url, row.source_version)
-    : (() => { const mode = geoJsonMode(row.name); return mode ? cachedGeoJsonNetwork(row.id, row.feed_url, mode, row.source_version) : Promise.reject(new Error('Unknown GeoJSON transport mode')); })())
-    .then((network) => ({ row, network })), layerContext(row, 'network'))));
+  const settled = await Promise.all(providers.map(async (row) => ({ row, layer: 'network', ...(await layerFetch(row.source_type === 'gtfs'
+    ? cachedNetwork(row.id, row.feed_url, row.source_version).then((network) => ({ row, network }))
+    : (() => { const mode = geoJsonMode(row.name); return mode ? cachedGeoJsonNetwork(row.id, row.feed_url, mode, row.source_version).then((network) => ({ row, network })) : Promise.reject(new Error('Unknown GeoJSON transport mode')); })(), layerContext(row, 'network'))) })));
   return { settled, loaded: settled.flatMap((item) => item.ok ? [item.value] : []) };
 };
 
@@ -859,7 +862,7 @@ app.get('/api/v1/transport/routes', requireAuth, asyncHandler(async (req, res) =
   const { settled, loaded } = await loadRoutes(box, types);
   const features = loaded.flatMap(({ row, network }) => network.routes.filter((route: NetworkRoute) => types.includes(route.type) && routeInBbox(route, box))
     .map((route) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${route.id}`, name: route.name, direction: route.direction, stopCount: route.stopCount, transport: route.type, provider: row.name.split(' — ')[0] }, geometry: { type: 'LineString' as const, coordinates: route.coordinates } })));
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 600) }, meta: { failedProviders: settled.length - loaded.length, truncated: features.length > 600 } });
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 600) }, meta: { failedProviders: layerFailures(settled), failedProviderCount: settled.length - loaded.length, truncated: features.length > 600 } });
 }));
 
 app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) => {
@@ -869,16 +872,17 @@ app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) =>
   const metroStationProviders = types.includes('metro')
     ? (await layerProviders(['geojson'], ['public_transit'])).filter((row) => row.city === 'Київ'
       && row.name.toLocaleLowerCase('uk-UA').includes('метро (станції)') && providerTouches(row, box)) : [];
-  const metroStationSettled = await Promise.all(metroStationProviders.map((row) => layerFetch(
-    cachedGeoJsonNetwork(row.id, row.feed_url, 'metro').then((network) => ({ row, network })), layerContext(row, 'network'),
-  )));
+  const metroStationSettled = await Promise.all(metroStationProviders.map(async (row) => {
+    const outcome = await layerFetch(cachedGeoJsonNetwork(row.id, row.feed_url, 'metro').then((network) => ({ row, network })), layerContext(row, 'network'));
+    return { row, layer: 'network', ...outcome };
+  }));
   const metroStationNetworks = metroStationSettled.flatMap((item) => item.ok ? [item.value] : []);
   const features = loaded.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat) && stop.types.some((type) => types.includes(type)))
     .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: stop.types.join(','), provider: row.name.split(' — ')[0] }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } })));
   features.push(...metroStationNetworks.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat))
     .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: 'metro', provider: row.name.split(' — ')[0], station: true }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } }))));
-  const failedProviders = settled.length - loaded.length + metroStationSettled.length - metroStationNetworks.length;
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 2500) }, meta: { failedProviders, truncated: features.length > 2500 } });
+  const failedOutcomes = layerFailures([...settled, ...metroStationSettled]);
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 2500) }, meta: { failedProviders: failedOutcomes, failedProviderCount: failedOutcomes.length, truncated: features.length > 2500 } });
 }));
 
 /**
@@ -975,6 +979,7 @@ app.get('/api/v1/transport/vehicles', requireAuth, asyncHandler(async (req, res)
   const features = vehicles.slice(0, 1500).map((vehicle) => ({ type: 'Feature' as const, properties: { id: vehicle.id, route: vehicle.route, transport: vehicle.type,
     bearing: vehicle.bearing, speed: vehicle.speed, updatedAt: vehicle.timestamp?.toISOString() }, geometry: { type: 'Point' as const, coordinates: [vehicle.lon, vehicle.lat] } }));
   sendLayerJson(req, res, { data: { type: 'FeatureCollection', features }, meta: { failedProviders: layerFailures([...indexes, ...geoJsonNetworks, ...settled]),
+    failedProviderCount: [...indexes, ...geoJsonNetworks, ...settled].filter((item) => !item.ok).length,
     providersQueried: { positions: settled.length, routeIndexes: indexes.length + geoJsonNetworks.length },
     filteredStaleVehicles: stale, unclassifiedVehicles: unclassified, truncated: vehicles.length > 1500 } });
 }));
@@ -986,7 +991,7 @@ app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req,
   const wantStations = wanted.includes('stations');
   if (!box || (assetTypes.size === 0 && !wantStations)) throw new ApiError(400, 'bbox (at most 0.6 degree) and types (bike, scooter, carsharing, stations) are required', 'invalid_transport_query');
   const providers = (await layerProviders(['gbfs'], ['bike', 'ebike', 'scooter', 'carsharing'])).filter((row) => providerTouches(row, box));
-  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })), layerContext(row, 'availability'))));
+  const settled = await Promise.all(providers.map(async (row) => ({ row, layer: 'availability', ...(await layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })), layerContext(row, 'availability'))) })));
   const features: unknown[] = [];
   let staleAssets = 0;
   for (const item of settled) {
@@ -1013,19 +1018,19 @@ app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req,
     );
     for (const row of rentals) { const feature = buildStaticRentalPointFeature(row); if (feature) features.push(feature); }
   }
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 3000) }, meta: { failedProviders: settled.filter((item) => !item.ok).length, filteredStaleAssets: staleAssets, truncated: features.length > 3000, attribution: 'Zelectra GBFS; © OpenStreetMap contributors, ODbL 1.0 where source=OSM' } });
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 3000) }, meta: { failedProviders: layerFailures(settled), failedProviderCount: settled.length - settled.filter((item) => item.ok).length, filteredStaleAssets: staleAssets, truncated: features.length > 3000, attribution: 'Zelectra GBFS; © OpenStreetMap contributors, ODbL 1.0 where source=OSM' } });
 }));
 
 app.get('/api/v1/transport/micromobility/geofences', requireAuth, asyncHandler(async (req, res) => {
   const box = parseBbox(req.query.bbox, 0.6);
   if (!box) throw new ApiError(400, 'bbox (at most 0.6 degree) is required', 'invalid_transport_query');
   const providers = (await layerProviders(['gbfs'], ['scooter'])).filter((row) => providerTouches(row, box));
-  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })), layerContext(row, 'availability'))));
+  const settled = await Promise.all(providers.map(async (row) => ({ row, layer: 'availability', ...(await layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })), layerContext(row, 'availability'))) })));
   const features = settled.flatMap((item) => item.ok ? buildMicromobilityGeofenceFeatures(
     { id: item.value.row.id, name: item.value.row.name, operatorId: item.value.row.operator_id }, item.value.snapshot,
     { west: box[0], south: box[1], east: box[2], north: box[3] },
   ) : []);
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 1000) }, meta: { failedProviders: settled.filter((item) => !item.ok).length, truncated: features.length > 1000, attribution: 'Zelectra GBFS; Mobility Database catalog reports CC BY 4.0' } });
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 1000) }, meta: { failedProviders: layerFailures(settled), failedProviderCount: settled.length - settled.filter((item) => item.ok).length, truncated: features.length > 1000, attribution: 'Zelectra GBFS; Mobility Database catalog reports CC BY 4.0' } });
 }));
 
 app.get('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {

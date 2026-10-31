@@ -419,7 +419,8 @@ export interface LayerOutcome {
 export function layerFailures(outcomes: readonly LayerOutcome[]): Array<{ id: string; name: string; sourceType: string; layer: string; reason: string }> {
   return outcomes
     .filter((item) => !item.ok)
-    .map((item) => ({ id: item.row.id, name: item.row.name.split(' — ')[0], sourceType: item.row.source_type, layer: item.layer, reason: item.reason ?? 'error' }));
+    // Reasons are classified upstream, but an unclassified one can still carry the requested URL, so redact again at the boundary.
+    .map((item) => ({ id: item.row.id, name: item.row.name.split(' — ')[0], sourceType: item.row.source_type, layer: item.layer, reason: redactFeedUrls(item.reason ?? 'error') }));
 }
 
 export function parseBbox(raw: unknown, maxSpanDegrees = 2): Bbox | null {
