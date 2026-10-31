@@ -3481,19 +3481,22 @@ export function getCachedGtfsTimetableStats(): { entries: number; estimatedBytes
   return { entries: feedCache.size, estimatedBytes: feedCache.weight };
 }
 
-// Parsed JS objects use substantially more memory than their source CSV. This
-// deliberately conservative estimate accounts for map entries and per-row
-// objects; it is a cache bound, not a claim about exact process RSS.
+// Parsed JS objects use substantially more memory than their source CSV. These
+// per-record weights come from measuring heap retention of the three largest
+// live Ukrainian feeds against this formula (Lvivavtodor 426 685 stop_time rows =
+// 114 MB, Kyivpastrans 103 533 rows = 35 MB, Ukrzaliznytsya 468 960 shape points
+// = 33 MB), so the budget tracks real RSS instead of overstating it ~2x and
+// pushing hot feeds out. It is still a cache bound, not a claim about exact RSS.
 function estimateGtfsFeedCacheBytes(feed: GtfsTimetableFeed): number {
   let stopTimeRows = 0;
   for (const rows of feed.stopTimes.values()) stopTimeRows += rows.length;
   let shapePoints = 0;
   for (const points of feed.shapes?.values() ?? []) shapePoints += points.length;
-  const retainedRecords = stopTimeRows * 512
+  const retainedRecords = stopTimeRows * 272
     + feed.stops.size * 768
     + feed.stopTimesByStop.size * 192
     + feed.trips.size * 512
-    + shapePoints * 48
+    + shapePoints * 72
     + feed.routes.size * 768
     + feed.calendars.size * 512
     + (feed.transfers?.length ?? 0) * 512;
