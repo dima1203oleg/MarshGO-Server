@@ -6686,6 +6686,29 @@ const runMobilityHealth = () => { if (process.env.MOBILITY_HEALTH_DISABLED === '
 const mobilityHealthStart = setTimeout(runMobilityHealth, 60_000);
 const mobilityHealthTimer = setInterval(runMobilityHealth, mobilityHealthIntervalMs);
 mobilityHealthStart.unref(); mobilityHealthTimer.unref();
+// Classifying a live vehicle needs the static feed's route index; building it on the request path downloads the provider's
+// whole GTFS zip, which measured 5.3 s for a single Lviv viewport and froze the map. Keep it warm between polls instead.
+const transportIndexIntervalMs = Math.max(60_000, Number(process.env.TRANSPORT_INDEX_REFRESH_MS) || 4 * 60_000);
+let transportIndexRun: Promise<void> | undefined;
+const runTransportIndexRefresh = (): Promise<void> => {
+  if (process.env.TRANSPORT_INDEX_REFRESH_DISABLED === 'true') return Promise.resolve();
+  if (transportIndexRun) return transportIndexRun;
+  // One provider at a time: every step is a multi-megabyte fetch and this host has 8 GB shared with everything else.
+  transportIndexRun = (async () => {
+    const rows = await layerProviders(['gtfs'], ['public_transit']);
+    let failed = 0;
+    for (const row of rows) {
+      try { await cachedGtfsRouteTypes(row.id, row.feed_url, row.source_version); }
+      // A provider that will not load is reported per provider on the layer endpoints; a warm-up pass must not add noise.
+      catch { failed += 1; }
+    }
+    console.log(JSON.stringify({ level: 'info', event: 'transport.route_index_warmed', providers: rows.length, failed }));
+  })().finally(() => { transportIndexRun = undefined; });
+  return transportIndexRun;
+};
+const transportIndexStart = setTimeout(() => { void runTransportIndexRefresh().catch(() => undefined); }, 20_000);
+const transportIndexTimer = setInterval(() => { void runTransportIndexRefresh().catch(() => undefined); }, transportIndexIntervalMs);
+transportIndexStart.unref(); transportIndexTimer.unref();
 const proposalExpiryTimer = setInterval(() => {
   void expireStaleProposals().catch((error: unknown) => console.error(JSON.stringify({ level: 'error', event: 'proposal.expiry_failed', message: error instanceof Error ? error.message : 'unknown_error' })));
 }, 30_000);

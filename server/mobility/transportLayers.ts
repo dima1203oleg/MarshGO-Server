@@ -368,7 +368,9 @@ export function cachedGtfsRouteTypes(providerId: string, url: string, sourceVers
   const parameters = { kind: 'route_types', providerId, url, sourceVersion: version, schemaVersion: NETWORK_CACHE_SCHEMA_VERSION };
   return smartCache.getOrLoad('gtfs_network', parameters, routeTypeEntriesSchema, {
     ttlMs: NETWORK_TTL_MS,
-    l1TtlMs: version ? 10 * 60_000 : 60_000,
+    // A provider with no source version keeps the index in L1 only, so L1 has to outlive one background refresh interval —
+    // otherwise the next live-map poll pays for the whole zip download again, inside the request.
+    l1TtlMs: 20 * 60_000,
     maxL2Bytes: 4 * 1024 * 1024,
     shared: Boolean(version),
   }, () => loadGtfsRouteTypes(url));
