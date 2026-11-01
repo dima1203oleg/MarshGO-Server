@@ -4824,6 +4824,7 @@ app.post('/api/v1/offers', requireAuth, requireRole('driver'), asyncHandler(asyn
 app.get('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT b.id, b.offer_id, b.seat_count, b.total_price_minor, b.currency, b.fee_class, b.platform_fee_minor, b.fee_rule_version, b.status, b.created_at,
+            b.completed_at, b.cancelled_at,
             o.origin_name, o.destination_name, o.departure_at, u.display_name AS driver_name, p.display_name AS passenger_name,
             (o.driver_id=$1) AS current_user_is_driver,
             (SELECT count(*)::int FROM booking_completion_confirmations cc WHERE cc.booking_id=b.id) AS completion_confirmation_count,
