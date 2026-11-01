@@ -2573,13 +2573,14 @@ export function findGtfsItinerariesWithStats(
   };
   // Feed trip insertion order is not a stable selection policy. Keep graph
   // retention and any bounded overflow fill reproducible across feed encodings.
-  // Debug-only phase attribution: `segments-built` was 8.6 s of an 11.5 s warm search,
-  // and the aggregate could not say whether instance-event construction, stop-pair
-  // visitation, retention, or final segment selection was paying for it.
+  // Debug-only phase attribution. The per-instance bucket is charged at the top of
+  // each service-date iteration, so it covers the retention work of the previous
+  // instance rather than the departure-window test, which costs nothing measurable.
   let phaseInstanceEventsMs = 0;
   let phasePairVisitationMs = 0;
   let phaseRetentionMs = 0;
   let phaseTripPrologueMs = 0;
+  let phaseInstanceRetentionMs = 0;
   let phaseTripLoopMs = 0;
   let phaseCursor = debugEnabled ? phaseMarkMs() : 0;
   const tripLoopStartMs = debugEnabled ? phaseCursor : 0;
@@ -2612,7 +2613,17 @@ export function findGtfsItinerariesWithStats(
     const eligibleContexts = eligibleIndexes.map((index) => stopContext(stops[index]));
     const boardingBounds = boardingDepartureBounds(stops, eligibleIndexes);
     const tripHasRealtimeOverlay = realtimeOverlayTripIds.has(tripId);
+    if (debugEnabled) {
+      const now = phaseMarkMs();
+      phaseTripPrologueMs += now - phaseCursor;
+      phaseCursor = now;
+    }
     for (const { serviceDate, window: departureWindow } of departureGates) {
+      if (debugEnabled) {
+        const now = phaseMarkMs();
+        phaseInstanceRetentionMs += now - phaseCursor;
+        phaseCursor = now;
+      }
       // A day of departures is mostly outside the journey window, and each instance skipped here
       // saves one event object plus two UTC conversions per eligible stop.
       if (boardingBounds === null
@@ -2721,21 +2732,21 @@ export function findGtfsItinerariesWithStats(
         const overflowCapacity = Math.min(MAX_ROUTE_OVERFLOW_SEGMENTS, graphSegmentLimitPerRoute);
         const overflow = overflowSegmentsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
+        const earliestDepartureMs = input.earliestDeparture.getTime();
+        let canBoardFromOrigin = false;
+        let canAlightAtDestination = false;
         for (const candidate of tripCandidates) {
-          const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
-          const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
-            >= input.earliestDeparture.getTime()
+          const canCatchOrigin = originStopIds.has(candidate.originContext.details.id)
+            && candidate.departureAt.getTime() >= earliestDepartureMs
               + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
           const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
           if (canCatchOrigin || endsAtDestination) overflow.consider(candidate);
+          canBoardFromOrigin ||= canCatchOrigin;
+          canAlightAtDestination ||= endsAtDestination;
         }
         overflowSegmentsByRoute.set(trip.routeId, overflow);
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
         const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
-        const canBoardFromOrigin = tripCandidates.some((candidate) => originStopIds.has(candidate.originContext.details.id)
-          && candidate.departureAt.getTime() >= input.earliestDeparture.getTime()
-            + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000);
-        const canAlightAtDestination = tripCandidates.some((candidate) => destinationStopIds.has(candidate.destinationContext.details.id));
         // Endpoint coverage is a property of the retained trip group, which
         // may offer different boarding/alighting alternatives on loop routes.
         const retentionTier = canBoardFromOrigin && canAlightAtDestination ? 0
@@ -2749,17 +2760,30 @@ export function findGtfsItinerariesWithStats(
         // continues from them toward the destination). Within the bounded
         // route budget, reserve priority for endpoint trips that actually
         // connect to the opposite query frontier before hashing alternatives.
-        const connectsOppositeQueryFrontier = tripCandidates.some((candidate) => {
-          const candidateStartsAtOrigin = originStopIds.has(candidate.originContext.details.id)
-            && candidate.departureAt.getTime() >= input.earliestDeparture.getTime()
-              + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
-          const candidateEndsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
-          return (candidateStartsAtOrigin && hasNextEvent(candidate, minimumTransferBufferSeconds))
-            || (candidateEndsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds));
-        });
-        const temporallyConnectsQueryEnds = tripCandidates.some((candidate) =>
-          hasPriorEvent(candidate, minimumTransferBufferSeconds)
-          && hasNextEvent(candidate, minimumTransferBufferSeconds));
+        // The two probes are existentials over this same candidate list and
+        // only one of them is ever read by `retentionPriorityTier`, so the
+        // unused probe is skipped and the used one stops at the first hit.
+        let connectsOppositeQueryFrontier = false;
+        let temporallyConnectsQueryEnds = false;
+        if (retentionTier !== 0) {
+          for (const candidate of tripCandidates) {
+            if (retentionTier < 3) {
+              const candidateStartsAtOrigin = originStopIds.has(candidate.originContext.details.id)
+                && candidate.departureAt.getTime() >= earliestDepartureMs
+                  + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
+              const candidateEndsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
+              if ((candidateStartsAtOrigin && hasNextEvent(candidate, minimumTransferBufferSeconds))
+                || (candidateEndsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds))) {
+                connectsOppositeQueryFrontier = true;
+                break;
+              }
+            } else if (hasPriorEvent(candidate, minimumTransferBufferSeconds)
+              && hasNextEvent(candidate, minimumTransferBufferSeconds)) {
+              temporallyConnectsQueryEnds = true;
+              break;
+            }
+          }
+        }
         const retentionPriorityTier = retentionTier === 0 ? 0
           : retentionTier < 3 ? connectsOppositeQueryFrontier ? 1 : 3
             : temporallyConnectsQueryEnds ? 2 : 4;
@@ -2888,7 +2912,8 @@ export function findGtfsItinerariesWithStats(
       .slice(0, 10)
     : undefined;
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
-    phaseTripLoopMs, phaseTripPrologueMs, phaseInstanceEventsMs, phasePairVisitationMs, phaseRetentionMs,
+    phaseTripLoopMs, phaseTripPrologueMs, phaseInstanceRetentionMs,
+    phaseInstanceEventsMs, phasePairVisitationMs, phaseRetentionMs,
     phaseSelectionMs: debugEnabled ? phaseMarkMs() - selectionStartMs : 0,
     serviceDates: serviceDates.size, corridorStops: corridorStops.size,
     candidateRouteCount, graphRoutesWithCandidates: segmentsByRoute.size,
