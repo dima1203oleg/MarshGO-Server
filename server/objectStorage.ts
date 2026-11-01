@@ -181,9 +181,15 @@ export async function putPhotoObject(key: unknown, body: unknown, contentType: u
     await s3Client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType }));
   } catch (_error) {
     // If S3 is not available in local environment, fallback to storing locally
-    const filePath = localFilePath(key);
-    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.promises.writeFile(filePath, body);
+    try {
+      const filePath = localFilePath(key);
+      await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.promises.writeFile(filePath, body);
+    } catch {
+      // The local fallback is unwritable (e.g. the volume is owned by root while the
+      // API runs unprivileged). Report a storage outage rather than blaming the upload.
+      throw new ObjectStorageUnavailableError();
+    }
   }
 }
 
