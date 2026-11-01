@@ -95,4 +95,10 @@ describe('transport layer wiring', () => {
     const block = source.slice(source.indexOf(`app.get('/api/v1/transport/routes'`), source.indexOf(`app.get('/api/v1/transport/stops'`));
     assert.match(block, /dataQuality: scheduledDataQuality\(served\.length\)/);
   });
+
+  it('labels the stop layer too, so an empty viewport says UNKNOWN rather than going unlabelled', () => {
+    const block = source.slice(source.indexOf(`app.get('/api/v1/transport/stops'`), source.indexOf(`app.get('/api/v1/transit/stops/`));
+    assert.match(block, /dataQuality: scheduledDataQuality\(served\.length\)/);
+    assert.match(block, /const served = features\.slice\(0, 2500\)/);
+  });
 });

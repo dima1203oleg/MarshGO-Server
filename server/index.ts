@@ -883,8 +883,12 @@ app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) =>
     .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: stop.types.join(','), provider: row.name.split(' — ')[0] }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } })));
   features.push(...metroStationNetworks.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat))
     .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: 'metro', provider: row.name.split(' — ')[0], station: true }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } }))));
+  const served = features.slice(0, 2500);
   const failedOutcomes = layerFailures([...settled, ...metroStationSettled]);
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 2500) }, meta: { failedProviders: failedOutcomes, failedProviderCount: failedOutcomes.length, truncated: features.length > 2500 } });
+  // Stops come from published timetables and static station feeds, so the label is
+  // SCHEDULED; without it a client could not tell a stop dot from live telemetry.
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: served }, meta: { failedProviders: failedOutcomes, failedProviderCount: failedOutcomes.length, truncated: features.length > 2500,
+    dataQuality: scheduledDataQuality(served.length) } });
 }));
 
 /**
