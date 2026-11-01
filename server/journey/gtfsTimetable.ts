@@ -1357,6 +1357,69 @@ export type GtfsTripLegProjection =
   | { kind: 'leg'; fromCursor: number; toCursor: number; fromEvent: EligibleTripInstanceStopEvent; toEvent: EligibleTripInstanceStopEvent }
   | { kind: 'omitted-beyond-window' };
 
+export type GtfsBoardingDepartureBounds = { firstDepartureSeconds: number; lastDepartureSeconds: number } | null;
+
+/**
+ * Bounds, in service seconds, within which a trip instance can board a vehicle. Mirrors exactly the
+ * two filters `visitTripInstanceLegs` applies before it emits an edge — the stop must allow boarding
+ * and the last stop is never a boarding point — so it answers "can this instance produce any edge at
+ * all" without building the event vector, which allocates an object plus two UTC conversions per stop
+ * and runs once per trip instance per search.
+ */
+export function boardingDepartureBounds(stops: readonly { pickupType: number; departureSeconds: number }[],
+  eligibleIndexes: readonly number[]): GtfsBoardingDepartureBounds {
+  let firstDepartureSeconds = Number.POSITIVE_INFINITY;
+  let lastDepartureSeconds = Number.NEGATIVE_INFINITY;
+  for (let cursor = 0; cursor < eligibleIndexes.length - 1; cursor++) {
+    const stopTime = stops[eligibleIndexes[cursor]!];
+    if (!stopTime || stopTime.pickupType !== 0) continue;
+    if (stopTime.departureSeconds < firstDepartureSeconds) firstDepartureSeconds = stopTime.departureSeconds;
+    if (stopTime.departureSeconds > lastDepartureSeconds) lastDepartureSeconds = stopTime.departureSeconds;
+  }
+  return Number.isFinite(firstDepartureSeconds) ? { firstDepartureSeconds, lastDepartureSeconds } : null;
+}
+
+export type GtfsServiceDateDepartureWindow = { earliestSeconds: number; latestSeconds: number } | null;
+
+/** GTFS stop_times allows times up to 71:59:59, so one service date spans almost three calendar days. */
+const maximumGtfsServiceSeconds = 72 * 60 * 60;
+
+/**
+ * Express the journey window in the service seconds of one service date, so the boarding gate is an
+ * integer comparison instead of two UTC conversions per trip instance. Exact only while the UTC offset
+ * is constant across the whole GTFS range, which is verified at the day boundaries rather than assumed:
+ * a timezone database shifts at most once per 24 h, so equal spans at 24 h, 48 h and 72 h from midnight
+ * mean the mapping is linear in between. A date that fails the check yields `null` and is never skipped.
+ */
+export function serviceDateDepartureWindow(serviceDate: string,
+  serviceTimeToUtc: (serviceDate: string, secondsAfterMidnight: number) => Date | null,
+  earliestDeparture: Date, journeyEnd: Date): GtfsServiceDateDepartureWindow {
+  const midnight = serviceTimeToUtc(serviceDate, 0);
+  if (!midnight) return null;
+  const midnightMs = midnight.getTime();
+  for (const seconds of [24 * 60 * 60, 48 * 60 * 60, maximumGtfsServiceSeconds - 1]) {
+    const at = serviceTimeToUtc(serviceDate, seconds);
+    if (!at || at.getTime() - midnightMs !== seconds * 1000) return null;
+  }
+  return {
+    earliestSeconds: Math.ceil((earliestDeparture.getTime() - midnightMs) / 1000),
+    latestSeconds: Math.floor((journeyEnd.getTime() - midnightMs) / 1000),
+  };
+}
+
+/**
+ * Whether the instance's scheduled departures all fall outside the journey window. Only sound without
+ * a realtime overlay on this exact instance: an update can move a departure into the window, while it
+ * can never add a boarding possibility (pickup types are static), so a `null` bound is always skippable.
+ */
+export function tripInstanceCannotDepartInWindow(bounds: GtfsBoardingDepartureBounds,
+  window: GtfsServiceDateDepartureWindow): boolean {
+  if (!bounds) return true;
+  if (!window) return false;
+  return bounds.lastDepartureSeconds < window.earliestSeconds
+    || bounds.firstDepartureSeconds > window.latestSeconds;
+}
+
 /** Keep the graph materializer and its budget estimator on the same stop-pair window rule. */
 export function shouldOmitGtfsStopPairBeyondLocalWindow(maximumTransfers: number,
   fromCursor: number, toCursor: number, isQueryDestination: boolean): boolean {
@@ -1909,6 +1972,21 @@ export function findGtfsItinerariesWithStats(
     const date = dateStringAfter(firstServiceDate, day);
     if (date <= lastServiceDate || day < 0) serviceDates.add(date);
   }
+  // Both trip enumerations ask the same question per service date, so answer it once here instead of
+  // converting stop times to UTC for every trip instance in the feed. Each gate is read once per trip,
+  // so it has to carry the resolved window rather than be looked up by string key ~2.4M times.
+  const departureGates = [...serviceDates].map((serviceDate) => ({
+    serviceDate,
+    window: serviceDateDepartureWindow(serviceDate, serviceTimeToUtc, input.earliestDeparture, journeyEnd),
+  }));
+  const hasRealtimeTripUpdates = (feed.realtimeTripUpdates?.size ?? 0) > 0;
+  // A composite tripId+date key must be built to prove an instance is not covered by a realtime
+  // overlay, which costs more than the event vectors the gate skips. Trips without any update at all
+  // are answered from this set instead.
+  const realtimeOverlayTripIds = new Set<string>();
+  for (const update of feed.realtimeTripUpdates?.values() ?? []) realtimeOverlayTripIds.add(update.tripId);
+  const instanceHasRealtimeOverlay = (tripId: string, serviceDate: string) => hasRealtimeTripUpdates
+    && feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate)) !== undefined;
 
   const originStopIds = new Set(originStops.map(({ stop }) => stop.id));
   const destinationStopIds = new Set(destinationStops.map(({ stop }) => stop.id));
@@ -2132,8 +2210,13 @@ export function findGtfsItinerariesWithStats(
       && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
     demandTripsWithEligibleStops++;
+    const boardingBounds = boardingDepartureBounds(stops, eligibleIndexes);
+    const tripHasRealtimeOverlay = realtimeOverlayTripIds.has(tripId);
     let pairOpportunities = 0;
-    for (const serviceDate of serviceDates) {
+    for (const { serviceDate, window: departureWindow } of departureGates) {
+      if (boardingBounds === null
+        || (tripInstanceCannotDepartInWindow(boardingBounds, departureWindow)
+          && !(tripHasRealtimeOverlay && instanceHasRealtimeOverlay(tripId, serviceDate)))) continue;
       const tripEvents = eligibleTripInstanceEventsShared(tripId, serviceDate, eligibleIndexes);
       if (!tripEvents) continue;
       demandTripInstancesBuilt++;
@@ -2527,7 +2610,14 @@ export function findGtfsItinerariesWithStats(
     // pairs rather than repeating map lookups, string keys, and haversine
     // calculations for every edge.
     const eligibleContexts = eligibleIndexes.map((index) => stopContext(stops[index]));
-    for (const serviceDate of serviceDates) {
+    const boardingBounds = boardingDepartureBounds(stops, eligibleIndexes);
+    const tripHasRealtimeOverlay = realtimeOverlayTripIds.has(tripId);
+    for (const { serviceDate, window: departureWindow } of departureGates) {
+      // A day of departures is mostly outside the journey window, and each instance skipped here
+      // saves one event object plus two UTC conversions per eligible stop.
+      if (boardingBounds === null
+        || (tripInstanceCannotDepartInWindow(boardingBounds, departureWindow)
+          && !(tripHasRealtimeOverlay && instanceHasRealtimeOverlay(tripId, serviceDate)))) continue;
       const tripEvents = eligibleTripInstanceEventsShared(tripId, serviceDate, eligibleIndexes);
       if (debugEnabled) {
         const now = phaseMarkMs();
