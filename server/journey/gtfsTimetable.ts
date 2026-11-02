@@ -5,7 +5,7 @@ import { pointIsInsideUkraine } from '../mobility/gbfs';
 import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
 import type { JourneyOption } from './types';
 import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
-import { calculateCityTariffFare } from '../mobility/transportTariffs';
+import { calculateCityTariffFare, calculateCashFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
 import { BoundedBestK, redistributeBoundedCandidates, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
 import { compareStableId } from './stableOrdering';
@@ -406,6 +406,8 @@ export interface GtfsItinerary {
   transferMinimumBufferSeconds: number[];
   transferRuleMinimumSeconds: Array<number | null>;
   fare: ReturnType<typeof calculateGtfsItineraryFare>;
+  /** In-vehicle price per boarding from the audited city tariff registry. */
+  cashFare: ReturnType<typeof calculateCashFare>;
 }
 
 export interface GtfsItinerarySearchTruncation {
@@ -3281,6 +3283,13 @@ export function findGtfsItinerariesWithStats(
     const isKnownTripChain = tripChainIds.size > 0;
     const legCount = resultCountByLegCount.get(path.length) ?? 0;
     const canReplaceRouteChainCandidate = routeChainIds.size >= MAX_RESULTS_PER_ROUTE_CHAIN;
+    const tariffLegs = path.map((segment) => ({
+      providerCity: segment.providerCity,
+      mode: segment.mode,
+      transportType: segment.transportType,
+      departureAt: segment.departureAt,
+      arrivalAt: segment.arrivalAt,
+    }));
     const candidate: GtfsItinerary = {
       id, providerId: first.providerId,
       providerName: [...new Set(path.map((segment) => segment.providerName))].join(' + '),
@@ -3305,13 +3314,8 @@ export function findGtfsItinerariesWithStats(
             ? stopTimes.slice(indexes.fromIndex, indexes.toIndex + 1).flatMap((entry) => entry.sourceZoneId ? [entry.sourceZoneId] : [])
             : segment.traveledZoneIds;
         })(),
-      }))) ?? calculateCityTariffFare(path.map((segment) => ({
-        providerCity: segment.providerCity,
-        mode: segment.mode,
-        transportType: segment.transportType,
-        departureAt: segment.departureAt,
-        arrivalAt: segment.arrivalAt,
-      }))),
+      }))) ?? calculateCityTariffFare(tariffLegs),
+      cashFare: calculateCashFare(tariffLegs),
     };
     if ((!isKnownTripChain && !canReplaceRouteChainCandidate
       && (legCount >= MAX_CANDIDATES_PER_LEG_COUNT || results.size >= MAX_SEARCH_RESULTS))) {

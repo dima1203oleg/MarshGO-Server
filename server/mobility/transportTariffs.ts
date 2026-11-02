@@ -26,6 +26,12 @@ export interface TransportFareRecord {
   sourceUrl: string;
   lastVerifiedAt: string;
   notes?: string[];
+  /**
+   * The audited price a rider pays when boarding a municipal vehicle without a
+   * prepaid discount product (cash or the standard single ticket). It is an
+   * explicit catalog fact, never inferred from the cheapest planner product.
+   */
+  inVehicleSingleRide?: boolean;
 }
 
 const VERIFIED_AT = '2026-10-13';
@@ -40,7 +46,7 @@ export const transportFareCatalog: TransportFareRecord[] = [
     currency: 'UAH', priceMinor: 3_000, pricePerRideMinor: 3_000, fareMedia: ['single_ticket', 'transport_card', 'qr'],
     riderCategory: 'adult', effectiveFrom: '2026-07-15', sourceName: 'Портал Києва — тарифи з 15 липня 2026 року',
     sourceUrl: 'https://kyivcity.gov.ua/news/iz_15_lipnya_vartist_razovogo_prozdu_v_komunalnomu_transporti_stanovitime_30_grn_dlya_postiynikh_pasazhiriv_diyatime_sistema_znizhok/',
-    lastVerifiedAt: VERIFIED_AT,
+    lastVerifiedAt: VERIFIED_AT, inVehicleSingleRide: true,
   },
   {
     id: 'kyiv-90-minute-transfer-ticket', city: 'Київ',
@@ -100,6 +106,7 @@ export const transportFareCatalog: TransportFareRecord[] = [
     priceMinor: amount, pricePerRideMinor: amount, fareMedia: media, riderCategory: category,
     effectiveFrom: '2026-05-16', sourceName: 'ЛК АТП-1 Львів — оплата проїзду',
     sourceUrl: 'https://atp1.lviv.ua/passengers/payment/', lastVerifiedAt: LVIV_ATP1_VERIFIED_AT,
+    ...(id === 'lviv-cash-adult' ? { inVehicleSingleRide: true } : {}),
   })),
   {
     id: 'lviv-leocard-40-minute-transfer', city: 'Львів', modes: ['bus', 'tram', 'trolleybus'],
@@ -129,7 +136,7 @@ export const transportFareCatalog: TransportFareRecord[] = [
     id: 'dnipro-metro-single-ride', city: 'Дніпро', modes: ['metro'],
     name: 'Разова поїздка в метро', kind: 'single_ride', status: 'verified_static', currency: 'UAH',
     priceMinor: 1_000, pricePerRideMinor: 1_000, riderCategory: 'adult', sourceName: 'КП «Дніпровський метрополітен» — оплата проїзду',
-    sourceUrl: 'https://metro.dp.ua/payment/', lastVerifiedAt: VERIFIED_AT,
+    sourceUrl: 'https://metro.dp.ua/payment/', lastVerifiedAt: VERIFIED_AT, inVehicleSingleRide: true,
   },
   ...[
     { id: 'dnipro-monthly-combined-full', name: 'Комбінований місячний: трамвай + тролейбус + метро', price: 90_000, category: 'adult' as const },
@@ -148,6 +155,7 @@ export const transportFareCatalog: TransportFareRecord[] = [
     priceMinor: 0, pricePerRideMinor: 0, riderCategory: 'all', sourceName: 'КП «Харківський метрополітен»',
     sourceUrl: 'https://www.metro.kharkiv.ua/kp-%C2%ABkhakrkivskyi-metkropoliten%C2%BB-vitaie-z-dnem-mistsevoho-samovkriaduvannia%21.html',
     lastVerifiedAt: VERIFIED_AT, notes: ['Безоплатний проїзд підтверджений останньою доступною публікацією оператора; оновлювати під час перевірки тарифів.'],
+    inVehicleSingleRide: true,
   },
   {
     id: 'intercity-bus-provider-quote', city: null, modes: ['intercity_bus', 'suburban_bus'],
@@ -295,4 +303,55 @@ export function calculateCityTariffFare(legs: readonly FareLegInput[]): GtfsItin
     return perRideFare(legs, 0, 'kharkiv-metro-free-ride');
   }
   return null;
+}
+
+export interface CashFareAllocation {
+  priceMinor: number;
+  currency: 'UAH';
+  fareProductId: string;
+  city: string;
+}
+
+export interface CashFareQuote {
+  priceMinor: number;
+  currency: 'UAH';
+  /** One entry per boarded transit leg; cash has no transfer product. */
+  allocations: CashFareAllocation[];
+  source: 'city-tariff-registry';
+}
+
+/**
+ * The amount a rider pays in the vehicle for every boarding. It comes from the
+ * audited catalog entries marked `inVehicleSingleRide`, so the client never has
+ * to keep its own city price table. Unknown cities, private feeds and mixed
+ * cities stay unknown instead of borrowing another city's price.
+ */
+export function calculateCashFare(legs: readonly FareLegInput[]): CashFareQuote | null {
+  if (!validLegs(legs)) return null;
+  const city = cityKey(legs[0]?.providerCity);
+  if (!city || legs.some((leg) => cityKey(leg.providerCity) !== city)) return null;
+  const allocations: CashFareAllocation[] = [];
+  for (const leg of legs) {
+    const mode = modeKey(leg);
+    const product = transportFareCatalog.find((record) => record.inVehicleSingleRide === true
+      && record.city !== null && cityKey(record.city) === city
+      && record.modes.includes(mode)
+      && (record.riderCategory === 'adult' || record.riderCategory === 'all')
+      && record.currency === 'UAH' && record.priceMinor !== null);
+    if (!product || product.priceMinor === null || product.city === null) return null;
+    allocations.push({ priceMinor: product.priceMinor, currency: 'UAH', fareProductId: product.id, city: product.city });
+  }
+  const priceMinor = allocations.reduce((sum, allocation) => sum + allocation.priceMinor, 0);
+  if (!Number.isSafeInteger(priceMinor) || priceMinor < 0) return null;
+  return { priceMinor, currency: 'UAH', allocations, source: 'city-tariff-registry' };
+}
+
+/** In-vehicle payment is per rider, so a multi-passenger search scales it. */
+export function scaleCashFareForPassengers(fare: CashFareQuote | null, passengerCount: number): CashFareQuote | null {
+  if (!fare) return null;
+  if (!Number.isInteger(passengerCount) || passengerCount < 1 || passengerCount > 20) return null;
+  const allocations = fare.allocations.map((allocation) => ({ ...allocation, priceMinor: allocation.priceMinor * passengerCount }));
+  const priceMinor = fare.priceMinor * passengerCount;
+  if (!Number.isSafeInteger(priceMinor) || allocations.some((allocation) => !Number.isSafeInteger(allocation.priceMinor))) return null;
+  return { ...fare, priceMinor, allocations };
 }
