@@ -2358,8 +2358,8 @@ app.delete('/api/v1/users/me/driver-photo', requireAuth, asyncHandler(async (req
 app.get('/api/v1/places/suggest', optionalAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   if (query.length < 3 || query.length > 120) throw new ApiError(400, 'place query must contain 3–120 characters');
-  const rawLatitude = typeof req.query.lat === 'string' ? req.query.lat : undefined;
-  const rawLongitude = typeof req.query.lon === 'string' ? req.query.lon : undefined;
+  const rawLatitude = typeof req.query.lat === 'string' && req.query.lat.trim() ? req.query.lat.trim() : undefined;
+  const rawLongitude = typeof req.query.lon === 'string' && req.query.lon.trim() ? req.query.lon.trim() : undefined;
   if ((rawLatitude === undefined) !== (rawLongitude === undefined)) {
     throw new ApiError(400, 'lat and lon must be provided together', 'invalid_coordinate');
   }
