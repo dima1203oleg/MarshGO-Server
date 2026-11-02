@@ -33,10 +33,11 @@ export async function refreshProviderHealth(
         await pool.query(
           `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_error=$3,
              last_report=CASE WHEN $2='offline'
-               THEN COALESCE(last_report,'{}'::jsonb) || jsonb_build_object('checks',$4::jsonb->'checks','error',$3::text,'last_probe_at',now())
-               ELSE COALESCE(last_report,'{}'::jsonb) || jsonb_build_object('health_probe',$4::jsonb,'last_probe_at',now()) END,
+               THEN COALESCE(last_report,'{}'::jsonb) || jsonb_build_object('checks',$4::jsonb->'checks','error',$3::text,'last_probe_at',now()) || CASE WHEN $5::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('sourceVersion',$5::text) END
+               ELSE COALESCE(last_report,'{}'::jsonb) || jsonb_build_object('health_probe',$4::jsonb,'last_probe_at',now()) || CASE WHEN $5::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('sourceVersion',$5::text) END
+             END,
              updated_at=now() WHERE id=$1`,
-          [provider.id, health, report.error ?? null, JSON.stringify(report)]);
+          [provider.id, health, report.error ?? null, JSON.stringify(report), report.sourceVersion ?? null]);
         if (health === 'healthy') healthy++; else if (health === 'degraded') degraded++; else offline++;
       } catch (error) {
         offline++;
