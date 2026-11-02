@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutePath } from '../server/journey/walkingRoutes';
+import {
+  applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, type WalkingRoutePath,
+} from '../server/journey/walkingRoutes';
 
 const start = Date.parse('2026-10-01T08:00:00Z');
 const at = (seconds: number) => new Date(start + seconds * 1000);
@@ -168,4 +170,29 @@ test('bounds concurrent provider work and drops excess queued walking paths', as
   assert.equal(routes.filter(Boolean).length, 36);
   assert.equal(fetchCount, 36);
   assert.equal(peakActive, 12);
+});
+
+test('selects the foot graph that covers both endpoints and refuses cross-city or unknown pairs', (t) => {
+  const originalUrl = process.env.WALKING_ROUTING_URL;
+  const originalUrls = process.env.WALKING_ROUTING_URLS;
+  t.after(() => {
+    if (originalUrl === undefined) delete process.env.WALKING_ROUTING_URL; else process.env.WALKING_ROUTING_URL = originalUrl;
+    if (originalUrls === undefined) delete process.env.WALKING_ROUTING_URLS; else process.env.WALKING_ROUTING_URLS = originalUrls;
+  });
+
+  process.env.WALKING_ROUTING_URL = 'http://single:5000/route/v1/foot';
+  delete process.env.WALKING_ROUTING_URLS;
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://single:5000/route/v1/foot');
+
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([
+    { bbox: [23.9, 49.75, 24.2, 49.95], url: 'http://lviv:5000/route/v1/foot' },
+    { bbox: [30.2, 50.25, 30.8, 50.62], url: 'http://kyiv:5000/route/v1/foot' },
+  ]);
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://lviv:5000/route/v1/foot');
+  assert.equal(walkingEndpointFor([30.52, 50.45], [30.48, 50.44]), 'http://kyiv:5000/route/v1/foot');
+  assert.equal(walkingEndpointFor([24.03, 49.84], [30.48, 50.44]), undefined);
+  assert.equal(walkingEndpointFor([31.2, 49.4], [31.21, 49.41]), undefined);
+
+  process.env.WALKING_ROUTING_URLS = 'not-json';
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://single:5000/route/v1/foot');
 });

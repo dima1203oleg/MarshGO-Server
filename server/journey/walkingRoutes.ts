@@ -29,6 +29,48 @@ type CachedRoute = { expiresAt: number; value: Promise<WalkingRoutePath | null> 
 const routeCache = new Map<string, CachedRoute>();
 const inFlightRouteRequests = new Map<string, Promise<WalkingRoutePath | null>>();
 
+type WalkingEndpointRule = { bbox: [number, number, number, number]; url: string };
+let walkingEndpointCache: { raw: string; rules: WalkingEndpointRule[] } | null = null;
+
+function walkingEndpointRules(): WalkingEndpointRule[] {
+  const raw = process.env.WALKING_ROUTING_URLS?.trim();
+  if (!raw) return [];
+  if (walkingEndpointCache?.raw === raw) return walkingEndpointCache.rules;
+  let rules: WalkingEndpointRule[] = [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) rules = parsed.flatMap((item): WalkingEndpointRule[] => {
+      const rule = item as { bbox?: unknown; url?: unknown } | null;
+      const bbox = rule?.bbox;
+      const url = rule?.url;
+      if (!Array.isArray(bbox) || bbox.length !== 4) return [];
+      if (!bbox.every((value) => typeof value === 'number' && Number.isFinite(value))) return [];
+      if (typeof url !== 'string' || !url.trim()) return [];
+      return [{ bbox: bbox as [number, number, number, number], url: url.trim() }];
+    });
+  } catch {
+    rules = [];
+  }
+  walkingEndpointCache = { raw, rules };
+  return rules;
+}
+
+function bboxContains(bbox: [number, number, number, number], point: [number, number]): boolean {
+  return point[0] >= bbox[0] && point[0] <= bbox[2] && point[1] >= bbox[1] && point[1] <= bbox[3];
+}
+
+/**
+ * A foot graph covers one area only. When a configured graph set exists, a walk whose endpoints
+ * are not inside the same graph must not reach a router at all: OSRM snaps to the nearest edge
+ * anywhere on its graph and answers `Ok` with distance 0, which cannot be told apart from a
+ * genuine zero-length walk — the leg then loses its geometry without any visible reason.
+ */
+export function walkingEndpointFor(from: [number, number], to?: [number, number]): string | undefined {
+  const rules = walkingEndpointRules();
+  if (!rules.length) return process.env.WALKING_ROUTING_URL;
+  return rules.find(({ bbox }) => bboxContains(bbox, from) && (!to || bboxContains(bbox, to)))?.url;
+}
+
 export interface WalkingRouteBudget {
   readonly limit: number;
   remaining: number;

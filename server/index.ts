@@ -25,7 +25,7 @@ import { composeCommunityTransitJourneys, type CommunityRideOption } from './jou
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, resolveTransitCandidateBudget, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
@@ -3142,13 +3142,16 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const previous = itinerary.segments[index];
       const next = itinerary.segments[index + 1];
       if (!previous || !next || itinerary.transferInSeat[index] || meters <= 0 || itinerary.transferWalkingGeometries[index]) return null;
-      return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates, walkingRoutingUrl, routeBudget);
+      return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates,
+        walkingEndpointFor(previous.destinationStop.coordinates, next.originStop.coordinates), routeBudget);
     });
     const [access, egress, ...transfers] = await Promise.all([
       first.distanceToOriginStopMeters > 0
-        ? routePedestrianPath(origin, first.originStop.coordinates, walkingRoutingUrl, routeBudget) : null,
+        ? routePedestrianPath(origin, first.originStop.coordinates,
+          walkingEndpointFor(origin, first.originStop.coordinates), routeBudget) : null,
       last.distanceFromDestinationStopMeters > 0
-        ? routePedestrianPath(last.destinationStop.coordinates, destination, walkingRoutingUrl, routeBudget) : null,
+        ? routePedestrianPath(last.destinationStop.coordinates, destination,
+          walkingEndpointFor(last.destinationStop.coordinates, destination), routeBudget) : null,
       ...transferRequests,
     ]);
     // A carpool pickup has no timetable to fall back on: an unmeasured walk to the
@@ -3644,7 +3647,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const blockedProviders = [
     ...canonicalRouteTypes.filter((type) => !routePlannerTypes.has(type))
       .map((type) => `transportType:${type}:no-routed-provider-in-corridor`),
-    ...(!walkingRoutingUrl ? ['door-to-door-walking:requires-WALKING_ROUTING_URL'] : []),
+    ...(!walkingRoutingUrl && !process.env.WALKING_ROUTING_URLS?.trim() ? ['door-to-door-walking:requires-WALKING_ROUTING_URL'] : []),
     'walking-transfers-between-unmatched-stops',
     'community-intermediate-pickup:requires-explicit-driver-approved-stop',
   ];
