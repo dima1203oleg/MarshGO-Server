@@ -54,13 +54,14 @@ export class BoundedPromiseCache<T> {
 
   private evictToBounds(protectKey?: string): void {
     while (this.entries.size > this.maxEntries || this.retainedWeight > this.maxWeight) {
-      const oldest = this.entries.keys().next().value as string | undefined;
-      if (!oldest) break;
-      if (oldest === protectKey && this.entries.size === 1) {
-        this.delete(oldest);
-        break;
-      }
-      this.delete(oldest);
+      const keys = [...this.entries.keys()];
+      const victim = keys.find((key) => key !== protectKey) ?? keys[0];
+      if (!victim) break;
+      // Never discard the entry that was just paid to load unless it alone breaks the
+      // bound: evicting it would throw away the completed load and make that key a
+      // permanent cache miss that repeats on every read.
+      if (victim === protectKey) break;
+      this.delete(victim);
     }
   }
 

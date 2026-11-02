@@ -20,7 +20,7 @@ import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, getWa
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
-import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
+import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
@@ -35,7 +35,7 @@ import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePri
 import { journeyTransportTypeSelected, type JourneyLegMode, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
-import { cachedGeoJsonNetwork, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isFreshVehicleTimestamp, isLineType, parseBbox, routeInBbox, type LineType, type NetworkRoute } from './mobility/transportLayers';
+import { aggregateDataQuality, cachedGeoJsonNetwork, cachedGtfsRouteTypes, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isLineType, isRequestedVehicleType, layerFailures, mergeRouteTypeEntries, parseBbox, providerFailureReason, redactFeedUrls, routeInBbox, scheduledDataQuality, selectFreshVehicles, vehicleDataQuality, type LineType, type NetworkRoute, type RequestedVehicleType } from './mobility/transportLayers';
 import { buildTransportCities } from './mobility/cities';
 import { buildTransportLayerAvailability } from './mobility/transportLayerAvailability';
 import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
@@ -581,8 +581,12 @@ app.get('/api/v1/mobility/nearby', requireAuth, placeSearchLimiter, asyncHandler
     `SELECT id,name,feed_url FROM mobility_providers WHERE status='enabled' AND health='healthy' AND source_type='gbfs' AND provider_type = ANY($1) ORDER BY priority`, [config.providerTypes]);
   const settled = await Promise.allSettled(providers.map(async (provider) => ({ providerId: provider.id, providerName: provider.name, snapshot: await cachedSnapshot(provider.id, provider.feed_url) })));
   const snapshots = settled.flatMap((item) => item.status === 'fulfilled' ? [item.value] : []);
+  // A count alone cannot tell an operator which rental feed broke; each failure is named with a redacted reason code.
+  const failures = settled.flatMap((item, index) => item.status === 'fulfilled' ? [] : [{
+    id: providers[index].id, name: providers[index].name.split(' — ')[0], sourceType: 'gbfs', layer: 'availability', reason: providerFailureReason(item.reason),
+  }]);
   const result = selectNearby(snapshots, [lon, lat], radiusM, config.assetTypes);
-  res.json({ data: { mode, radiusM, providers: providers.length, failedProviders: settled.length - snapshots.length, ...result } });
+  res.json({ data: { mode, radiusM, providers: providers.length, failedProviders: failures, failedProviderCount: failures.length, ...result } });
 }));
 
 /** Canonical service-operator registry; legacy feed registry remains available at /mobility/providers. */
@@ -770,7 +774,15 @@ const sendLayerJson = (req: express.Request, res: express.Response, payload: unk
   res.end(body);
 };
 const typesParam = (raw: unknown): LineType[] => (typeof raw === 'string' ? raw.split(',').filter(isLineType) : []);
-const layerFetch = <T>(task: Promise<T>) => task.then((value) => ({ ok: true as const, value }), () => ({ ok: false as const }));
+const vehicleTypesParam = (raw: unknown): RequestedVehicleType[] => (typeof raw === 'string' ? raw.split(',').filter(isRequestedVehicleType) : []);
+const layerFetch = <T>(task: Promise<T>, context = { provider: 'unknown', layer: 'unknown' }) => task
+  .then((value) => ({ ok: true as const, value }), (error: unknown) => {
+    // The client only sees a safe reason code; the server log keeps the redacted detail so an operator can tell provider outage from MARSHGO bug.
+    const detail = redactFeedUrls(error instanceof Error ? `${error.name}: ${error.message} cause=${String((error as Error & { cause?: Error }).cause?.name ?? '')} ${(error as Error & { cause?: Error }).cause?.message ?? ''}` : String(error)).slice(0, 300);
+    console.log(JSON.stringify({ level: 'warn', event: 'transport.layer.failed', provider: context.provider, layer: context.layer, reason: providerFailureReason(error), detail }));
+    return { ok: false as const, reason: providerFailureReason(error) };
+  });
+const layerContext = (row: { name: string }, layer: string) => ({ provider: row.name.split(' — ')[0], layer });
 
 /** Which layers can show anything right now (from the connected feeds), so the client can grey out the rest. */
 app.get('/api/v1/transport/layers', requireAuth, asyncHandler(async (_req, res) => {
@@ -838,10 +850,9 @@ const loadRoutes = async (box: [number, number, number, number], types: LineType
   // Skip feeds that contain none of the requested transport types (e.g. a national rail feed when the user asked for trams).
   const hasTypes = (row: LayerProviderRow) => types.length === 0 || types.some((type) => (row.last_report?.counts?.[`routes_${type}`] ?? 0) > 0);
   const providers = (await layerProviders(['gtfs', 'geojson'], ['public_transit'])).filter((row) => providerTouches(row, box) && hasTypes(row));
-  const settled = await Promise.all(providers.map((row) => layerFetch((row.source_type === 'gtfs'
-    ? cachedNetwork(row.id, row.feed_url, row.source_version)
-    : (() => { const mode = geoJsonMode(row.name); return mode ? cachedGeoJsonNetwork(row.id, row.feed_url, mode, row.source_version) : Promise.reject(new Error('Unknown GeoJSON transport mode')); })())
-    .then((network) => ({ row, network })))));
+  const settled = await Promise.all(providers.map(async (row) => ({ row, layer: 'network', ...(await layerFetch(row.source_type === 'gtfs'
+    ? cachedNetwork(row.id, row.feed_url, row.source_version).then((network) => ({ row, network }))
+    : (() => { const mode = geoJsonMode(row.name); return mode ? cachedGeoJsonNetwork(row.id, row.feed_url, mode, row.source_version).then((network) => ({ row, network })) : Promise.reject(new Error('Unknown GeoJSON transport mode')); })(), layerContext(row, 'network'))) })));
   return { settled, loaded: settled.flatMap((item) => item.ok ? [item.value] : []) };
 };
 
@@ -851,7 +862,9 @@ app.get('/api/v1/transport/routes', requireAuth, asyncHandler(async (req, res) =
   const { settled, loaded } = await loadRoutes(box, types);
   const features = loaded.flatMap(({ row, network }) => network.routes.filter((route: NetworkRoute) => types.includes(route.type) && routeInBbox(route, box))
     .map((route) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${route.id}`, name: route.name, direction: route.direction, stopCount: route.stopCount, transport: route.type, provider: row.name.split(' — ')[0] }, geometry: { type: 'LineString' as const, coordinates: route.coordinates } })));
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 600) }, meta: { failedProviders: settled.length - loaded.length, truncated: features.length > 600 } });
+  const served = features.slice(0, 600);
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: served }, meta: { failedProviders: layerFailures(settled), failedProviderCount: settled.length - loaded.length, truncated: features.length > 600,
+    dataQuality: scheduledDataQuality(served.length) } });
 }));
 
 app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) => {
@@ -861,16 +874,21 @@ app.get('/api/v1/transport/stops', requireAuth, asyncHandler(async (req, res) =>
   const metroStationProviders = types.includes('metro')
     ? (await layerProviders(['geojson'], ['public_transit'])).filter((row) => row.city === 'Київ'
       && row.name.toLocaleLowerCase('uk-UA').includes('метро (станції)') && providerTouches(row, box)) : [];
-  const metroStationSettled = await Promise.all(metroStationProviders.map((row) => layerFetch(
-    cachedGeoJsonNetwork(row.id, row.feed_url, 'metro').then((network) => ({ row, network })),
-  )));
+  const metroStationSettled = await Promise.all(metroStationProviders.map(async (row) => {
+    const outcome = await layerFetch(cachedGeoJsonNetwork(row.id, row.feed_url, 'metro').then((network) => ({ row, network })), layerContext(row, 'network'));
+    return { row, layer: 'network', ...outcome };
+  }));
   const metroStationNetworks = metroStationSettled.flatMap((item) => item.ok ? [item.value] : []);
   const features = loaded.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat) && stop.types.some((type) => types.includes(type)))
     .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: stop.types.join(','), provider: row.name.split(' — ')[0] }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } })));
   features.push(...metroStationNetworks.flatMap(({ row, network }) => network.stops.filter((stop) => inBbox(box, stop.lon, stop.lat))
     .map((stop) => ({ type: 'Feature' as const, properties: { id: `${row.id}:${stop.id}`, name: stop.name, routes: stop.routes.slice(0, 12).join(', '), transports: 'metro', provider: row.name.split(' — ')[0], station: true }, geometry: { type: 'Point' as const, coordinates: [stop.lon, stop.lat] } }))));
-  const failedProviders = settled.length - loaded.length + metroStationSettled.length - metroStationNetworks.length;
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 2500) }, meta: { failedProviders, truncated: features.length > 2500 } });
+  const served = features.slice(0, 2500);
+  const failedOutcomes = layerFailures([...settled, ...metroStationSettled]);
+  // Stops come from published timetables and static station feeds, so the label is
+  // SCHEDULED; without it a client could not tell a stop dot from live telemetry.
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: served }, meta: { failedProviders: failedOutcomes, failedProviderCount: failedOutcomes.length, truncated: features.length > 2500,
+    dataQuality: scheduledDataQuality(served.length) } });
 }));
 
 /**
@@ -948,19 +966,32 @@ app.get('/api/v1/transit/stops/:stopId/arrivals', asyncHandler(async (req, res) 
 }));
 
 app.get('/api/v1/transport/vehicles', requireAuth, asyncHandler(async (req, res) => {
-  const box = parseBbox(req.query.bbox); const types = typesParam(req.query.types);
+  const box = parseBbox(req.query.bbox); const types = vehicleTypesParam(req.query.types);
   if (!box || types.length === 0) throw new ApiError(400, 'bbox (west,south,east,north, at most 2 degrees) and types are required', 'invalid_transport_query');
   const realtime = (await layerProviders(['gtfs_rt', 'json'], ['public_transit'])).filter((row) => providerTouches(row, box));
-  const { loaded } = await loadRoutes(box, types);
-  const names = new Map<string, { name: string; type: LineType }>();
-  for (const { network } of loaded) for (const route of network.routes) names.set(route.id.split('|')[0], { name: route.name, type: route.type });
-  const settled = await Promise.all(realtime.map((row) => layerFetch(cachedVehicles(row.id, row.source_type, row.feed_url, names))));
+  // National feeds first, municipal last: a city feed's own route IDs win over an umbrella mirror that reuses them.
+  const statics = (await layerProviders(['gtfs', 'geojson'], ['public_transit']))
+    .filter((row) => providerTouches(row, box))
+    .sort((a, b) => (a.city === 'Україна' ? 0 : 1) - (b.city === 'Україна' ? 0 : 1));
+  const geoJsonRows = statics.filter((row) => row.source_type === 'geojson' && geoJsonMode(row.name));
+  const gtfsRows = statics.filter((row) => !geoJsonRows.includes(row));
+  const indexes = await Promise.all(gtfsRows.map(async (row) => ({ row, layer: 'route_index', ...(await layerFetch(cachedGtfsRouteTypes(row.id, row.feed_url, row.source_version), layerContext(row, 'route_index'))) })));
+  const names = mergeRouteTypeEntries(indexes.flatMap((item) => item.ok ? [item.value] : []));
+  const geoJsonNetworks = await Promise.all(geoJsonRows.map(async (row) => ({ row, layer: 'route_index', ...(await layerFetch(cachedGeoJsonNetwork(row.id, row.feed_url, geoJsonMode(row.name)!, row.source_version), layerContext(row, 'route_index'))) })));
+  for (const network of geoJsonNetworks.flatMap((item) => item.ok ? [item.value] : [])) for (const route of network.routes) names.set(route.id.split('|')[0], { name: route.name, type: route.type });
+  const settled = await Promise.all(realtime.map(async (row) => ({ row, layer: 'positions', ...(await layerFetch(cachedVehicles(row.id, row.source_type, row.feed_url, names), layerContext(row, 'positions'))) })));
   const received = settled.flatMap((item) => item.ok ? item.value : []);
-  const fresh = received.filter((vehicle) => isFreshVehicleTimestamp(vehicle.timestamp));
-  const vehicles = fresh.filter((vehicle) => inBbox(box, vehicle.lon, vehicle.lat) && (vehicle.type === 'other' || types.includes(vehicle.type)));
-  const features = vehicles.slice(0, 1500).map((vehicle) => ({ type: 'Feature' as const, properties: { id: vehicle.id, route: vehicle.route, transport: vehicle.type,
-    bearing: vehicle.bearing, speed: vehicle.speed, updatedAt: vehicle.timestamp?.toISOString() }, geometry: { type: 'Point' as const, coordinates: [vehicle.lon, vehicle.lat] } }));
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features }, meta: { failedProviders: settled.filter((item) => !item.ok).length, filteredStaleVehicles: received.length - fresh.length } });
+  const { vehicles, stale, unclassified } = selectFreshVehicles(received, box, types);
+  const served = vehicles.slice(0, 1500);
+  const qualities = served.map((vehicle) => vehicleDataQuality(vehicle.timestamp));
+  const features = served.map((vehicle, index) => ({ type: 'Feature' as const, properties: { id: vehicle.id, route: vehicle.route, transport: vehicle.type,
+    bearing: vehicle.bearing, speed: vehicle.speed, updatedAt: vehicle.timestamp?.toISOString(),
+    dataQuality: qualities[index]!.level, positionAgeMs: qualities[index]!.ageMs }, geometry: { type: 'Point' as const, coordinates: [vehicle.lon, vehicle.lat] } }));
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features }, meta: { failedProviders: layerFailures([...indexes, ...geoJsonNetworks, ...settled]),
+    failedProviderCount: [...indexes, ...geoJsonNetworks, ...settled].filter((item) => !item.ok).length,
+    providersQueried: { positions: settled.length, routeIndexes: indexes.length + geoJsonNetworks.length },
+    filteredStaleVehicles: stale, unclassifiedVehicles: unclassified, truncated: vehicles.length > 1500,
+    dataQuality: aggregateDataQuality(qualities) } });
 }));
 
 app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req, res) => {
@@ -970,7 +1001,7 @@ app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req,
   const wantStations = wanted.includes('stations');
   if (!box || (assetTypes.size === 0 && !wantStations)) throw new ApiError(400, 'bbox (at most 0.6 degree) and types (bike, scooter, carsharing, stations) are required', 'invalid_transport_query');
   const providers = (await layerProviders(['gbfs'], ['bike', 'ebike', 'scooter', 'carsharing'])).filter((row) => providerTouches(row, box));
-  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })))));
+  const settled = await Promise.all(providers.map(async (row) => ({ row, layer: 'availability', ...(await layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })), layerContext(row, 'availability'))) })));
   const features: unknown[] = [];
   let staleAssets = 0;
   for (const item of settled) {
@@ -997,19 +1028,19 @@ app.get('/api/v1/transport/micromobility', requireAuth, asyncHandler(async (req,
     );
     for (const row of rentals) { const feature = buildStaticRentalPointFeature(row); if (feature) features.push(feature); }
   }
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 3000) }, meta: { failedProviders: settled.filter((item) => !item.ok).length, filteredStaleAssets: staleAssets, truncated: features.length > 3000, attribution: 'Zelectra GBFS; © OpenStreetMap contributors, ODbL 1.0 where source=OSM' } });
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 3000) }, meta: { failedProviders: layerFailures(settled), failedProviderCount: settled.length - settled.filter((item) => item.ok).length, filteredStaleAssets: staleAssets, truncated: features.length > 3000, attribution: 'Zelectra GBFS; © OpenStreetMap contributors, ODbL 1.0 where source=OSM' } });
 }));
 
 app.get('/api/v1/transport/micromobility/geofences', requireAuth, asyncHandler(async (req, res) => {
   const box = parseBbox(req.query.bbox, 0.6);
   if (!box) throw new ApiError(400, 'bbox (at most 0.6 degree) is required', 'invalid_transport_query');
   const providers = (await layerProviders(['gbfs'], ['scooter'])).filter((row) => providerTouches(row, box));
-  const settled = await Promise.all(providers.map((row) => layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })))));
+  const settled = await Promise.all(providers.map(async (row) => ({ row, layer: 'availability', ...(await layerFetch(cachedSnapshot(row.id, row.feed_url, row.country).then((snapshot) => ({ row, snapshot })), layerContext(row, 'availability'))) })));
   const features = settled.flatMap((item) => item.ok ? buildMicromobilityGeofenceFeatures(
     { id: item.value.row.id, name: item.value.row.name, operatorId: item.value.row.operator_id }, item.value.snapshot,
     { west: box[0], south: box[1], east: box[2], north: box[3] },
   ) : []);
-  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 1000) }, meta: { failedProviders: settled.filter((item) => !item.ok).length, truncated: features.length > 1000, attribution: 'Zelectra GBFS; Mobility Database catalog reports CC BY 4.0' } });
+  sendLayerJson(req, res, { data: { type: 'FeatureCollection', features: features.slice(0, 1000) }, meta: { failedProviders: layerFailures(settled), failedProviderCount: settled.length - settled.filter((item) => item.ok).length, truncated: features.length > 1000, attribution: 'Zelectra GBFS; Mobility Database catalog reports CC BY 4.0' } });
 }));
 
 app.get('/api/v1/admin/mobility/providers', requireAuth, requireAdmin, asyncHandler(async (_req, res) => {
@@ -1421,8 +1452,10 @@ app.post('/api/v1/navigation/sessions', requireAuth, asyncHandler(async (req, re
   // Navigation is for everyone; only passenger matching needs a verified vehicle (enforced below). Navigation may start without a destination ("just drive"); the road route, and with it passenger matching, starts once one is chosen.
   const freeDrive = destination === undefined || destination === null;
   if (!pointValid(origin)) throw new ApiError(400, 'A GPS origin is required');
-  if (!freeDrive && (!pointValid(destination) || typeof destinationName !== 'string' || destinationName.trim().length < 1 || destinationName.trim().length > 120)) {
-    throw new ApiError(400, 'Destination coordinates and a destination name are required together');
+  if (!freeDrive) {
+    if (!pointValid(destination)) throw new ApiError(400, 'Destination must be a [longitude, latitude] pair inside WGS84 bounds', 'invalid_destination');
+    if (typeof destinationName !== 'string' || destinationName.trim().length < 1) throw new ApiError(400, 'A destination name is required with its coordinates', 'destination_name_required');
+    if (destinationName.trim().length > MAX_PLACE_NAME_LENGTH) throw new ApiError(400, `Destination name must contain at most ${MAX_PLACE_NAME_LENGTH} characters`, 'destination_name_too_long');
   }
   let route: Awaited<ReturnType<typeof getRoadRoute>> | null = null;
   if (!freeDrive) {
@@ -1518,7 +1551,7 @@ app.post('/api/v1/navigation/sessions/:id/resume', requireAuth, asyncHandler(asy
 app.put('/api/v1/navigation/sessions/:id/destination', requireAuth, asyncHandler(async (req, res) => {
   const { destination, destinationName } = req.body ?? {};
   const valid = Array.isArray(destination) && destination.length === 2 && destination.every((v) => typeof v === 'number' && Number.isFinite(v)) && Math.abs(destination[0]) <= 180 && Math.abs(destination[1]) <= 90;
-  if (!valid || typeof destinationName !== 'string' || destinationName.trim().length < 1 || destinationName.trim().length > 120) throw new ApiError(400, 'Destination coordinates and name are required');
+  if (!valid || typeof destinationName !== 'string' || destinationName.trim().length < 1 || destinationName.trim().length > MAX_PLACE_NAME_LENGTH) throw new ApiError(400, 'Destination coordinates and name are required');
   const { rows } = await pool.query<{ state: string; route_version: number; current_location_at: Date | null; current_lon: number | null; current_lat: number | null }>(
     `SELECT state,route_version,current_location_at,
        CASE WHEN current_location IS NULL THEN NULL ELSE ST_X(current_location::geometry) END AS current_lon,
@@ -2325,8 +2358,22 @@ app.delete('/api/v1/users/me/driver-photo', requireAuth, asyncHandler(async (req
 app.get('/api/v1/places/suggest', optionalAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   if (query.length < 3 || query.length > 120) throw new ApiError(400, 'place query must contain 3–120 characters');
+  const rawLatitude = typeof req.query.lat === 'string' && req.query.lat.trim() ? req.query.lat.trim() : undefined;
+  const rawLongitude = typeof req.query.lon === 'string' && req.query.lon.trim() ? req.query.lon.trim() : undefined;
+  if ((rawLatitude === undefined) !== (rawLongitude === undefined)) {
+    throw new ApiError(400, 'lat and lon must be provided together', 'invalid_coordinate');
+  }
+  let bias: { latitude: number; longitude: number } | undefined;
+  if (rawLatitude !== undefined && rawLongitude !== undefined) {
+    const latitude = Number(rawLatitude);
+    const longitude = Number(rawLongitude);
+    if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180) {
+      throw new ApiError(400, 'lat and lon must be valid WGS84 coordinates', 'invalid_coordinate');
+    }
+    bias = { latitude, longitude };
+  }
   try {
-    const data = await suggestPlaces(query);
+    const data = await suggestPlaces(query, bias);
     res.json({ data });
   } catch (error) {
     if (error instanceof GeocodingUnavailableError) throw new ApiError(503, error.message, 'geocoder_unavailable');
@@ -2684,7 +2731,9 @@ app.get('/api/v1/offers', asyncHandler(async (req, res) => {
   const hasCoordinates = suppliedCoordinates.every(Boolean);
   if (suppliedCoordinates.some(Boolean) && !hasCoordinates) throw new ApiError(400, 'all four route coordinates are required');
   const coordinates = hasCoordinates ? coordinateKeys.map((key) => Number(req.query[key])) : [];
-  if (!origin || !destination || origin.length > 120 || destination.length > 120) {
+  // Geocoder addresses are full postal strings («вулиця…, громада, область, індекс»),
+  // so the guard only bounds abuse; offers.origin_name is an unrestricted text column.
+  if (!origin || !destination || origin.length > MAX_PLACE_NAME_LENGTH || destination.length > MAX_PLACE_NAME_LENGTH) {
     throw new ApiError(400, 'origin and destination are required');
   }
   if (!Number.isInteger(seats) || seats < 1 || seats > 20 || (date !== null && !/^\d{4}-\d{2}-\d{2}$/.test(date)) ||
@@ -2782,7 +2831,7 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
          'distanceMeters',l.distance_m,'priceMinor',l.price_minor,'priceMinMinor',l.price_min_minor,
          'priceMaxMinor',l.price_max_minor,'currency',l.currency,'priceStatus',l.price_status,
          'availabilityStatus',l.availability_status,'providerType',l.provider_type,'providerId',l.provider_id,'offerId',l.offer_id,
-         'routeId',l.metadata->>'routeId','headsign',l.metadata->>'headsign',
+         'routeId',l.metadata->>'routeId','routeName',l.metadata->>'routeName','transportType',l.metadata->>'transportType','headsign',l.metadata->>'headsign',
          'fareProductId',l.metadata->>'fareProductId','fareSource',l.metadata->>'fareSource',
          'fareIncludedByPreviousSegment',COALESCE((l.metadata->>'fareIncludedByPreviousSegment')::boolean,false),
          'scheduleSemantics',l.metadata->>'scheduleSemantics',
@@ -4738,8 +4787,8 @@ app.post('/api/v1/offers', requireAuth, requireRole('driver'), asyncHandler(asyn
     Number.isFinite(point[0]) && Number.isFinite(point[1]) && Math.abs(point[0]) <= 180 && Math.abs(point[1]) <= 90;
   const departure = new Date(departureAt);
   if (typeof vehicleId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(vehicleId) ||
-      typeof originName !== 'string' || originName.trim().length < 1 || originName.length > 120 ||
-      typeof destinationName !== 'string' || destinationName.trim().length < 1 || destinationName.length > 120 ||
+      typeof originName !== 'string' || originName.trim().length < 1 || originName.length > MAX_PLACE_NAME_LENGTH ||
+      typeof destinationName !== 'string' || destinationName.trim().length < 1 || destinationName.length > MAX_PLACE_NAME_LENGTH ||
       !pointValid(origin) || !pointValid(destination) || !Number.isFinite(departure.getTime()) || departure <= new Date() ||
       !Number.isInteger(pricePerSeatMinor) || pricePerSeatMinor < 1 || pricePerSeatMinor > 100_000_000 ||
       !Number.isInteger(seats) || seats < 1 || seats > 20) {
@@ -4789,6 +4838,7 @@ app.post('/api/v1/offers', requireAuth, requireRole('driver'), asyncHandler(asyn
 app.get('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT b.id, b.offer_id, b.seat_count, b.total_price_minor, b.currency, b.fee_class, b.platform_fee_minor, b.fee_rule_version, b.status, b.created_at,
+            b.completed_at, b.cancelled_at,
             o.origin_name, o.destination_name, o.departure_at, u.display_name AS driver_name, p.display_name AS passenger_name,
             (o.driver_id=$1) AS current_user_is_driver,
             (SELECT count(*)::int FROM booking_completion_confirmations cc WHERE cc.booking_id=b.id) AS completion_confirmation_count,
@@ -5729,8 +5779,8 @@ app.post('/api/v1/demands', requireAuth, requireRole('passenger'), asyncHandler(
     Math.abs(point[0]) <= 180 && Math.abs(point[1]) <= 90;
   const earliest = new Date(earliestDeparture);
   const latest = new Date(latestDeparture);
-  if (typeof originName !== 'string' || !originName.trim() || originName.length > 120 ||
-      typeof destinationName !== 'string' || !destinationName.trim() || destinationName.length > 120 ||
+  if (typeof originName !== 'string' || !originName.trim() || originName.length > MAX_PLACE_NAME_LENGTH ||
+      typeof destinationName !== 'string' || !destinationName.trim() || destinationName.length > MAX_PLACE_NAME_LENGTH ||
       !validPoint(origin) || !validPoint(destination) || !Number.isFinite(earliest.getTime()) || !Number.isFinite(latest.getTime()) ||
       earliest <= new Date() || latest < earliest || latest.getTime() - earliest.getTime() > 7 * 86400_000 ||
       !Number.isInteger(passengers) || passengers < 1 || passengers > 20 ||
@@ -6661,6 +6711,29 @@ const runMobilityHealth = () => { if (process.env.MOBILITY_HEALTH_DISABLED === '
 const mobilityHealthStart = setTimeout(runMobilityHealth, 60_000);
 const mobilityHealthTimer = setInterval(runMobilityHealth, mobilityHealthIntervalMs);
 mobilityHealthStart.unref(); mobilityHealthTimer.unref();
+// Classifying a live vehicle needs the static feed's route index; building it on the request path downloads the provider's
+// whole GTFS zip, which measured 5.3 s for a single Lviv viewport and froze the map. Keep it warm between polls instead.
+const transportIndexIntervalMs = Math.max(60_000, Number(process.env.TRANSPORT_INDEX_REFRESH_MS) || 4 * 60_000);
+let transportIndexRun: Promise<void> | undefined;
+const runTransportIndexRefresh = (): Promise<void> => {
+  if (process.env.TRANSPORT_INDEX_REFRESH_DISABLED === 'true') return Promise.resolve();
+  if (transportIndexRun) return transportIndexRun;
+  // One provider at a time: every step is a multi-megabyte fetch and this host has 8 GB shared with everything else.
+  transportIndexRun = (async () => {
+    const rows = await layerProviders(['gtfs'], ['public_transit']);
+    let failed = 0;
+    for (const row of rows) {
+      try { await cachedGtfsRouteTypes(row.id, row.feed_url, row.source_version); }
+      // A provider that will not load is reported per provider on the layer endpoints; a warm-up pass must not add noise.
+      catch { failed += 1; }
+    }
+    console.log(JSON.stringify({ level: 'info', event: 'transport.route_index_warmed', providers: rows.length, failed }));
+  })().finally(() => { transportIndexRun = undefined; });
+  return transportIndexRun;
+};
+const transportIndexStart = setTimeout(() => { void runTransportIndexRefresh().catch(() => undefined); }, 20_000);
+const transportIndexTimer = setInterval(() => { void runTransportIndexRefresh().catch(() => undefined); }, transportIndexIntervalMs);
+transportIndexStart.unref(); transportIndexTimer.unref();
 const proposalExpiryTimer = setInterval(() => {
   void expireStaleProposals().catch((error: unknown) => console.error(JSON.stringify({ level: 'error', event: 'proposal.expiry_failed', message: error instanceof Error ? error.message : 'unknown_error' })));
 }, 30_000);

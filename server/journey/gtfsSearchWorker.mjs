@@ -22,6 +22,13 @@ const testFixtureDirectory = typeof workerData?.testFixtureDirectory === 'string
   ? workerData.testFixtureDirectory : undefined;
 
 async function loadProviderTimetable(provider) {
+  const startedAt = Date.now();
+  const feed = await loadProviderTimetableUncached(provider);
+  debugStage('provider-feed-loaded', { provider: provider.id, ms: Date.now() - startedAt });
+  return feed;
+}
+
+async function loadProviderTimetableUncached(provider) {
   if (testFixtureDirectory && provider.feedUrl === GTFS_TEST_FIXTURE_URL) {
     const entries = await Promise.all(GTFS_TEST_FILES.map(async (name) => [name,
       new Uint8Array(await readFile(join(testFixtureDirectory, name)))
@@ -36,6 +43,16 @@ async function loadProviderTimetable(provider) {
 // request. Keep that memory bounded and discard snapshots after short-term use.
 const groups = new GtfsSearchGroupCache(8, 5 * 60_000);
 let activeSearchId = null;
+
+// Feed loading and the provider merge run before the planner's own timer starts,
+// so they need a separate opt-in stage timer to become observable.
+const searchDebugEnabled = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1';
+let workerStartedAt = Date.now();
+const debugStage = (stage, details = {}) => {
+  if (searchDebugEnabled) {
+    console.info(JSON.stringify({ event: 'gtfs.worker.debug', stage, elapsedMs: Date.now() - workerStartedAt, ...details }));
+  }
+};
 
 async function buildGroups(providers, metro) {
   const loaded = await Promise.allSettled(providers.map(async (provider) => {
@@ -53,6 +70,7 @@ async function buildGroups(providers, metro) {
   }));
   const sources = [];
   const errors = [];
+  debugStage('feeds-loaded', { providers: providers.length, rejected: loaded.filter((result) => result.status === 'rejected').length, feedCache: getCachedGtfsTimetableStats() });
   loaded.forEach((result, index) => {
     if (result.status === 'fulfilled') {
       sources.push(result.value);
@@ -71,12 +89,14 @@ async function buildGroups(providers, metro) {
     }
   }
   const built = buildGtfsSearchGroups(sources, String(activeSearchId));
+  debugStage('groups-built', { sources: sources.length, groups: built.groups.length, errors: errors.length });
   for (const [id, group] of built.groups) groups.set(id, group);
   return { descriptors: built.descriptors, errors };
 }
 
 parentPort.on('message', async (message) => {
   const { id, type } = message;
+  workerStartedAt = Date.now();
   try {
     if (type === 'diagnostics') {
       if (message.collectGarbage && typeof globalThis.gc === 'function') globalThis.gc();
@@ -97,6 +117,7 @@ parentPort.on('message', async (message) => {
         result.push({ groupId: descriptor.id, ...search });
         delete group.feed;
       }
+      debugStage('groups-searched', { groups: descriptors.length, itineraries: result.reduce((n, r) => n + r.itineraries.length, 0), truncated: result.filter((r) => r.searchTruncated).length });
       parentPort.postMessage({ id, ok: true, value: { descriptors, errors, searches: result } });
       return;
     }

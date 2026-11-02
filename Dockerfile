@@ -10,6 +10,8 @@ COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package.json ./package.json
 COPY --chown=node:node server ./server
 COPY --chown=node:node shared ./shared
+# The API runs unprivileged; LOCAL_STORAGE_DIR must be writable and an empty named volume inherits this ownership.
+RUN mkdir -p /app/.uploads && chown node:node /app/.uploads
 USER node
 EXPOSE 3002
 HEALTHCHECK --interval=20s --timeout=3s --start-period=20s --retries=3 \

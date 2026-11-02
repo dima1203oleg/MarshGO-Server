@@ -36,3 +36,19 @@ test('bounded async cache expires entries and refuses to retain one value larger
   await cache.getOrLoad('small', () => load('expired'), () => 4, 10);
   assert.equal(loads, 3);
 });
+
+test('a value that overflows the budget on arrival evicts older entries instead of itself', async () => {
+  const cache = new BoundedPromiseCache<string>(4, 10, 100, 10);
+  const loaded: string[] = [];
+  const load = async (value: string) => { loaded.push(value); return value; };
+
+  await cache.getOrLoad('a', () => load('A'), () => 3, 0);
+  await cache.getOrLoad('b', () => load('B'), () => 3, 1);
+  await cache.getOrLoad('big', () => load('BIG'), () => 8, 2);
+
+  assert.deepEqual(loaded, ['A', 'B', 'BIG']);
+  assert.equal(cache.size, 1);
+  assert.equal(cache.weight, 8);
+  assert.equal(await cache.getOrLoad('big', () => load('BIG again'), () => 8, 3), 'BIG');
+  assert.deepEqual(loaded, ['A', 'B', 'BIG']);
+});

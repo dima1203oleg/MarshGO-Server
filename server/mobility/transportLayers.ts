@@ -1,12 +1,12 @@
 import { unzipSync, strFromU8 } from 'fflate';
 import bindings from 'gtfs-realtime-bindings';
 import { z } from 'zod';
-import { smartCache } from '../cache/cacheService';
-import { fetchBinary, fetchJson } from './safeFetch';
+import { cacheKey, smartCache } from '../cache/cacheService';
+import { fetchBinary, fetchJson, UnsafeUrlError } from './safeFetch';
 import { parseCsvLine, routeTypeLabel } from './gtfs';
 import { extractVehicleList, vehicleTransportLabel } from './jsonVehicles';
 import { bboxOf, type Bbox } from './types';
-import { isFreshMobilityTimestamp, parseMobilityTimestamp } from './timestamps';
+import { isFreshMobilityTimestamp, LIVE_MOBILITY_MAX_AGE_MS, parseMobilityTimestamp } from './timestamps';
 
 /**
  * Map data for the 2D transport layers. Everything is loaded per viewport (bbox) and per layer, never as one "whole transport world":
@@ -256,6 +256,55 @@ export function isFreshVehicleTimestamp(timestamp: Date | null, now = Date.now()
   return isFreshMobilityTimestamp(timestamp, now);
 }
 
+/** A vehicle whose route is absent from every loaded static feed cannot be classified; clients may ask for that bucket explicitly. */
+export type RequestedVehicleType = LineType | 'other';
+export const isRequestedVehicleType = (value: string): value is RequestedVehicleType => value === 'other' || isLineType(value);
+
+/** Fresh positions inside the viewport, split by the requested categories. `unclassified` keeps hidden supply visible in the response. */
+export function selectFreshVehicles(received: LiveVehicle[], box: Bbox, types: readonly RequestedVehicleType[]): { vehicles: LiveVehicle[]; stale: number; unclassified: number } {
+  const fresh = received.filter((vehicle) => isFreshVehicleTimestamp(vehicle.timestamp));
+  const visible = fresh.filter((vehicle) => inBbox(box, vehicle.lon, vehicle.lat));
+  const unclassified = visible.filter((vehicle) => vehicle.type === 'other').length;
+  return { vehicles: visible.filter((vehicle) => types.includes(vehicle.type)), stale: received.length - fresh.length, unclassified };
+}
+
+/**
+ * ТЗ-MG-TRANSPORT-12 requires every served feature to say how its data was obtained.
+ * LIVE is a provider-stamped position inside the freshness window, STALE is one that aged out,
+ * ESTIMATED has no stamp to verify, SCHEDULED is static feed geometry, UNKNOWN labels nothing.
+ */
+export type DataQuality = 'LIVE' | 'SCHEDULED' | 'ESTIMATED' | 'STALE' | 'UNKNOWN';
+const QUALITY_SEVERITY: readonly DataQuality[] = ['STALE', 'UNKNOWN', 'ESTIMATED', 'SCHEDULED', 'LIVE'];
+
+export type QualityEntry = { level: DataQuality; ageMs: number | null };
+
+export function vehicleDataQuality(timestamp: Date | null, now = Date.now()): QualityEntry {
+  if (!timestamp) return { level: 'ESTIMATED', ageMs: null };
+  const ageMs = Math.max(0, now - timestamp.getTime());
+  return { level: isFreshVehicleTimestamp(timestamp, now) ? 'LIVE' : 'STALE', ageMs };
+}
+
+/** The response is only as fresh as its least fresh marker, but the counts keep the mix visible. */
+export function aggregateDataQuality(entries: readonly QualityEntry[]): {
+  level: DataQuality; counts: Partial<Record<DataQuality, number>>; oldestAgeMs: number | null; newestAgeMs: number | null; freshnessWindowMs: number;
+} {
+  const counts: Partial<Record<DataQuality, number>> = {};
+  for (const entry of entries) counts[entry.level] = (counts[entry.level] ?? 0) + 1;
+  const ages = entries.map((entry) => entry.ageMs).filter((age): age is number => age !== null);
+  return {
+    level: QUALITY_SEVERITY.find((level) => (counts[level] ?? 0) > 0) ?? 'UNKNOWN',
+    counts,
+    oldestAgeMs: ages.length > 0 ? Math.max(...ages) : null,
+    newestAgeMs: ages.length > 0 ? Math.min(...ages) : null,
+    freshnessWindowMs: LIVE_MOBILITY_MAX_AGE_MS,
+  };
+}
+
+/** Route lines and stop positions come from static feeds, so they must never be presented as live data. */
+export function scheduledDataQuality(featureCount: number) {
+  return aggregateDataQuality(Array.from({ length: featureCount }, () => ({ level: 'SCHEDULED' as const, ageMs: null })));
+}
+
 const VEHICLE_TTL_MS = 10_000;
 const vehicleCache = new Map<string, { at: number; promise: Promise<LiveVehicle[]> }>();
 const { transit_realtime } = bindings;
@@ -312,13 +361,108 @@ async function loadVehicles(providerId: string, sourceType: string, url: string,
 }
 
 /** Positions are shared between users for ten seconds so a busy map never multiplies requests to city feeds. */
-export function cachedVehicles(providerId: string, sourceType: string, url: string, routeNames: Map<string, { name: string; type: LineType }>): Promise<LiveVehicle[]> {
+export function cachedVehicles(
+  providerId: string, sourceType: string, url: string,
+  routeNames: Map<string, { name: string; type: LineType }>,
+): Promise<LiveVehicle[]> {
   const hit = vehicleCache.get(providerId);
   if (hit && Date.now() - hit.at < VEHICLE_TTL_MS) return hit.promise;
   const promise = loadVehicles(providerId, sourceType, url, routeNames);
   vehicleCache.set(providerId, { at: Date.now(), promise });
   promise.catch(() => vehicleCache.delete(providerId));
   return promise;
+}
+
+/**
+ * A vehicle's category comes from the static feed's route table, so the live-map endpoint needs a `route_id → {name, type}` map.
+ * Building it from full cached networks means `JSON.parse` of every route geometry in the viewport, which measured 12.9 s for one Lviv
+ * poll. This index keeps only what classification needs and is therefore safe to hold in the shared cache.
+ */
+export type RouteTypeEntry = [string, string, LineType];
+export const routeTypeEntriesSchema = z.array(z.tuple([z.string(), z.string(), z.enum(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular'])])) as unknown as z.ZodType<RouteTypeEntry[]>;
+
+export function buildRouteTypeEntries(routesText: string | undefined): RouteTypeEntry[] {
+  const out: RouteTypeEntry[] = [];
+  for (const route of rows(routesText)) {
+    const type = asLineType(routeTypeLabel(Number(route.route_type), `${route.route_short_name ?? ''} ${route.route_long_name ?? ''} ${route.route_desc ?? ''}`));
+    if (!type || !route.route_id) continue;
+    out.push([route.route_id, (route.route_short_name || route.route_long_name || route.route_id).trim(), type]);
+  }
+  return out.sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+const ROUTES_ONLY = /(^|\/)routes\.txt$/;
+
+async function loadGtfsRouteTypes(url: string): Promise<RouteTypeEntry[]> {
+  const { data } = await fetchBinary(url, 60 * 1024 * 1024);
+  const unzipped = unzipSync(data, { filter: (file) => ROUTES_ONLY.test(file.name) && file.originalSize < 64 * 1024 * 1024 });
+  const entry = Object.entries(unzipped).find(([name]) => ROUTES_ONLY.test(name));
+  return buildRouteTypeEntries(entry ? strFromU8(entry[1]) : undefined);
+}
+
+export function cachedGtfsRouteTypes(providerId: string, url: string, sourceVersion?: string | null): Promise<RouteTypeEntry[]> {
+  const version = sourceVersion?.trim() || null;
+  const parameters = { kind: 'route_types', providerId, url, sourceVersion: version, schemaVersion: NETWORK_CACHE_SCHEMA_VERSION };
+  return smartCache.getOrLoad('gtfs_network', parameters, routeTypeEntriesSchema, {
+    ttlMs: NETWORK_TTL_MS,
+    // A provider with no source version keeps the index in L1 only, so L1 has to outlive one background refresh interval —
+    // otherwise the next live-map poll pays for the whole zip download again, inside the request.
+    l1TtlMs: 20 * 60_000,
+    // Route names and categories age slowly, so an expired index still classifies a vehicle better than making the map wait
+    // (or dropping the vehicle as unclassified). The stale copy is served while a background pass refetches it.
+    staleTtlMs: 24 * 60 * 60_000,
+    maxL2Bytes: 4 * 1024 * 1024,
+    shared: Boolean(version),
+  }, () => loadGtfsRouteTypes(url));
+}
+
+/** Cache key a caller can use to evict an index after its feed is re-synced. */
+export function gtfsRouteTypesCacheKey(providerId: string, url: string, sourceVersion?: string | null): string {
+  return cacheKey('gtfs_network', { kind: 'route_types', providerId, url, sourceVersion: sourceVersion?.trim() || null, schemaVersion: NETWORK_CACHE_SCHEMA_VERSION });
+}
+
+/** Later entries win, so callers pass national feeds first and municipal feeds last. */
+export function mergeRouteTypeEntries(all: readonly RouteTypeEntry[][]): Map<string, { name: string; type: LineType }> {
+  const merged = new Map<string, { name: string; type: LineType }>();
+  for (const entries of all) for (const [id, name, type] of entries) merged.set(id, { name, type });
+  return merged;
+}
+
+/**
+ * A layer response must name the failing provider and say why, but the provider's feed URL can carry an API key,
+ * so the raw error text never reaches the client.
+ */
+export function providerFailureReason(error: unknown): string {
+  if (error instanceof UnsafeUrlError) return 'feed_url_rejected';
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (/abort|timeout|timed out|etimedout/.test(message)) return 'timeout';
+  if (/\b429\b|rate limit|too many requests/.test(message)) return 'rate_limited';
+  if (/unauthor|forbidden|\b40[13]\b/.test(message)) return 'access_denied';
+  if (/not found|\b404\b/.test(message)) return 'not_found';
+  if (/too large/.test(message)) return 'feed_too_large';
+  if (/\b5\d\d\b|server error|unavailable/.test(message)) return 'provider_unavailable';
+  if (/unknown geojson transport mode/.test(message)) return 'unsupported_feed';
+  if (/decode|protobuf|invalid|unexpected|out of range/.test(message)) return 'invalid_data';
+  if (/incomplete|terminated|other side closed|socket hang up/.test(message)) return 'truncated_response';
+  if (/enotfound|econnrefused|socket|network|fetch failed/.test(message)) return 'network_error';
+  return 'error';
+}
+
+/** Error texts can interpolate the requested URL, which may carry a key, so they are never logged verbatim. */
+export const redactFeedUrls = (text: string): string => text.replace(/https?:\/\/\S+/g, '[feed-url]');
+
+export interface LayerOutcome {
+  layer: string;
+  ok: boolean;
+  reason?: string;
+  row: { id: string; name: string; source_type: string };
+}
+
+export function layerFailures(outcomes: readonly LayerOutcome[]): Array<{ id: string; name: string; sourceType: string; layer: string; reason: string }> {
+  return outcomes
+    .filter((item) => !item.ok)
+    // Reasons are classified upstream, but an unclassified one can still carry the requested URL, so redact again at the boundary.
+    .map((item) => ({ id: item.row.id, name: item.row.name.split(' — ')[0], sourceType: item.row.source_type, layer: item.layer, reason: redactFeedUrls(item.reason ?? 'error') }));
 }
 
 export function parseBbox(raw: unknown, maxSpanDegrees = 2): Bbox | null {

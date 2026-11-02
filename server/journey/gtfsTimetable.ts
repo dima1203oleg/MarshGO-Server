@@ -805,8 +805,15 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
   const stopTimes: GtfsTimetableFeed['stopTimes'] = new Map();
   for (const row of csvRows(text('stop_times.txt'))) {
     if (!trips.has(row.trip_id) || !stops.has(row.stop_id)) continue;
-    const arrivalSeconds = gtfsTime(row.arrival_time), departureSeconds = gtfsTime(row.departure_time);
-    if (arrivalSeconds === null || departureSeconds === null) continue;
+    const declaredArrival = gtfsTime(row.arrival_time), declaredDeparture = gtfsTime(row.departure_time);
+    // GTFS leaves arrival_time off the first stop and departure_time off the last,
+    // and Dozor feeds also omit departure_time at pass-through stops. Requiring
+    // both silently dropped 90 % of those stop calls, so most stops were
+    // unroutable and legs reported only the board/alight pair. Treat the missing
+    // side as the same time point instead of discarding the stop.
+    if (declaredArrival === null && declaredDeparture === null) continue;
+    const arrivalSeconds = declaredArrival ?? declaredDeparture as number;
+    const departureSeconds = declaredDeparture ?? declaredArrival as number;
     const list = stopTimes.get(row.trip_id) ?? [];
     const sourceStop = stops.get(row.stop_id);
     list.push({ stopId: row.stop_id, sourceStopId: row.stop_id,
@@ -1350,10 +1357,128 @@ export type GtfsTripLegProjection =
   | { kind: 'leg'; fromCursor: number; toCursor: number; fromEvent: EligibleTripInstanceStopEvent; toEvent: EligibleTripInstanceStopEvent }
   | { kind: 'omitted-beyond-window' };
 
+export type GtfsBoardingDepartureBounds = { firstDepartureSeconds: number; lastDepartureSeconds: number } | null;
+
+/**
+ * Bounds, in service seconds, within which a trip instance can board a vehicle. Mirrors exactly the
+ * two filters `visitTripInstanceLegs` applies before it emits an edge — the stop must allow boarding
+ * and the last stop is never a boarding point — so it answers "can this instance produce any edge at
+ * all" without building the event vector, which allocates an object plus two UTC conversions per stop
+ * and runs once per trip instance per search.
+ */
+export function boardingDepartureBounds(stops: readonly { pickupType: number; departureSeconds: number }[],
+  eligibleIndexes: readonly number[]): GtfsBoardingDepartureBounds {
+  let firstDepartureSeconds = Number.POSITIVE_INFINITY;
+  let lastDepartureSeconds = Number.NEGATIVE_INFINITY;
+  for (let cursor = 0; cursor < eligibleIndexes.length - 1; cursor++) {
+    const stopTime = stops[eligibleIndexes[cursor]!];
+    if (!stopTime || stopTime.pickupType !== 0) continue;
+    if (stopTime.departureSeconds < firstDepartureSeconds) firstDepartureSeconds = stopTime.departureSeconds;
+    if (stopTime.departureSeconds > lastDepartureSeconds) lastDepartureSeconds = stopTime.departureSeconds;
+  }
+  return Number.isFinite(firstDepartureSeconds) ? { firstDepartureSeconds, lastDepartureSeconds } : null;
+}
+
+export type GtfsServiceDateDepartureWindow = { earliestSeconds: number; latestSeconds: number } | null;
+
+/** GTFS stop_times allows times up to 71:59:59, so one service date spans almost three calendar days. */
+const maximumGtfsServiceSeconds = 72 * 60 * 60;
+
+/**
+ * Express the journey window in the service seconds of one service date, so the boarding gate is an
+ * integer comparison instead of two UTC conversions per trip instance. Exact only while the UTC offset
+ * is constant across the whole GTFS range, which is verified at the day boundaries rather than assumed:
+ * a timezone database shifts at most once per 24 h, so equal spans at 24 h, 48 h and 72 h from midnight
+ * mean the mapping is linear in between. A date that fails the check yields `null` and is never skipped.
+ */
+export function serviceDateDepartureWindow(serviceDate: string,
+  serviceTimeToUtc: (serviceDate: string, secondsAfterMidnight: number) => Date | null,
+  earliestDeparture: Date, journeyEnd: Date): GtfsServiceDateDepartureWindow {
+  const midnight = serviceTimeToUtc(serviceDate, 0);
+  if (!midnight) return null;
+  const midnightMs = midnight.getTime();
+  for (const seconds of [24 * 60 * 60, 48 * 60 * 60, maximumGtfsServiceSeconds - 1]) {
+    const at = serviceTimeToUtc(serviceDate, seconds);
+    if (!at || at.getTime() - midnightMs !== seconds * 1000) return null;
+  }
+  return {
+    earliestSeconds: Math.ceil((earliestDeparture.getTime() - midnightMs) / 1000),
+    latestSeconds: Math.floor((journeyEnd.getTime() - midnightMs) / 1000),
+  };
+}
+
+/**
+ * Whether the instance's scheduled departures all fall outside the journey window. Only sound without
+ * a realtime overlay on this exact instance: an update can move a departure into the window, while it
+ * can never add a boarding possibility (pickup types are static), so a `null` bound is always skippable.
+ */
+export function tripInstanceCannotDepartInWindow(bounds: GtfsBoardingDepartureBounds,
+  window: GtfsServiceDateDepartureWindow): boolean {
+  if (!bounds) return true;
+  if (!window) return false;
+  return bounds.lastDepartureSeconds < window.earliestSeconds
+    || bounds.firstDepartureSeconds > window.latestSeconds;
+}
+
 /** Keep the graph materializer and its budget estimator on the same stop-pair window rule. */
 export function shouldOmitGtfsStopPairBeyondLocalWindow(maximumTransfers: number,
   fromCursor: number, toCursor: number, isQueryDestination: boolean): boolean {
   return maximumTransfers > 0 && toCursor > fromCursor + 20 && !isQueryDestination;
+}
+
+/**
+ * Push-based twin of {@link materializeTripInstanceLegs} for the graph materializer, which
+ * expands on the order of a million stop pairs per search. The generator allocates one
+ * projection object per pair on top of the candidate it produces; this variant hands the same
+ * four values over as arguments. `tests/gtfs-trip-leg-projection.test.ts` asserts the two agree
+ * pair-for-pair, omitted-beyond-window signals included, so the shared window rule cannot drift.
+ * The generator stays lazy for callers that break out of the projection early.
+ */
+export function visitTripInstanceLegs(
+  events: readonly EligibleTripInstanceStopEvent[],
+  options: {
+    maximumTransfers: number;
+    earliestDeparture: Date;
+    journeyEnd: Date;
+    destinationStopIds: ReadonlySet<string>;
+    canBelongToDirectOnlyJourney: (fromStopId: string, toStopId: string) => boolean;
+    boardingStopIndex?: number;
+  },
+  onLeg: (fromCursor: number, toCursor: number, fromEvent: EligibleTripInstanceStopEvent,
+    toEvent: EligibleTripInstanceStopEvent) => void,
+  onOmittedBeyondWindow?: () => void,
+): void {
+  const requestedCursor = options.boardingStopIndex === undefined
+    ? -1 : events.findIndex((event) => event.stopIndex === options.boardingStopIndex);
+  const firstCursor = options.boardingStopIndex === undefined ? 0 : requestedCursor;
+  const lastCursor = options.boardingStopIndex === undefined ? events.length - 2 : requestedCursor;
+  for (let fromCursor = firstCursor; fromCursor >= 0 && fromCursor <= lastCursor; fromCursor++) {
+    const fromEvent = events[fromCursor]!;
+    const from = fromEvent.stopTime;
+    const departureAt = fromEvent.departureAt;
+    if (!fromEvent.canBoard || !fromEvent.scheduledDepartureAt || !departureAt
+      || departureAt < options.earliestDeparture || departureAt > options.journeyEnd) continue;
+    for (let toCursor = fromCursor + 1; toCursor < events.length; toCursor++) {
+      const toEvent = events[toCursor]!;
+      const to = toEvent.stopTime;
+      if (shouldOmitGtfsStopPairBeyondLocalWindow(options.maximumTransfers, fromCursor, toCursor,
+        options.destinationStopIds.has(to.stopId))) {
+        const omittedArrivalAt = toEvent.scheduledArrivalAt;
+        if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
+          && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
+          && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
+          onOmittedBeyondWindow?.();
+        }
+        continue;
+      }
+      if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds
+        || !toEvent.scheduledArrivalAt || !toEvent.arrivalAt
+        || toEvent.arrivalAt < departureAt || toEvent.arrivalAt > options.journeyEnd
+        || toEvent.arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000
+        || !options.canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
+      onLeg(fromCursor, toCursor, fromEvent, toEvent);
+    }
+  }
 }
 
 /** Shared, deterministic stop-pair eligibility projection for graph and event searches. */
@@ -1629,6 +1754,7 @@ export function findGtfsItinerariesWithStats(
 ): GtfsItinerarySearchResult {
   const debugStartedAt = Date.now();
   const debugEnabled = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1';
+  const phaseMarkMs = () => Number(process.hrtime.bigint() / 1_000_000n);
   const debugStage = (stage: string, details: Record<string, number | string> = {}) => {
     if (debugEnabled) {
       const memory = process.memoryUsage();
@@ -1846,6 +1972,21 @@ export function findGtfsItinerariesWithStats(
     const date = dateStringAfter(firstServiceDate, day);
     if (date <= lastServiceDate || day < 0) serviceDates.add(date);
   }
+  // Both trip enumerations ask the same question per service date, so answer it once here instead of
+  // converting stop times to UTC for every trip instance in the feed. Each gate is read once per trip,
+  // so it has to carry the resolved window rather than be looked up by string key ~2.4M times.
+  const departureGates = [...serviceDates].map((serviceDate) => ({
+    serviceDate,
+    window: serviceDateDepartureWindow(serviceDate, serviceTimeToUtc, input.earliestDeparture, journeyEnd),
+  }));
+  const hasRealtimeTripUpdates = (feed.realtimeTripUpdates?.size ?? 0) > 0;
+  // A composite tripId+date key must be built to prove an instance is not covered by a realtime
+  // overlay, which costs more than the event vectors the gate skips. Trips without any update at all
+  // are answered from this set instead.
+  const realtimeOverlayTripIds = new Set<string>();
+  for (const update of feed.realtimeTripUpdates?.values() ?? []) realtimeOverlayTripIds.add(update.tripId);
+  const instanceHasRealtimeOverlay = (tripId: string, serviceDate: string) => hasRealtimeTripUpdates
+    && feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(tripId, serviceDate)) !== undefined;
 
   const originStopIds = new Set(originStops.map(({ stop }) => stop.id));
   const destinationStopIds = new Set(destinationStops.map(({ stop }) => stop.id));
@@ -2041,6 +2182,22 @@ export function findGtfsItinerariesWithStats(
     const signatures = new Set(best.map((rule) => `${rule.transferType}:${rule.minTransferTimeSeconds ?? ''}`));
     return signatures.size > 1 ? { rule: null, ambiguous: true } : { rule: best[0]!, ambiguous: false };
   };
+  // Phase attribution measured `eligibleTripInstanceStopEvents` at 6.3 s of the 10.7 s
+  // `segments-built` stage: the two exhaustive trip enumerations below rebuild the event vector
+  // of every (trip, service date) pair twice, and each rebuild allocates one event per eligible
+  // stop plus two cached timezone conversions. The key carries the eligible index set itself, so
+  // a shared result is only ever reused for an identical projection.
+  const sharedTripInstanceEvents = new Map<string, EligibleTripInstanceEvents | null>();
+  const eligibleTripInstanceEventsShared = (tripId: string, serviceDate: string,
+    eligibleIndexes: readonly number[]): EligibleTripInstanceEvents | null => {
+    const key = `${tripId}\u0000${serviceDate}\u0000${eligibleIndexes.join(',')}`;
+    if (sharedTripInstanceEvents.has(key)) return sharedTripInstanceEvents.get(key) ?? null;
+    const built = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes, serviceTimeToUtc);
+    sharedTripInstanceEvents.set(key, built ?? null);
+    return built;
+  };
+  let demandTripsWithEligibleStops = 0;
+  let demandTripInstancesBuilt = 0;
   for (const [tripId, trip] of feed.trips) {
     const candidateStops = candidateStopCountByRoute.get(trip.routeId) ?? 0;
     if (candidateStops < 2) continue;
@@ -2052,10 +2209,17 @@ export function findGtfsItinerariesWithStats(
     const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
       && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
+    demandTripsWithEligibleStops++;
+    const boardingBounds = boardingDepartureBounds(stops, eligibleIndexes);
+    const tripHasRealtimeOverlay = realtimeOverlayTripIds.has(tripId);
     let pairOpportunities = 0;
-    for (const serviceDate of serviceDates) {
-      const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes, serviceTimeToUtc);
+    for (const { serviceDate, window: departureWindow } of departureGates) {
+      if (boardingBounds === null
+        || (tripInstanceCannotDepartInWindow(boardingBounds, departureWindow)
+          && !(tripHasRealtimeOverlay && instanceHasRealtimeOverlay(tripId, serviceDate)))) continue;
+      const tripEvents = eligibleTripInstanceEventsShared(tripId, serviceDate, eligibleIndexes);
       if (!tripEvents) continue;
+      demandTripInstancesBuilt++;
       for (let fromCursor = 0; fromCursor < tripEvents.events.length - 1; fromCursor++) {
         const fromEvent = tripEvents.events[fromCursor];
         const from = fromEvent.stopTime;
@@ -2107,6 +2271,11 @@ export function findGtfsItinerariesWithStats(
   const graphRoutesAtPerRouteCap = [...graphSegmentBudgetByRoute.values()]
     .filter((budget) => budget === maximumGraphSegmentsPerRoute).length;
   const globalGraphBudgetBinding = estimatedGraphDemand > maximumGraphSegments;
+  // The two exhaustive trip enumerations (demand estimation here and materialization
+  // below) are the dominant cost of `segments-built`, but the aggregate stage could not
+  // say which one to bound. These counters attribute that stage without changing it.
+  debugStage('demand-estimated', { demandTripsWithEligibleStops, demandTripInstancesBuilt,
+    candidateRoutes: candidateRouteCount, estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap });
   let segmentGraphTruncated = false;
   // A national feed can produce a very large number of stop-pair candidates.
   // Keep only the stop-time indexes during graph construction and materialize
@@ -2404,8 +2573,24 @@ export function findGtfsItinerariesWithStats(
   };
   // Feed trip insertion order is not a stable selection policy. Keep graph
   // retention and any bounded overflow fill reproducible across feed encodings.
+  // Debug-only phase attribution. The per-instance bucket is charged at the top of
+  // each service-date iteration, so it covers the retention work of the previous
+  // instance rather than the departure-window test, which costs nothing measurable.
+  let phaseInstanceEventsMs = 0;
+  let phasePairVisitationMs = 0;
+  let phaseRetentionMs = 0;
+  let phaseTripPrologueMs = 0;
+  let phaseInstanceRetentionMs = 0;
+  let phaseTripLoopMs = 0;
+  let phaseCursor = debugEnabled ? phaseMarkMs() : 0;
+  const tripLoopStartMs = debugEnabled ? phaseCursor : 0;
   for (const [tripId, trip] of [...feed.trips].sort(([left], [right]) => compareStableId(left, right))) {
     tripsConsidered++;
+    if (debugEnabled) {
+      const now = phaseMarkMs();
+      phaseTripPrologueMs += now - phaseCursor;
+      phaseCursor = now;
+    }
     const route = feed.routes.get(trip.routeId);
     const stops = feed.stopTimes.get(tripId);
     if (!route || !stops || stops.length < 2 || (input.allowedModes && !input.allowedModes.includes(route.mode))) continue;
@@ -2426,8 +2611,30 @@ export function findGtfsItinerariesWithStats(
     // pairs rather than repeating map lookups, string keys, and haversine
     // calculations for every edge.
     const eligibleContexts = eligibleIndexes.map((index) => stopContext(stops[index]));
-    for (const serviceDate of serviceDates) {
-      const tripEvents = eligibleTripInstanceStopEvents(feed, tripId, serviceDate, eligibleIndexes, serviceTimeToUtc);
+    const boardingBounds = boardingDepartureBounds(stops, eligibleIndexes);
+    const tripHasRealtimeOverlay = realtimeOverlayTripIds.has(tripId);
+    if (debugEnabled) {
+      const now = phaseMarkMs();
+      phaseTripPrologueMs += now - phaseCursor;
+      phaseCursor = now;
+    }
+    for (const { serviceDate, window: departureWindow } of departureGates) {
+      if (debugEnabled) {
+        const now = phaseMarkMs();
+        phaseInstanceRetentionMs += now - phaseCursor;
+        phaseCursor = now;
+      }
+      // A day of departures is mostly outside the journey window, and each instance skipped here
+      // saves one event object plus two UTC conversions per eligible stop.
+      if (boardingBounds === null
+        || (tripInstanceCannotDepartInWindow(boardingBounds, departureWindow)
+          && !(tripHasRealtimeOverlay && instanceHasRealtimeOverlay(tripId, serviceDate)))) continue;
+      const tripEvents = eligibleTripInstanceEventsShared(tripId, serviceDate, eligibleIndexes);
+      if (debugEnabled) {
+        const now = phaseMarkMs();
+        phaseInstanceEventsMs += now - phaseCursor;
+        phaseCursor = now;
+      }
       if (!tripEvents) continue;
       let tripCandidates: RetainedGtfsSegment[] = [];
       let tripCandidateCount = 0;
@@ -2436,16 +2643,22 @@ export function findGtfsItinerariesWithStats(
       // this trip instance so a citywide set of every candidate key is not
       // retained alongside the graph.
       const seenTripSegments = new Set<string>();
-      for (const projection of materializeTripInstanceLegs(tripEvents.events, {
+      const realtimeUpdate = tripEvents.realtimeUpdate;
+      // "Was any stop between these two updated?" answered from one prefix sum per trip
+      // instance, instead of slicing and scanning that interval for every candidate edge.
+      let updatedPrefix: Int32Array | undefined;
+      if (realtimeUpdate && tripEvents.datedStops) {
+        const datedStops = tripEvents.datedStops;
+        const prefix = new Int32Array(datedStops.length + 1);
+        for (let index = 0; index < datedStops.length; index++) {
+          prefix[index + 1] = (prefix[index] ?? 0) + (datedStops[index]?.updated ? 1 : 0);
+        }
+        updatedPrefix = prefix;
+      }
+      visitTripInstanceLegs(tripEvents.events, {
         maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
         canBelongToDirectOnlyJourney,
-      })) {
-        if (projection.kind === 'omitted-beyond-window') {
-          // Preserve the partial-search signal for omitted, potentially useful legs.
-          segmentGraphTruncated = true;
-          continue;
-        }
-        const { fromCursor, toCursor, fromEvent, toEvent } = projection;
+      }, (fromCursor, toCursor, fromEvent, toEvent) => {
         const fromIndex = fromEvent.stopIndex;
         const toIndex = toEvent.stopIndex;
         const from = fromEvent.stopTime;
@@ -2456,13 +2669,13 @@ export function findGtfsItinerariesWithStats(
         const scheduledArrivalAt = toEvent.scheduledArrivalAt;
         const departureAt = fromEvent.departureAt;
         const arrivalAt = toEvent.arrivalAt;
-        if (!fromContext || !toContext || !scheduledDepartureAt || !scheduledArrivalAt || !departureAt || !arrivalAt) continue;
+        if (!fromContext || !toContext || !scheduledDepartureAt || !scheduledArrivalAt || !departureAt || !arrivalAt) return;
           // A duplicate loop-route segment is defined by the same stops and
           // departure instant. Avoid formatting an ISO timestamp for every
           // candidate edge; the numeric epoch value is an identical key with
           // substantially less allocation in dense feeds.
           const key = `${from.stopId}:${to.stopId}:${departureAt.getTime()}`;
-          if (seenTripSegments.has(key)) continue;
+          if (seenTripSegments.has(key)) return;
           seenTripSegments.add(key);
           const candidate: RetainedGtfsSegment = {
             providerId: provider?.id ?? input.providerId,
@@ -2477,15 +2690,20 @@ export function findGtfsItinerariesWithStats(
             scheduledArrivalAt,
             departureAt,
             arrivalAt,
-            ...(tripEvents.realtimeUpdate && tripEvents.datedStops?.slice(fromIndex, toIndex + 1).some((stop) => stop.updated)
-              ? { realtimeUpdatedAt: tripEvents.realtimeUpdate.updatedAt } : {}),
-            ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
-            ...(to.sourceZoneId ? { destinationZoneId: to.sourceZoneId } : {}),
           };
+          // Optional fields are assigned, not spread: three conditional spreads each
+          // allocated a throwaway object for every candidate, and one search generates
+          // on the order of 1.9 million of them against a 100 000-segment graph budget.
+          if (realtimeUpdate && updatedPrefix
+            && (updatedPrefix[toIndex + 1] ?? 0) - (updatedPrefix[fromIndex] ?? 0) > 0) {
+            candidate.realtimeUpdatedAt = realtimeUpdate.updatedAt;
+          }
+          if (from.sourceZoneId) candidate.originZoneId = from.sourceZoneId;
+          if (to.sourceZoneId) candidate.destinationZoneId = to.sourceZoneId;
           tripCandidateCount++;
           if (!boundedTripCandidates && tripCandidates.length < graphSegmentLimitPerRoute) {
             tripCandidates.push(candidate);
-            continue;
+            return;
           }
           if (!boundedTripCandidates) {
             boundedTripCandidates = new BoundedBestK(graphSegmentLimitPerRoute, compareTripSegments);
@@ -2493,6 +2711,14 @@ export function findGtfsItinerariesWithStats(
             tripCandidates = [];
           }
           boundedTripCandidates.consider(candidate);
+      }, () => {
+        // Preserve the partial-search signal for omitted, potentially useful legs.
+        segmentGraphTruncated = true;
+      });
+      if (debugEnabled) {
+        const now = phaseMarkMs();
+        phasePairVisitationMs += now - phaseCursor;
+        phaseCursor = now;
       }
       if (boundedTripCandidates) {
         tripCandidates = boundedTripCandidates.toSortedArray();
@@ -2506,21 +2732,21 @@ export function findGtfsItinerariesWithStats(
         const overflowCapacity = Math.min(MAX_ROUTE_OVERFLOW_SEGMENTS, graphSegmentLimitPerRoute);
         const overflow = overflowSegmentsByRoute.get(trip.routeId)
           ?? new BoundedBestK<RetainedGtfsSegment>(overflowCapacity, compareTripSegments);
+        const earliestDepartureMs = input.earliestDeparture.getTime();
+        let canBoardFromOrigin = false;
+        let canAlightAtDestination = false;
         for (const candidate of tripCandidates) {
-          const startsAtOrigin = originStopIds.has(candidate.originContext.details.id);
-          const canCatchOrigin = startsAtOrigin && candidate.departureAt.getTime()
-            >= input.earliestDeparture.getTime()
+          const canCatchOrigin = originStopIds.has(candidate.originContext.details.id)
+            && candidate.departureAt.getTime() >= earliestDepartureMs
               + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
           const endsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
           if (canCatchOrigin || endsAtDestination) overflow.consider(candidate);
+          canBoardFromOrigin ||= canCatchOrigin;
+          canAlightAtDestination ||= endsAtDestination;
         }
         overflowSegmentsByRoute.set(trip.routeId, overflow);
         segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
         const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
-        const canBoardFromOrigin = tripCandidates.some((candidate) => originStopIds.has(candidate.originContext.details.id)
-          && candidate.departureAt.getTime() >= input.earliestDeparture.getTime()
-            + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000);
-        const canAlightAtDestination = tripCandidates.some((candidate) => destinationStopIds.has(candidate.destinationContext.details.id));
         // Endpoint coverage is a property of the retained trip group, which
         // may offer different boarding/alighting alternatives on loop routes.
         const retentionTier = canBoardFromOrigin && canAlightAtDestination ? 0
@@ -2534,17 +2760,30 @@ export function findGtfsItinerariesWithStats(
         // continues from them toward the destination). Within the bounded
         // route budget, reserve priority for endpoint trips that actually
         // connect to the opposite query frontier before hashing alternatives.
-        const connectsOppositeQueryFrontier = tripCandidates.some((candidate) => {
-          const candidateStartsAtOrigin = originStopIds.has(candidate.originContext.details.id)
-            && candidate.departureAt.getTime() >= input.earliestDeparture.getTime()
-              + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
-          const candidateEndsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
-          return (candidateStartsAtOrigin && hasNextEvent(candidate, minimumTransferBufferSeconds))
-            || (candidateEndsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds));
-        });
-        const temporallyConnectsQueryEnds = tripCandidates.some((candidate) =>
-          hasPriorEvent(candidate, minimumTransferBufferSeconds)
-          && hasNextEvent(candidate, minimumTransferBufferSeconds));
+        // The two probes are existentials over this same candidate list and
+        // only one of them is ever read by `retentionPriorityTier`, so the
+        // unused probe is skipped and the used one stops at the first hit.
+        let connectsOppositeQueryFrontier = false;
+        let temporallyConnectsQueryEnds = false;
+        if (retentionTier !== 0) {
+          for (const candidate of tripCandidates) {
+            if (retentionTier < 3) {
+              const candidateStartsAtOrigin = originStopIds.has(candidate.originContext.details.id)
+                && candidate.departureAt.getTime() >= earliestDepartureMs
+                  + Math.ceil(candidate.originContext.distanceToOriginStopMeters / 1.25) * 1000;
+              const candidateEndsAtDestination = destinationStopIds.has(candidate.destinationContext.details.id);
+              if ((candidateStartsAtOrigin && hasNextEvent(candidate, minimumTransferBufferSeconds))
+                || (candidateEndsAtDestination && hasPriorEvent(candidate, minimumTransferBufferSeconds))) {
+                connectsOppositeQueryFrontier = true;
+                break;
+              }
+            } else if (hasPriorEvent(candidate, minimumTransferBufferSeconds)
+              && hasNextEvent(candidate, minimumTransferBufferSeconds)) {
+              temporallyConnectsQueryEnds = true;
+              break;
+            }
+          }
+        }
         const retentionPriorityTier = retentionTier === 0 ? 0
           : retentionTier < 3 ? connectsOppositeQueryFrontier ? 1 : 3
             : temporallyConnectsQueryEnds ? 2 : 4;
@@ -2569,6 +2808,12 @@ export function findGtfsItinerariesWithStats(
       }
     }
   }
+  if (debugEnabled) {
+    const now = phaseMarkMs();
+    phaseRetentionMs += now - phaseCursor;
+    phaseTripLoopMs = now - tripLoopStartMs;
+  }
+  const selectionStartMs = debugEnabled ? phaseMarkMs() : 0;
   const selectedSegmentsByRoute = new Map<string, RetainedGtfsSegment[]>();
   for (const [routeId, trips] of segmentsByRoute) {
     const selected = trips.flatMap((trip) => trip.segments);
@@ -2667,6 +2912,9 @@ export function findGtfsItinerariesWithStats(
       .slice(0, 10)
     : undefined;
   debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
+    phaseTripLoopMs, phaseTripPrologueMs, phaseInstanceRetentionMs,
+    phaseInstanceEventsMs, phasePairVisitationMs, phaseRetentionMs,
+    phaseSelectionMs: debugEnabled ? phaseMarkMs() - selectionStartMs : 0,
     serviceDates: serviceDates.size, corridorStops: corridorStops.size,
     candidateRouteCount, graphRoutesWithCandidates: segmentsByRoute.size,
     graphRoutesAtLimit: [...selectedSegmentsByRoute].filter(([routeId, routeSegments]) => routeSegments.length === graphSegmentBudgetByRoute.get(routeId)).length,
@@ -3474,19 +3722,22 @@ export function getCachedGtfsTimetableStats(): { entries: number; estimatedBytes
   return { entries: feedCache.size, estimatedBytes: feedCache.weight };
 }
 
-// Parsed JS objects use substantially more memory than their source CSV. This
-// deliberately conservative estimate accounts for map entries and per-row
-// objects; it is a cache bound, not a claim about exact process RSS.
+// Parsed JS objects use substantially more memory than their source CSV. These
+// per-record weights come from measuring heap retention of the three largest
+// live Ukrainian feeds against this formula (Lvivavtodor 426 685 stop_time rows =
+// 114 MB, Kyivpastrans 103 533 rows = 35 MB, Ukrzaliznytsya 468 960 shape points
+// = 33 MB), so the budget tracks real RSS instead of overstating it ~2x and
+// pushing hot feeds out. It is still a cache bound, not a claim about exact RSS.
 function estimateGtfsFeedCacheBytes(feed: GtfsTimetableFeed): number {
   let stopTimeRows = 0;
   for (const rows of feed.stopTimes.values()) stopTimeRows += rows.length;
   let shapePoints = 0;
   for (const points of feed.shapes?.values() ?? []) shapePoints += points.length;
-  const retainedRecords = stopTimeRows * 512
+  const retainedRecords = stopTimeRows * 272
     + feed.stops.size * 768
     + feed.stopTimesByStop.size * 192
     + feed.trips.size * 512
-    + shapePoints * 48
+    + shapePoints * 72
     + feed.routes.size * 768
     + feed.calendars.size * 512
     + (feed.transfers?.length ?? 0) * 512;

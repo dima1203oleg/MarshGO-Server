@@ -64,12 +64,20 @@ export const JOURNEY_SEARCH_TRANSIT_MODES: readonly TransitJourneyMode[] = [
   'BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO',
 ];
 
+/**
+ * One bound for every place label a journey can carry — search, offers, demands
+ * and navigation destinations all store the string the address picker returns,
+ * so a limit that is narrower than another endpoint's rejects a trip the user
+ * was just allowed to search for.
+ */
+export const MAX_PLACE_NAME_LENGTH = 300;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function parsePlace(value: unknown, name: string): JourneySearchRequest['origin'] {
-  if (!isRecord(value) || typeof value.name !== 'string' || value.name.trim().length < 1 || value.name.trim().length > 160
+  if (!isRecord(value) || typeof value.name !== 'string' || value.name.trim().length < 1 || value.name.trim().length > MAX_PLACE_NAME_LENGTH
     || !Array.isArray(value.coordinates) || value.coordinates.length !== 2) {
     throw new TypeError(`${name} must include a name and [longitude, latitude] coordinates`);
   }
