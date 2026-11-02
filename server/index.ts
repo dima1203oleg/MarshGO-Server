@@ -23,7 +23,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_SEARCH_LIMIT, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, resolveTransitCandidateBudget, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
@@ -3074,13 +3074,14 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   }
   let gtfsWorkerSearch: Awaited<ReturnType<typeof gtfsSearchWorker.search>> = { descriptors: [], errors: [], searches: [] };
   let transitSearchFailed = false;
+  const transitCandidateBudget = resolveTransitCandidateBudget(process.env.JOURNEY_TRANSIT_CANDIDATE_LIMIT);
   try {
     if (eligibleGtfsProviders.length > 0 || metroSources) {
       gtfsWorkerSearch = await gtfsSearchWorker.search({
         providerId: 'worker', providerName: 'worker', origin: search.origin.coordinates, destination: search.destination.coordinates,
         earliestDeparture: search.departureAt,
         latestDeparture: new Date(search.departureAt.getTime() + (routeDistanceMeters > 30_000 ? Math.min(maximumSearchDurationSeconds, 24 * 3600) * 1000 : 120 * 60_000)),
-        limit: MAX_GTFS_SEARCH_LIMIT,
+        limit: transitCandidateBudget,
         maximumJourneySeconds: maximumSearchDurationSeconds,
         maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
         maximumWaitSeconds: routeDistanceMeters > 30_000
@@ -3567,16 +3568,16 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
   }
   // Keep the pre-cap size: selectGtfsCandidatesForCrossProviderSearch below rewrites the pool to
-  // MAX_GTFS_SEARCH_LIMIT, the same value the worker is limited to, and the counters must show
-  // how many chains were really generated.
+  // the configured transit budget, the same value the worker is limited to, and the completeness
+  // counters must show how many chains were really generated.
   const generatedTransitCandidateCount = scheduledCandidates.length;
-  if (scheduledCandidates.length > MAX_GTFS_SEARCH_LIMIT) candidateGenerationTruncated = true;
+  if (scheduledCandidates.length > transitCandidateBudget) candidateGenerationTruncated = true;
   const crossProviderRankingContext: JourneyOption[] = [
     ...candidates,
     ...communityTransitCandidates,
     ...micromobilityCandidates,
   ];
-  scheduledCandidates = selectGtfsCandidatesForCrossProviderSearch(scheduledCandidates, MAX_GTFS_SEARCH_LIMIT, crossProviderRankingContext);
+  scheduledCandidates = selectGtfsCandidatesForCrossProviderSearch(scheduledCandidates, transitCandidateBudget, crossProviderRankingContext);
   const transitRouteChainKey = (itinerary: GtfsItinerary) => {
     const routes: string[] = [];
     for (const segment of itinerary.segments) {
