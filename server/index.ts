@@ -3100,6 +3100,16 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     // The worker rejecting means no transit provider was searched at all; the corridor says
     // nothing about provider coverage, so this must not degrade into "no routes here".
     transitSearchFailed = true;
+    // The passenger-visible message stays generic, but the reason must be observable: without
+    // it a worker that searched 100 itineraries and then threw looks like an empty corridor.
+    console.log(JSON.stringify({
+      level: 'warn',
+      event: 'journey.transit_search_failed',
+      errorName: error instanceof Error ? error.name : 'unknown',
+      errorMessage: error instanceof Error ? error.message : String(error),
+      providers: eligibleGtfsProviders.length,
+      candidateBudget: transitCandidateBudget,
+    }));
     providerErrors.push(`GTFS-пошук тимчасово недоступний${error instanceof Error && error.message.includes('capacity') ? ': черга заповнена' : ''}; інші типи маршрутів перевіряються окремо`);
   }
   const mergedFeedGroups: GtfsWorkerGroup[] = gtfsWorkerSearch.descriptors;
