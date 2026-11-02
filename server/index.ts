@@ -23,15 +23,16 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, resolveTransitCandidateBudget, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePrices } from './journey/scoring';
+import { buildSearchCompleteness } from './journey/searchCompleteness';
 import { journeyTransportTypeSelected, type JourneyLegMode, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
@@ -3056,7 +3057,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     if (!stations || !route || scheduleSources.length < 3) throw new Error('Київські джерела станцій, геометрії, розкладу або пересадок не зареєстровані чи вимкнені');
     return { stationSource: stations, routeSource: route, scheduleSources };
   })() : null;
-  type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary, 'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified'>>;
+  type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary,
+    'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified' | 'walkingRoutesUnconfirmed'>>;
   const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
     if (!itinerary.fare || search.passengers === 1) return itinerary;
     return { ...itinerary, fare: scaleGtfsFareForPassengers(itinerary.fare, search.passengers) };
@@ -3072,13 +3074,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
   }
   let gtfsWorkerSearch: Awaited<ReturnType<typeof gtfsSearchWorker.search>> = { descriptors: [], errors: [], searches: [] };
+  let transitSearchFailed = false;
+  const transitCandidateBudget = resolveTransitCandidateBudget(process.env.JOURNEY_TRANSIT_CANDIDATE_LIMIT);
   try {
     if (eligibleGtfsProviders.length > 0 || metroSources) {
       gtfsWorkerSearch = await gtfsSearchWorker.search({
         providerId: 'worker', providerName: 'worker', origin: search.origin.coordinates, destination: search.destination.coordinates,
         earliestDeparture: search.departureAt,
         latestDeparture: new Date(search.departureAt.getTime() + (routeDistanceMeters > 30_000 ? Math.min(maximumSearchDurationSeconds, 24 * 3600) * 1000 : 120 * 60_000)),
-        limit: 100,
+        limit: transitCandidateBudget,
         maximumJourneySeconds: maximumSearchDurationSeconds,
         maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
         maximumWaitSeconds: routeDistanceMeters > 30_000
@@ -3093,6 +3097,19 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         feedUrl: provider.feed_url, ...(provider.realtime_url ? { realtimeUrl: provider.realtime_url } : {}) })), metroSources);
     }
   } catch (error) {
+    // The worker rejecting means no transit provider was searched at all; the corridor says
+    // nothing about provider coverage, so this must not degrade into "no routes here".
+    transitSearchFailed = true;
+    // The passenger-visible message stays generic, but the reason must be observable: without
+    // it a worker that searched 100 itineraries and then threw looks like an empty corridor.
+    console.log(JSON.stringify({
+      level: 'warn',
+      event: 'journey.transit_search_failed',
+      errorName: error instanceof Error ? error.name : 'unknown',
+      errorMessage: error instanceof Error ? error.message : String(error),
+      providers: eligibleGtfsProviders.length,
+      candidateBudget: transitCandidateBudget,
+    }));
     providerErrors.push(`GTFS-пошук тимчасово недоступний${error instanceof Error && error.message.includes('capacity') ? ': черга заповнена' : ''}; інші типи маршрутів перевіряються окремо`);
   }
   const mergedFeedGroups: GtfsWorkerGroup[] = gtfsWorkerSearch.descriptors;
@@ -3125,20 +3142,24 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const previous = itinerary.segments[index];
       const next = itinerary.segments[index + 1];
       if (!previous || !next || itinerary.transferInSeat[index] || meters <= 0 || itinerary.transferWalkingGeometries[index]) return null;
-      return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates, walkingRoutingUrl, routeBudget);
+      return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates,
+        walkingEndpointFor(previous.destinationStop.coordinates, next.originStop.coordinates), routeBudget);
     });
     const [access, egress, ...transfers] = await Promise.all([
       first.distanceToOriginStopMeters > 0
-        ? routePedestrianPath(origin, first.originStop.coordinates, walkingRoutingUrl, routeBudget) : null,
+        ? routePedestrianPath(origin, first.originStop.coordinates,
+          walkingEndpointFor(origin, first.originStop.coordinates), routeBudget) : null,
       last.distanceFromDestinationStopMeters > 0
-        ? routePedestrianPath(last.destinationStop.coordinates, destination, walkingRoutingUrl, routeBudget) : null,
+        ? routePedestrianPath(last.destinationStop.coordinates, destination,
+          walkingEndpointFor(last.destinationStop.coordinates, destination), routeBudget) : null,
       ...transferRequests,
     ]);
-    const missingRequiredPath = (first.distanceToOriginStopMeters > 0 && !access)
+    // A carpool pickup has no timetable to fall back on: an unmeasured walk to the
+    // meeting point can make the whole combination impossible, so it stays hidden.
+    if (requireMeasuredWalks && ((first.distanceToOriginStopMeters > 0 && !access)
       || (last.distanceFromDestinationStopMeters > 0 && !egress)
       || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
-        && !itinerary.transferWalkingGeometries[index] && !transfers[index]);
-    if (missingRequiredPath) return null;
+        && !itinerary.transferWalkingGeometries[index] && !transfers[index]))) return null;
     const effectiveMaxAccessMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS;
     const effectiveMaxEgressMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS;
     return applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
@@ -3180,18 +3201,18 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   if (walkingRoutingUrl) {
     const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary) => {
       const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, search.destination.coordinates, walkingRouteBudget, false);
-      if (!routed && walkingRouteBudget.remaining > 0) pedestrianRoutesUnavailable = true;
       if (!routed) {
         pedestrianCandidatesRejected = true;
         return null;
       }
+      if (routed.walkingRoutesUnconfirmed && walkingRouteBudget.remaining > 0) pedestrianRoutesUnavailable = true;
       return routed;
     }));
     scheduledCandidates = routedCandidates.filter((itinerary): itinerary is SearchItinerary => itinerary !== null)
       .filter((itinerary) => (search.preferences.maxWalkingMeters === undefined || itinerary.walkingMeters <= search.preferences.maxWalkingMeters)
         && (search.preferences.maxTotalDurationSeconds === undefined || itinerary.durationSeconds <= search.preferences.maxTotalDurationSeconds));
     if (pedestrianRoutesUnavailable) {
-      providerErrors.push('Пішохідний маршрутизатор не повернув підтверджений шлях для частини варіантів; ці варіанти приховано.');
+      providerErrors.push('Пішохідний маршрутизатор не повернув підтверджений шлях для частини варіантів; їхні піші ділянки залишено як оцінку.');
     }
     if (pedestrianCandidatesRejected) {
       providerErrors.push('Частину варіантів відхилено: фактичний час або відстань пішохідного шляху не дозволяє здійснити маршрут.');
@@ -3561,13 +3582,17 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerErrors.push(`Пішохідний маршрутизатор обмежив перевірку комбінацій ${communityWalkingBudget.limit} шляхами; частину варіантів не перевірено.`);
     }
   }
-  if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
+  // Keep the pre-cap size: selectGtfsCandidatesForCrossProviderSearch below rewrites the pool to
+  // the configured transit budget, the same value the worker is limited to, and the completeness
+  // counters must show how many chains were really generated.
+  const generatedTransitCandidateCount = scheduledCandidates.length;
+  if (scheduledCandidates.length > transitCandidateBudget) candidateGenerationTruncated = true;
   const crossProviderRankingContext: JourneyOption[] = [
     ...candidates,
     ...communityTransitCandidates,
     ...micromobilityCandidates,
   ];
-  scheduledCandidates = selectGtfsCandidatesForCrossProviderSearch(scheduledCandidates, 100, crossProviderRankingContext);
+  scheduledCandidates = selectGtfsCandidatesForCrossProviderSearch(scheduledCandidates, transitCandidateBudget, crossProviderRankingContext);
   const transitRouteChainKey = (itinerary: GtfsItinerary) => {
     const routes: string[] = [];
     for (const segment of itinerary.segments) {
@@ -3622,7 +3647,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const blockedProviders = [
     ...canonicalRouteTypes.filter((type) => !routePlannerTypes.has(type))
       .map((type) => `transportType:${type}:no-routed-provider-in-corridor`),
-    ...(!walkingRoutingUrl ? ['door-to-door-walking:requires-WALKING_ROUTING_URL'] : []),
+    ...(!walkingRoutingUrl && !process.env.WALKING_ROUTING_URLS?.trim() ? ['door-to-door-walking:requires-WALKING_ROUTING_URL'] : []),
     'walking-transfers-between-unmatched-stops',
     'community-intermediate-pickup:requires-explicit-driver-approved-stop',
   ];
@@ -4194,12 +4219,29 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     candidateGenerationTruncated,
     providerErrorCount: providerErrors.length,
     unsupportedPreferenceCount: unsupportedPreferences.length,
-    scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0 && !walkingRoutingUrl,
+    scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0
+      && (!walkingRoutingUrl || pedestrianRoutesUnavailable),
   });
   const truncationState = getJourneySearchTruncationState({
     candidateGenerationTruncated,
     resultSamplingTruncated,
     rankedAlternativesOmitted: paretoCandidates.some((candidate) => !selectedCandidateIds.has(candidate.id)),
+  });
+  // A realtime fallback still produced schedule-based results, so it is not a failed provider.
+  const failedTransitProviderIds = new Set(gtfsWorkerSearch.errors
+    .filter((error) => error.kind !== 'realtime' && error.providerId)
+    .map((error) => error.providerId as string));
+  const completeness = buildSearchCompleteness({
+    providersQueried: eligibleGtfsProviders.length,
+    providersFailed: failedTransitProviderIds.size,
+    routeTypesInCorridor: routePlannerTypes,
+    requestedRouteTypes: search.preferences.allowedTransportTypes,
+    candidatesGenerated: generatedTransitCandidateCount + candidates.length + communityTransitCandidates.length + micromobilityCandidates.length,
+    candidatesValidated: rankedCandidates.length,
+    candidatesDeduplicated: paretoCandidates.length,
+    resultsReturned: journeys.length,
+    searchTruncated: Object.values(truncationState).some(Boolean),
+    transitSearchFailed,
   });
   res.json({ data: {
     journeys,
@@ -4210,6 +4252,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     returnedCount: journeys.length,
     alternativeLimitPerStrategy,
     gtfsTruncation,
+    completeness,
     ...truncationState,
     partial: partialReasons.length > 0,
     partialReasons,

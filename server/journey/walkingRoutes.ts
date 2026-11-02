@@ -13,10 +13,13 @@ export type WalkingRoutedItinerary = GtfsItinerary & {
   accessWalk: WalkingRoutePath | null;
   egressWalk: WalkingRoutePath | null;
   transferWalks: Array<WalkingRoutePath | null>;
-  walkingRoutesVerified: true;
+  walkingRoutesVerified: boolean;
+  walkingRoutesUnconfirmed: boolean;
 };
 
 const WALKING_ROUTE_TIMEOUT_MS = 1500;
+/** Same pace the timetable uses for an unmeasured walk, so a degraded leg stays comparable. */
+const ESTIMATED_WALKING_SPEED_METERS_PER_SECOND = 1.25;
 const WALKING_ROUTE_CACHE_TTL_MS = 5 * 60_000;
 const WALKING_ROUTE_FAILURE_TTL_MS = 15_000;
 const MAX_WALKING_ROUTE_CACHE_ENTRIES = 20_000;
@@ -25,6 +28,48 @@ export const MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH = 32;
 type CachedRoute = { expiresAt: number; value: Promise<WalkingRoutePath | null> };
 const routeCache = new Map<string, CachedRoute>();
 const inFlightRouteRequests = new Map<string, Promise<WalkingRoutePath | null>>();
+
+type WalkingEndpointRule = { bbox: [number, number, number, number]; url: string };
+let walkingEndpointCache: { raw: string; rules: WalkingEndpointRule[] } | null = null;
+
+function walkingEndpointRules(): WalkingEndpointRule[] {
+  const raw = process.env.WALKING_ROUTING_URLS?.trim();
+  if (!raw) return [];
+  if (walkingEndpointCache?.raw === raw) return walkingEndpointCache.rules;
+  let rules: WalkingEndpointRule[] = [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) rules = parsed.flatMap((item): WalkingEndpointRule[] => {
+      const rule = item as { bbox?: unknown; url?: unknown } | null;
+      const bbox = rule?.bbox;
+      const url = rule?.url;
+      if (!Array.isArray(bbox) || bbox.length !== 4) return [];
+      if (!bbox.every((value) => typeof value === 'number' && Number.isFinite(value))) return [];
+      if (typeof url !== 'string' || !url.trim()) return [];
+      return [{ bbox: bbox as [number, number, number, number], url: url.trim() }];
+    });
+  } catch {
+    rules = [];
+  }
+  walkingEndpointCache = { raw, rules };
+  return rules;
+}
+
+function bboxContains(bbox: [number, number, number, number], point: [number, number]): boolean {
+  return point[0] >= bbox[0] && point[0] <= bbox[2] && point[1] >= bbox[1] && point[1] <= bbox[3];
+}
+
+/**
+ * A foot graph covers one area only. When a configured graph set exists, a walk whose endpoints
+ * are not inside the same graph must not reach a router at all: OSRM snaps to the nearest edge
+ * anywhere on its graph and answers `Ok` with distance 0, which cannot be told apart from a
+ * genuine zero-length walk — the leg then loses its geometry without any visible reason.
+ */
+export function walkingEndpointFor(from: [number, number], to?: [number, number]): string | undefined {
+  const rules = walkingEndpointRules();
+  if (!rules.length) return process.env.WALKING_ROUTING_URL;
+  return rules.find(({ bbox }) => bboxContains(bbox, from) && (!to || bboxContains(bbox, to)))?.url;
+}
 
 export interface WalkingRouteBudget {
   readonly limit: number;
@@ -45,8 +90,8 @@ function coordinateKey(point: [number, number]): string {
 
 /**
  * Route a walking connection through a configured OSRM-compatible foot profile.
- * A missing provider or failed route is represented as null; callers must not
- * convert that into a direct-line route.
+ * A missing provider or failed route is represented as null; callers may keep
+ * the timetable's straight-line estimate only while labelling it unconfirmed.
  */
 export async function routePedestrianPath(
   from: [number, number],
@@ -92,6 +137,11 @@ export async function routePedestrianPath(
  * Replace GTFS's explicitly estimated first/last-mile and fallback transfer
  * walks with routed pedestrian paths. Re-check every affected timetable
  * connection because a real foot route can take longer than a straight line.
+ *
+ * A leg the router could not confirm keeps the timetable's own straight-line
+ * estimate and is reported through `walkingRoutesUnconfirmed`; dropping the
+ * whole journey here would hide a connection that is genuinely available,
+ * which is worse than labelling one of its walks as an estimate.
  */
 export function applyRoutedWalkingPaths(
   itinerary: GtfsItinerary,
@@ -102,18 +152,21 @@ export function applyRoutedWalkingPaths(
   const last = itinerary.segments.at(-1);
   if (!first || !last || routes.transfers.length !== itinerary.transferWalkingMeters.length) return null;
 
-  const accessMeters = routes.access?.distanceMeters ?? 0;
-  const accessSeconds = routes.access?.durationSeconds ?? 0;
-  const egressMeters = routes.egress?.distanceMeters ?? 0;
-  const egressSeconds = routes.egress?.durationSeconds ?? 0;
-  if ((first.distanceToOriginStopMeters > 0 && !routes.access)
-    || (last.distanceFromDestinationStopMeters > 0 && !routes.egress)
-    || accessMeters > limits.maximumAccessMeters || egressMeters > limits.maximumEgressMeters) return null;
+  const accessMeters = routes.access?.distanceMeters ?? first.distanceToOriginStopMeters;
+  const accessSeconds = routes.access?.durationSeconds
+    ?? Math.ceil(first.distanceToOriginStopMeters / ESTIMATED_WALKING_SPEED_METERS_PER_SECOND);
+  const egressMeters = routes.egress?.distanceMeters ?? last.distanceFromDestinationStopMeters;
+  const egressSeconds = routes.egress?.durationSeconds
+    ?? Math.ceil(last.distanceFromDestinationStopMeters / ESTIMATED_WALKING_SPEED_METERS_PER_SECOND);
+  const accessUnconfirmed = first.distanceToOriginStopMeters > 0 && !routes.access;
+  const egressUnconfirmed = last.distanceFromDestinationStopMeters > 0 && !routes.egress;
+  if (accessMeters > limits.maximumAccessMeters || egressMeters > limits.maximumEgressMeters) return null;
   if (first.departureAt.getTime() < itinerary.departureAt.getTime() + accessSeconds * 1000) return null;
 
   const transferWalkingMeters = [...itinerary.transferWalkingMeters];
   const transferWalkingSeconds = [...itinerary.transferWalkingSeconds];
   const transferWalkingGeometries = [...itinerary.transferWalkingGeometries];
+  let transferUnconfirmed = false;
   let transferWalkingTotal = 0;
   for (let index = 0; index < transferWalkingMeters.length; index++) {
     const previous = itinerary.segments[index];
@@ -125,12 +178,12 @@ export function applyRoutedWalkingPaths(
       transferWalkingMeters[index] = path.distanceMeters;
       transferWalkingSeconds[index] = path.durationSeconds;
       transferWalkingGeometries[index] = path.geometry;
-    } else if (!inSeat && transferWalkingMeters[index] > 0 && !transferWalkingGeometries[index]) {
-      // The configured pedestrian provider failed for an unmodeled transfer.
-      return null;
+    } else if (!inSeat && (transferWalkingMeters[index] ?? 0) > 0 && !transferWalkingGeometries[index]) {
+      // The pedestrian router failed for a transfer that has no modeled path.
+      transferUnconfirmed = true;
     }
     const walkMeters = inSeat ? 0 : transferWalkingMeters[index] ?? 0;
-    const walkSeconds = inSeat ? 0 : transferWalkingSeconds[index] ?? 0;
+    const walkSeconds = inSeat ? 0 : transferWalkingSeconds[index] ?? Math.ceil(walkMeters / ESTIMATED_WALKING_SPEED_METERS_PER_SECOND);
     transferWalkingTotal += walkMeters;
     if (walkMeters > limits.maximumTransferMeters) return null;
     const minimumBuffer = itinerary.transferMinimumBufferSeconds[index] ?? 0;
@@ -140,6 +193,7 @@ export function applyRoutedWalkingPaths(
     if (availableSeconds < requiredSeconds) return null;
   }
 
+  const unconfirmed = accessUnconfirmed || egressUnconfirmed || transferUnconfirmed;
   const arrivalAt = new Date(last.arrivalAt.getTime() + egressSeconds * 1000);
   const waitingSeconds = Math.max(0, Math.ceil((first.departureAt.getTime()
     - itinerary.departureAt.getTime() - accessSeconds * 1000) / 1000))
@@ -162,7 +216,8 @@ export function applyRoutedWalkingPaths(
     accessWalk: routes.access,
     egressWalk: routes.egress,
     transferWalks: routes.transfers,
-    walkingRoutesVerified: true,
+    walkingRoutesVerified: !unconfirmed,
+    walkingRoutesUnconfirmed: unconfirmed,
   };
 }
 

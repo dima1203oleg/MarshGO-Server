@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutePath } from '../server/journey/walkingRoutes';
+import {
+  applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, type WalkingRoutePath,
+} from '../server/journey/walkingRoutes';
 
 const start = Date.parse('2026-10-01T08:00:00Z');
 const at = (seconds: number) => new Date(start + seconds * 1000);
@@ -71,6 +73,39 @@ test('does not fabricate a route when the pedestrian provider is unconfigured', 
   assert.equal(await routePedestrianPath([24, 49], [24.01, 49.01], ''), null);
 });
 
+test('keeps a journey whose access walk the router could not confirm and labels it unverified', () => {
+  const degraded = applyRoutedWalkingPaths(itinerary(), {
+    access: null, egress: path(600, 500), transfers: [path(350, 240)],
+  }, limits);
+
+  assert.ok(degraded);
+  assert.equal(degraded.walkingRoutesVerified, false);
+  assert.equal(degraded.walkingRoutesUnconfirmed, true);
+  assert.equal(degraded.accessWalk, null);
+  assert.equal(degraded.walkingMeters, 1050);
+  assert.equal(degraded.durationSeconds, 3500);
+});
+
+test('keeps an unconfirmed transfer walk as the timetable estimate instead of dropping the journey', () => {
+  const degraded = applyRoutedWalkingPaths(itinerary(), {
+    access: path(500, 480), egress: path(600, 500), transfers: [null],
+  }, limits);
+
+  assert.ok(degraded);
+  assert.equal(degraded.walkingRoutesUnconfirmed, true);
+  assert.deepEqual(degraded.transferWalkingMeters, [250]);
+  assert.deepEqual(degraded.transferWalkingSeconds, [200]);
+  assert.deepEqual(degraded.transferWalkingGeometries, [null]);
+});
+
+test('still drops an itinerary when its unconfirmed walk estimate exceeds the passenger limit', () => {
+  const wide = itinerary();
+  (wide.segments[0] as unknown as { distanceToOriginStopMeters: number}).distanceToOriginStopMeters = 900;
+  assert.equal(applyRoutedWalkingPaths(wide, {
+    access: null, egress: path(100, 90), transfers: [path(100, 90)],
+  }, limits), null);
+});
+
 test('uses the configured OSRM foot profile and preserves its routed geometry', async (t) => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
@@ -135,4 +170,29 @@ test('bounds concurrent provider work and drops excess queued walking paths', as
   assert.equal(routes.filter(Boolean).length, 36);
   assert.equal(fetchCount, 36);
   assert.equal(peakActive, 12);
+});
+
+test('selects the foot graph that covers both endpoints and refuses cross-city or unknown pairs', (t) => {
+  const originalUrl = process.env.WALKING_ROUTING_URL;
+  const originalUrls = process.env.WALKING_ROUTING_URLS;
+  t.after(() => {
+    if (originalUrl === undefined) delete process.env.WALKING_ROUTING_URL; else process.env.WALKING_ROUTING_URL = originalUrl;
+    if (originalUrls === undefined) delete process.env.WALKING_ROUTING_URLS; else process.env.WALKING_ROUTING_URLS = originalUrls;
+  });
+
+  process.env.WALKING_ROUTING_URL = 'http://single:5000/route/v1/foot';
+  delete process.env.WALKING_ROUTING_URLS;
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://single:5000/route/v1/foot');
+
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([
+    { bbox: [23.9, 49.75, 24.2, 49.95], url: 'http://lviv:5000/route/v1/foot' },
+    { bbox: [30.2, 50.25, 30.8, 50.62], url: 'http://kyiv:5000/route/v1/foot' },
+  ]);
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://lviv:5000/route/v1/foot');
+  assert.equal(walkingEndpointFor([30.52, 50.45], [30.48, 50.44]), 'http://kyiv:5000/route/v1/foot');
+  assert.equal(walkingEndpointFor([24.03, 49.84], [30.48, 50.44]), undefined);
+  assert.equal(walkingEndpointFor([31.2, 49.4], [31.21, 49.41]), undefined);
+
+  process.env.WALKING_ROUTING_URLS = 'not-json';
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://single:5000/route/v1/foot');
 });

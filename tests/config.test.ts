@@ -60,11 +60,23 @@ describe('runtime production configuration', () => {
 
   it('fails closed when production map/routing assets or provider settings are incompatible', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, OSRM_URL: 'http://localhost:5000/route' }), /OSRM_URL must be a public HTTPS URL/);
-    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_URL: 'http://localhost:5000/route/v1/foot' }), /WALKING_ROUTING_URL must be a public HTTPS URL/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, MAP_STYLE_MANIFEST_URL: undefined }), /MAP_STYLE_MANIFEST_URL is required/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, ROUTING_PRIMARY: 'here' }), /only configured production routing provider/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, HERE_TRAFFIC_ENABLED: 'true' }), /provider adapter is implemented/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRAFFIC_PROVIDER: 'tomtom' }), /only configured traffic provider/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, GEOCODING_PROVIDER: 'unknown' }), /GEOCODING_PROVIDER must be nominatim or photon/);
+  });
+
+  it('accepts a self-operated pedestrian graph on the private network but never a public plain-HTTP router', () => {
+    for (const url of ['http://marshgo-walk-router:5000/route/v1/foot', 'http://127.0.0.1:5000/route/v1/foot',
+      'http://10.0.5.9:5000/route/v1/foot', 'https://walking.example.com/route/v1/foot']) {
+      validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_URL: url });
+    }
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_URL: 'http://walking.example.com/route/v1/foot' }),
+      /WALKING_ROUTING_URL must use HTTPS unless it points at a private-network service/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_URL: 'http://pass@marshgo-walk-router:5000/route/v1/foot' }),
+      /WALKING_ROUTING_URL must not embed credentials/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_URL: 'ftp://marshgo-walk-router/route/v1/foot' }),
+      /WALKING_ROUTING_URL must use HTTP or HTTPS/);
   });
 });

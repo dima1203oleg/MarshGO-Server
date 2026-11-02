@@ -33,6 +33,22 @@ const MAX_ROUTE_GEOMETRY_POINTS = 500;
 const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
 export const MAX_GTFS_TRANSFERS = 4;
+/** Upper bound for `limit`; callers that ask for more make the search throw, so share this value. */
+export const MAX_GTFS_SEARCH_LIMIT = 100;
+/**
+ * Ceiling for a configured budget. Measured on the Lviv public preview (2026-11-02): a 300
+ * pool costs +6 to +8 s and ~0.3 GiB per request while the Pareto frontier and the journeys
+ * returned stay identical to the 100 pool, so budgets above this are paid for nothing.
+ */
+export const HARD_MAX_GTFS_SEARCH_LIMIT = 300;
+
+/** Operator-tunable transit candidate budget; anything unusable falls back to the default. */
+export function resolveTransitCandidateBudget(rawValue: string | undefined): number {
+  const parsed = Number.parseInt(rawValue ?? '', 10);
+  return Number.isInteger(parsed)
+    ? Math.min(Math.max(parsed, 1), HARD_MAX_GTFS_SEARCH_LIMIT)
+    : MAX_GTFS_SEARCH_LIMIT;
+}
 export const DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS = 180;
 export const DEFAULT_MAXIMUM_WAIT_SECONDS = 4 * 60 * 60;
 export const DEFAULT_MAX_ACCESS_WALKING_METERS = 900;
@@ -1784,7 +1800,7 @@ export function findGtfsItinerariesWithStats(
     || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > 10_000
     || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > 10_000
     || !Number.isFinite(transferRadius) || transferRadius < 0 || transferRadius > 10_000
-    || !Number.isInteger(limit) || limit < 1 || limit > 100
+    || !Number.isInteger(limit) || limit < 1 || limit > HARD_MAX_GTFS_SEARCH_LIMIT
     || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > MAX_GTFS_GRAPH_SEGMENTS
     || !Number.isSafeInteger(maximumGraphSegmentsPerRoute) || maximumGraphSegmentsPerRoute < 1
     || maximumGraphSegmentsPerRoute > MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE) {
