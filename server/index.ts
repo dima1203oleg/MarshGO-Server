@@ -32,6 +32,7 @@ import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePrices } from './journey/scoring';
+import { buildSearchCompleteness } from './journey/searchCompleteness';
 import { journeyTransportTypeSelected, type JourneyLegMode, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
@@ -3561,6 +3562,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       providerErrors.push(`Пішохідний маршрутизатор обмежив перевірку комбінацій ${communityWalkingBudget.limit} шляхами; частину варіантів не перевірено.`);
     }
   }
+  // Keep the pre-cap size: selectGtfsCandidatesForCrossProviderSearch below rewrites the pool
+  // to 100, and the completeness counters must show how many chains were really generated.
+  const generatedTransitCandidateCount = scheduledCandidates.length;
   if (scheduledCandidates.length > 100) candidateGenerationTruncated = true;
   const crossProviderRankingContext: JourneyOption[] = [
     ...candidates,
@@ -4201,6 +4205,21 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     resultSamplingTruncated,
     rankedAlternativesOmitted: paretoCandidates.some((candidate) => !selectedCandidateIds.has(candidate.id)),
   });
+  // A realtime fallback still produced schedule-based results, so it is not a failed provider.
+  const failedTransitProviderIds = new Set(gtfsWorkerSearch.errors
+    .filter((error) => error.kind !== 'realtime' && error.providerId)
+    .map((error) => error.providerId as string));
+  const completeness = buildSearchCompleteness({
+    providersQueried: eligibleGtfsProviders.length,
+    providersFailed: failedTransitProviderIds.size,
+    routeTypesInCorridor: routePlannerTypes,
+    requestedRouteTypes: search.preferences.allowedTransportTypes,
+    candidatesGenerated: generatedTransitCandidateCount + candidates.length + communityTransitCandidates.length + micromobilityCandidates.length,
+    candidatesValidated: rankedCandidates.length,
+    candidatesDeduplicated: paretoCandidates.length,
+    resultsReturned: journeys.length,
+    searchTruncated: Object.values(truncationState).some(Boolean),
+  });
   res.json({ data: {
     journeys,
     requestedStrategy: search.strategy,
@@ -4210,6 +4229,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     returnedCount: journeys.length,
     alternativeLimitPerStrategy,
     gtfsTruncation,
+    completeness,
     ...truncationState,
     partial: partialReasons.length > 0,
     partialReasons,
