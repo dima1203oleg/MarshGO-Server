@@ -118,7 +118,7 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
       try {
         requireWalkingRoutingUrl({ ...environment, WALKING_ROUTING_URL: url }, 'WALKING_ROUTING_URL');
       } catch (error) {
-        throw new Error(`WALKING_ROUTING_URLS: ${error instanceof Error ? error.message : 'invalid url'}`);
+        throw new Error(`WALKING_ROUTING_URLS: ${error instanceof Error ? error.message : 'invalid url'}`, { cause: error });
       }
     }
   }

@@ -94,6 +94,8 @@ API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:auth-security
 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:rendezvous
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:qr-attestation
 stop_api
 
 OSRM_STUB_PORT=3304 node tests/fixtures/osrm-stub.mjs &

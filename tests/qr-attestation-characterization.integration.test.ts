@@ -26,7 +26,15 @@ const decodeClaims = (value: string) => {
   };
 };
 
-describe('POPUTKY-SEC-QR-1 — MarshPass ticket attestation, behaviour as shipped', () => {
+// This suite drives the booking lifecycle over HTTP, so it only has meaning next to a
+// running API. `npm test` runs without one; the managed-API integration job supplies it.
+const apiReachable = await fetch(`${apiUrl}/healthz`, { signal: AbortSignal.timeout(2_000) })
+  .then((response) => response.ok)
+  .catch(() => false);
+
+describe('POPUTKY-SEC-QR-1 — MarshPass ticket attestation, behaviour as shipped', {
+  skip: apiReachable ? false : `no API at ${apiUrl} (run through npm run test:integration)`,
+}, () => {
   it('gates booking boarding by the ticket, but never consumes its nonce', async () => {
     const pool = new pg.Pool({ connectionString: databaseUrl });
     const runId = crypto.randomUUID().slice(0, 8);
