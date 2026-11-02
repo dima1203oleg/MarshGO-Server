@@ -1,16 +1,19 @@
 import { after, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, Server } from 'node:http';
-import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, RoutingUnavailableError } from '../server/routing';
+import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, getWalkingRoute, RoutingUnavailableError } from '../server/routing';
 
 describe('OSRM-compatible routing adapter', () => {
   let server: Server | undefined;
   const originalUrl = process.env.ROUTING_ENGINE_URL;
+  const originalWalkingUrl = process.env.WALKING_ROUTING_URL;
 
   after(async () => {
     if (server?.listening) await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
     if (originalUrl === undefined) delete process.env.ROUTING_ENGINE_URL;
     else process.env.ROUTING_ENGINE_URL = originalUrl;
+    if (originalWalkingUrl === undefined) delete process.env.WALKING_ROUTING_URL;
+    else process.env.WALKING_ROUTING_URL = originalWalkingUrl;
   });
 
   it('parses road geometry, distance, and duration from a local contract fixture', async () => {
@@ -31,12 +34,16 @@ describe('OSRM-compatible routing adapter', () => {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
     process.env.ROUTING_ENGINE_URL = `http://127.0.0.1:${address.port}/route/v1/driving`;
-    assert.deepEqual(await getRoadRoute([23.86, 49.25], [24.03, 49.84]), {
+    const road = await getRoadRoute([23.86, 49.25], [24.03, 49.84]);
+    assert.deepEqual({ ...road, maneuvers: undefined }, {
       geometry: [[23.86, 49.25], [23.95, 49.51], [24.03, 49.84]],
       distanceMeters: 10400,
       durationSeconds: 930,
       legs: [{ distanceMeters: 10400, durationSeconds: 930 }],
+      maneuvers: undefined,
     });
+    // Turn-by-turn steps travel with the road route so navigation can guide and speak them.
+    assert.deepEqual(road.maneuvers?.map((step) => [step.type, step.modifier ?? null, step.streetName ?? null]), [['DEPART', null, null], ['TURN', 'LEFT', 'Highway'], ['ARRIVE', null, null]]);
     const canonical = await calculateCanonicalRoute({ origin: [23.86, 49.25], destination: [24.03, 49.84], profile: { mode: 'CAR' }, requestId: 'route-contract-test' });
     assert.equal(canonical.geometry.encoding, 'polyline6');
     assert.equal(canonical.maneuvers[0].type, 'DEPART');
@@ -71,5 +78,25 @@ describe('OSRM-compatible routing adapter', () => {
   it('does not invent a route when the provider is unavailable', async () => {
     delete process.env.ROUTING_ENGINE_URL;
     await assert.rejects(() => getRoadRoute([23.86, 49.25], [24.03, 49.84]), RoutingUnavailableError);
+  });
+
+  it('uses the configured cached gateway for a real foot-profile route and fails closed when unset', async () => {
+    if (server?.listening) await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+    const requested: string[] = [];
+    server = createServer((request, response) => {
+      requested.push(request.url ?? '');
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ code: 'Ok', routes: [{ distance: 840, duration: 720,
+        geometry: { type: 'LineString', coordinates: [[24,49],[24.001,49.001]] } }] }));
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.WALKING_ROUTING_URL = `http://127.0.0.1:${address.port}/route/v1/foot`;
+    const route = await getWalkingRoute([24,49],[24.001,49.001]);
+    assert.equal(route.distanceMeters, 840);
+    assert.match(requested[0] ?? '', /^\/route\/v1\/foot\/24,49;/);
+    delete process.env.WALKING_ROUTING_URL;
+    await assert.rejects(() => getWalkingRoute([24,49],[24.001,49.001]), RoutingUnavailableError);
   });
 });

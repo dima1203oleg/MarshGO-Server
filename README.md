@@ -14,7 +14,7 @@ npm run db:migrate
 npm run api
 ```
 
-API health endpoints: `GET /healthz` and `GET /readyz`. The versioned REST API is documented in [`docs/API.md`](docs/API.md). The current integrated schema is migration `027`; apply only additive migrations to reviewed databases. See `docs/DATA_MODEL.md` for migration history and known product gaps.
+API health endpoints: `GET /healthz` and `GET /readyz`. The versioned REST API is documented in [`docs/API.md`](docs/API.md). The current candidate branch applies through migration `048`; this was verified on an isolated CI PostGIS database. It has not been rehearsed against an existing/staging data set. Apply only reviewed additive migrations. See `docs/DATA_MODEL.md` for migration history and known product gaps.
 
 ## Verification
 
@@ -30,3 +30,7 @@ Integration tests require only the isolated loopback database `marshgo_e2e` and 
 ## Production status
 
 This repository is application code, not a deployed service. A real SMS sender, production geocoding/routing provider, private object storage, HTTPS host, managed PostgreSQL/PostGIS and Redis, monitoring, backups and recovery drills are required before public release. No secret belongs in this repository. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and [`docs/SECURITY.md`](docs/SECURITY.md).
+
+## Cross-repository audit
+
+The architecture and migration audit is maintained by the MarshGO documentation owner in the [`codex/marshgo-production` audit index](https://github.com/dima1203oleg/MarshGO/tree/codex/marshgo-production/docs/audit). The release is not production-ready until its documented blockers are closed.

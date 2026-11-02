@@ -21,6 +21,7 @@ describe('foreground navigation session API (opt-in local integration test)', { 
   const headers = (userId: string) => ({ 'content-type': 'application/json', 'x-dev-user-id': userId });
   let sessionId = '';
   let offlineSessionId = '';
+  let freeSessionId = '';
   let forwardDemandId = '';
   let reverseDemandId = '';
   let overCapacityDemandId = '';
@@ -48,6 +49,10 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     if (sessionId) {
       await pool.query('DELETE FROM audit_events WHERE entity_id=$1', [sessionId]);
       await pool.query('DELETE FROM navigation_sessions WHERE id=$1', [sessionId]);
+    }
+    if (freeSessionId) {
+      await pool.query('DELETE FROM audit_events WHERE entity_id=$1', [freeSessionId]);
+      await pool.query('DELETE FROM navigation_sessions WHERE id=$1', [freeSessionId]);
     }
     if (offlineSessionId) {
       await pool.query('DELETE FROM audit_events WHERE entity_id=$1', [offlineSessionId]);
@@ -88,12 +93,22 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     assert.equal(duplicate.status, 409);
 
     const hidden = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}`, { headers: headers(passenger) });
-    assert.equal(hidden.status, 403);
-    const forbiddenStart = await fetch(`${apiUrl}/api/v1/navigation/sessions`, {
+    assert.equal(hidden.status, 404);
+    // Navigation is open to every signed-in user; only passenger matching needs a verified vehicle.
+    const plainNavigation = await fetch(`${apiUrl}/api/v1/navigation/sessions`, {
       method: 'POST', headers: headers(passenger),
-      body: JSON.stringify({ origin: [24, 49], destination: [25, 50], destinationName: 'No driver role' }),
+      body: JSON.stringify({ origin: [24, 49], destination: [25, 50], destinationName: 'No vehicle' }),
     });
-    assert.equal(forbiddenStart.status, 403);
+    assert.equal(plainNavigation.status, 201);
+    const plainBody = await plainNavigation.json() as { data: { id: string; matching_vehicle_available: boolean } };
+    assert.equal(plainBody.data.matching_vehicle_available, false);
+    const noVehicleMatching = await fetch(`${apiUrl}/api/v1/navigation/sessions/${plainBody.data.id}/matching`, { method: 'PATCH', headers: headers(passenger), body: JSON.stringify({ enabled: true }) });
+    assert.equal(noVehicleMatching.status, 409);
+    const noRoleInterest = await fetch(`${apiUrl}/api/v1/navigation/sessions/${plainBody.data.id}/matches/refresh`, { method: 'POST', headers: headers(passenger) });
+    assert.equal(noRoleInterest.status, 403, 'candidate search stays a driver action');
+    await fetch(`${apiUrl}/api/v1/navigation/sessions/${plainBody.data.id}/end`, { method: 'POST', headers: headers(passenger) });
+    await pool.query('DELETE FROM audit_events WHERE entity_id=$1', [plainBody.data.id]);
+    await pool.query('DELETE FROM navigation_sessions WHERE id=$1', [plainBody.data.id]);
 
     const fix = await fetch(`${apiUrl}/api/v1/navigation/sessions/${sessionId}/location`, {
       method: 'POST', headers: headers(driver),
@@ -326,5 +341,48 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     assert.equal(expired.rows[0].state, 'ended');
     assert.equal(expired.rows[0].route, null);
     assert.equal(expired.rows[0].destination, null);
+  });
+
+  it('starts without a destination, shows no route or matches, and builds the road route once a destination is chosen', async () => {
+    const active = await fetch(`${apiUrl}/api/v1/navigation/sessions/active`, { headers: headers(driver) });
+    const existing = (await active.json() as { data: { id: string } | null }).data;
+    if (existing) await fetch(`${apiUrl}/api/v1/navigation/sessions/${existing.id}/end`, { method: 'POST', headers: headers(driver) });
+    const created = await fetch(`${apiUrl}/api/v1/navigation/sessions`, { method: 'POST', headers: headers(driver), body: JSON.stringify({ origin: [24, 49] }) });
+    assert.equal(created.status, 201);
+    const body = await created.json() as { data: { id: string; route: unknown; destination_name: string | null; route_distance_m: number | null; matching_vehicle_available: boolean } };
+    freeSessionId = body.data.id;
+    assert.equal(body.data.route, null);
+    assert.equal(body.data.destination_name, null);
+    assert.equal(body.data.route_distance_m, null);
+    assert.equal(body.data.matching_vehicle_available, true);
+
+    const halfDestination = await fetch(`${apiUrl}/api/v1/navigation/sessions`, { method: 'POST', headers: headers(passenger), body: JSON.stringify({ origin: [24, 49], destination: [25, 50] }) });
+    assert.equal(halfDestination.status, 400, 'a destination needs both coordinates and a name');
+
+    const fix = await fetch(`${apiUrl}/api/v1/navigation/sessions/${freeSessionId}/location`, {
+      method: 'POST', headers: headers(driver), body: JSON.stringify({ coordinates: [24, 49], accuracyMeters: 8, capturedAt: new Date().toISOString() }),
+    });
+    assert.equal(fix.status, 200);
+    assert.equal((await fix.json() as { data: { onRoute: boolean } }).data.onRoute, true, 'no route means no deviation');
+
+    assert.equal((await fetch(`${apiUrl}/api/v1/navigation/sessions/${freeSessionId}/matching`, { method: 'PATCH', headers: headers(driver), body: JSON.stringify({ enabled: true }) })).status, 200);
+    const noDestination = await fetch(`${apiUrl}/api/v1/navigation/sessions/${freeSessionId}/matches/refresh`, { method: 'POST', headers: headers(driver) });
+    assert.equal(noDestination.status, 409);
+    assert.equal((await noDestination.json() as { error: { code: string } }).error.code, 'destination_required');
+
+    const invalid = await fetch(`${apiUrl}/api/v1/navigation/sessions/${freeSessionId}/destination`, { method: 'PUT', headers: headers(driver), body: JSON.stringify({ destination: [25, 50] }) });
+    assert.equal(invalid.status, 400);
+    const stranger = await fetch(`${apiUrl}/api/v1/navigation/sessions/${freeSessionId}/destination`, { method: 'PUT', headers: headers(passenger), body: JSON.stringify({ destination: [25, 50], destinationName: 'Not mine' }) });
+    assert.equal(stranger.status, 409, 'another user has no active session of their own to give a destination');
+    const routed = await fetch(`${apiUrl}/api/v1/navigation/sessions/${freeSessionId}/destination`, { method: 'PUT', headers: headers(driver), body: JSON.stringify({ destination: [25, 50], destinationName: 'Chosen later' }) });
+    assert.equal(routed.status, 200);
+    const routedBody = await routed.json() as { data: { destination_name: string; route: [number, number][]; route_version: number; opt_in: boolean } };
+    assert.equal(routedBody.data.destination_name, 'Chosen later');
+    assert.ok(routedBody.data.route.length >= 2);
+    assert.equal(routedBody.data.route_version, 2);
+    assert.equal(routedBody.data.opt_in, true, 'the driver keeps their matching choice when the route appears');
+    const matches = await fetch(`${apiUrl}/api/v1/navigation/sessions/${freeSessionId}/matches/refresh`, { method: 'POST', headers: headers(driver) });
+    assert.equal(matches.status, 200);
+    await fetch(`${apiUrl}/api/v1/navigation/sessions/${freeSessionId}/end`, { method: 'POST', headers: headers(driver) });
   });
 });

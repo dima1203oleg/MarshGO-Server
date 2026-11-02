@@ -5,6 +5,8 @@ export type PlaceSuggestion = {
   providerId: string;
 };
 
+export type PlaceBias = { latitude: number; longitude: number };
+
 export class GeocodingUnavailableError extends Error {
   constructor(message = 'Geocoding service is not configured') { super(message); }
 }
@@ -24,7 +26,21 @@ export function parseNominatimSuggestions(payload: unknown): PlaceSuggestion[] {
   });
 }
 
+const reverseCache = new Map<string, { at: number; place: PlaceSuggestion }>();
+const reverseCacheTtlMs = 10 * 60_000;
+
+/** Map-picker pans fire many nearby lookups; a ~100 m grid cache keeps providers within their rate limits. */
 export async function reverseGeocode(latitude: number, longitude: number): Promise<PlaceSuggestion> {
+  const key = `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+  const hit = reverseCache.get(key);
+  if (hit && Date.now() - hit.at < reverseCacheTtlMs) return hit.place;
+  const place = await reverseGeocodeUncached(latitude, longitude);
+  if (reverseCache.size > 500) reverseCache.delete(reverseCache.keys().next().value as string);
+  reverseCache.set(key, { at: Date.now(), place });
+  return place;
+}
+
+async function reverseGeocodeUncached(latitude: number, longitude: number): Promise<PlaceSuggestion> {
   if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180) {
     throw new GeocodingUnavailableError('Reverse geocoding coordinates are invalid');
   }
@@ -51,7 +67,16 @@ export async function reverseGeocode(latitude: number, longitude: number): Promi
   return place;
 }
 
-export async function suggestPlaces(query: string): Promise<PlaceSuggestion[]> {
+/** Nominatim reads viewbox as left,top,right,bottom; without `bounded` it prefers rather than filters, so distant famous places survive. */
+function biasViewbox({ latitude, longitude }: PlaceBias): string {
+  const halfLatitude = 0.09;
+  const halfLongitude = 0.13;
+  return [longitude - halfLongitude, latitude + halfLatitude, longitude + halfLongitude, latitude - halfLatitude]
+    .map((value) => value.toFixed(4))
+    .join(',');
+}
+
+export async function suggestPlaces(query: string, bias?: PlaceBias): Promise<PlaceSuggestion[]> {
   const endpoint = process.env.GEOCODING_ENGINE_URL;
   if (!endpoint) throw new GeocodingUnavailableError();
   let url: URL;
@@ -65,6 +90,7 @@ export async function suggestPlaces(query: string): Promise<PlaceSuggestion[]> {
   url.searchParams.set('countrycodes', 'ua');
   url.searchParams.set('accept-language', 'uk');
   url.searchParams.set('limit', '6');
+  if (bias) url.searchParams.set('viewbox', biasViewbox(bias));
 
   const headers = new Headers({ accept: 'application/json', 'user-agent': 'MARSHGO/1.0 (place search)' });
   const apiKey = process.env.GEOCODING_API_KEY;

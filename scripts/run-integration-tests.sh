@@ -11,6 +11,11 @@ if [[ ! "$DATABASE_HOST" =~ ^(127\.0\.0\.1|localhost|::1)$ || ! "$DATABASE_NAME"
   echo "Refusing integration tests outside loopback marshgo_e2e-prefixed database." >&2
   exit 2
 fi
+REDIS_HOST="$(node -e 'process.stdout.write(new URL(process.argv[1]).hostname)' "$REDIS_URL")"
+if [[ ! "$REDIS_HOST" =~ ^(127\.0\.0\.1|localhost|::1|\[::1\])$ ]]; then
+  echo "Refusing integration tests with a non-loopback Redis URL." >&2
+  exit 2
+fi
 DATABASE_URL="$DATABASE_URL" npm run db:migrate
 
 API_PORT="${API_TEST_PORT:-3306}"
@@ -31,12 +36,14 @@ JOURNEY_TEST_DATABASE_URL="$DATABASE_URL" npm run test:integration:journey
 
 start_api() {
   local routing_url="${1:-}"
-  env NODE_ENV=development AUTH_DEV_BYPASS=true AUTH_DEV_OTP=true \
+  env NODE_ENV=development AUTH_DEV_BYPASS=true AUTH_DEV_OTP=true MOBILITY_HEALTH_DISABLED=true \
     DATABASE_URL="$DATABASE_URL" API_HOST=127.0.0.1 API_PORT="$API_PORT" \
+    MARSHGO_API_TEST_FIXTURE_MODE=1 MARSHGO_GTFS_TEST_FIXTURE_DIR="$PWD/tests/fixtures/gtfs-http" \
+    TRUST_PROXY_HOPS="${API_TEST_TRUST_PROXY_HOPS:-0}" \
     REDIS_URL="$REDIS_URL" API_RATE_LIMIT_PREFIX="${API_TEST_RATE_LIMIT_PREFIX_OVERRIDE:-$RATE_LIMIT_TEST_PREFIX}" \
-    API_RATE_LIMIT_LIMIT="${API_TEST_RATE_LIMIT_LIMIT:-300}" \
+    API_RATE_LIMIT_LIMIT="${API_TEST_RATE_LIMIT_LIMIT:-5000}" \
     API_RATE_LIMIT_WINDOW_MS="${API_TEST_RATE_LIMIT_WINDOW_MS:-900000}" SESSION_SECRET="integration-test-session-secret-32chars" \
-    ROUTING_ENGINE_URL="$routing_url" ./node_modules/.bin/tsx server/index.ts &
+    OSRM_URL="" WALKING_ROUTING_URL="" ROUTING_ENGINE_URL="$routing_url" ./node_modules/.bin/tsx server/index.ts &
   API_PID=$!
   for _ in $(seq 1 60); do
     if curl --fail --silent "$API_URL/healthz" >/dev/null; then return 0; fi
@@ -59,10 +66,11 @@ stop_secondary_api() {
   fi
 }
 start_secondary_api() {
-  env NODE_ENV=development AUTH_DEV_OTP=true DATABASE_URL="$DATABASE_URL" \
+  env NODE_ENV=development AUTH_DEV_OTP=true MOBILITY_HEALTH_DISABLED=true DATABASE_URL="$DATABASE_URL" \
     API_HOST=127.0.0.1 API_PORT="$SECONDARY_API_PORT" REDIS_URL="$REDIS_URL" \
+    TRUST_PROXY_HOPS="${API_TEST_TRUST_PROXY_HOPS:-0}" \
     API_RATE_LIMIT_PREFIX="${API_TEST_RATE_LIMIT_PREFIX_OVERRIDE:-$RATE_LIMIT_TEST_PREFIX}" \
-    API_RATE_LIMIT_LIMIT="${API_TEST_RATE_LIMIT_LIMIT:-300}" API_RATE_LIMIT_WINDOW_MS="${API_TEST_RATE_LIMIT_WINDOW_MS:-900000}" \
+    API_RATE_LIMIT_LIMIT="${API_TEST_RATE_LIMIT_LIMIT:-5000}" API_RATE_LIMIT_WINDOW_MS="${API_TEST_RATE_LIMIT_WINDOW_MS:-900000}" \
     SESSION_SECRET="integration-test-session-secret-32chars" ./node_modules/.bin/tsx server/index.ts &
   SECONDARY_API_PID=$!
   for _ in $(seq 1 60); do
@@ -75,8 +83,19 @@ start_secondary_api() {
 }
 
 start_api
-API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" npm run test:integration:live-journey
+API_TEST_GTFS_FIXTURE=1 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:bookings
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:partners
+# These two suites default to a hand-started dev API, so they were only ever run manually.
+# Binding them to the managed API makes the P0 auth and carpool lifecycles real CI coverage.
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:auth-security
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:rendezvous
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:qr-attestation
 stop_api
 
 OSRM_STUB_PORT=3304 node tests/fixtures/osrm-stub.mjs &
@@ -95,9 +114,9 @@ stop_api
 API_TEST_DATABASE_URL="$DATABASE_URL" API_TEST_RESTART=true API_TEST_RESTART_PORT=3308 \
   npm run test:integration:restart
 
-API_TEST_RATE_LIMIT_PREFIX_OVERRIDE="${RATE_LIMIT_TEST_PREFIX}strict:" \
+API_TEST_TRUST_PROXY_HOPS=1 API_TEST_RATE_LIMIT_PREFIX_OVERRIDE="${RATE_LIMIT_TEST_PREFIX}strict:" \
   API_TEST_RATE_LIMIT_LIMIT=3 API_TEST_RATE_LIMIT_WINDOW_MS=60000 start_api
-API_TEST_RATE_LIMIT_PREFIX_OVERRIDE="${RATE_LIMIT_TEST_PREFIX}strict:" \
+API_TEST_TRUST_PROXY_HOPS=1 API_TEST_RATE_LIMIT_PREFIX_OVERRIDE="${RATE_LIMIT_TEST_PREFIX}strict:" \
   API_TEST_RATE_LIMIT_LIMIT=3 API_TEST_RATE_LIMIT_WINDOW_MS=60000 start_secondary_api
 API_TEST_URL="$API_URL" API_TEST_SECONDARY_URL="$SECONDARY_API_URL" \
   npm run test:integration:rate-limit

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { validateRuntimeConfig } from '../server/config';
+import { getTrustedProxyHops, validateRuntimeConfig } from '../server/config';
 
 const validProductionConfig: NodeJS.ProcessEnv = {
   NODE_ENV: 'production',
+  TRUST_PROXY_HOPS: '1',
   SESSION_SECRET: 'a'.repeat(64),
   CORS_ORIGINS: 'https://marshgo.example,capacitor://localhost',
   SMS_PROVIDER: 'twilio',
@@ -30,9 +31,22 @@ describe('runtime production configuration', () => {
     assert.doesNotThrow(() => validateRuntimeConfig({ NODE_ENV: 'development', AUTH_DEV_OTP: 'true' }));
   });
 
+  it('requires an explicit bounded reverse-proxy hop count in production', () => {
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRUST_PROXY_HOPS: undefined }), /TRUST_PROXY_HOPS is required/);
+    for (const value of ['-1', '6', '1.5', 'true']) assert.throws(() => getTrustedProxyHops({ NODE_ENV: 'development', TRUST_PROXY_HOPS: value }), /integer from 0 to 5/);
+    assert.equal(getTrustedProxyHops({ NODE_ENV: 'development' }), 0);
+    assert.equal(getTrustedProxyHops({ NODE_ENV: 'production', TRUST_PROXY_HOPS: '2' }), 2);
+  });
+
   it('rejects development auth bypass in production', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, AUTH_DEV_BYPASS: 'true' }), /development authentication/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, AUTH_DEV_OTP: 'true' }), /development authentication/);
+  });
+
+  it('rejects non-Twilio SMS providers in production', () => {
+    for (const provider of ['development', 'getotp', '']) {
+      assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, SMS_PROVIDER: provider }), /SMS_PROVIDER=twilio/);
+    }
   });
 
   it('requires strong sessions, explicit secure origins, and real SMS credentials', () => {
@@ -50,5 +64,19 @@ describe('runtime production configuration', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, ROUTING_PRIMARY: 'here' }), /only configured production routing provider/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, HERE_TRAFFIC_ENABLED: 'true' }), /provider adapter is implemented/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRAFFIC_PROVIDER: 'tomtom' }), /only configured traffic provider/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, GEOCODING_PROVIDER: 'unknown' }), /GEOCODING_PROVIDER must be nominatim or photon/);
+  });
+
+  it('accepts a self-operated pedestrian graph on the private network but never a public plain-HTTP router', () => {
+    for (const url of ['http://marshgo-walk-router:5000/route/v1/foot', 'http://127.0.0.1:5000/route/v1/foot',
+      'http://10.0.5.9:5000/route/v1/foot', 'https://walking.example.com/route/v1/foot']) {
+      validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_URL: url });
+    }
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_URL: 'http://walking.example.com/route/v1/foot' }),
+      /WALKING_ROUTING_URL must use HTTPS unless it points at a private-network service/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_URL: 'http://pass@marshgo-walk-router:5000/route/v1/foot' }),
+      /WALKING_ROUTING_URL must not embed credentials/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, WALKING_ROUTING_URL: 'ftp://marshgo-walk-router/route/v1/foot' }),
+      /WALKING_ROUTING_URL must use HTTP or HTTPS/);
   });
 });

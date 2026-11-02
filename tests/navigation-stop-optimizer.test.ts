@@ -65,4 +65,28 @@ describe('multi-passenger navigation stop insertion', () => {
     }));
     assert.equal(plan, null);
   });
+
+  it('matches a rider whose dropoff is the driver destination without sending a zero-length road leg', async () => {
+    const routedPointSets: [number, number][][] = [];
+    const roadRouter = async (points: [number, number][]): Promise<RoadRoute> => {
+      routedPointSets.push(points);
+      for (let index = 1; index < points.length; index += 1) {
+        assert.notDeepEqual(points[index], points[index - 1], 'road router should not receive repeated consecutive waypoints');
+      }
+      return {
+        geometry: points,
+        distanceMeters: 20_000,
+        durationSeconds: 1_000,
+        legs: points.slice(1).map(() => ({ distanceMeters: 10_000, durationSeconds: 500 })),
+      };
+    };
+    const plan = await optimizeStopInsertion({
+      ...base,
+      candidate: { ...base.candidate, dropoff: { placeName: 'Driver destination', coordinates: base.destination } },
+    }, roadRouter);
+
+    assert.ok(plan);
+    assert.equal(plan.stops.at(-1)?.kind, 'dropoff');
+    assert.ok(routedPointSets.every((points) => points.length < 4));
+  });
 });

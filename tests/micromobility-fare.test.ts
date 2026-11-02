@@ -1,0 +1,29 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { micromobilityJourneyFareMinor } from '../server/journey/micromobilityFare';
+import { selectStrategyAlternatives } from '../server/journey/scoring';
+import type { JourneyOption } from '../server/journey/types';
+
+test('micromobility + transit is excluded from CHEAPEST until both fares are known', () => {
+  const partialTransitFare = micromobilityJourneyFareMinor(3_000, null);
+  assert.equal(partialTransitFare, null);
+
+  const journeys: JourneyOption[] = [
+    { id: 'bike+metro', priceMinor: partialTransitFare, durationSeconds: 1_800,
+      transfers: 1, walkingMeters: 250, reliability: null, transferRisk: 0.4, comfort: null,
+      legs: [{ mode: 'BICYCLE' }, { mode: 'METRO' }] },
+    { id: 'known-bus', priceMinor: 4_000, durationSeconds: 2_400,
+      transfers: 0, walkingMeters: 100, reliability: null, transferRisk: 0, comfort: null,
+      legs: [{ mode: 'BUS' }] },
+  ];
+
+  const cheapest = selectStrategyAlternatives(journeys, ['CHEAPEST']);
+  assert.deepEqual(cheapest.map(({ journey }) => journey.id), ['known-bus']);
+});
+
+test('a micromobility journey fare is comparable only when both component fares are valid', () => {
+  assert.equal(micromobilityJourneyFareMinor(3_000, 1_500), 4_500);
+  assert.equal(micromobilityJourneyFareMinor(null, 1_500), null);
+  assert.equal(micromobilityJourneyFareMinor(3_000, -1), null);
+  assert.equal(micromobilityJourneyFareMinor(Number.MAX_SAFE_INTEGER, 1), null);
+});
