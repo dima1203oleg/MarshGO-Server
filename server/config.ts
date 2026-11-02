@@ -49,6 +49,25 @@ function requireHttpsUrl(environment: RuntimeEnvironment, name: string): void {
   }
 }
 
+/**
+ * A pedestrian graph MARSHGO operates itself is reached over the private
+ * container network, where routing is the edge proxy's job. Every other
+ * hostname still has to speak HTTPS, and credentials never belong in a URL.
+ */
+function requireWalkingRoutingUrl(environment: RuntimeEnvironment, name: string): void {
+  const raw = requireValue(environment, name);
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error(`${name} must be a valid URL in production`); }
+  if (url.username || url.password) throw new Error(`${name} must not embed credentials`);
+  if (url.protocol === 'https:') return;
+  if (url.protocol !== 'http:') throw new Error(`${name} must use HTTP or HTTPS`);
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const privateAddress = host === 'localhost' || host === 'ip6-localhost' || host === '::1'
+    || !host.includes('.') || /^(10\.|192\.168\.|169\.254\.|127\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host)
+    || /^(fc|fd)/i.test(host);
+  if (!privateAddress) throw new Error(`${name} must use HTTPS unless it points at a private-network service`);
+}
+
 /** Fail closed before listening if production could silently use dev auth or default CORS. */
 export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   getTrustedProxyHops(environment);
@@ -80,7 +99,7 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   if ((environment.ROUTING_PRIMARY ?? 'osrm') !== 'osrm') throw new Error('ROUTING_PRIMARY=osrm is the only configured production routing provider');
   if ((environment.TRAFFIC_PROVIDER ?? 'none') !== 'none') throw new Error('TRAFFIC_PROVIDER=none is the only configured traffic provider');
   requireHttpsUrl({ ...environment, OSRM_URL: environment.OSRM_URL || environment.ROUTING_ENGINE_URL }, 'OSRM_URL');
-  if (environment.WALKING_ROUTING_URL?.trim()) requireHttpsUrl(environment, 'WALKING_ROUTING_URL');
+  if (environment.WALKING_ROUTING_URL?.trim()) requireWalkingRoutingUrl(environment, 'WALKING_ROUTING_URL');
   requireHttpsUrl(environment, 'GEOCODING_ENGINE_URL');
   requireHttpsUrl(environment, 'GEOCODING_REVERSE_URL');
   requireHttpsUrl(environment, 'MAP_STYLE_MANIFEST_URL');

@@ -71,6 +71,39 @@ test('does not fabricate a route when the pedestrian provider is unconfigured', 
   assert.equal(await routePedestrianPath([24, 49], [24.01, 49.01], ''), null);
 });
 
+test('keeps a journey whose access walk the router could not confirm and labels it unverified', () => {
+  const degraded = applyRoutedWalkingPaths(itinerary(), {
+    access: null, egress: path(600, 500), transfers: [path(350, 240)],
+  }, limits);
+
+  assert.ok(degraded);
+  assert.equal(degraded.walkingRoutesVerified, false);
+  assert.equal(degraded.walkingRoutesUnconfirmed, true);
+  assert.equal(degraded.accessWalk, null);
+  assert.equal(degraded.walkingMeters, 1050);
+  assert.equal(degraded.durationSeconds, 3500);
+});
+
+test('keeps an unconfirmed transfer walk as the timetable estimate instead of dropping the journey', () => {
+  const degraded = applyRoutedWalkingPaths(itinerary(), {
+    access: path(500, 480), egress: path(600, 500), transfers: [null],
+  }, limits);
+
+  assert.ok(degraded);
+  assert.equal(degraded.walkingRoutesUnconfirmed, true);
+  assert.deepEqual(degraded.transferWalkingMeters, [250]);
+  assert.deepEqual(degraded.transferWalkingSeconds, [200]);
+  assert.deepEqual(degraded.transferWalkingGeometries, [null]);
+});
+
+test('still drops an itinerary when its unconfirmed walk estimate exceeds the passenger limit', () => {
+  const wide = itinerary();
+  (wide.segments[0] as unknown as { distanceToOriginStopMeters: number}).distanceToOriginStopMeters = 900;
+  assert.equal(applyRoutedWalkingPaths(wide, {
+    access: null, egress: path(100, 90), transfers: [path(100, 90)],
+  }, limits), null);
+});
+
 test('uses the configured OSRM foot profile and preserves its routed geometry', async (t) => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';

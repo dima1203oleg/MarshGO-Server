@@ -3057,7 +3057,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     if (!stations || !route || scheduleSources.length < 3) throw new Error('Київські джерела станцій, геометрії, розкладу або пересадок не зареєстровані чи вимкнені');
     return { stationSource: stations, routeSource: route, scheduleSources };
   })() : null;
-  type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary, 'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified'>>;
+  type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary,
+    'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified' | 'walkingRoutesUnconfirmed'>>;
   const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
     if (!itinerary.fare || search.passengers === 1) return itinerary;
     return { ...itinerary, fare: scaleGtfsFareForPassengers(itinerary.fare, search.passengers) };
@@ -3140,11 +3141,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         ? routePedestrianPath(last.destinationStop.coordinates, destination, walkingRoutingUrl, routeBudget) : null,
       ...transferRequests,
     ]);
-    const missingRequiredPath = (first.distanceToOriginStopMeters > 0 && !access)
+    // A carpool pickup has no timetable to fall back on: an unmeasured walk to the
+    // meeting point can make the whole combination impossible, so it stays hidden.
+    if (requireMeasuredWalks && ((first.distanceToOriginStopMeters > 0 && !access)
       || (last.distanceFromDestinationStopMeters > 0 && !egress)
       || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
-        && !itinerary.transferWalkingGeometries[index] && !transfers[index]);
-    if (missingRequiredPath) return null;
+        && !itinerary.transferWalkingGeometries[index] && !transfers[index]))) return null;
     const effectiveMaxAccessMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS;
     const effectiveMaxEgressMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS;
     return applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
@@ -3186,18 +3188,18 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   if (walkingRoutingUrl) {
     const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary) => {
       const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, search.destination.coordinates, walkingRouteBudget, false);
-      if (!routed && walkingRouteBudget.remaining > 0) pedestrianRoutesUnavailable = true;
       if (!routed) {
         pedestrianCandidatesRejected = true;
         return null;
       }
+      if (routed.walkingRoutesUnconfirmed && walkingRouteBudget.remaining > 0) pedestrianRoutesUnavailable = true;
       return routed;
     }));
     scheduledCandidates = routedCandidates.filter((itinerary): itinerary is SearchItinerary => itinerary !== null)
       .filter((itinerary) => (search.preferences.maxWalkingMeters === undefined || itinerary.walkingMeters <= search.preferences.maxWalkingMeters)
         && (search.preferences.maxTotalDurationSeconds === undefined || itinerary.durationSeconds <= search.preferences.maxTotalDurationSeconds));
     if (pedestrianRoutesUnavailable) {
-      providerErrors.push('Пішохідний маршрутизатор не повернув підтверджений шлях для частини варіантів; ці варіанти приховано.');
+      providerErrors.push('Пішохідний маршрутизатор не повернув підтверджений шлях для частини варіантів; їхні піші ділянки залишено як оцінку.');
     }
     if (pedestrianCandidatesRejected) {
       providerErrors.push('Частину варіантів відхилено: фактичний час або відстань пішохідного шляху не дозволяє здійснити маршрут.');
@@ -4204,7 +4206,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     candidateGenerationTruncated,
     providerErrorCount: providerErrors.length,
     unsupportedPreferenceCount: unsupportedPreferences.length,
-    scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0 && !walkingRoutingUrl,
+    scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0
+      && (!walkingRoutingUrl || pedestrianRoutesUnavailable),
   });
   const truncationState = getJourneySearchTruncationState({
     candidateGenerationTruncated,
