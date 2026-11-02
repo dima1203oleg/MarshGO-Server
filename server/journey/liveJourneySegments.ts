@@ -1,6 +1,7 @@
 import { networkRoutesForRoute, type LiveVehicle, type TransportNetwork } from '../mobility/transportLayers';
 import { getGtfsTripStopArrival, type GtfsTimetableFeed } from './gtfsTimetable';
 import { approachingBoardingStop, freshVehiclesForRoute, isJourneyLegGpsWindowOpen, matchLiveVehicleForJourneyLeg, selectBoardingApproachVehicleIds, unscopeGtfsId } from './liveVehicles';
+import { classifyVehiclePriority, splitRouteGeometryByStops, type RouteZoneSplit, type VehiclePriority } from './transportVisualZones';
 
 export interface LiveJourneyLegInput {
   id: string;
@@ -43,6 +44,14 @@ export interface LiveJourneySegment {
     direction: string;
     directionId: string | null;
     geometrySource: 'gtfs_shape' | 'official_geojson';
+    /**
+     * `full_route` is the whole published line, so zones A and C can exist.
+     * `leg_only` is only the boarding-to-alighting slice, so the client must not
+     * imply that nothing runs before or after it.
+     */
+    geometryScope: 'full_route' | 'leg_only';
+    /** Null when this direction cannot be projected onto the passenger's stops. */
+    zones: (RouteZoneSplit & { boardingStopId: string | null; alightingStopId: string | null }) | null;
     coordinates: Array<[number, number]>;
   }>;
   vehicles: Array<{
@@ -58,6 +67,9 @@ export interface LiveJourneySegment {
     approachingBoarding: boolean;
     remainingStops: number | null;
     emphasized: boolean;
+    /** Five-level visual priority, derived only from verified route/stop/GPS facts. */
+    priority: VehiclePriority;
+    etaConfidence: 'OBSERVED' | 'PREDICTED' | 'NONE';
     approachEvidence: null | {
       source: 'OBSERVED_PROGRESS' | 'TRIP_UPDATE_PREDICTION';
       predictedArrivalAt?: string;
@@ -133,7 +145,42 @@ export function buildLiveJourneySegment(
   const fleet = rawRouteId && feed.vehicles
     ? freshVehiclesForRoute(leg.providerId, rawRouteId, feed.vehicles, now)
     : [];
-  const liveNetworkRoutes = feed.network && rawRouteId
+  const boardingStopId = typeof leg.metadata.fromStopFeedId === 'string' ? leg.metadata.fromStopFeedId : null;
+  const rawAlightingStopId = unscopeGtfsId(leg.providerId, typeof leg.metadata.toStopFeedId === 'string'
+    ? leg.metadata.toStopFeedId : null);
+  const legTripStops = rawTripId ? feed.timetable?.stopTimes.get(rawTripId) ?? [] : [];
+  // Stop coordinates come from the selected trip's own call list first, because a merged
+  // timetable canonicalises stop ids across feeds; the raw network stop table is the fallback.
+  const stopPoint = (rawStopId: string | null): [number, number] | null => {
+    if (!rawStopId) return null;
+    const onTrip = legTripStops.find((stop) => unscopeGtfsId(leg.providerId!, stop.stopId) === rawStopId)?.sourceStopCoordinates;
+    if (onTrip) return onTrip;
+    const networkStop = feed.network?.stops.find((stop) => stop.id === rawStopId);
+    return networkStop ? [networkStop.lon, networkStop.lat] : null;
+  };
+  const boardingPoint = stopPoint(unscopeGtfsId(leg.providerId, boardingStopId));
+  const alightingPoint = stopPoint(rawAlightingStopId);
+  const rawBoardingStopForZones = unscopeGtfsId(leg.providerId, boardingStopId);
+  const legTripDirection = rawTripId ? feed.timetable?.trips.get(rawTripId)?.directionId ?? null : null;
+  const zonesFor = (route: LiveJourneySegment['lineRoutes'][number]) => {
+    if (route.geometryScope === 'leg_only') {
+      return {
+        boardingShapeIndex: 0,
+        alightingShapeIndex: route.coordinates.length - 1,
+        beforeBoarding: null,
+        passengerSegment: route.coordinates,
+        afterAlighting: null,
+        snapMeters: 0,
+        boardingStopId: rawBoardingStopForZones,
+        alightingStopId: rawAlightingStopId,
+      };
+    }
+    // A slice of the opposite direction would be a different line, so refuse to guess it.
+    if (legTripDirection && route.directionId && legTripDirection !== route.directionId) return null;
+    const split = splitRouteGeometryByStops(route.coordinates, boardingPoint, alightingPoint);
+    return split ? { ...split, boardingStopId: rawBoardingStopForZones, alightingStopId: rawAlightingStopId } : null;
+  };
+  const liveNetworkRoutes: LiveJourneySegment['lineRoutes'] = feed.network && rawRouteId
     ? networkRoutesForRoute(feed.network, rawRouteId, 'gtfs_shape').map((route) => ({
       id: `${leg.providerId}:${route.id}`,
       providerId: leg.providerId!,
@@ -142,22 +189,25 @@ export function buildLiveJourneySegment(
       direction: route.direction,
       directionId: route.directionId ?? null,
       geometrySource: 'gtfs_shape' as const,
+      geometryScope: 'full_route' as const,
+      zones: null,
       coordinates: route.coordinates,
     }))
     : emptyRoutes;
-  const lineRoutes: LiveJourneySegment['lineRoutes'] = liveNetworkRoutes.length > 0 ? liveNetworkRoutes
-    : hasTrustedStoredGeometry && routeId && geometrySource ? [{
-      id: `${leg.providerId}:${routeId}:scheduled`,
-      providerId: leg.providerId,
-      routeId,
-      name: typeof leg.metadata.routeName === 'string' ? leg.metadata.routeName : routeId,
-      direction: typeof leg.metadata.headsign === 'string' && leg.metadata.headsign ? leg.metadata.headsign : 'Напрямок сегмента',
-      directionId: null,
-      geometrySource: geometrySource as NonNullable<typeof geometrySource>,
-      coordinates: storedGeometry,
-    }] : emptyRoutes;
-
-  const boardingStopId = typeof leg.metadata.fromStopFeedId === 'string' ? leg.metadata.fromStopFeedId : null;
+  const scheduledRoute: LiveJourneySegment['lineRoutes'][number] | null = hasTrustedStoredGeometry && routeId && geometrySource ? {
+    id: `${leg.providerId}:${routeId}:scheduled`,
+    providerId: leg.providerId,
+    routeId,
+    name: typeof leg.metadata.routeName === 'string' ? leg.metadata.routeName : routeId,
+    direction: typeof leg.metadata.headsign === 'string' && leg.metadata.headsign ? leg.metadata.headsign : 'Напрямок сегмента',
+    directionId: null,
+    geometrySource: geometrySource as NonNullable<typeof geometrySource>,
+    geometryScope: 'leg_only',
+    zones: null,
+    coordinates: storedGeometry,
+  } : null;
+  const lineRoutes = (liveNetworkRoutes.length > 0 ? liveNetworkRoutes : scheduledRoute ? [scheduledRoute] : emptyRoutes)
+    .map((route) => ({ ...route, zones: zonesFor(route) }));
   const vehicleProgress = fleet.map((item) => {
     const rawTripId = unscopeGtfsId(leg.providerId!, item.tripId);
     const rawVehicleRouteId = unscopeGtfsId(leg.providerId!, item.routeId);
@@ -206,9 +256,32 @@ export function buildLiveJourneySegment(
         }
         : null;
     const approaching = Boolean(approachEvidence);
+    // An explicit directionId comparison is authoritative: a vehicle on the reverse trip can
+    // show stop-sequence progress toward the same physical stop and still be going away.
+    // Stop-sequence progress only proves the direction when the feed omits direction ids.
+    const vehicleDirectionId = trip?.directionId ?? null;
+    const direction: 'MATCHING' | 'OPPOSITE' | 'UNKNOWN' = legTripDirection && vehicleDirectionId
+      ? (legTripDirection === vehicleDirectionId ? 'MATCHING' : 'OPPOSITE')
+      : progress ? 'MATCHING' : 'UNKNOWN';
+    const servesBoardingStop = tripMatchesRoute && rawBoardingStopId
+      ? tripStops.some((stop) => unscopeGtfsId(leg.providerId!, stop.stopId) === rawBoardingStopId)
+      : false;
+    const priority = classifyVehiclePriority({
+      fresh: true,
+      sameRoute: true,
+      direction,
+      servesBoardingStop,
+      passedBoardingStop: progress?.approaching === false,
+      approaching,
+      remainingStops: approaching && progress?.approaching ? progress.remainingStops : null,
+      etaSeconds: approachEvidence ? etaSeconds : null,
+    });
     return { item, progress, approaching, approachEvidence,
       etaSeconds: approachEvidence ? etaSeconds : null,
-      directionId: tripMatchesRoute ? trip?.directionId ?? null : null };
+      directionId: tripMatchesRoute ? trip?.directionId ?? null : null,
+      priority,
+      etaConfidence: approachEvidence?.source === 'OBSERVED_PROGRESS' ? 'OBSERVED' as const
+        : approachEvidence?.source === 'TRIP_UPDATE_PREDICTION' ? 'PREDICTED' as const : 'NONE' as const };
   });
   const emphasizedIds = selectBoardingApproachVehicleIds(vehicleProgress.map(({ item, progress, approaching, approachEvidence, etaSeconds }) => ({
     vehicleId: item.id,
@@ -218,7 +291,7 @@ export function buildLiveJourneySegment(
     remainingStops: progress?.approaching ? progress.remainingStops : null,
   })));
   const vehicles: LiveJourneySegment['vehicles'] = vehicleProgress.flatMap(({ item, progress, directionId,
-    approaching, approachEvidence, etaSeconds }) => {
+    approaching, approachEvidence, etaSeconds, priority, etaConfidence }) => {
     if (!item.timestamp) return [];
     return [{
       id: item.id,
@@ -233,6 +306,8 @@ export function buildLiveJourneySegment(
       approachingBoarding: approaching,
       remainingStops: approaching && progress?.approaching ? progress.remainingStops : null,
       emphasized: emphasizedIds.has(item.id),
+      priority,
+      etaConfidence,
       approachEvidence,
       etaSeconds,
     }];
