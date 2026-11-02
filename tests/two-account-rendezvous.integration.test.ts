@@ -3,18 +3,21 @@ import crypto from 'node:crypto';
 import { describe, it } from 'node:test';
 import pg from 'pg';
 
-const apiUrl = process.env.API_TEST_URL || 'http://127.0.0.1:3002';
-const databaseUrl = process.env.API_TEST_DATABASE_URL || process.env.DATABASE_URL || 'postgres://marshgo:local_only_change_me@127.0.0.1:5434/marshgo';
+// Opt-in: runs only under scripts/run-integration-tests.sh, which provides both a managed
+// API and a migrated loopback database. Without them the unit glob must skip, not guess a port.
+const apiUrl = process.env.API_TEST_URL ?? '';
+const databaseUrl = process.env.API_TEST_DATABASE_URL ?? '';
+const enabled = Boolean(apiUrl && databaseUrl);
 
-const database = new URL(databaseUrl);
-if (!['127.0.0.1', 'localhost', '::1'].includes(database.hostname)) {
+const database = enabled ? new URL(databaseUrl) : null;
+if (database && !['127.0.0.1', 'localhost', '::1'].includes(database.hostname)) {
   throw new Error('Rendezvous integration test is strictly restricted to a local loopback database');
 }
-if (!database.pathname.includes('marshgo') && !database.pathname.includes('test')) {
+if (database && !database.pathname.includes('marshgo') && !database.pathname.includes('test')) {
   throw new Error('Rendezvous integration test requires a database name containing "marshgo" or "test"');
 }
 
-describe('P1 — Two-Account Carpool & Rendezvous Verification', () => {
+describe('P1 — Two-Account Carpool & Rendezvous Verification (opt-in local integration test)', { skip: !enabled }, () => {
   it('verifies the full carpool, concurrent booking, dual-consent, and arrival lifecycle with strict cleanup', async () => {
     const pool = new pg.Pool({ connectionString: databaseUrl });
     const runId = crypto.randomUUID().slice(0, 8);

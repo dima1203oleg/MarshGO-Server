@@ -19,7 +19,9 @@ export default tseslint.config(
     },
   },
   {
-    files: ['**/*.ts'],
+    // The GTFS search worker is an .mjs Node module, so it needs the same
+    // runtime globals the .ts sources get; without this, lint:all fails on it.
+    files: ['**/*.ts', '**/*.mjs'],
     languageOptions: { globals: { Buffer: 'readonly', console: 'readonly', process: 'readonly' } },
   },
 );
