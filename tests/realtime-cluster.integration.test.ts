@@ -29,18 +29,20 @@ function trackRealtimeSocket(socket: WebSocket) {
   });
 }
 
+// `/auth/otp/*` is hard-disabled (HTTP 410) in the product, so this suite authenticates the
+// same way passengers now do — email/password register, which returns the session inline.
 async function register(phone: string, displayName: string) {
-  const requested = await fetch(`${primaryUrl}/api/v1/auth/otp/request`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone, displayName }),
+  const registered = await fetch(`${primaryUrl}/api/v1/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      email: `cluster-${phone.replace(/[^0-9]/g, '')}-${crypto.randomUUID().slice(0, 8)}@marshgo.test`,
+      password: 'SecurePassword2026!',
+      displayName,
+    }),
   });
-  assert.equal(requested.status, 200);
-  const requestBody = await requested.json() as { developmentCode?: string };
-  assert.match(requestBody.developmentCode ?? '', /^\d{6}$/);
-  const verified = await fetch(`${primaryUrl}/api/v1/auth/otp/verify`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ phone, code: requestBody.developmentCode }),
-  });
-  assert.equal(verified.status, 200);
-  return await verified.json() as AuthResult;
+  assert.equal(registered.status, 201);
+  return await registered.json() as AuthResult;
 }
 
 function waitForSocketEvent(socket: WebSocket, type: string, timeoutMs = 10_000) {
