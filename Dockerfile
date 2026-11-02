@@ -4,7 +4,20 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 FROM node:24.21.0-slim AS runtime
-ENV NODE_ENV=production API_HOST=0.0.0.0 API_PORT=3002
+ARG MARSHGO_BUILD_ID=unknown
+ARG MARSHGO_BUILD_SHA=unknown
+ARG MARSHGO_BUILD_TIME=unknown
+ARG MARSHGO_SOURCE_STATE=unknown
+ENV NODE_ENV=production API_HOST=0.0.0.0 API_PORT=3002 \
+    MARSHGO_BUILD_ID=${MARSHGO_BUILD_ID} \
+    MARSHGO_BUILD_SHA=${MARSHGO_BUILD_SHA} \
+    MARSHGO_BUILD_TIME=${MARSHGO_BUILD_TIME} \
+    MARSHGO_SOURCE_STATE=${MARSHGO_SOURCE_STATE}
+LABEL org.opencontainers.image.title="marshgo/api" \
+      org.opencontainers.image.source="https://github.com/dima1203oleg/MarshGO-Server" \
+      org.opencontainers.image.revision="${MARSHGO_BUILD_SHA}" \
+      org.opencontainers.image.created="${MARSHGO_BUILD_TIME}" \
+      org.opencontainers.image.version="${MARSHGO_BUILD_ID}"
 WORKDIR /app
 COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package.json ./package.json
