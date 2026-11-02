@@ -2864,7 +2864,7 @@ app.get('/api/v1/journeys/:id/live', requireAuth, asyncHandler(async (req, res) 
      LEFT JOIN mobility_providers p ON p.id=l.provider_id
      WHERE j.id=$1 AND j.user_id=$2
        AND ($3::uuid IS NULL OR l.id=$3::uuid)
-       AND l.mode IN ('BUS','MINIBUS','RAIL','TRAM','TROLLEYBUS','METRO')
+       AND l.mode IN ('BUS','URBAN_BUS','MINIBUS','RAIL','TRAM','TROLLEYBUS','METRO','FERRY','FUNICULAR')
      ORDER BY l.ordinal`, [req.params.id, req.userId, requestedLegId],
   );
   if (rows.length === 0) {
