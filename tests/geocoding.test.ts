@@ -49,6 +49,27 @@ describe('Nominatim-compatible place search adapter', () => {
     server = undefined;
   });
 
+  it('biases suggestions toward the caller locality without filtering it', async () => {
+    const seen: string[] = [];
+    server = createServer((request, response) => {
+      const url = new URL(request.url ?? '/', 'http://localhost');
+      seen.push(url.searchParams.get('viewbox') ?? '');
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ place_id: 1, display_name: 'Залізничний вокзал, Львів', lat: '49.839', lon: '24.030' }]));
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/search`;
+    await suggestPlaces('залізничний вокзал', { latitude: 49.8397, longitude: 24.0297 });
+    assert.equal(seen[0], '23.8997,49.9297,24.1597,49.7497');
+    await suggestPlaces('залізничний вокзал');
+    assert.equal(seen[1], '');
+    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+    server = undefined;
+  });
+
   it('reverse geocodes coordinates through a bounded Ukrainian provider request', async () => {
     server = createServer((request, response) => {
       const url = new URL(request.url ?? '/', 'http://localhost');

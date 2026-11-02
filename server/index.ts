@@ -2358,8 +2358,22 @@ app.delete('/api/v1/users/me/driver-photo', requireAuth, asyncHandler(async (req
 app.get('/api/v1/places/suggest', optionalAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
   if (query.length < 3 || query.length > 120) throw new ApiError(400, 'place query must contain 3–120 characters');
+  const rawLatitude = typeof req.query.lat === 'string' ? req.query.lat : undefined;
+  const rawLongitude = typeof req.query.lon === 'string' ? req.query.lon : undefined;
+  if ((rawLatitude === undefined) !== (rawLongitude === undefined)) {
+    throw new ApiError(400, 'lat and lon must be provided together', 'invalid_coordinate');
+  }
+  let bias: { latitude: number; longitude: number } | undefined;
+  if (rawLatitude !== undefined && rawLongitude !== undefined) {
+    const latitude = Number(rawLatitude);
+    const longitude = Number(rawLongitude);
+    if (!Number.isFinite(latitude) || Math.abs(latitude) > 90 || !Number.isFinite(longitude) || Math.abs(longitude) > 180) {
+      throw new ApiError(400, 'lat and lon must be valid WGS84 coordinates', 'invalid_coordinate');
+    }
+    bias = { latitude, longitude };
+  }
   try {
-    const data = await suggestPlaces(query);
+    const data = await suggestPlaces(query, bias);
     res.json({ data });
   } catch (error) {
     if (error instanceof GeocodingUnavailableError) throw new ApiError(503, error.message, 'geocoder_unavailable');
