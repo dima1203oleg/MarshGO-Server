@@ -6,11 +6,18 @@ export const CANONICAL_ROUTE_TYPES = [
 
 export type CanonicalRouteType = (typeof CANONICAL_ROUTE_TYPES)[number];
 
+export type ModeAvailabilityReason =
+  | 'usable_provider_data_in_corridor'
+  | 'no_routed_provider_in_corridor'
+  | 'no_source_declares_this_category'
+  /** The transit search itself threw, so an empty corridor is not evidence about provider coverage. */
+  | 'transit_search_failed';
+
 export type ModeAvailability = {
   mode: CanonicalRouteType;
   available: boolean;
   requested: boolean;
-  reason: 'usable_provider_data_in_corridor' | 'no_routed_provider_in_corridor' | 'no_source_declares_this_category';
+  reason: ModeAvailabilityReason;
 };
 
 export type SearchCompleteness = {
@@ -26,6 +33,7 @@ export type SearchCompleteness = {
   resultsReturned: number;
   searchTruncated: boolean;
   searchComplete: boolean;
+  transitSearchFailed: boolean;
 };
 
 export type SearchCompletenessInput = {
@@ -40,16 +48,23 @@ export type SearchCompletenessInput = {
   candidatesDeduplicated: number;
   resultsReturned: number;
   searchTruncated: boolean;
+  /** True when the transit provider search threw and returned nothing at all. */
+  transitSearchFailed?: boolean | undefined;
 };
 
 const CANONICAL = new Set<string>(CANONICAL_ROUTE_TYPES);
 
+/** Categories whose only source is the GTFS provider search, as opposed to carpool or micromobility feeds. */
+const GTFS_ROUTED_ROUTE_TYPES = new Set<string>(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train']);
+
 /**
  * A category is only reported as available when some provider in the corridor actually
  * declares it, so a missing marshrutka reads as an honest data gap instead of a silent
- * empty result set.
+ * empty result set. A failed transit search is reported as a failure, never as a gap:
+ * an engine that threw proves nothing about which providers cover the corridor.
  */
 export function buildSearchCompleteness(input: SearchCompletenessInput): SearchCompleteness {
+  const transitSearchFailed = input.transitSearchFailed ?? false;
   const inCorridor = new Set([...input.routeTypesInCorridor].filter((type) => CANONICAL.has(type)));
   const requested = new Set((input.requestedRouteTypes ?? CANONICAL_ROUTE_TYPES).filter((type) => CANONICAL.has(type)));
   const modesUnavailable: ModeAvailability[] = CANONICAL_ROUTE_TYPES.filter((type) => !inCorridor.has(type))
@@ -57,9 +72,15 @@ export function buildSearchCompleteness(input: SearchCompletenessInput): SearchC
       mode: type,
       available: false,
       requested: requested.has(type),
-      reason: requested.has(type) ? 'no_routed_provider_in_corridor' : 'no_source_declares_this_category',
+      reason: !requested.has(type)
+        ? 'no_source_declares_this_category'
+        : transitSearchFailed && GTFS_ROUTED_ROUTE_TYPES.has(type)
+          ? 'transit_search_failed'
+          : 'no_routed_provider_in_corridor',
     }));
-  const providersFailed = Math.min(Math.max(input.providersFailed, 0), input.providersQueried);
+  const providersFailed = transitSearchFailed
+    ? input.providersQueried
+    : Math.min(Math.max(input.providersFailed, 0), input.providersQueried);
   const candidatesRejected = Math.max(input.candidatesGenerated - input.candidatesValidated, 0);
   return {
     providersQueried: input.providersQueried,
@@ -73,6 +94,7 @@ export function buildSearchCompleteness(input: SearchCompletenessInput): SearchC
     candidatesDeduplicated: input.candidatesDeduplicated,
     resultsReturned: input.resultsReturned,
     searchTruncated: input.searchTruncated,
-    searchComplete: !input.searchTruncated && providersFailed === 0 && input.candidatesGenerated > 0,
+    searchComplete: !input.searchTruncated && !transitSearchFailed && providersFailed === 0 && input.candidatesGenerated > 0,
+    transitSearchFailed,
   };
 }
