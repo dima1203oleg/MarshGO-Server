@@ -397,6 +397,11 @@ function requireStaff(req: AuthenticatedRequest, res: Response, next: NextFuncti
   }).catch(next);
 }
 
+// `users.roles` is a denormalised mirror of `user_roles`, but requireRole/requireStaff/requireAdmin
+// enforce from `user_roles`. Any client-visible role list must come from the enforced relation,
+// otherwise a row written out of band (seed or manual SQL) unlocks portal UI whose API calls then 403.
+const ENFORCED_ROLES_SQL = `(SELECT COALESCE(ARRAY_AGG(er.role ORDER BY er.role), ARRAY[]::text[]) FROM user_roles er WHERE er.user_id = users.id)`;
+
 function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   pool.query<{ allowed: boolean }>(`SELECT EXISTS(SELECT 1 FROM user_roles WHERE user_id=$1 AND role='admin') AS allowed`, [req.userId])
     .then(({ rows }) => {
@@ -1929,7 +1934,7 @@ app.post('/api/v1/auth/login', asyncHandler(async (req, res) => {
     password_hash: string | null;
     account_status: string;
   }>(
-    `SELECT id, display_name, email, phone_e164, roles, password_hash, account_status
+    `SELECT id, display_name, email, phone_e164, ${ENFORCED_ROLES_SQL} AS roles, password_hash, account_status
      FROM users WHERE lower(email) = $1`,
     [normalizedEmail],
   );
@@ -2173,7 +2178,7 @@ app.post('/api/v1/auth/firebase/verify', asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
     const found = await client.query<{ id: string; display_name: string; phone_e164: string; roles: string[]; account_status: string }>(
-      'SELECT id,display_name,phone_e164,roles,account_status FROM users WHERE phone_e164=$1 FOR UPDATE', [phone],
+      `SELECT id,display_name,phone_e164,${ENFORCED_ROLES_SQL} AS roles,account_status FROM users WHERE phone_e164=$1 FOR UPDATE`, [phone],
     );
     if (found.rows[0]?.account_status !== undefined && found.rows[0].account_status !== 'active') {
       unavailableAccount = true;
@@ -2240,7 +2245,7 @@ app.post('/api/v1/auth/refresh', asyncHandler(async (req, res) => {
     client.release();
   }
   if (!rotated || !userId) throw new ApiError(401, 'Refresh session is invalid', 'refresh_invalid');
-  const { rows: users } = await pool.query('SELECT id,display_name,phone_e164,roles FROM users WHERE id=$1', [userId]);
+  const { rows: users } = await pool.query(`SELECT id,display_name,phone_e164,${ENFORCED_ROLES_SQL} AS roles FROM users WHERE id=$1`, [userId]);
   setRefreshCookie(res, rotated.refreshToken, refreshLifetimeMs);
   res.json({ data: { user: users[0], accessToken: rotated.accessToken, accessExpiresAt: rotated.accessExpiresAt.toISOString() } });
 }));
@@ -2261,7 +2266,7 @@ app.post('/api/v1/auth/logout-all', requireAuth, asyncHandler(async (req, res) =
 
 app.get('/api/v1/users/me', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT id,phone_e164,display_name,email,roles,is_verified,account_status,created_at,driver_photo_key
+    `SELECT id,phone_e164,display_name,email,${ENFORCED_ROLES_SQL} AS roles,is_verified,account_status,created_at,driver_photo_key
        FROM users WHERE id=$1 AND account_status='active'`, [req.userId],
   );
   if (!rows[0]) throw new ApiError(404, 'user unavailable');
@@ -2429,7 +2434,7 @@ app.post('/api/v1/users/me/roles', requireAuth, asyncHandler(async (req, res) =>
 
 app.get('/api/v1/users/me/export', requireAuth, asyncHandler(async (req, res) => {
   const [profile, vehicles, bookings, demands] = await Promise.all([
-    pool.query('SELECT id,phone_e164,display_name,email,roles,is_verified,created_at FROM users WHERE id=$1', [req.userId]),
+    pool.query(`SELECT id,phone_e164,display_name,email,${ENFORCED_ROLES_SQL} AS roles,is_verified,created_at FROM users WHERE id=$1`, [req.userId]),
     pool.query('SELECT id,make,model,model_year,seat_count,verification_status,plate,trust_level,created_at FROM vehicles WHERE owner_id=$1', [req.userId]),
     pool.query(
       `SELECT b.id,b.offer_id,b.seat_count,b.total_price_minor,b.currency,b.fee_class,b.platform_fee_minor,b.fee_rule_version,b.status,b.created_at
@@ -6393,8 +6398,11 @@ app.post('/api/v1/admin/moderation/:id/decision', requireAuth, requireStaff, asy
     }
     if (action === 'suspend_account' && !staffRole.rows[0]?.is_admin) throw new ApiError(403, 'Only administrators can suspend an account');
     if (action === 'suspend_account') {
-      const target = await client.query<{ roles: string[]; account_status: string }>('SELECT roles,account_status FROM users WHERE id=$1 FOR UPDATE', [report.reported_user_id]);
-      if (target.rows[0]?.roles.includes('admin') || target.rows[0]?.roles.includes('moderator')) throw new ApiError(403, 'Staff accounts cannot be suspended through user reports');
+      const target = await client.query<{ is_staff: boolean; account_status: string }>(
+        `SELECT account_status,
+                EXISTS(SELECT 1 FROM user_roles er WHERE er.user_id = users.id AND er.role IN ('admin','moderator')) AS is_staff
+           FROM users WHERE id = $1 FOR UPDATE`, [report.reported_user_id]);
+      if (target.rows[0]?.is_staff) throw new ApiError(403, 'Staff accounts cannot be suspended through user reports');
       await client.query(`UPDATE users SET account_status='suspended',updated_at=now() WHERE id=$1 AND account_status='active'`, [report.reported_user_id]);
       await client.query('UPDATE sessions SET revoked_at=COALESCE(revoked_at,now()) WHERE user_id=$1', [report.reported_user_id]);
       suspendedUserId = report.reported_user_id;
