@@ -1895,6 +1895,20 @@ export function findGtfsItinerariesWithStats(
         heapUsedBytes: memory.heapUsed, rssBytes: memory.rss, ...details }));
     }
   };
+  // Where the seconds actually go: the two step functions, plus the candidate assembly and the
+  // transfer feasibility check nested inside them. Only allocated when search debug is on.
+  const stepProfile = debugEnabled ? {
+    expandPathMs: 0, expandNextChildMs: 0, addPathMs: 0, transferDecisionMs: 0,
+    expandPathCalls: 0, expandNextChildCalls: 0, addPathCalls: 0, transferDecisionCalls: 0,
+  } : undefined;
+  const milliseconds = () => Number(process.hrtime.bigint() / 1_000_000n);
+  const profileStep = (key: 'expandPathMs' | 'expandNextChildMs', run: () => void) => {
+    if (!stepProfile) { run(); return; }
+    const startedAt = milliseconds();
+    run();
+    stepProfile[key] += milliseconds() - startedAt;
+    stepProfile[key === 'expandPathMs' ? 'expandPathCalls' : 'expandNextChildCalls']++;
+  };
   const now = input.now ?? new Date();
   const maximumJourneySeconds = input.maximumJourneySeconds ?? 24 * 60 * 60;
   const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
@@ -3707,7 +3721,12 @@ export function findGtfsItinerariesWithStats(
     searchSteps++;
     const last = path.at(-1)!;
     if (destinationStopIds.has(last.destinationStop.id) && path.length === maximumLegsForPass) {
-      addPath(path, maximumLegsForPass);
+      if (stepProfile) {
+        const startedAt = milliseconds();
+        addPath(path, maximumLegsForPass);
+        stepProfile.addPathMs += milliseconds() - startedAt;
+        stepProfile.addPathCalls++;
+      } else addPath(path, maximumLegsForPass);
     }
     const remainingLegs = maximumLegsForPass - path.length;
     if (remainingLegs <= 0 || !reachableWithin[remainingLegs].has(last.destinationStop.id)) return;
@@ -3731,9 +3750,17 @@ export function findGtfsItinerariesWithStats(
     const next = work.choices[work.nextIndex++];
     if (next.departureAt.getTime() <= work.latestNext
       && reachableWithin[work.remainingLegs - 1].has(next.destinationStop.id)
-      && !work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)
-      && transferDecision(work.last, next).feasible) {
-      enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
+      && !work.previousIds.has(next.tripId) && !work.visitedStops.has(next.destinationStop.id)) {
+      const decision = stepProfile
+        ? (() => {
+          const startedAt = milliseconds();
+          const measured = transferDecision(work.last, next);
+          stepProfile.transferDecisionMs += milliseconds() - startedAt;
+          stepProfile.transferDecisionCalls++;
+          return measured;
+        })()
+        : transferDecision(work.last, next);
+      if (decision.feasible) enqueueWork(queue, { kind: 'path', path: [...work.path, next] });
     }
     if (work.nextIndex < work.choices.length
       && work.choices[work.nextIndex].departureAt.getTime() <= work.latestNext) {
@@ -3775,8 +3802,8 @@ export function findGtfsItinerariesWithStats(
         const work = takeNextWork(queue);
         if (!work) continue;
         processed = true;
-        if (work.kind === 'path') expandPath(work.path, queue, maximumLegsForPass);
-        else expandNextChild(work, queue);
+        if (work.kind === 'path') profileStep('expandPathMs', () => expandPath(work.path, queue, maximumLegsForPass));
+        else profileStep('expandNextChildMs', () => expandNextChild(work, queue));
       }
       if (!processed) break;
     }
@@ -3850,6 +3877,7 @@ export function findGtfsItinerariesWithStats(
     ...(candidateSamplingEventsByReason
       ? { candidateSamplingEventsByReason: JSON.stringify(candidateSamplingEventsByReason) } : {}),
     maxQueuedSearchWork: maximumQueuedSearchWork,
+    ...(stepProfile ? { stepProfileMs: JSON.stringify(stepProfile) } : {}),
     searchTruncated: Number(stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated),
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
