@@ -32,6 +32,8 @@ const MAX_ROUTE_GEOMETRY_POINTS = 500;
 // preserves a fair slice for each line and makes truncation explicit.
 const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
+/** Frontier queue the A*-style pass may hold; above it the pass reports `searchBudget` truncation. */
+const DEFAULT_GTFS_QUEUED_SEARCH_WORK = 10_000;
 export const MAX_GTFS_TRANSFERS = 4;
 /** Upper bound for `limit`; callers that ask for more make the search throw, so share this value. */
 export const MAX_GTFS_SEARCH_LIMIT = 100;
@@ -48,6 +50,46 @@ export function resolveTransitCandidateBudget(rawValue: string | undefined): num
   return Number.isInteger(parsed)
     ? Math.min(Math.max(parsed, 1), HARD_MAX_GTFS_SEARCH_LIMIT)
     : MAX_GTFS_SEARCH_LIMIT;
+}
+
+/**
+ * Hard ceiling for an operator-raised graph budget, measured rather than invented: the Lviv
+ * public preview (2026-11-03, `segments=63 134`) costs a transient heap step of ~150-170 MiB,
+ * i.e. ~2.7 KB per retained segment. 300 000 segments therefore already needs ~0.8 GiB inside
+ * one search, which is the point where a 1.758 GiB API container starts shedding pages.
+ */
+export const HARD_MAX_GTFS_GRAPH_SEGMENTS = 300_000;
+export const HARD_MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 30_000;
+export const HARD_MAX_GTFS_QUEUED_SEARCH_WORK = 100_000;
+
+function resolveGraphBudgetValue(rawValue: string | undefined, fallback: number, hardMaximum: number): number | undefined {
+  if (rawValue === undefined || rawValue.trim() === '') return undefined;
+  // Number, not parseInt: an operator writing 3e5 means 300 000, while parseInt would read 3 and
+  // quietly shrink the search. A value with a fraction or a magnitude beyond exact integer range
+  // is not a budget anyone intended, so it falls back rather than being silently reinterpreted.
+  const parsed = Number(rawValue);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return fallback;
+  return Math.min(parsed, hardMaximum);
+}
+
+/**
+ * The three retention caps that decide how much of a corridor the planner is allowed to look at
+ * were compile-time constants, so a search that reports `candidateGraph`/`searchBudget` truncation
+ * could only be retuned by rebuilding the image. Reading them from the environment makes the
+ * memory-for-routes trade-off an operator decision; every unset name keeps the shipped default.
+ */
+export function resolveGtfsGraphBudgetLimits(environment: Record<string, string | undefined> = process.env): GtfsGraphBudgetLimits {
+  const totalSegments = resolveGraphBudgetValue(environment.MARSHGO_GTFS_GRAPH_MAX_SEGMENTS,
+    MAX_GTFS_GRAPH_SEGMENTS, HARD_MAX_GTFS_GRAPH_SEGMENTS);
+  const segmentsPerRoute = resolveGraphBudgetValue(environment.MARSHGO_GTFS_GRAPH_MAX_SEGMENTS_PER_ROUTE,
+    MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE, HARD_MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE);
+  const maxQueuedSearchWork = resolveGraphBudgetValue(environment.MARSHGO_GTFS_MAX_QUEUED_SEARCH_WORK,
+    DEFAULT_GTFS_QUEUED_SEARCH_WORK, HARD_MAX_GTFS_QUEUED_SEARCH_WORK);
+  return {
+    ...(totalSegments === undefined ? {} : { totalSegments }),
+    ...(segmentsPerRoute === undefined ? {} : { segmentsPerRoute }),
+    ...(maxQueuedSearchWork === undefined ? {} : { maxQueuedSearchWork }),
+  };
 }
 export const DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS = 180;
 export const DEFAULT_MAXIMUM_WAIT_SECONDS = 4 * 60 * 60;
@@ -426,11 +468,12 @@ export interface GtfsItinerarySearchResult {
   truncation: GtfsItinerarySearchTruncation;
 }
 
-/** Optional lower graph limits let tests exercise bounded retention deterministically. */
+/** Operator-supplied caps, resolved once in the search worker; tests may inject smaller ones. */
 export interface GtfsGraphBudgetLimits {
+  /** Retention caps for the materialized candidate graph; the worker supplies these from `resolveGtfsGraphBudgetLimits`. */
   totalSegments?: number;
   segmentsPerRoute?: number;
-  /** Test-only override for verifying bounded search-frontier behavior. */
+  /** Search-frontier queue bound; the worker supplies it from the environment, tests may inject a smaller one. */
   maxQueuedSearchWork?: number;
 }
 
@@ -1785,6 +1828,9 @@ export function findGtfsItinerariesWithStats(
   const maximumWaitSeconds = input.maximumWaitSeconds ?? 4 * 60 * 60;
   const maximumGraphSegments = graphLimits.totalSegments ?? MAX_GTFS_GRAPH_SEGMENTS;
   const maximumGraphSegmentsPerRoute = graphLimits.segmentsPerRoute ?? MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
+  // A zero frontier is a meaningful bound, not a missing one: callers use it to prove that the
+  // search discloses the work it drops. Only negative, fractional and runaway values are invalid.
+  const queuedSearchWorkCap = graphLimits.maxQueuedSearchWork ?? DEFAULT_GTFS_QUEUED_SEARCH_WORK;
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
@@ -1801,9 +1847,11 @@ export function findGtfsItinerariesWithStats(
     || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > 10_000
     || !Number.isFinite(transferRadius) || transferRadius < 0 || transferRadius > 10_000
     || !Number.isInteger(limit) || limit < 1 || limit > HARD_MAX_GTFS_SEARCH_LIMIT
-    || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > MAX_GTFS_GRAPH_SEGMENTS
+    || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > HARD_MAX_GTFS_GRAPH_SEGMENTS
     || !Number.isSafeInteger(maximumGraphSegmentsPerRoute) || maximumGraphSegmentsPerRoute < 1
-    || maximumGraphSegmentsPerRoute > MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE) {
+    || maximumGraphSegmentsPerRoute > HARD_MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE
+    || !Number.isSafeInteger(queuedSearchWorkCap) || queuedSearchWorkCap < 0
+    || queuedSearchWorkCap > HARD_MAX_GTFS_QUEUED_SEARCH_WORK) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
   const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
@@ -3413,7 +3461,7 @@ export function findGtfsItinerariesWithStats(
   // a large transfer fan-out before the next work item is visited. Keep the
   // pending frontier bounded independently, and disclose any dropped work via
   // the existing search-budget truncation flag.
-  const MAX_QUEUED_SEARCH_WORK = graphLimits.maxQueuedSearchWork ?? 10_000;
+  const MAX_QUEUED_SEARCH_WORK = queuedSearchWorkCap;
   let searchBudgetTruncated = false;
   let maximumQueuedSearchWork = 0;
 

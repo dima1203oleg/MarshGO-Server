@@ -2,6 +2,7 @@ import {
   findGtfsItinerariesWithStats,
   findGtfsStopArrivals,
   mergeGtfsTimetables,
+  type GtfsGraphBudgetLimits,
   type GtfsItinerarySearchInput,
   type GtfsTimetableFeed,
   type GtfsTimetableSource,
@@ -99,10 +100,10 @@ export function buildGtfsSearchGroups(sources: readonly GtfsTimetableSource[], i
   return { descriptors, groups };
 }
 
-export function searchGtfsGroup(group: GtfsSearchGroup, input: GtfsItinerarySearchInput) {
+export function searchGtfsGroup(group: GtfsSearchGroup, input: GtfsItinerarySearchInput, graphLimits: GtfsGraphBudgetLimits = {}) {
   const first = group.sources[0];
   if (!first) throw new Error('GTFS search group has no providers');
-  return findGtfsItinerariesWithStats(group.feed, { ...input, providerId: first.providerId, providerName: first.providerName });
+  return findGtfsItinerariesWithStats(group.feed, { ...input, providerId: first.providerId, providerName: first.providerName }, graphLimits);
 }
 
 export function selectGtfsTripMetadata(feed: GtfsTimetableFeed, tripIds: readonly string[]) {
