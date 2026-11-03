@@ -2818,7 +2818,7 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
        json_build_array(ST_X(j.destination::geometry),ST_Y(j.destination::geometry)) AS destination_coordinates,
        j.requested_departure_at,j.requested_arrival_at,j.strategy,j.state,j.passenger_count,j.total_price_minor,
        j.confirmed_price_minor,j.estimated_price_min_minor,j.estimated_price_max_minor,j.total_duration_s,
-       j.walking_distance_m,j.transfer_count,j.reliability_score,j.comfort_score,j.current_leg_id,j.created_at,j.updated_at,
+       j.walking_distance_m,j.transfer_count,j.reliability_score,j.comfort_score,j.current_leg_id,j.started_at,j.completed_at,j.created_at,j.updated_at,
        GREATEST(j.total_duration_s-COALESCE(SUM(l.duration_s),0),0)::int AS "waitingSeconds",
        COALESCE(json_agg(json_build_object(
          'id',l.id,'ordinal',l.ordinal,'mode',l.mode,'originName',l.origin_name,'originCoordinates',

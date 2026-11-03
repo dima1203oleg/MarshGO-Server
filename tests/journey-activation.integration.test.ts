@@ -112,6 +112,16 @@ describe('passenger journey activation contract (opt-in local integration test)'
     assert.equal(audit.rowCount, 1);
   });
 
+  it('exposes the lifecycle timestamps through the read endpoint the client restores from', async () => {
+    const response = await call('GET', `/api/v1/journeys/${journey}`, passenger);
+    assert.equal(response.status, 200);
+    const stored = await journeyRow(journey);
+    assert.equal(response.json?.data?.state, 'ACTIVE');
+    assert.equal(response.json?.data?.current_leg_id, stored.current_leg_id);
+    assert.equal(Date.parse(response.json?.data?.started_at), stored.started_at?.getTime());
+    assert.equal(response.json?.data?.completed_at, null);
+  });
+
   it('replays a repeated activation without moving started_at again', async () => {
     const before = await journeyRow(journey);
     const response = await call('POST', `/api/v1/journeys/${journey}/activate`, passenger);
