@@ -458,8 +458,9 @@ export interface GtfsItinerarySearchResult {
 
 /**
  * Collapse per-group reach measurements into one honest disclosure. Returns null when
- * nothing was measured; `blocked` is true only when every searched group missed a side,
- * so a reachable group always outrules a missed one.
+ * nothing was measured; `blocked` is true only when one specific side was missed in every
+ * searched group, and only that side keeps its nearest-stop distance. Naming a side some feed
+ * already reached would tell a passenger to move a point that was never the problem.
  */
 export function summarizeGtfsWalkReach(searches: readonly { walkReach?: GtfsWalkReach }[]): {
   blocked: boolean;
@@ -470,10 +471,12 @@ export function summarizeGtfsWalkReach(searches: readonly { walkReach?: GtfsWalk
   if (reaches.length === 0 || reaches.some((reach) => !reach)) return null;
   const nearest = (values: Array<number | null>) => values.reduce<number | null>(
     (min, value) => (value === null ? min : min === null || value < min ? value : min), null);
+  const originMissed = reaches.every((reach) => !reach!.originStopsFound);
+  const destinationMissed = reaches.every((reach) => !reach!.destinationStopsFound);
   return {
-    blocked: reaches.every((reach) => !reach!.originStopsFound || !reach!.destinationStopsFound),
-    nearestOriginStopMeters: nearest(reaches.map((reach) => reach!.nearestOriginStopMeters)),
-    nearestDestinationStopMeters: nearest(reaches.map((reach) => reach!.nearestDestinationStopMeters)),
+    blocked: originMissed || destinationMissed,
+    nearestOriginStopMeters: originMissed ? nearest(reaches.map((reach) => reach!.nearestOriginStopMeters)) : null,
+    nearestDestinationStopMeters: destinationMissed ? nearest(reaches.map((reach) => reach!.nearestDestinationStopMeters)) : null,
   };
 }
 

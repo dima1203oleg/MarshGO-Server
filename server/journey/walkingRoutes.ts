@@ -23,7 +23,59 @@ const ESTIMATED_WALKING_SPEED_METERS_PER_SECOND = 1.25;
 const WALKING_ROUTE_CACHE_TTL_MS = 5 * 60_000;
 const WALKING_ROUTE_FAILURE_TTL_MS = 15_000;
 const MAX_WALKING_ROUTE_CACHE_ENTRIES = 20_000;
-export const MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH = 32;
+/**
+ * One search routes every transit candidate it produced, and a real Lviv corridor yields 70+
+ * candidates with two to three distinct walks each. Identical walks are free because a cached or
+ * in-flight route returns before the budget is touched, but distinct ones are not: a budget below
+ * the corridor's distinct-leg count leaves displayed journeys with straight-line estimates, which
+ * is the defect passengers actually see. The default is therefore sized for a full candidate pool
+ * and stays hard-bounded so no search can fan out without limit.
+ */
+const DEFAULT_WALKING_ROUTE_REQUESTS_PER_SEARCH = 120;
+const MIN_WALKING_ROUTE_REQUESTS_PER_SEARCH = 16;
+/** Absolute ceiling for one search, whatever the environment asks for. */
+export const MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH = 240;
+/**
+ * Candidates routed per wave. The routing queue admits `ROUTING_MAX_CONCURRENCY` active plus
+ * `ROUTING_MAX_QUEUE` waiting requests and rejects the rest, so issuing the whole candidate pool
+ * at once would spend the budget on requests that never reached a foot graph. Six candidates
+ * (~15 legs) keep a wave inside the default 12+24 capacity.
+ */
+const DEFAULT_WALKING_ROUTE_CANDIDATES_PER_BATCH = 6;
+const MAX_WALKING_ROUTE_CANDIDATES_PER_BATCH = 12;
+
+function boundedEnvInteger(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const value = raw?.trim() ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
+/** Operator-tunable per-search foot-route request budget, always inside the hard ceiling. */
+export function walkingRouteRequestLimit(): number {
+  return boundedEnvInteger(process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH,
+    DEFAULT_WALKING_ROUTE_REQUESTS_PER_SEARCH, MIN_WALKING_ROUTE_REQUESTS_PER_SEARCH, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH);
+}
+
+/** Operator-tunable candidate wave size, kept at or below the queue capacity guard. */
+export function walkingRouteCandidateBatchSize(): number {
+  return boundedEnvInteger(process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH,
+    DEFAULT_WALKING_ROUTE_CANDIDATES_PER_BATCH, 1, MAX_WALKING_ROUTE_CANDIDATES_PER_BATCH);
+}
+
+export interface WalkingRouteBudget {
+  readonly limit: number;
+  remaining: number;
+  exhausted: boolean;
+  /** Distinct foot routes actually requested from a router; cached and in-flight hits are free. */
+  spent: number;
+}
+
+export function createWalkingRouteBudget(limit = walkingRouteRequestLimit()): WalkingRouteBudget {
+  const boundedLimit = Number.isSafeInteger(limit)
+    ? Math.max(0, Math.min(limit, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH))
+    : 0;
+  return { limit: boundedLimit, remaining: boundedLimit, exhausted: false, spent: 0 };
+}
 
 type CachedRoute = { expiresAt: number; value: Promise<WalkingRoutePath | null> };
 const routeCache = new Map<string, CachedRoute>();
@@ -92,17 +144,6 @@ export function walkingRoutingConfiguredFor(origin: [number, number], destinatio
   return Boolean(walkingEndpointFor(origin, destination));
 }
 
-export interface WalkingRouteBudget {
-  readonly limit: number;
-  remaining: number;
-  exhausted: boolean;
-}
-
-export function createWalkingRouteBudget(limit = MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH): WalkingRouteBudget {
-  const boundedLimit = Number.isSafeInteger(limit) ? Math.max(0, Math.min(limit, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH)) : 0;
-  return { limit: boundedLimit, remaining: boundedLimit, exhausted: false };
-}
-
 function coordinateKey(point: [number, number]): string {
   const longitude = Object.is(point[0], -0) ? 0 : point[0];
   const latitude = Object.is(point[1], -0) ? 0 : point[1];
@@ -135,6 +176,7 @@ export async function routePedestrianPath(
       return null;
     }
     budget.remaining--;
+    budget.spent += 1;
   }
 
   const value = requestOsrmRoute([from, to], endpoint, { timeoutMs: WALKING_ROUTE_TIMEOUT_MS, profile: 'FOOT', priority: 'background' })

@@ -67,6 +67,16 @@ export function scaleGtfsFareForPassengers(
   return { ...fare, priceMinor, allocations };
 }
 
+/**
+ * A price label may not promise an estimate the payload cannot show. `ESTIMATED` is only honest
+ * together with an actual amount, so a fare this search cannot price in the passenger's currency
+ * stays `priceMinor: null` plus `UNKNOWN`. Claiming an estimate there would let a client read a
+ * bare label as an implied quote — and an unknown fare is never zero.
+ */
+export function priceStatusFor(amountMinor: number | null | undefined): 'ESTIMATED' | 'UNKNOWN' {
+  return typeof amountMinor === 'number' && Number.isFinite(amountMinor) ? 'ESTIMATED' : 'UNKNOWN';
+}
+
 const V2_FILES = [
   'fare_media.txt', 'fare_products.txt', 'fare_leg_rules.txt', 'fare_leg_join_rules.txt',
   'fare_transfer_rules.txt', 'rider_categories.txt', 'timeframes.txt', 'networks.txt',

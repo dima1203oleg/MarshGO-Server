@@ -22,10 +22,10 @@ import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
-import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
+import { priceStatusFor, scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, effectiveWalkingReachMeters, resolveTransitCandidateBudget, summarizeGtfsWalkReach, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, walkingRoutingConfigured, walkingRoutingConfiguredFor, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingConfigured, walkingRoutingConfiguredFor, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
@@ -3230,7 +3230,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
   }
   if (walkingRoutingAvailable) {
-    const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary) => {
+    const routeStartedAt = Date.now();
+    const routeCandidate = async (itinerary: SearchItinerary): Promise<SearchItinerary | null> => {
       const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, search.destination.coordinates, walkingRouteBudget, false);
       if (!routed) {
         pedestrianCandidatesRejected = true;
@@ -3238,10 +3239,25 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       }
       if (routed.walkingRoutesUnconfirmed && walkingRouteBudget.remaining > 0) pedestrianRoutesUnavailable = true;
       return routed;
-    }));
+    };
+    // Route in bounded waves. Issuing the whole candidate pool at once overflows the routing
+    // queue, whose rejection path also spends the request budget, so the search would pay for
+    // routes that never reached a foot graph and still show estimated walks.
+    const candidateBatchSize = walkingRouteCandidateBatchSize();
+    const routedCandidates: Array<SearchItinerary | null> = [];
+    for (let index = 0; index < scheduledCandidates.length; index += candidateBatchSize) {
+      const batch = scheduledCandidates.slice(index, index + candidateBatchSize);
+      routedCandidates.push(...await Promise.all(batch.map(routeCandidate)));
+    }
     scheduledCandidates = routedCandidates.filter((itinerary): itinerary is SearchItinerary => itinerary !== null)
       .filter((itinerary) => (search.preferences.maxWalkingMeters === undefined || itinerary.walkingMeters <= search.preferences.maxWalkingMeters)
         && (search.preferences.maxTotalDurationSeconds === undefined || itinerary.durationSeconds <= search.preferences.maxTotalDurationSeconds));
+    if (process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1') {
+      console.info(JSON.stringify({ event: 'walking.route.debug', candidates: routedCandidates.length,
+        retained: scheduledCandidates.length, budgetLimit: walkingRouteBudget.limit, requestsSpent: walkingRouteBudget.spent,
+        exhausted: walkingRouteBudget.exhausted, unconfirmed: pedestrianRoutesUnavailable,
+        rejected: pedestrianCandidatesRejected, durationMs: Date.now() - routeStartedAt }));
+    }
     if (pedestrianRoutesUnavailable) {
       providerErrors.push('Пішохідний маршрутизатор не повернув підтверджений шлях для частини варіантів; їхні піші ділянки залишено як оцінку.');
     }
@@ -3671,7 +3687,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   if (wantsScooter && scooterRouteProviders.length > 0) routePlannerTypes.add('scooter');
   for (const group of mergedFeedGroups) for (const routeType of group.routeTypes) routePlannerTypes.add(routeType);
   const canonicalRouteTypes = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'];
-  const requestedRouteTypes = search.preferences.allowedTransportTypes ?? canonicalRouteTypes;
+  // Only an explicit category selection is a passenger preference. An unrestricted search asks
+  // for everything, so reporting twelve unmet conditions would be invented noise: categories with
+  // no provider in this corridor are already disclosed through completeness.modesUnavailable.
+  const requestedRouteTypes = search.preferences.allowedTransportTypes ?? [];
   const unsupportedSelectedTypes = requestedRouteTypes
     .filter((type) => !routePlannerTypes.has(type))
     .map((type) => `transportType:${type}:not-in-route-engine`);
@@ -3798,7 +3817,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
                 segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
                 segment.scheduledDepartureAt, segment.scheduledArrivalAt, durationSeconds, allocation?.priceMinor ?? null,
-                path.fare?.currency ?? 'UAH', allocation ? 'ESTIMATED' : 'UNKNOWN', segment.providerId,
+                path.fare?.currency ?? 'UAH', priceStatusFor(allocation?.priceMinor), segment.providerId,
                 segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
                 segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
                 JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
@@ -3819,7 +3838,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               // Shape-measured riding distance; null only when no shape projection succeeded.
               distanceMeters: segment.ridingDistanceMeters ?? null,
               priceMinor: allocation?.priceMinor ?? null, currency: allocation ? path.fare?.currency ?? null : null,
-              priceStatus: allocation ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN', source: 'gtfs-static',
+              priceStatus: priceStatusFor(allocation?.priceMinor), availabilityStatus: 'UNKNOWN', source: 'gtfs-static',
               providerName: segment.providerName, routeName: segment.routeName, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс',
               scheduleSemantics: segment.scheduleSemantics,
               ...(segment.stops ? { stops: segment.stops } : {}),
@@ -3940,7 +3959,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                 segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
                 segment.scheduledDepartureAt, segment.scheduledArrivalAt,
                 segment.realtimeUpdatedAt ? segment.departureAt : null, segment.realtimeUpdatedAt ? segment.arrivalAt : null,
-                durationSeconds, allocation?.priceMinor ?? null, path.fare?.currency ?? 'UAH', allocation ? 'ESTIMATED' : 'UNKNOWN',
+                durationSeconds, allocation?.priceMinor ?? null, path.fare?.currency ?? 'UAH', priceStatusFor(allocation?.priceMinor),
                 segment.providerId, segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
                 segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
                 JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
@@ -3964,7 +3983,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
               durationSeconds, distanceMeters: segment.ridingDistanceMeters ?? null, priceMinor: allocation?.priceMinor ?? null,
               currency: allocation ? path.fare?.currency ?? null : null,
-              priceStatus: allocation ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+              priceStatus: priceStatusFor(allocation?.priceMinor), availabilityStatus: 'UNKNOWN',
               ...(allocation ? { fareProductId: allocation.fareProductId,
                 fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
               ...(segment.stops ? { stops: segment.stops } : {}),
@@ -4171,7 +4190,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             segment.realtimeUpdatedAt ? segment.arrivalAt : null,
             durationSeconds,
             itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
-            itinerary.fare?.currency ?? 'UAH', itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', segment.providerId,
+            itinerary.fare?.currency ?? 'UAH', priceStatusFor(itinerary.fare?.allocations[segmentIndex]?.priceMinor), segment.providerId,
             segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
             segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
           JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
@@ -4196,7 +4215,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
           durationSeconds,
           distanceMeters: segment.ridingDistanceMeters ?? null, priceMinor: itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
-          currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+          currency: itinerary.fare?.currency ?? null, priceStatus: priceStatusFor(itinerary.fare?.allocations[segmentIndex]?.priceMinor), availabilityStatus: 'UNKNOWN',
           ...(itinerary.fare?.allocations[segmentIndex] ? {
             fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
             fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
@@ -4227,7 +4246,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         totalPriceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null, confirmedPriceMinor: null,
         estimatedPriceMinMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
         estimatedPriceMaxMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
-        currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', walkingMeters: itinerary.walkingMeters,
+        currency: itinerary.fare?.currency ?? null, priceStatus: priceStatusFor(itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null), walkingMeters: itinerary.walkingMeters,
         transfers: itinerary.transfers, reliabilityScore: null, legs: responseLegs });
     }
     await client.query('COMMIT');

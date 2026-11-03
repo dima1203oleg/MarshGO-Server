@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
 import {
-  applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor,
+  applyRoutedWalkingPaths, createWalkingRouteBudget, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH, routePedestrianPath,
+  walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRouteRequestLimit,
   walkingRoutingConfigured, walkingRoutingConfiguredFor, type WalkingRoutePath,
 } from '../server/journey/walkingRoutes';
 
@@ -143,7 +144,54 @@ test('caps external foot-route requests per search without caching a budget miss
   assert.equal(await routePedestrianPath([25.02, 49], [25.03, 49.01], endpoint, budget), null);
   assert.equal(budget.remaining, 0);
   assert.equal(budget.exhausted, true);
+  assert.equal(budget.spent, 1, 'only a request that reached a router is charged to the budget');
   assert.equal(fetchCount, 1);
+});
+
+test('the foot-route budget covers a real candidate pool and stays hard-bounded', (t) => {
+  t.diagnostic('regression: a live Lviv search generated 73 candidates; a 32-request budget left displayed journeys with estimated walks');
+  const original = process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH;
+  const restore = () => {
+    if (original === undefined) delete process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH;
+    else process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH = original;
+  };
+  t.after(restore);
+
+  delete process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH;
+  const fallback = walkingRouteRequestLimit();
+  assert.ok(fallback >= 96, `an ordinary corridor must not be starved: got ${fallback}`);
+  assert.ok(fallback <= MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH);
+  assert.equal(createWalkingRouteBudget().limit, fallback, 'a search uses the configured budget by default');
+
+  process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH = '500';
+  assert.equal(walkingRouteRequestLimit(), MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH, 'no search may fan out without a ceiling');
+  process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH = '4';
+  assert.equal(walkingRouteRequestLimit(), 16, 'an override too small to price one corridor is not trusted');
+  process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH = 'not-a-number';
+  assert.equal(walkingRouteRequestLimit(), fallback, 'an unreadable override falls back to the default');
+  restore();
+
+  assert.equal(createWalkingRouteBudget(24).limit, 24, 'a per-stage sub-budget stays below the ceiling');
+  assert.equal(createWalkingRouteBudget(100_000).limit, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH);
+  assert.equal(createWalkingRouteBudget(-1).limit, 0, 'a negative budget requests nothing');
+  assert.equal(createWalkingRouteBudget(1.5).limit, 0, 'a non-integer budget is not trusted');
+});
+
+test('candidate waves stay inside the routing queue capacity', (t) => {
+  const original = process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH;
+  t.after(() => {
+    if (original === undefined) delete process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH;
+    else process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH = original;
+  });
+  // ROUTING_MAX_CONCURRENCY(12) + ROUTING_MAX_QUEUE(24) accept 36 requests; beyond that the
+  // gateway rejects them and the rejected request still paid its budget.
+  delete process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH;
+  const wave = walkingRouteCandidateBatchSize();
+  assert.ok(wave >= 1 && wave * 3 <= 36, `a wave of ${wave} candidates must fit the default queue`);
+  process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH = '99';
+  assert.equal(walkingRouteCandidateBatchSize(), 12, 'wave size stays bounded');
+  process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH = '0';
+  assert.equal(walkingRouteCandidateBatchSize(), 1, 'a wave of zero candidates would stall the search');
 });
 
 test('bounds concurrent provider work and drops excess queued walking paths', async (t) => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateGtfsItineraryFare, parseGtfsFares, scaleGtfsFareForPassengers, type GtfsFareLeg } from '../server/journey/gtfsFares';
+import { calculateGtfsItineraryFare, parseGtfsFares, priceStatusFor, scaleGtfsFareForPassengers, type GtfsFareLeg } from '../server/journey/gtfsFares';
 import { findGtfsItineraries, mergeGtfsTimetables, parseGtfsTimetable, type GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 
 const encode = (value: string) => new TextEncoder().encode(value);
@@ -107,4 +107,13 @@ test('feed fares survive provider namespacing and price the composed scheduled i
   assert.ok(itinerary);
   assert.equal(itinerary.fare?.priceMinor, 4200);
   assert.equal(itinerary.fare?.currency, 'UAH');
+});
+
+test('a price label without an amount is never reported as an estimate', () => {
+  // Live defect: a Lviv journey returned priceMinor:null with priceStatus:'ESTIMATED'.
+  assert.equal(priceStatusFor(3000), 'ESTIMATED');
+  assert.equal(priceStatusFor(0), 'ESTIMATED', 'a genuinely free leg is not an unknown price');
+  assert.equal(priceStatusFor(null), 'UNKNOWN', 'an unknown fare is not zero and not an estimate');
+  assert.equal(priceStatusFor(undefined), 'UNKNOWN', 'a fare this search cannot price stays unknown');
+  assert.equal(priceStatusFor(Number.NaN), 'UNKNOWN');
 });

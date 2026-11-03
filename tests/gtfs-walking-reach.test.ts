@@ -115,3 +115,23 @@ test('the disclosure surfaces as a partial reason and completeness nearest-stop 
   assert.equal(disclosed.nearestOriginStopMeters, 13);
   assert.equal(disclosed.nearestDestinationStopMeters, 1335);
 });
+
+test('the reach summary names only the side every searched group missed', () => {
+  const missedDestination = (nearestDestinationStopMeters: number) => ({
+    walkReach: { originStopsFound: true, destinationStopsFound: false, nearestOriginStopMeters: 93, nearestDestinationStopMeters },
+  });
+  const summary = summarizeGtfsWalkReach([missedDestination(1243), missedDestination(1500)]);
+  assert.ok(summary?.blocked, 'every group missed the destination side');
+  assert.equal(summary?.nearestDestinationStopMeters, 1243, 'the nearest missed stop is the distance a passenger can act on');
+  // A live Lviv search named an origin 93 m from its own stop inside a "no stop nearby" message.
+  assert.equal(summary?.nearestOriginStopMeters, null, 'a side every group reached must not be named');
+
+  // Different feeds missing different sides prove nothing about either side being out of reach.
+  const split = summarizeGtfsWalkReach([
+    { walkReach: { originStopsFound: false, destinationStopsFound: true, nearestOriginStopMeters: 2400, nearestDestinationStopMeters: 40 } },
+    { walkReach: { originStopsFound: true, destinationStopsFound: false, nearestOriginStopMeters: 40, nearestDestinationStopMeters: 2400 } },
+  ]);
+  assert.equal(split?.blocked, false, 'no single side is missed by every group');
+  assert.equal(split?.nearestOriginStopMeters, null);
+  assert.equal(split?.nearestDestinationStopMeters, null);
+});
