@@ -51,28 +51,33 @@ const searchInput = (destination: [number, number], maxWalkingMeters?: number) =
   maximumEgressWalkingMeters: effectiveWalkingReachMeters(DEFAULT_MAX_EGRESS_WALKING_METERS, maxWalkingMeters),
 });
 
-test('a walking preference beyond the default radius unlocks a stop the baseline search misses', () => {
+test('a stop outside the default radius is still planned from, because the alternative is an empty screen', () => {
   const baseline = findGtfsItinerariesWithStats(feed(), searchInput(MISSED_DESTINATION_POINT));
-  assert.equal(baseline.itineraries.length, 0, 'the default 1000 m egress must not reach a 1.3 km stop');
-  const unlocked = findGtfsItinerariesWithStats(feed(), searchInput(MISSED_DESTINATION_POINT, 1500));
-  assert.ok(unlocked.itineraries.length >= 1,
-    'maxWalkingMeters 1500 must widen the egress radius to 1500 and find the itinerary');
+  assert.ok(baseline.itineraries.length >= 1,
+    'the nearest stop 1.3 km away must be planned from; the old answer was zero routes for a real Lviv trip');
+  assert.equal(baseline.walkReach?.destinationStopsFound, true);
+  assert.equal(baseline.walkReach?.destinationReachedWithinWalkingRadius, false,
+    'it is still outside the radius, and the search has to say so');
+  const widened = findGtfsItinerariesWithStats(feed(), searchInput(MISSED_DESTINATION_POINT, 1500));
+  assert.ok(widened.itineraries.length >= 1);
+  assert.equal(widened.walkReach?.destinationReachedWithinWalkingRadius, true,
+    'maxWalkingMeters 1500 widens the egress radius over the same stop');
   assert.equal(effectiveWalkingReachMeters(DEFAULT_MAX_EGRESS_WALKING_METERS, 1500), 1500);
   assert.equal(effectiveWalkingReachMeters(DEFAULT_MAX_EGRESS_WALKING_METERS, undefined), DEFAULT_MAX_EGRESS_WALKING_METERS,
     'without the preference the configured radii stay untouched');
 });
 
-test('the zero-reach result carries measured per-side nearest stop distances', () => {
-  const blocked = findGtfsItinerariesWithStats(feed(), searchInput(MISSED_DESTINATION_POINT));
+test('a stop beyond every allowed walk is not planned from, and names the distance instead', () => {
+  const blocked = findGtfsItinerariesWithStats(feed(), searchInput(UNREACHABLE_DESTINATION_POINT));
+  assert.equal(blocked.itineraries.length, 0, 'the fallback stops at the walk ceiling, not at any stop on earth');
   assert.ok(blocked.walkReach, 'a searched result must carry the measured walk reach');
   assert.equal(blocked.walkReach.originStopsFound, true);
   assert.equal(blocked.walkReach.destinationStopsFound, false);
   assert.ok(blocked.walkReach.nearestOriginStopMeters !== null
     && blocked.walkReach.nearestOriginStopMeters < 20, 'the origin side sits at its own stop');
   assert.ok(blocked.walkReach.nearestDestinationStopMeters !== null
-    && blocked.walkReach.nearestDestinationStopMeters > 1250
-    && blocked.walkReach.nearestDestinationStopMeters < 1420,
-  `expected ~1335 m, measured ${blocked.walkReach.nearestDestinationStopMeters}`);
+    && blocked.walkReach.nearestDestinationStopMeters > 2_000,
+  `expected ~2 449 m, measured ${blocked.walkReach.nearestDestinationStopMeters}`);
 });
 
 test('a pathologically large walking preference is capped and never shrinks a wider base radius', () => {
@@ -85,10 +90,10 @@ test('a pathologically large walking preference is capped and never shrinks a wi
 });
 
 test('the walk-reach summary is present exactly in the zero-reach case and never without measurement', () => {
-  const blocked = findGtfsItinerariesWithStats(feed(), searchInput(MISSED_DESTINATION_POINT));
+  const blocked = findGtfsItinerariesWithStats(feed(), searchInput(UNREACHABLE_DESTINATION_POINT));
   const summary = summarizeGtfsWalkReach([blocked]);
   assert.ok(summary && summary.blocked);
-  assert.ok(summary.nearestDestinationStopMeters !== null && summary.nearestDestinationStopMeters > 1250);
+  assert.ok(summary.nearestDestinationStopMeters !== null && summary.nearestDestinationStopMeters > 2_000);
   assert.equal(summarizeGtfsWalkReach([findGtfsItinerariesWithStats(feed(), searchInput(MISSED_DESTINATION_POINT, 1500))])?.blocked, false);
   assert.equal(summarizeGtfsWalkReach([]), null, 'no searched group proves nothing');
   // A synthesized empty fallback carries no measurement, so the summary must stay silent.
@@ -118,7 +123,11 @@ test('the disclosure surfaces as a partial reason and completeness nearest-stop 
 
 test('the reach summary names only the side every searched group missed', () => {
   const missedDestination = (nearestDestinationStopMeters: number) => ({
-    walkReach: { originStopsFound: true, destinationStopsFound: false, nearestOriginStopMeters: 93, nearestDestinationStopMeters },
+    walkReach: {
+      originStopsFound: true, destinationStopsFound: false,
+      originReachedWithinWalkingRadius: true, destinationReachedWithinWalkingRadius: false,
+      nearestOriginStopMeters: 93, nearestDestinationStopMeters,
+    },
   });
   const summary = summarizeGtfsWalkReach([missedDestination(1243), missedDestination(1500)]);
   assert.ok(summary?.blocked, 'every group missed the destination side');
@@ -128,10 +137,38 @@ test('the reach summary names only the side every searched group missed', () => 
 
   // Different feeds missing different sides prove nothing about either side being out of reach.
   const split = summarizeGtfsWalkReach([
-    { walkReach: { originStopsFound: false, destinationStopsFound: true, nearestOriginStopMeters: 2400, nearestDestinationStopMeters: 40 } },
-    { walkReach: { originStopsFound: true, destinationStopsFound: false, nearestOriginStopMeters: 40, nearestDestinationStopMeters: 2400 } },
+    { walkReach: { originStopsFound: false, destinationStopsFound: true, originReachedWithinWalkingRadius: false, destinationReachedWithinWalkingRadius: true, nearestOriginStopMeters: 2400, nearestDestinationStopMeters: 40 } },
+    { walkReach: { originStopsFound: true, destinationStopsFound: false, originReachedWithinWalkingRadius: true, destinationReachedWithinWalkingRadius: false, nearestOriginStopMeters: 40, nearestDestinationStopMeters: 2400 } },
   ]);
   assert.equal(split?.blocked, false, 'no single side is missed by every group');
   assert.equal(split?.nearestOriginStopMeters, null);
   assert.equal(split?.nearestDestinationStopMeters, null);
+});
+
+test('a journey built on the closest stop outside the radius is disclosed as a longer walk, not as an outage', () => {
+  // Measured live in Lviv: nothing sat inside the 1 000 m egress radius, the nearest stop was
+  // 1 243 m away in a straight line, and the search used to answer "no routes".
+  const onlyByFallback = {
+    walkReach: {
+      originStopsFound: true, destinationStopsFound: true,
+      originReachedWithinWalkingRadius: true, destinationReachedWithinWalkingRadius: false,
+      nearestOriginStopMeters: 120, nearestDestinationStopMeters: 1243,
+    },
+  };
+  const summary = summarizeGtfsWalkReach([onlyByFallback]);
+  assert.equal(summary?.blocked, false, 'a route exists, so the passenger must not be told to move the pin');
+  assert.equal(summary?.reachExtended, true);
+  assert.equal(summary?.nearestDestinationStopMeters, 1243, 'the long walk is named so the passenger can judge it');
+  assert.equal(summary?.nearestOriginStopMeters, null, 'the side that was reached stays unmentioned');
+
+  // A stop inside the radius on every side is a normal search: no reason, no distances.
+  const ordinary = summarizeGtfsWalkReach([{
+    walkReach: {
+      originStopsFound: true, destinationStopsFound: true,
+      originReachedWithinWalkingRadius: true, destinationReachedWithinWalkingRadius: true,
+      nearestOriginStopMeters: 120, nearestDestinationStopMeters: 340,
+    },
+  }]);
+  assert.equal(ordinary?.reachExtended, false);
+  assert.equal(ordinary?.nearestDestinationStopMeters, null);
 });

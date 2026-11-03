@@ -439,8 +439,15 @@ export interface GtfsItinerarySearchTruncation {
 
 /** Stop-reach facts measured during stop selection; distances are straight-line. */
 export interface GtfsWalkReach {
+  /** A stop was selected for that side, whether inside the radius or by the nearest-stop fallback. */
   originStopsFound: boolean;
   destinationStopsFound: boolean;
+  /**
+   * A stop lay inside the radius the search asked for. False with `…StopsFound` true means the
+   * side was served only by the fallback stop, so journeys from it need a longer walk than usual.
+   */
+  originReachedWithinWalkingRadius: boolean;
+  destinationReachedWithinWalkingRadius: boolean;
   /** Null only when the searched feed had no usable stops at all. */
   nearestOriginStopMeters: number | null;
   nearestDestinationStopMeters: number | null;
@@ -461,9 +468,14 @@ export interface GtfsItinerarySearchResult {
  * nothing was measured; `blocked` is true only when one specific side was missed in every
  * searched group, and only that side keeps its nearest-stop distance. Naming a side some feed
  * already reached would tell a passenger to move a point that was never the problem.
+ *
+ * `reachExtended` is the other half of the answer: the search did build journeys, but only from a
+ * stop that lay outside the radius, so the walk is longer than the plan normally allows. That is a
+ * fact about the routes being shown, not an outage, and the caller must not word it as one.
  */
 export function summarizeGtfsWalkReach(searches: readonly { walkReach?: GtfsWalkReach }[]): {
   blocked: boolean;
+  reachExtended: boolean;
   nearestOriginStopMeters: number | null;
   nearestDestinationStopMeters: number | null;
 } | null {
@@ -473,10 +485,16 @@ export function summarizeGtfsWalkReach(searches: readonly { walkReach?: GtfsWalk
     (min, value) => (value === null ? min : min === null || value < min ? value : min), null);
   const originMissed = reaches.every((reach) => !reach!.originStopsFound);
   const destinationMissed = reaches.every((reach) => !reach!.destinationStopsFound);
+  const originOutsideRadius = reaches.every((reach) => !reach!.originReachedWithinWalkingRadius);
+  const destinationOutsideRadius = reaches.every((reach) => !reach!.destinationReachedWithinWalkingRadius);
+  const blocked = originMissed || destinationMissed;
   return {
-    blocked: originMissed || destinationMissed,
-    nearestOriginStopMeters: originMissed ? nearest(reaches.map((reach) => reach!.nearestOriginStopMeters)) : null,
-    nearestDestinationStopMeters: destinationMissed ? nearest(reaches.map((reach) => reach!.nearestDestinationStopMeters)) : null,
+    blocked,
+    reachExtended: !blocked && (originOutsideRadius || destinationOutsideRadius),
+    nearestOriginStopMeters: originMissed || originOutsideRadius
+      ? nearest(reaches.map((reach) => reach!.nearestOriginStopMeters)) : null,
+    nearestDestinationStopMeters: destinationMissed || destinationOutsideRadius
+      ? nearest(reaches.map((reach) => reach!.nearestDestinationStopMeters)) : null,
   };
 }
 
@@ -1920,6 +1938,18 @@ export function findGtfsItinerariesWithStats(
     const ranked = measured
       .filter(({ distance }) => distance <= radius)
       .sort((a, b) => a.distance - b.distance);
+    const reachedWithinRadius = ranked.length > 0;
+    // A stop that sits just outside the straight-line radius is not an unreachable stop: a pin in
+    // the middle of a Lviv block measured 1 243 m from its destination stop in a crow-flight — a
+    // normal walk — and the search answered "no routes" because that single number excluded the
+    // stop before any timetable was looked at. When the radius admits nothing, the one nearest
+    // stop is admitted instead, bounded by the same ceiling a passenger may explicitly ask for.
+    // Journeys built on it are disclosed as needing a longer walk; they are never presented as if
+    // the stop had been close.
+    if (!reachedWithinRadius && nearestMeters !== null && nearestMeters <= MAX_PREFERENCE_WALKING_RADIUS_METERS) {
+      const nearest = measured.reduce((best, item) => (item.distance < best.distance ? item : best));
+      ranked.push(nearest);
+    }
     const selected = new Map<string, typeof ranked[number]>();
     const selectedByRoutePattern = new Map<string, number>();
     const routePatternsByStop = new Map<string, Set<string>>();
@@ -1988,7 +2018,7 @@ export function findGtfsItinerariesWithStats(
       addSelected(item);
     }
     if (selected.size < ranked.length) stopSelectionTruncated = true;
-    return { stops: [...selected.values()], nearestMeters };
+    return { stops: [...selected.values()], nearestMeters, reachedWithinRadius };
   };
   const originReach = closestStops(input.origin, accessRadius);
   const destinationReach = closestStops(input.destination, egressRadius);
@@ -1997,6 +2027,8 @@ export function findGtfsItinerariesWithStats(
   const walkReach: GtfsWalkReach = {
     originStopsFound: originStops.length > 0,
     destinationStopsFound: destinationStops.length > 0,
+    originReachedWithinWalkingRadius: originReach.reachedWithinRadius,
+    destinationReachedWithinWalkingRadius: destinationReach.reachedWithinRadius,
     nearestOriginStopMeters: originReach.nearestMeters,
     nearestDestinationStopMeters: destinationReach.nearestMeters,
   };

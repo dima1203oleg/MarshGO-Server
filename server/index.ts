@@ -23,9 +23,9 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { priceStatusFor, scaleGtfsFareForPassengers } from './journey/gtfsFares';
-import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, effectiveWalkingReachMeters, resolveTransitCandidateBudget, summarizeGtfsWalkReach, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, effectiveWalkingReachMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS, resolveTransitCandidateBudget, summarizeGtfsWalkReach, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingConfigured, walkingRoutingConfiguredFor, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, routePedestrianPath, STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingConfigured, walkingRoutingConfiguredFor, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
@@ -3081,7 +3081,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     return { stationSource: stations, routeSource: route, scheduleSources };
   })() : null;
   type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary,
-    'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified' | 'walkingRoutesUnconfirmed'>>;
+    'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified' | 'walkingRoutesUnconfirmed' | 'walkReachExtended'>>;
   const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
     if (!itinerary.fare || search.passengers === 1) return itinerary;
     return { ...itinerary, fare: scaleGtfsFareForPassengers(itinerary.fare, search.passengers) };
@@ -3105,6 +3105,24 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS, search.preferences.maxWalkingMeters);
   const transitEgressWalkingMeters = effectiveWalkingReachMeters(
     routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS, search.preferences.maxWalkingMeters);
+  // Those two numbers are straight-line stop-reach radii: they decide which stops the timetable
+  // search may look at. The legs they then cap are street paths, and a confirmed foot route leaves
+  // a block at more than the crow-flight line. Without the allowance the Lviv search measured at
+  // 2026-11-03 generated 100 real itineraries and returned none, because a 1 594 m walk to a stop
+  // 1 243 m away was rejected by the 1 500 m line that had selected that very stop.
+  const walkStreetDetourAllowance = search.preferences.maxWalkingMeters === undefined
+    ? STREET_WALKING_DETOUR_ALLOWANCE : 1;
+  // A walk limit the passenger typed is a street distance and stays a hard cap. The engine's own
+  // radii are not a request at all, so when no stop lies inside one, the closest stop there is
+  // becomes the fallback budget — bounded by the same ceiling a passenger may explicitly ask for,
+  // and every journey built on it is disclosed as needing a longer walk than planned.
+  const explicitWalkLimit = search.preferences.maxWalkingMeters !== undefined;
+  const extendedTransitAccessWalkingMeters = explicitWalkLimit
+    ? transitAccessWalkingMeters
+    : Math.max(transitAccessWalkingMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS);
+  const extendedTransitEgressWalkingMeters = explicitWalkLimit
+    ? transitEgressWalkingMeters
+    : Math.max(transitEgressWalkingMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS);
   try {
     if (eligibleGtfsProviders.length > 0 || metroSources) {
       gtfsWorkerSearch = await gtfsSearchWorker.search({
@@ -3151,6 +3169,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   let pedestrianRoutesUnavailable = false;
   let pedestrianCandidatesRejected = false;
   let hasUnpricedTransitCandidates = false;
+  let walkReachExtendedCandidates = 0;
+  const walkRejections = createWalkingRejectionReasons();
   const routeTransitItinerary = async (
     itinerary: GtfsItinerary,
     origin: [number, number],
@@ -3172,7 +3192,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     // it stays null so the leg keeps its estimate and is reported as unconfirmed.
     const routeLeg = (from: [number, number], to: [number, number]) => {
       const endpoint = walkingEndpointFor(from, to);
-      return endpoint ? routePedestrianPath(from, to, endpoint, routeBudget) : Promise.resolve(null);
+      if (!endpoint) {
+        walkRejections.unroutableWalkPair += 1;
+        return Promise.resolve(null);
+      }
+      return routePedestrianPath(from, to, endpoint, routeBudget);
     };
     const transferRequests = itinerary.transferWalkingMeters.map(async (meters, index) => {
       const previous = itinerary.segments[index];
@@ -3193,11 +3217,16 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       || (last.distanceFromDestinationStopMeters > 0 && !egress)
       || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
         && !itinerary.transferWalkingGeometries[index] && !transfers[index]))) return null;
-    return applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
+    const routed = applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
       maximumAccessMeters: transitAccessWalkingMeters,
       maximumEgressMeters: transitEgressWalkingMeters,
       maximumTransferMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
-    });
+      streetDetourAllowance: walkStreetDetourAllowance,
+      extendedMaximumAccessMeters: extendedTransitAccessWalkingMeters,
+      extendedMaximumEgressMeters: extendedTransitEgressWalkingMeters,
+    }, walkRejections);
+    if (routed?.walkReachExtended) walkReachExtendedCandidates += 1;
+    return routed;
   };
 
   for (const itinerarySearch of gtfsWorkerSearch.searches) {
@@ -3249,14 +3278,35 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const batch = scheduledCandidates.slice(index, index + candidateBatchSize);
       routedCandidates.push(...await Promise.all(batch.map(routeCandidate)));
     }
-    scheduledCandidates = routedCandidates.filter((itinerary): itinerary is SearchItinerary => itinerary !== null)
-      .filter((itinerary) => (search.preferences.maxWalkingMeters === undefined || itinerary.walkingMeters <= search.preferences.maxWalkingMeters)
-        && (search.preferences.maxTotalDurationSeconds === undefined || itinerary.durationSeconds <= search.preferences.maxTotalDurationSeconds));
+    const routed = routedCandidates.filter((itinerary): itinerary is SearchItinerary => itinerary !== null);
+    const withinPreferences = routed.filter((itinerary) => {
+      if (search.preferences.maxWalkingMeters !== undefined && itinerary.walkingMeters > search.preferences.maxWalkingMeters) {
+        walkRejections.overPreferenceWalk += 1;
+        return false;
+      }
+      if (search.preferences.maxTotalDurationSeconds !== undefined
+        && itinerary.durationSeconds > search.preferences.maxTotalDurationSeconds) {
+        walkRejections.overPreferenceDuration += 1;
+        return false;
+      }
+      return true;
+    });
+    scheduledCandidates = withinPreferences;
     if (process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1') {
+      const walked = withinPreferences.map((itinerary) => itinerary.walkingMeters);
       console.info(JSON.stringify({ event: 'walking.route.debug', candidates: routedCandidates.length,
         retained: scheduledCandidates.length, budgetLimit: walkingRouteBudget.limit, requestsSpent: walkingRouteBudget.spent,
         exhausted: walkingRouteBudget.exhausted, unconfirmed: pedestrianRoutesUnavailable,
-        rejected: pedestrianCandidatesRejected, durationMs: Date.now() - routeStartedAt }));
+        rejected: pedestrianCandidatesRejected, durationMs: Date.now() - routeStartedAt,
+        accessCapMeters: transitAccessWalkingMeters, egressCapMeters: transitEgressWalkingMeters,
+        preferenceWalkMeters: search.preferences.maxWalkingMeters ?? null,
+        streetDetourAllowance: walkStreetDetourAllowance,
+        extendedAccessCapMeters: extendedTransitAccessWalkingMeters,
+        extendedEgressCapMeters: extendedTransitEgressWalkingMeters,
+        beyondStandardReachCandidates: walkReachExtendedCandidates,
+        rejections: walkRejections,
+        // How close the best confirmed candidate was, so a cap can be judged against reality.
+        bestWalkedMeters: walked.length ? Math.min(...walked) : (routed.length ? Math.min(...routed.map(i => i.walkingMeters)) : null) }));
     }
     if (pedestrianRoutesUnavailable) {
       providerErrors.push('Пішохідний маршрутизатор не повернув підтверджений шлях для частини варіантів; їхні піші ділянки залишено як оцінку.');
@@ -4271,6 +4321,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   // so the reason must not turn a worker crash into "no stops nearby".
   const walkReachSummary = transitSearchFailed ? null : summarizeGtfsWalkReach(gtfsWorkerSearch.searches);
   const noStopWithinWalkingDistance = walkReachSummary?.blocked === true;
+  // Either signal is enough: the reach summary knows which sides missed the radius, the counter
+  // knows which journeys were actually built on a stop outside it. One without the other happens —
+  // a far stop can win the ranking even when a near one was available.
+  const walkReachExtended = walkReachSummary?.reachExtended === true || walkReachExtendedCandidates > 0;
   const partialReasons = getJourneySearchPartialReasons({
     candidateGenerationTruncated,
     providerErrorCount: providerErrors.length,
@@ -4278,6 +4332,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0
       && (!walkingRoutingAvailable || pedestrianRoutesUnavailable),
     noStopWithinWalkingDistance,
+    walkReachExtended,
   });
   const truncationState = getJourneySearchTruncationState({
     candidateGenerationTruncated,
@@ -4299,9 +4354,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     resultsReturned: journeys.length,
     searchTruncated: Object.values(truncationState).some(Boolean),
     transitSearchFailed,
-    ...(noStopWithinWalkingDistance && walkReachSummary ? { walkingReach: {
+    ...((noStopWithinWalkingDistance || walkReachExtended) && walkReachSummary ? { walkingReach: {
       nearestOriginStopMeters: walkReachSummary.nearestOriginStopMeters,
       nearestDestinationStopMeters: walkReachSummary.nearestDestinationStopMeters,
+      // The routes are shown even though the walk overshoots the standard reach; the client needs
+      // the fact and the distance to say so instead of leaving a long walk unsuspicious.
+      ...(walkReachExtended ? { extended: true, journeysWithExtendedReach: walkReachExtendedCandidates } : {}),
     } } : {}),
   });
   res.json({ data: {

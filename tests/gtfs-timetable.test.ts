@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch, shouldOmitGtfsStopPairBeyondLocalWindow } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_PREFERENCE_WALKING_RADIUS_METERS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch, shouldOmitGtfsStopPairBeyondLocalWindow } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 import { queryDirectedEventIndexPrototype, validateEventIndexCandidatesWithProductionTransfers } from './helpers/gtfs-event-label-prototype';
@@ -1998,26 +1998,47 @@ test('honors GTFS pickup/drop-off restrictions and only searches nearby stops', 
   assert.equal(findDirectGtfsJourneys(feed(), farAway).length, 0);
 });
 
-test('applies separate conservative first-mile and last-mile walking limits', () => {
+test('applies separate first-mile and last-mile walking sheds, then plans from the closest stop within the walk ceiling', () => {
   assert.equal(DEFAULT_MAX_ACCESS_WALKING_METERS, 900);
   assert.equal(DEFAULT_MAX_EGRESS_WALKING_METERS, 1000);
   assert.equal(DEFAULT_MAX_TRANSFER_WALKING_METERS, 400);
 
+  // Both pins sit ~912 m / ~1 112 m from the stop they can use — outside their shed, inside the
+  // 2 000 m walk ceiling. Measured here, and measured live in Lviv at 1 243 m: before 2026-11-03 the
+  // answer was "no routes" and the canonical PWA has no control that widens the shed.
   const accessRequest = request('2026-10-12T04:35:00Z', '2026-10-12T05:10:00Z');
-  accessRequest.origin = [24.0200, 49.8482];
-  assert.equal(findGtfsItinerariesWithStats(feed(), accessRequest).itineraries.length, 0,
-    'the default access walk shed must reject a stop more than 900 m away');
-  assert.equal(findGtfsItinerariesWithStats(feed(), {
-    ...accessRequest, maximumAccessWalkingMeters: 1200,
-  }).itineraries.length, 1, 'a caller may explicitly request a wider access walk shed');
+  accessRequest.origin = [24.0200, 49.8318];
+  const beyondAccessShed = findGtfsItinerariesWithStats(feed(), accessRequest);
+  assert.equal(beyondAccessShed.itineraries.length, 1, 'the access side falls back to its nearest stop too');
+  assert.equal(beyondAccessShed.walkReach?.originReachedWithinWalkingRadius, false,
+    'the shed is still measured and reported, so the longer walk is disclosed rather than hidden');
+  assert.equal(beyondAccessShed.walkReach?.nearestOriginStopMeters !== null
+    && beyondAccessShed.walkReach.nearestOriginStopMeters > DEFAULT_MAX_ACCESS_WALKING_METERS, true);
+
+  const widerAccessShed = findGtfsItinerariesWithStats(feed(), { ...accessRequest, maximumAccessWalkingMeters: 1200 });
+  assert.equal(widerAccessShed.walkReach?.originReachedWithinWalkingRadius, true,
+    'a caller may explicitly request a wider access walk shed');
+  assert.equal(widerAccessShed.itineraries.length, 1);
 
   const egressRequest = request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z');
   egressRequest.destination = [24.0300, 49.8600];
-  assert.equal(findGtfsItinerariesWithStats(feed(), egressRequest).itineraries.length, 0,
-    'the default egress walk shed must reject a stop more than 1,000 m away');
-  assert.equal(findGtfsItinerariesWithStats(feed(), {
-    ...egressRequest, maximumEgressWalkingMeters: 1200,
-  }).itineraries.length, 1, 'a caller may explicitly request a wider egress walk shed');
+  const beyondEgressShed = findGtfsItinerariesWithStats(feed(), egressRequest);
+  assert.equal(beyondEgressShed.walkReach?.destinationReachedWithinWalkingRadius, false,
+    'the egress shed is a separate number and is reported separately');
+  assert.equal(beyondEgressShed.itineraries.length, 1);
+  assert.equal(findGtfsItinerariesWithStats(feed(), { ...egressRequest, maximumEgressWalkingMeters: 1200 })
+    .walkReach?.destinationReachedWithinWalkingRadius, true);
+
+  // Beyond the ceiling nothing is admitted: the search says how far away the nearest stop is instead
+  // of pretending the passenger could walk there, so "move the pin" stays a real instruction.
+  const unreachable = request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z');
+  unreachable.destination = [24.0300, 49.8700];
+  const refused = findGtfsItinerariesWithStats(feed(), unreachable);
+  assert.equal(refused.itineraries.length, 0, 'a stop beyond every allowed walk is not planned from');
+  assert.equal(refused.walkReach?.destinationStopsFound, false);
+  assert.ok(refused.walkReach && refused.walkReach.nearestDestinationStopMeters !== null
+    && refused.walkReach.nearestDestinationStopMeters > MAX_PREFERENCE_WALKING_RADIUS_METERS,
+  `expected the nearest stop beyond ${MAX_PREFERENCE_WALKING_RADIUS_METERS} m, measured ${refused.walkReach?.nearestDestinationStopMeters}`);
 });
 
 test('finds service after midnight when GTFS uses a 24-hour stop time', () => {

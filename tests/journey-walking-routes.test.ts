@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS } from '../server/journey/gtfsTimetable';
 import {
-  applyRoutedWalkingPaths, createWalkingRouteBudget, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH, routePedestrianPath,
-  walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRouteRequestLimit,
+  applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH, routePedestrianPath,
+  STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRouteRequestLimit,
   walkingRoutingConfigured, walkingRoutingConfiguredFor, type WalkingRoutePath,
 } from '../server/journey/walkingRoutes';
 
@@ -273,4 +274,77 @@ test('opens the walking pipeline for a per-area graph set and keeps it closed fo
   process.env.WALKING_ROUTING_URL = 'http://single:5000/route/v1/foot';
   delete process.env.WALKING_ROUTING_URLS;
   assert.equal(walkingRoutingConfiguredFor([30.52, 50.45], [30.48, 50.44]), true);
+});
+
+/**
+ * The Lviv numbers measured on the live feed at 2026-11-03, rebuilt as fixtures: the destination
+ * stop lies 1 243 m from the pin in a straight line and 1 594 m along the foot graph, and the old
+ * comparison of those two numbers dropped all 100 itineraries the engine had built. Fixtures, not
+ * live evidence — the live proof is the search run after this change.
+ */
+function farEgressItinerary(straightLineMeters: number): GtfsItinerary {
+  const base = itinerary();
+  return {
+    ...base,
+    segments: [base.segments[0], { ...base.segments[1], distanceFromDestinationStopMeters: straightLineMeters }],
+  } as unknown as GtfsItinerary;
+}
+
+const walkTo = (egressMeters: number) => ({
+  access: path(200, 180),
+  egress: path(egressMeters, Math.ceil(egressMeters / 1.25)),
+  transfers: [path(100, 90)],
+});
+
+/** Mirrors how server/index.ts builds them: a straight-line radius, a street allowance over it, and
+ *  the walk ceiling as the budget of the last-resort nearest stop. */
+const defaultWalkLimits = {
+  maximumAccessMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+  maximumEgressMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+  maximumTransferMeters: 400,
+  streetDetourAllowance: STREET_WALKING_DETOUR_ALLOWANCE,
+  extendedMaximumAccessMeters: 2_000,
+  extendedMaximumEgressMeters: 2_000,
+};
+
+test('keeps a journey whose confirmed street walk overshoots the straight-line radius that selected its stop', () => {
+  const reasons = createWalkingRejectionReasons();
+  const routed = applyRoutedWalkingPaths(farEgressItinerary(1_243), walkTo(1_594), defaultWalkLimits, reasons);
+  assert.ok(routed, '1 594 m of pavement against a 1 000 m crow-flight radius is a street detour, not an unreachable stop');
+  assert.equal(routed.walkReachExtended, true, 'the walk is longer than the search planned for, and the passenger is told');
+  assert.equal(routed.walkingMeters, 200 + 1_594 + 100);
+  assert.equal(reasons.egressOverCap, 0);
+  assert.equal(reasons.minimumRejectedEgressMeters, null);
+});
+
+test('a walk inside the detour allowance is an ordinary journey, not an extended reach', () => {
+  const routed = applyRoutedWalkingPaths(farEgressItinerary(900), walkTo(1_250), defaultWalkLimits);
+  assert.ok(routed);
+  assert.equal(routed.walkReachExtended, false, 'flagging every journey as a long walk would train the passenger to ignore it');
+});
+
+test('an unconfirmed walk estimate gets no street slack but still reaches the closest stop', () => {
+  const degraded = applyRoutedWalkingPaths(farEgressItinerary(1_594),
+    { access: path(200, 180), egress: null, transfers: [path(100, 90)] }, defaultWalkLimits);
+  assert.ok(degraded, 'a stop 1 594 m away in a straight line is inside the walk ceiling the search may fall back to');
+  assert.equal(degraded.walkReachExtended, true);
+  assert.equal(degraded.walkingRoutesUnconfirmed, true, 'the leg stays labelled as an estimate');
+});
+
+test('a walk beyond even the fallback ceiling is rejected with its measured distance kept', () => {
+  const reasons = createWalkingRejectionReasons();
+  assert.equal(applyRoutedWalkingPaths(farEgressItinerary(1_243), walkTo(2_400), defaultWalkLimits, reasons), null);
+  assert.equal(reasons.egressOverCap, 1);
+  assert.equal(reasons.minimumRejectedEgressMeters, 2_400);
+});
+
+test('an explicit walk limit stays a hard street cap and the shortfall is measured, not guessed', () => {
+  // With maxWalkingMeters the caller passes no allowance and no fallback budget: the number the
+  // passenger typed means street metres, so 1 594 m of walking is refused — honestly, and with the
+  // distance named so the interface can say how far it missed by.
+  const explicit = { maximumAccessMeters: 1_500, maximumEgressMeters: 1_500, maximumTransferMeters: 400 };
+  const reasons = createWalkingRejectionReasons();
+  assert.equal(applyRoutedWalkingPaths(farEgressItinerary(1_243), walkTo(1_594), explicit, reasons), null);
+  assert.equal(reasons.egressOverCap, 1);
+  assert.equal(reasons.minimumRejectedEgressMeters, 1_594, '94 m short is a different answer for the passenger than 1 400 m');
 });
