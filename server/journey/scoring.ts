@@ -73,6 +73,23 @@ export interface StrategyRecommendation<T extends JourneyOption> {
 /** Two search instants out of three leave a single non-dominated journey, which is too thin to compare. */
 export const MIN_COMPARABLE_ALTERNATIVES = 3;
 
+/** The smallest arrival difference a passenger reads as "another option" rather than a duplicate card. */
+export const MIN_PERCEPTIBLE_ARRIVAL_GAP_SECONDS = 120;
+
+/**
+ * Does this journey add a decision the already-shown cards do not offer? A card is only worth showing when it
+ * arrives at a materially different time or costs a materially different amount. Walk distance and transfer
+ * count are deliberately not differentiators: a card with the same arrival and the same fare that walks
+ * further or transfers once more is strictly worse, not a choice, and the better-walking twin of that card is
+ * already non-dominated so it reached the frontier on its own.
+ */
+function addsADecision<T extends JourneyOption>(candidate: T, shown: readonly T[]): boolean {
+  return shown.every((other) => other.id === candidate.id
+    || Math.abs(other.durationSeconds - candidate.durationSeconds) >= MIN_PERCEPTIBLE_ARRIVAL_GAP_SECONDS
+    || (other.priceMinor === null) !== (candidate.priceMinor === null)
+    || (other.priceMinor !== null && candidate.priceMinor !== null && other.priceMinor !== candidate.priceMinor));
+}
+
 /** The chain a passenger recognises as "that line", used both for the per-chain cap and for the backfill. */
 function routeChainKey<T extends JourneyOption>(journey: T): string {
   const modeChain = journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.mode).join('>') || 'WALK';
@@ -80,12 +97,20 @@ function routeChainKey<T extends JourneyOption>(journey: T): string {
 }
 
 /**
- * A search that leaves at one instant usually produces exactly one non-dominated journey: the direct ride on
- * the best line beats every transfer chain on time, price and walk simultaneously, so the frontier is a set of
- * one and the passenger gets a single card to "compare" and "select" from. Being dominated is not being the same
- * journey — the slower tram line is still a line the passenger may choose — so a thin frontier is backfilled with
- * the best journey of each chain that is not represented yet. Frontier members are ranked first and the per-chain
- * cap is unchanged, so the FASTEST and CHEAPEST promises stay factual and walk-variant copies stay collapsed.
+ * A search at one instant usually produces exactly one non-dominated journey: the first direct ride beats every
+ * transfer chain and every later departure on duration, price and walk at once, so the frontier is a set of one
+ * and the passenger gets a single card to "compare" and "select" from. Being dominated is not being the same
+ * journey — the slower tram line is still a line the passenger may choose — so a thin frontier is backfilled
+ * with the best journey of each chain that is not represented yet.
+ *
+ * The backfill has a second test, because a different line chain is not automatically a different choice: the
+ * measured Lviv corridor returned three cards with the same 3 232 s arrival, the same 23 ₴ fare and walks of
+ * 1 867/1 867/2 192 m, differing only in that one ride was split across two or three route ids. Three copies
+ * of one decision read as a broken app, so a backfilled card must also arrive at a materially different time
+ * or cost a materially different amount (see `addsADecision`). That corridor then yields 3 232 s / 3 772 s /
+ * 3 952 s — three different arrivals on three different lines.
+ * Frontier members are ranked first and the per-chain cap is unchanged, so the FASTEST and CHEAPEST promises
+ * stay factual.
  */
 function comparablePool<T extends JourneyOption>(journeys: readonly T[], frontier: readonly T[]): T[] {
   const pool = [...frontier];
@@ -97,6 +122,7 @@ function comparablePool<T extends JourneyOption>(journeys: readonly T[], frontie
     if (pool.length >= MIN_COMPARABLE_ALTERNATIVES) break;
     const chain = routeChainKey(journey);
     if (represented.has(chain)) continue;
+    if (!addsADecision(journey, pool)) continue;
     represented.add(chain);
     pool.push(journey);
   }
