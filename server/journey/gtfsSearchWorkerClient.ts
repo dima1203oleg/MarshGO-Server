@@ -1,6 +1,7 @@
 import { Worker } from 'node:worker_threads';
 import { isAbsolute } from 'node:path';
 import type { GtfsItinerarySearchInput, GtfsItinerarySearchResult, GtfsStopArrival } from './gtfsTimetable';
+import { resolveGtfsWorkerHeapCeiling } from './gtfsWorkerMemory';
 
 export interface GtfsWorkerProvider {
   id: string;
@@ -42,6 +43,7 @@ export interface GtfsWorkerTripMetadata {
 export interface GtfsWorkerDiagnostics {
   rssBytes: number;
   heapUsedBytes: number;
+  heapLimitBytes: number;
   externalBytes: number;
   feedCache: { entries: number; estimatedBytes: number };
   groupCacheEntries: number;
@@ -76,6 +78,7 @@ export class GtfsSearchWorkerClient {
   private busy = false;
   private closed = false;
   private readonly maxQueuedRequests = 8;
+  private heapCeilingAnnounced = false;
 
   constructor(private readonly testFixtureDirectory?: string) {
     if (testFixtureDirectory && !isAbsolute(testFixtureDirectory)) {
@@ -127,8 +130,19 @@ export class GtfsSearchWorkerClient {
 
   private async ensureWorker(): Promise<void> {
     if (this.ready) return this.ready;
+    // Without an explicit ceiling the worker isolate inherits the same `max-old-space` as the API
+    // isolate, so the two together can outrun the container and get the whole service OOM-killed.
+    const heapCeiling = resolveGtfsWorkerHeapCeiling();
+    if (!this.heapCeilingAnnounced) {
+      this.heapCeilingAnnounced = true;
+      console.info(JSON.stringify({
+        event: heapCeiling?.authoritative === false ? 'gtfs.worker.memory_ceiling_shadowed' : 'gtfs.worker.memory_ceiling',
+        ...(heapCeiling ?? { source: 'node-default' as const }),
+      }));
+    }
     const worker = new Worker(new URL('./gtfsSearchWorker.mjs', import.meta.url), {
       workerData: { testFixtureDirectory: this.testFixtureDirectory },
+      ...(heapCeiling ? { resourceLimits: { maxOldGenerationSizeMb: heapCeiling.maxOldGenerationSizeMb } } : {}),
     });
     this.worker = worker;
     this.ready = new Promise<void>((resolve, reject) => {

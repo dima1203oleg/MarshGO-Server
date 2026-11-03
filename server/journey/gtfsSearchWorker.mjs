@@ -1,17 +1,25 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import v8 from 'node:v8';
 import { tsImport } from 'tsx/esm/api';
 
 if (!parentPort) throw new Error('GTFS search worker requires a parent port');
 
-const [{ cachedGtfsTimetable, mergeGtfsTimetables, getCachedGtfsTimetableStats, parseGtfsTimetable }, { cachedGtfsRealtimeTripUpdates },
+const [{ cachedGtfsTimetable, mergeGtfsTimetables, getCachedGtfsTimetableStats, parseGtfsTimetable, resolveGtfsGraphBudgetLimits }, { cachedGtfsRealtimeTripUpdates },
   { cachedKyivMetroTimetable }, { GtfsSearchGroupCache, buildGtfsSearchGroups, searchGtfsGroup, selectGtfsTripMetadata, selectGtfsStopArrivals }] = await Promise.all([
   tsImport('./gtfsTimetable.ts', import.meta.url),
   tsImport('./gtfsRealtime.ts', import.meta.url),
   tsImport('../mobility/kyivMetroTimetable.ts', import.meta.url),
   tsImport('./gtfsSearchWorkerCore.ts', import.meta.url),
 ]);
+
+// These three retention caps decide how much of a corridor the planner is allowed to examine, and
+// a search that hits one of them reports truncation to the passenger. Resolve them once per worker
+// from the environment so an operator can retune without a rebuild, and announce what is active
+// because an unusable value silently falls back to the shipped default.
+const graphSearchLimits = resolveGtfsGraphBudgetLimits(process.env);
+console.info(JSON.stringify({ event: 'gtfs.worker.config', graphSearchLimits }));
 
 // An opt-in, exact-URL test seam lets API integration tests exercise the real
 // worker/parser/planner without a public feed or any relaxation of safeFetch.
@@ -103,6 +111,8 @@ parentPort.on('message', async (message) => {
       const memory = globalThis.process.memoryUsage();
       parentPort.postMessage({ id, ok: true, value: {
         rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, externalBytes: memory.external,
+        // The isolate's own ceiling — `rssBytes` above is process-wide and includes the API isolate.
+        heapLimitBytes: v8.getHeapStatistics().heap_size_limit,
         feedCache: getCachedGtfsTimetableStats(), groupCacheEntries: groups.size,
       } });
       return;
@@ -113,7 +123,7 @@ parentPort.on('message', async (message) => {
       const result = [];
       for (const descriptor of descriptors) {
         const group = groups.get(descriptor.id);
-        const search = searchGtfsGroup(group, message.input);
+        const search = searchGtfsGroup(group, message.input, graphSearchLimits);
         result.push({ groupId: descriptor.id, ...search });
         delete group.feed;
       }
@@ -126,7 +136,7 @@ parentPort.on('message', async (message) => {
       if (!group) throw new Error('GTFS search snapshot expired');
       const feed = mergeGtfsTimetables(group.sources);
       if (!feed) throw new Error('GTFS search snapshot is unavailable');
-      const value = searchGtfsGroup({ ...group, feed }, message.input);
+      const value = searchGtfsGroup({ ...group, feed }, message.input, graphSearchLimits);
       parentPort.postMessage({ id, ok: true, value });
       return;
     }

@@ -25,7 +25,7 @@ import { composeCommunityTransitJourneys, type CommunityRideOption } from './jou
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, resolveTransitCandidateBudget, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
@@ -2818,7 +2818,7 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
        json_build_array(ST_X(j.destination::geometry),ST_Y(j.destination::geometry)) AS destination_coordinates,
        j.requested_departure_at,j.requested_arrival_at,j.strategy,j.state,j.passenger_count,j.total_price_minor,
        j.confirmed_price_minor,j.estimated_price_min_minor,j.estimated_price_max_minor,j.total_duration_s,
-       j.walking_distance_m,j.transfer_count,j.reliability_score,j.comfort_score,j.current_leg_id,j.created_at,j.updated_at,
+       j.walking_distance_m,j.transfer_count,j.reliability_score,j.comfort_score,j.current_leg_id,j.started_at,j.completed_at,j.created_at,j.updated_at,
        GREATEST(j.total_duration_s-COALESCE(SUM(l.duration_s),0),0)::int AS "waitingSeconds",
        COALESCE(json_agg(json_build_object(
          'id',l.id,'ordinal',l.ordinal,'mode',l.mode,'originName',l.origin_name,'originCoordinates',
@@ -2932,6 +2932,110 @@ app.get('/api/v1/journeys/:id/live', requireAuth, asyncHandler(async (req, res) 
   res.json({ data: { journeyId: req.params.id, checkedAt: new Date(now).toISOString(), segments } });
 }));
 
+// Passenger navigation lifecycle. These routes own journeys.state only: they never
+// write journey_legs or bookings, because a carpool leg's business status is owned by
+// the booking endpoints and the two lifecycles must not overwrite each other.
+app.post('/api/v1/journeys/:id/activate', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid Journey ID', 'invalid_journey_id');
+  }
+  const requestedLegId = typeof req.body?.legId === 'string' ? req.body.legId : null;
+  if (requestedLegId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestedLegId)) {
+    throw new ApiError(400, 'invalid Journey leg ID', 'invalid_journey_leg_id');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ state: string; current_leg_id: string | null; started_at: Date | null }>(
+      'SELECT state,current_leg_id,started_at FROM journeys WHERE id=$1 AND user_id=$2 FOR UPDATE', [req.params.id, req.userId],
+    );
+    const journey = rows[0];
+    if (!journey) throw new ApiError(404, 'Journey not found');
+    if (journey.state === 'ACTIVE' || journey.state === 'TRANSFER') {
+      await client.query('COMMIT');
+      res.json({ data: { id: req.params.id, state: journey.state, currentLegId: journey.current_leg_id, startedAt: journey.started_at }, replayed: true });
+      return;
+    }
+    if (['COMPLETED','CANCELLED','FAILED'].includes(journey.state)) {
+      throw new ApiError(409, 'a finished journey cannot be activated', 'journey_already_finished');
+    }
+    let currentLegId = journey.current_leg_id;
+    if (requestedLegId) {
+      const leg = await client.query('SELECT 1 FROM journey_legs WHERE id=$1 AND journey_id=$2', [requestedLegId, req.params.id]);
+      if (!leg.rows[0]) throw new ApiError(400, 'Journey leg does not belong to this journey', 'invalid_journey_leg');
+      currentLegId = requestedLegId;
+    }
+    const activated = await client.query<{ started_at: Date }>(
+      `UPDATE journeys SET state='ACTIVE',started_at=COALESCE(started_at,now()),current_leg_id=$2,updated_at=now()
+       WHERE id=$1 AND user_id=$3 RETURNING started_at`, [req.params.id, currentLegId, req.userId],
+    );
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES($1,$2,$3,$4)',
+      [req.userId, 'journey.activated', 'journey', req.params.id]);
+    await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:activate:${req.params.id}:${currentLegId ?? 'none'}`,
+      [req.userId!], { journey_id: req.params.id, journey_leg_id: currentLegId ?? undefined, state: 'ACTIVE' });
+    await client.query('COMMIT');
+    res.json({ data: { id: req.params.id, state: 'ACTIVE', currentLegId, startedAt: activated.rows[0]?.started_at ?? null } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}));
+
+app.post('/api/v1/journeys/:id/end', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid Journey ID', 'invalid_journey_id');
+  }
+  const outcome = req.body?.outcome;
+  if (outcome !== 'COMPLETED' && outcome !== 'CANCELLED') {
+    throw new ApiError(400, 'outcome must be COMPLETED or CANCELLED', 'invalid_journey_outcome');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ state: string; started_at: Date | null; completed_at: Date | null }>(
+      'SELECT state,started_at,completed_at FROM journeys WHERE id=$1 AND user_id=$2 FOR UPDATE', [req.params.id, req.userId],
+    );
+    const journey = rows[0];
+    if (!journey) throw new ApiError(404, 'Journey not found');
+    if (journey.state === outcome) {
+      await client.query('COMMIT');
+      res.json({ data: { id: req.params.id, state: journey.state, startedAt: journey.started_at, completedAt: journey.completed_at }, replayed: true });
+      return;
+    }
+    if (!['PLANNED','READY','PARTIALLY_RESERVED','ACTIVE','TRANSFER','REPLANNING'].includes(journey.state)) {
+      throw new ApiError(409, 'a finished journey cannot be ended again', 'journey_already_finished');
+    }
+    // Completing a journey the passenger never started would write a trip that did not
+    // happen into history, fares and MarshPass; cancelling an unstarted plan stays legal.
+    if (outcome === 'COMPLETED' && !journey.started_at) {
+      throw new ApiError(409, 'start the journey before completing it', 'journey_not_started');
+    }
+    if (outcome === 'CANCELLED') {
+      const activeBooking = await client.query(
+        `SELECT 1 FROM journey_legs l JOIN bookings b ON b.id=l.booking_id
+          WHERE l.journey_id=$1 AND b.status IN ('confirmed','boarding','in_progress') LIMIT 1`, [req.params.id],
+      );
+      if (activeBooking.rows[0]) {
+        throw new ApiError(409, 'cancel the active booking first; the passenger cannot cancel a booked journey leg', 'booking_lifecycle_active');
+      }
+    }
+    const written = await client.query<{ started_at: Date | null; completed_at: Date | null }>(
+      `UPDATE journeys SET state=$2,completed_at=CASE WHEN $2='COMPLETED' THEN COALESCE(completed_at,now()) ELSE completed_at END,updated_at=now()
+       WHERE id=$1 AND user_id=$3 RETURNING started_at,completed_at`, [req.params.id, outcome, req.userId],
+    );
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES($1,$2,$3,$4)',
+      [req.userId, `journey.${outcome === 'COMPLETED' ? 'completed' : 'cancelled'}`, 'journey', req.params.id]);
+    await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:end:${req.params.id}:${outcome}`,
+      [req.userId!], { journey_id: req.params.id, state: outcome });
+    await client.query('COMMIT');
+    const writtenRow = written.rows[0] ?? { started_at: journey.started_at, completed_at: journey.completed_at };
+    res.json({ data: { id: req.params.id, state: outcome, startedAt: writtenRow.started_at, completedAt: writtenRow.completed_at } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}));
+
 app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) => {
   let search;
   try {
@@ -3027,7 +3131,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     preferenceValues.minimumTransferBufferSeconds ?? DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
     DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
   );
-  const walkingRoutingUrl = process.env.WALKING_ROUTING_URL?.trim();
+  const walkingRoutingConfigured = walkingRoutingEnabled();
   const walkingRouteBudget = createWalkingRouteBudget();
   const providerErrors: string[] = [];
   let gtfsSecondarySearchUnavailable = false;
@@ -3151,7 +3255,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const first = itinerary.segments[0];
     const last = itinerary.segments.at(-1);
     if (!first || !last) return null;
-    if (!walkingRoutingUrl) {
+    if (!walkingRoutingConfigured) {
       if (requireMeasuredWalks && (first.distanceToOriginStopMeters > 0 || last.distanceFromDestinationStopMeters > 0
         || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
           && !itinerary.transferWalkingGeometries[index]))) return null;
@@ -3198,12 +3302,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const feasibleItineraries = itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
       && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes))
       && candidate.segments.every((segment) => transitProviderAllowed(search.preferences, segment.transportType, segment.providerName))
-      && (walkingRoutingUrl || (search.preferences.maxWalkingMeters === undefined && search.preferences.maxTotalDurationSeconds === undefined)
+      && (walkingRoutingConfigured || (search.preferences.maxWalkingMeters === undefined && search.preferences.maxTotalDurationSeconds === undefined)
         || (candidate.segments[0]?.distanceToOriginStopMeters === 0
           && candidate.segments.at(-1)?.distanceFromDestinationStopMeters === 0
           && candidate.transferWalkingMeters.every((meters, index) => meters === 0 || candidate.transferInSeat[index]
             || Boolean(candidate.transferWalkingGeometries[index]))))
-      && (walkingRoutingUrl || search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
+      && (walkingRoutingConfigured || search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
       && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers));
     for (const itinerary of feasibleItineraries) {
       const comparableUahFare = itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
@@ -3217,7 +3321,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       scheduledCandidates.push(itinerary);
     }
   }
-  if (walkingRoutingUrl) {
+  if (walkingRoutingConfigured) {
     const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary) => {
       const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, search.destination.coordinates, walkingRouteBudget, false);
       if (!routed) {
@@ -3666,7 +3770,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const blockedProviders = [
     ...canonicalRouteTypes.filter((type) => !routePlannerTypes.has(type))
       .map((type) => `transportType:${type}:no-routed-provider-in-corridor`),
-    ...(!walkingRoutingUrl && !process.env.WALKING_ROUTING_URLS?.trim() ? ['door-to-door-walking:requires-WALKING_ROUTING_URL'] : []),
+    ...(!walkingRoutingConfigured ? ['door-to-door-walking:requires-WALKING_ROUTING_URL-or-WALKING_ROUTING_URLS'] : []),
     'walking-transfers-between-unmatched-stops',
     'community-intermediate-pickup:requires-explicit-driver-approved-stop',
   ];
@@ -4239,7 +4343,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     providerErrorCount: providerErrors.length,
     unsupportedPreferenceCount: unsupportedPreferences.length,
     scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0
-      && (!walkingRoutingUrl || pedestrianRoutesUnavailable),
+      && (!walkingRoutingConfigured || pedestrianRoutesUnavailable),
   });
   const truncationState = getJourneySearchTruncationState({
     candidateGenerationTruncated,
