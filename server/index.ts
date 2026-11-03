@@ -2992,18 +2992,23 @@ app.post('/api/v1/journeys/:id/end', requireAuth, asyncHandler(async (req, res) 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const { rows } = await client.query<{ state: string; completed_at: Date | null }>(
-      'SELECT state,completed_at FROM journeys WHERE id=$1 AND user_id=$2 FOR UPDATE', [req.params.id, req.userId],
+    const { rows } = await client.query<{ state: string; started_at: Date | null; completed_at: Date | null }>(
+      'SELECT state,started_at,completed_at FROM journeys WHERE id=$1 AND user_id=$2 FOR UPDATE', [req.params.id, req.userId],
     );
     const journey = rows[0];
     if (!journey) throw new ApiError(404, 'Journey not found');
     if (journey.state === outcome) {
       await client.query('COMMIT');
-      res.json({ data: { id: req.params.id, state: journey.state, completedAt: journey.completed_at }, replayed: true });
+      res.json({ data: { id: req.params.id, state: journey.state, startedAt: journey.started_at, completedAt: journey.completed_at }, replayed: true });
       return;
     }
     if (!['PLANNED','READY','PARTIALLY_RESERVED','ACTIVE','TRANSFER','REPLANNING'].includes(journey.state)) {
       throw new ApiError(409, 'a finished journey cannot be ended again', 'journey_already_finished');
+    }
+    // Completing a journey the passenger never started would write a trip that did not
+    // happen into history, fares and MarshPass; cancelling an unstarted plan stays legal.
+    if (outcome === 'COMPLETED' && !journey.started_at) {
+      throw new ApiError(409, 'start the journey before completing it', 'journey_not_started');
     }
     if (outcome === 'CANCELLED') {
       const activeBooking = await client.query(
@@ -3014,16 +3019,17 @@ app.post('/api/v1/journeys/:id/end', requireAuth, asyncHandler(async (req, res) 
         throw new ApiError(409, 'cancel the active booking first; the passenger cannot cancel a booked journey leg', 'booking_lifecycle_active');
       }
     }
-    await client.query(
+    const written = await client.query<{ started_at: Date | null; completed_at: Date | null }>(
       `UPDATE journeys SET state=$2,completed_at=CASE WHEN $2='COMPLETED' THEN COALESCE(completed_at,now()) ELSE completed_at END,updated_at=now()
-       WHERE id=$1 AND user_id=$3`, [req.params.id, outcome, req.userId],
+       WHERE id=$1 AND user_id=$3 RETURNING started_at,completed_at`, [req.params.id, outcome, req.userId],
     );
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES($1,$2,$3,$4)',
       [req.userId, `journey.${outcome === 'COMPLETED' ? 'completed' : 'cancelled'}`, 'journey', req.params.id]);
     await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:end:${req.params.id}:${outcome}`,
       [req.userId!], { journey_id: req.params.id, state: outcome });
     await client.query('COMMIT');
-    res.json({ data: { id: req.params.id, state: outcome } });
+    const writtenRow = written.rows[0] ?? { started_at: journey.started_at, completed_at: journey.completed_at };
+    res.json({ data: { id: req.params.id, state: outcome, startedAt: writtenRow.started_at, completedAt: writtenRow.completed_at } });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;

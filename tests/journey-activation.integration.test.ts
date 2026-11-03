@@ -184,6 +184,25 @@ describe('passenger journey activation contract (opt-in local integration test)'
     assert.equal(reactivate.json?.error?.code, 'journey_already_finished');
   });
 
+  it('refuses to complete a journey that was never started, but still lets it be cancelled', async () => {
+    const completed = await call('POST', `/api/v1/journeys/${otherJourney}/end`, passenger, { outcome: 'COMPLETED' });
+    assert.equal(completed.status, 409);
+    assert.equal(completed.json?.error?.code, 'journey_not_started');
+    const untouched = await journeyRow(otherJourney);
+    assert.equal(untouched.state, 'PLANNED');
+    assert.equal(untouched.started_at, null);
+    assert.equal(untouched.completed_at, null);
+
+    const cancelled = await call('POST', `/api/v1/journeys/${otherJourney}/end`, passenger, { outcome: 'CANCELLED' });
+    assert.equal(cancelled.status, 200);
+    assert.equal(cancelled.json?.data?.state, 'CANCELLED');
+    const stored = await journeyRow(otherJourney);
+    assert.equal(stored.state, 'CANCELLED');
+    assert.equal(stored.completed_at, null);
+    const audit = await pool.query('SELECT action FROM audit_events WHERE entity_id=$1', [otherJourney]);
+    assert.deepEqual(audit.rows.map((row: { action: string }) => row.action), ['journey.cancelled']);
+  });
+
   it('publishes journey.updated realtime events for both transitions to the owner only', async () => {
     const { rows } = await pool.query<{ event_type: string; recipient_ids: string[]; payload: Record<string, unknown> }>(
       `SELECT event_type,recipient_ids,payload FROM realtime_outbox
