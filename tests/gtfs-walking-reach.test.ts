@@ -119,6 +119,20 @@ test('the disclosure surfaces as a partial reason and completeness nearest-stop 
     walkingReach: { nearestOriginStopMeters: 13, nearestDestinationStopMeters: 1335 } });
   assert.equal(disclosed.nearestOriginStopMeters, 13);
   assert.equal(disclosed.nearestDestinationStopMeters, 1335);
+  // The two distances alone cannot tell an interface whether the journey it shows rests on a longer
+  // walk or the search really found no stop at all, so the extended fact travels with them. Measured
+  // live: a Lviv egress of 1 243 m produced a journey plus `walk_reach_extended`, while the client
+  // payload carried only the numbers and rendered "move the pin" advice over a working result.
+  assert.equal('walkReachExtended' in disclosed, false, 'a blocked-radius disclosure is not an extended reach');
+  const extended = buildSearchCompleteness({ ...baseCompleteness,
+    walkingReach: { nearestOriginStopMeters: null, nearestDestinationStopMeters: 1243, extended: true, journeysWithExtendedReach: 80 } });
+  assert.equal(extended.walkReachExtended, true);
+  assert.equal(extended.journeysWithExtendedReach, 80);
+  // The count comes from the candidate loop, so a summary can claim extension before any journey is
+  // attributed to it; the field then still must not be invented.
+  assert.equal(buildSearchCompleteness({ ...baseCompleteness,
+    walkingReach: { nearestOriginStopMeters: null, nearestDestinationStopMeters: 1243, extended: true } })
+    .journeysWithExtendedReach, 0);
 });
 
 test('the reach summary names only the side every searched group missed', () => {
