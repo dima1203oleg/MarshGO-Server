@@ -70,6 +70,39 @@ export interface StrategyRecommendation<T extends JourneyOption> {
   strategyRanks?: Partial<Record<JourneyStrategy, number>>;
 }
 
+/** Two search instants out of three leave a single non-dominated journey, which is too thin to compare. */
+export const MIN_COMPARABLE_ALTERNATIVES = 3;
+
+/** The chain a passenger recognises as "that line", used both for the per-chain cap and for the backfill. */
+function routeChainKey<T extends JourneyOption>(journey: T): string {
+  const modeChain = journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.mode).join('>') || 'WALK';
+  return journey.diversityKey ?? modeChain;
+}
+
+/**
+ * A search that leaves at one instant usually produces exactly one non-dominated journey: the direct ride on
+ * the best line beats every transfer chain on time, price and walk simultaneously, so the frontier is a set of
+ * one and the passenger gets a single card to "compare" and "select" from. Being dominated is not being the same
+ * journey — the slower tram line is still a line the passenger may choose — so a thin frontier is backfilled with
+ * the best journey of each chain that is not represented yet. Frontier members are ranked first and the per-chain
+ * cap is unchanged, so the FASTEST and CHEAPEST promises stay factual and walk-variant copies stay collapsed.
+ */
+function comparablePool<T extends JourneyOption>(journeys: readonly T[], frontier: readonly T[]): T[] {
+  const pool = [...frontier];
+  if (frontier.length >= MIN_COMPARABLE_ALTERNATIVES) return pool;
+  const represented = new Set(pool.map(routeChainKey));
+  const frontierIds = new Set(frontier.map((journey) => journey.id));
+  const rest = journeys.filter((journey) => !frontierIds.has(journey.id) && !represented.has(routeChainKey(journey)));
+  for (const { journey } of scoreJourneys(rest, 'BALANCED')) {
+    if (pool.length >= MIN_COMPARABLE_ALTERNATIVES) break;
+    const chain = routeChainKey(journey);
+    if (represented.has(chain)) continue;
+    represented.add(chain);
+    pool.push(journey);
+  }
+  return pool;
+}
+
 /** Keep a bounded, diverse-enough set of Pareto alternatives for each visible strategy. */
 export function selectStrategyAlternatives<T extends JourneyOption>(
   journeys: readonly T[],
@@ -79,19 +112,18 @@ export function selectStrategyAlternatives<T extends JourneyOption>(
   if (!Number.isInteger(maximumPerStrategy) || maximumPerStrategy < 1 || maximumPerStrategy > 50) {
     throw new TypeError('maximum alternatives per strategy must be between 1 and 50');
   }
-  const frontier = paretoFrontier(journeys);
+  const pool = comparablePool(journeys, paretoFrontier(journeys));
   const alternatives = new Map<string, StrategyRecommendation<T>>();
   for (const strategy of strategies) {
     // An unknown fare is not a zero or a comparable amount. Keep such routes
     // available to other strategies, but never include them in CHEAPEST.
     const strategyCandidates = strategy === 'CHEAPEST'
-      ? frontier.filter((journey) => journey.priceMinor !== null)
-      : frontier;
+      ? pool.filter((journey) => journey.priceMinor !== null)
+      : pool;
     const chainCounts = new Map<string, number>();
     let rank = 0;
     for (const { journey, score } of scoreJourneys(strategyCandidates, strategy)) {
-      const modeChain = journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.mode).join('>') || 'WALK';
-      const diversityKey = journey.diversityKey ?? modeChain;
+      const diversityKey = routeChainKey(journey);
       const count = chainCounts.get(diversityKey) ?? 0;
       if (count >= 3) continue;
       chainCounts.set(diversityKey, count + 1);

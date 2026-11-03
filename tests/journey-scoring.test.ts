@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { JOURNEY_SCORE_WEIGHTS, paretoFrontier, scoreJourneys, selectRepresentativeJourneys, selectStrategyAlternatives, selectStrategyRecommendations, strategiesWithComparablePrices, TRANSFER_TIME_PENALTY_SECONDS } from '../server/journey/scoring';
-import type { JourneyOption } from '../server/journey/types';
+import { JOURNEY_SCORE_WEIGHTS, MIN_COMPARABLE_ALTERNATIVES, paretoFrontier, scoreJourneys, selectRepresentativeJourneys, selectStrategyAlternatives, selectStrategyRecommendations, strategiesWithComparablePrices, TRANSFER_TIME_PENALTY_SECONDS } from '../server/journey/scoring';
+import type { JourneyLegMode, JourneyOption, JourneyStrategy } from '../server/journey/types';
 
 const candidates: JourneyOption[] = [
   { id: 'bus', durationSeconds: 6600, priceMinor: 12000, transfers: 0, walkingMeters: 200, reliability: 0.82, transferRisk: 0, comfort: 0.6, legs: [{ mode: 'BUS' }] },
@@ -170,5 +170,81 @@ describe('Journey strategy scoring', () => {
   it('rejects incomplete or invalid option measurements instead of inventing values', () => {
     assert.throws(() => scoreJourneys([{ ...candidates[0], reliability: 1.2 }], 'RELIABLE'), /invalid scoring features/);
     assert.throws(() => scoreJourneys([{ ...candidates[0], priceMinor: -1 }], 'CHEAPEST'), /invalid scoring features/);
+  });
+});
+
+// PARETO-YIELD-1: a live Lviv search returned one card from 80 validated candidates. The diagnostic dump showed
+// all 80 leaving at the same requested instant and differing only in route chain and stop-approach footpath, so
+// the direct bus beat every transfer chain on duration, fare, transfers and walk at once and the frontier was a
+// set of one. These fixtures are synthetic; the metric values and the chain shape are the measured ones.
+describe('a thin frontier still gives the passenger something to compare', () => {
+  const leg = (mode: JourneyLegMode, providerId: string | null = null) => ({ mode, ...(providerId ? { providerId } : {}) });
+  const tramLegs: JourneyOption['legs'] = [leg('WALK', null), leg('TRAM', 'lviv'), leg('WALK', null), leg('BUS', 'lviv'), leg('WALK', null)];
+  const trolleyLegs: JourneyOption['legs'] = [leg('WALK', null), leg('TROLLEYBUS', 'lviv'), leg('WALK', null), leg('BUS', 'lviv'), leg('WALK', null)];
+  const on = (id: string, diversityKey: string, legs: JourneyOption['legs'] = trolleyLegs, over: Partial<JourneyOption> = {}): JourneyOption => ({
+    id, durationSeconds: 3_232, priceMinor: 2_300, transfers: 0, walkingMeters: 1_867,
+    reliability: null, transferRisk: 0, comfort: null, diversityKey, legs, ...over,
+  });
+  // One departure instant, four route chains, and three footpath copies of the direct bus.
+  const corridor: JourneyOption[] = [
+    on('bus-102', 'transit:lviv:102', trolleyLegs),
+    on('bus-102-far-stop', 'transit:lviv:102', trolleyLegs, { walkingMeters: 2_063 }),
+    on('bus-102-farther-stop', 'transit:lviv:102', trolleyLegs, { walkingMeters: 2_466 }),
+    on('tram-then-bus', 'transit:lviv:1006>transit:lviv:119', tramLegs, { durationSeconds: 3_772, transfers: 1, walkingMeters: 2_055 }),
+    on('tram-then-bus-near', 'transit:lviv:1006>transit:lviv:119', tramLegs, { durationSeconds: 3_772, transfers: 1, walkingMeters: 1_973 }),
+    on('trolley-then-bus', 'transit:lviv:97>transit:lviv:102', trolleyLegs, { transfers: 1 }),
+    on('marshrutka-then-bus', 'transit:lviv:2300>transit:lviv:119', tramLegs, { durationSeconds: 3_772, transfers: 1, walkingMeters: 2_458 }),
+  ];
+  const strategies: JourneyStrategy[] = ['FASTEST', 'CHEAPEST', 'BALANCED', 'PREMIUM', 'RELIABLE'];
+
+  it('reproduces the measured collapse before asserting the fix', () => {
+    assert.deepEqual(paretoFrontier(corridor).map((journey) => journey.id), ['bus-102']);
+  });
+
+  it('backfills other route chains so the list can be compared and selected', () => {
+    const selected = selectStrategyAlternatives(corridor, strategies);
+    assert.ok(selected.length >= MIN_COMPARABLE_ALTERNATIVES, `expected ${MIN_COMPARABLE_ALTERNATIVES} cards, got ${selected.length}`);
+    assert.equal(new Set(selected.map(({ journey }) => journey.id)).size, selected.length, 'no candidate listed twice');
+    assert.equal(selected.filter(({ journey }) => journey.id === 'bus-102').length, 1);
+    assert.ok(selected.some(({ journey }) => journey.id === 'trolley-then-bus'), 'the second line is offered');
+    assert.ok(selected.some(({ journey }) => journey.id === 'tram-then-bus-near'), 'a line is represented by its quickest ride, not by a worse copy');
+  });
+
+  it('keeps the non-dominated journey as the factual FASTEST and CHEAPEST winner', () => {
+    const selected = selectStrategyAlternatives(corridor, strategies);
+    const winner = selected.find(({ journey }) => journey.id === 'bus-102');
+    for (const strategy of ['FASTEST', 'CHEAPEST'] as const) {
+      assert.equal(winner?.strategyRanks?.[strategy], 1, `${strategy} must stay a measurable promise`);
+    }
+    assert.ok(selected.every((item) => item.strategyRanks?.FASTEST !== 1 || item.journey.id === 'bus-102'));
+  });
+
+  it('still prices an unknown fare as unknown rather than as the cheapest backfill', () => {
+    const noFare = corridor.map((journey) => ({ ...journey, priceMinor: journey.id === 'marshrutka-then-bus' ? null : journey.priceMinor }));
+    const cheapest = selectStrategyAlternatives(noFare, ['CHEAPEST']);
+    assert.ok(cheapest.length > 0);
+    assert.ok(cheapest.every(({ journey }) => journey.priceMinor !== null), 'an unknown fare is not a zero fare');
+  });
+
+  it('collapses footpath copies of one line instead of filling the list with them', () => {
+    const selected = selectStrategyAlternatives(corridor, ['BALANCED'], 12);
+    assert.equal(selected.filter(({ journey }) => journey.diversityKey === 'transit:lviv:102').length, 1);
+  });
+
+  it('does not pad a frontier that already offers a real choice', () => {
+    const rich: JourneyOption[] = [
+      on('a', 'transit:lviv:1', trolleyLegs, { durationSeconds: 3_000, walkingMeters: 2_500 }),
+      on('b', 'transit:lviv:2', trolleyLegs, { durationSeconds: 3_400, walkingMeters: 1_500 }),
+      on('c', 'transit:lviv:3', trolleyLegs, { durationSeconds: 3_800, priceMinor: 1_500, walkingMeters: 900 }),
+      on('d', 'transit:lviv:4', trolleyLegs, { durationSeconds: 4_200, walkingMeters: 2_600 }),
+    ];
+    assert.equal(paretoFrontier(rich).length, 3);
+    assert.deepEqual(selectStrategyAlternatives(rich, ['BALANCED']).map(({ journey }) => journey.id).sort(), ['a', 'b', 'c']);
+  });
+
+  it('never invents a card when the search really produced one journey', () => {
+    const single = corridor.filter(({ id }) => id === 'bus-102');
+    assert.deepEqual(selectStrategyAlternatives(single, strategies).map(({ journey }) => journey.id), ['bus-102']);
+    assert.deepEqual(selectStrategyAlternatives([], strategies), []);
   });
 });
