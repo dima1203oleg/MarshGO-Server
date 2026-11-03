@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
 import {
-  applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, type WalkingRoutePath,
+  applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, walkingRoutingEnabled, type WalkingRoutePath,
 } from '../server/journey/walkingRoutes';
 
 const start = Date.parse('2026-10-01T08:00:00Z');
@@ -195,4 +195,32 @@ test('selects the foot graph that covers both endpoints and refuses cross-city o
 
   process.env.WALKING_ROUTING_URLS = 'not-json';
   assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://single:5000/route/v1/foot');
+});
+
+test('a bbox rule set alone counts as a configured foot router', (t) => {
+  const originalUrl = process.env.WALKING_ROUTING_URL;
+  const originalUrls = process.env.WALKING_ROUTING_URLS;
+  t.after(() => {
+    if (originalUrl === undefined) delete process.env.WALKING_ROUTING_URL; else process.env.WALKING_ROUTING_URL = originalUrl;
+    if (originalUrls === undefined) delete process.env.WALKING_ROUTING_URLS; else process.env.WALKING_ROUTING_URLS = originalUrls;
+  });
+
+  delete process.env.WALKING_ROUTING_URL;
+  delete process.env.WALKING_ROUTING_URLS;
+  assert.equal(walkingRoutingEnabled(), false);
+
+  process.env.WALKING_ROUTING_URL = '  ';
+  assert.equal(walkingRoutingEnabled(), false);
+
+  process.env.WALKING_ROUTING_URL = 'http://single:5000/route/v1/foot';
+  assert.equal(walkingRoutingEnabled(), true);
+
+  delete process.env.WALKING_ROUTING_URL;
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([{ bbox: [23.9, 49.75, 24.2, 49.95], url: 'http://lviv:5000/route/v1/foot' }]);
+  assert.equal(walkingRoutingEnabled(), true);
+
+  process.env.WALKING_ROUTING_URLS = '[]';
+  assert.equal(walkingRoutingEnabled(), false);
+  process.env.WALKING_ROUTING_URLS = 'not-json';
+  assert.equal(walkingRoutingEnabled(), false);
 });
