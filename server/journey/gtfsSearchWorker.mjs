@@ -1,6 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import v8 from 'node:v8';
 import { tsImport } from 'tsx/esm/api';
 
 if (!parentPort) throw new Error('GTFS search worker requires a parent port');
@@ -110,6 +111,8 @@ parentPort.on('message', async (message) => {
       const memory = globalThis.process.memoryUsage();
       parentPort.postMessage({ id, ok: true, value: {
         rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, externalBytes: memory.external,
+        // The isolate's own ceiling — `rssBytes` above is process-wide and includes the API isolate.
+        heapLimitBytes: v8.getHeapStatistics().heap_size_limit,
         feedCache: getCachedGtfsTimetableStats(), groupCacheEntries: groups.size,
       } });
       return;
