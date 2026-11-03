@@ -22,6 +22,21 @@ export interface GtfsWorkerHeapCeiling {
   maxOldGenerationSizeMb: number;
   source: 'env' | 'cgroup';
   containerLimitBytes?: number;
+  /**
+   * `false` when `NODE_OPTIONS` already pins `--max-old-space-size`. Measured on Node 24: that flag
+   * applies to every isolate in the process and outranks the worker's `resourceLimits`, so the
+   * ceiling below is what this process asked for, not what the worker actually gets.
+   */
+  authoritative: boolean;
+  nodeOptionsMaxOldSpaceMb?: number;
+}
+
+/** `--max-old-space-size=<MiB>` as an operator set it in `NODE_OPTIONS`, if present at all. */
+function readNodeOptionsPinned(environment: Record<string, string | undefined>): number | undefined {
+  const match = /(?:^|\s)--max-old-space-size=(\d+)/.exec(environment.NODE_OPTIONS ?? '');
+  if (!match) return undefined;
+  const pinned = Number(match[1]);
+  return Number.isSafeInteger(pinned) && pinned > 0 ? pinned : undefined;
 }
 
 function readContainerMemoryLimit(readFile: (path: string) => string): number | undefined {
@@ -48,15 +63,17 @@ export function resolveGtfsWorkerHeapCeiling(
   environment: Record<string, string | undefined> = process.env,
   readFile: (path: string) => string = (path) => readFileSync(path, 'utf8'),
 ): GtfsWorkerHeapCeiling | undefined {
+  const pinned = readNodeOptionsPinned(environment);
+  const authority = pinned === undefined ? { authoritative: true } : { authoritative: false, nodeOptionsMaxOldSpaceMb: pinned };
   const explicit = environment.MARSHGO_GTFS_WORKER_MAX_OLD_SPACE_MB?.trim();
   if (explicit) {
     const parsed = Number(explicit);
     if (!Number.isSafeInteger(parsed) || parsed < MIN_GTFS_WORKER_HEAP_MB) return undefined;
-    return { maxOldGenerationSizeMb: Math.min(parsed, MAX_GTFS_WORKER_HEAP_MB), source: 'env' };
+    return { maxOldGenerationSizeMb: Math.min(parsed, MAX_GTFS_WORKER_HEAP_MB), source: 'env', ...authority };
   }
   const containerLimitBytes = readContainerMemoryLimit(readFile);
   if (!containerLimitBytes) return undefined;
   const derived = Math.floor((containerLimitBytes / (1024 * 1024)) * WORKER_SHARE_OF_CONTAINER);
   if (derived < MIN_GTFS_WORKER_HEAP_MB) return undefined;
-  return { maxOldGenerationSizeMb: Math.min(derived, MAX_GTFS_WORKER_HEAP_MB), source: 'cgroup', containerLimitBytes };
+  return { maxOldGenerationSizeMb: Math.min(derived, MAX_GTFS_WORKER_HEAP_MB), source: 'cgroup', containerLimitBytes, ...authority };
 }

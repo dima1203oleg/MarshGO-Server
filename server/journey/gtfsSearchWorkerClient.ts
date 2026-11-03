@@ -147,7 +147,10 @@ export class GtfsSearchWorkerClient {
     const heapCeiling = resolveGtfsWorkerHeapCeiling();
     if (!this.heapCeilingAnnounced) {
       this.heapCeilingAnnounced = true;
-      console.info(JSON.stringify({ event: 'gtfs.worker.memory_ceiling', ...(heapCeiling ?? { source: 'node-default' as const }) }));
+      console.info(JSON.stringify({
+        event: heapCeiling?.authoritative === false ? 'gtfs.worker.memory_ceiling_shadowed' : 'gtfs.worker.memory_ceiling',
+        ...(heapCeiling ?? { source: 'node-default' as const }),
+      }));
     }
     return new Worker(new URL('./gtfsSearchWorker.mjs', import.meta.url), {
       workerData: { testFixtureDirectory: this.testFixtureDirectory },
