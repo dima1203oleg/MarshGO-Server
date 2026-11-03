@@ -1,6 +1,7 @@
 import { Worker } from 'node:worker_threads';
 import { isAbsolute } from 'node:path';
 import type { GtfsItinerarySearchInput, GtfsItinerarySearchResult, GtfsStopArrival } from './gtfsTimetable';
+import { resolveGtfsWorkerHeapCeiling } from './gtfsWorkerMemory';
 
 export interface GtfsWorkerProvider {
   id: string;
@@ -42,6 +43,7 @@ export interface GtfsWorkerTripMetadata {
 export interface GtfsWorkerDiagnostics {
   rssBytes: number;
   heapUsedBytes: number;
+  heapLimitBytes: number;
   externalBytes: number;
   feedCache: { entries: number; estimatedBytes: number };
   groupCacheEntries: number;
@@ -87,6 +89,7 @@ export class GtfsSearchWorkerClient {
   private busy = false;
   private closed = false;
   private readonly maxQueuedRequests = 8;
+  private heapCeilingAnnounced = false;
 
   constructor(private readonly testFixtureDirectory?: string, readonly requestTimeoutMs = DEFAULT_WORKER_REQUEST_TIMEOUT_MS) {
     if (testFixtureDirectory && !isAbsolute(testFixtureDirectory)) {
@@ -141,8 +144,14 @@ export class GtfsSearchWorkerClient {
 
   /** Overridable for deterministic tests of the queue and timeout behaviour. */
   protected createWorker(): Worker {
+    const heapCeiling = resolveGtfsWorkerHeapCeiling();
+    if (!this.heapCeilingAnnounced) {
+      this.heapCeilingAnnounced = true;
+      console.info(JSON.stringify({ event: 'gtfs.worker.memory_ceiling', ...(heapCeiling ?? { source: 'node-default' as const }) }));
+    }
     return new Worker(new URL('./gtfsSearchWorker.mjs', import.meta.url), {
       workerData: { testFixtureDirectory: this.testFixtureDirectory },
+      ...(heapCeiling ? { resourceLimits: { maxOldGenerationSizeMb: heapCeiling.maxOldGenerationSizeMb } } : {}),
     });
   }
 
