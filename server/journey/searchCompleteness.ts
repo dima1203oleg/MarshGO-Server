@@ -34,6 +34,9 @@ export type SearchCompleteness = {
   searchTruncated: boolean;
   searchComplete: boolean;
   transitSearchFailed: boolean;
+  /** Measured only when every queried feed missed a side at the walk radius; absent otherwise. */
+  nearestOriginStopMeters?: number | null;
+  nearestDestinationStopMeters?: number | null;
 };
 
 export type SearchCompletenessInput = {
@@ -50,6 +53,8 @@ export type SearchCompletenessInput = {
   searchTruncated: boolean;
   /** True when the transit provider search threw and returned nothing at all. */
   transitSearchFailed?: boolean | undefined;
+  /** Per-side nearest-stop distances measured during a walk-radius blocked transit search. */
+  walkingReach?: { nearestOriginStopMeters: number | null; nearestDestinationStopMeters: number | null } | undefined;
 };
 
 const CANONICAL = new Set<string>(CANONICAL_ROUTE_TYPES);
@@ -96,5 +101,9 @@ export function buildSearchCompleteness(input: SearchCompletenessInput): SearchC
     searchTruncated: input.searchTruncated,
     searchComplete: !input.searchTruncated && !transitSearchFailed && providersFailed === 0 && input.candidatesGenerated > 0,
     transitSearchFailed,
+    ...(input.walkingReach ? {
+      nearestOriginStopMeters: input.walkingReach.nearestOriginStopMeters,
+      nearestDestinationStopMeters: input.walkingReach.nearestDestinationStopMeters,
+    } : {}),
   };
 }

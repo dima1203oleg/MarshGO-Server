@@ -33,7 +33,9 @@ export type JourneySearchPartialReason =
   | 'candidate_generation_truncated'
   | 'provider_error'
   | 'unsupported_preference'
-  | 'walking_routing_unavailable';
+  | 'walking_routing_unavailable'
+  /** Every queried GTFS feed missed the access or egress side at the effective walk radius. */
+  | 'no_stop_within_walking_distance';
 
 /**
  * Report whether the search is incomplete because of a known limitation.
@@ -46,12 +48,14 @@ export function getJourneySearchPartialReasons(input: {
   providerErrorCount: number;
   unsupportedPreferenceCount: number;
   scheduledCandidatesNeedWalkingRouting: boolean;
+  noStopWithinWalkingDistance?: boolean | undefined;
 }): JourneySearchPartialReason[] {
   return [
     ...(input.candidateGenerationTruncated ? ['candidate_generation_truncated' as const] : []),
     ...(input.providerErrorCount > 0 ? ['provider_error' as const] : []),
     ...(input.unsupportedPreferenceCount > 0 ? ['unsupported_preference' as const] : []),
     ...(input.scheduledCandidatesNeedWalkingRouting ? ['walking_routing_unavailable' as const] : []),
+    ...(input.noStopWithinWalkingDistance ? ['no_stop_within_walking_distance' as const] : []),
   ];
 }
 

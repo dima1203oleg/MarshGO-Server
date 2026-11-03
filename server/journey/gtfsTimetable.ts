@@ -54,6 +54,19 @@ export const DEFAULT_MAXIMUM_WAIT_SECONDS = 4 * 60 * 60;
 export const DEFAULT_MAX_ACCESS_WALKING_METERS = 900;
 export const DEFAULT_MAX_EGRESS_WALKING_METERS = 1000;
 export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
+/**
+ * Ceiling for widening a stop-reach radius from the `maxWalkingMeters` request preference.
+ * Measured on the Lviv feed (2026-11-02): missed pins sit 1.2-1.3 km from the nearest stop,
+ * while a radius beyond 2 km admits most of the city as candidates without unlocking them.
+ * Intercity searches keep their own wider 5 km radius; this cap never shrinks a base radius.
+ */
+export const MAX_PREFERENCE_WALKING_RADIUS_METERS = 2_000;
+
+/** Expand a walk radius toward the preference, capped, never shrinking the base value. */
+export function effectiveWalkingReachMeters(baseMeters: number, maxWalkingMeters: number | undefined): number {
+  if (maxWalkingMeters === undefined) return baseMeters;
+  return Math.max(baseMeters, Math.min(maxWalkingMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS));
+}
 const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
 const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
 const MAX_IMPLICIT_INTERMODAL_STATION_WALK_METERS = 150;
@@ -156,6 +169,12 @@ export interface GtfsDirectJourney {
   distanceFromDestinationStopMeters: number;
   /** Present only when the source supplied a usable GTFS shape for this ride segment. */
   routeGeometry?: Array<[number, number]>;
+  /**
+   * Riding distance in metres measured along the trip's GTFS shape between the projected
+   * boarding and alighting stops. Present only when that shape projection succeeded; it is
+   * never a straight-line substitute, so absence means the distance is genuinely unknown.
+   */
+  ridingDistanceMeters?: number;
   /** Timed stop calls copied from this exact GTFS trip segment. */
   stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string; pickupType: number; dropOffType: number; skipped?: boolean }>;
   realtimeUpdatedAt?: Date;
@@ -418,12 +437,44 @@ export interface GtfsItinerarySearchTruncation {
   responsePage: boolean;
 }
 
+/** Stop-reach facts measured during stop selection; distances are straight-line. */
+export interface GtfsWalkReach {
+  originStopsFound: boolean;
+  destinationStopsFound: boolean;
+  /** Null only when the searched feed had no usable stops at all. */
+  nearestOriginStopMeters: number | null;
+  nearestDestinationStopMeters: number | null;
+}
+
 export interface GtfsItinerarySearchResult {
   itineraries: GtfsItinerary[];
   searchTruncated: boolean;
   resultLimitReached: boolean;
   candidateGraphTruncated: boolean;
   truncation: GtfsItinerarySearchTruncation;
+  /** Absent on synthesized empty results, so callers never read an unmeasured reach. */
+  walkReach?: GtfsWalkReach;
+}
+
+/**
+ * Collapse per-group reach measurements into one honest disclosure. Returns null when
+ * nothing was measured; `blocked` is true only when every searched group missed a side,
+ * so a reachable group always outrules a missed one.
+ */
+export function summarizeGtfsWalkReach(searches: readonly { walkReach?: GtfsWalkReach }[]): {
+  blocked: boolean;
+  nearestOriginStopMeters: number | null;
+  nearestDestinationStopMeters: number | null;
+} | null {
+  const reaches = searches.map((search) => search.walkReach);
+  if (reaches.length === 0 || reaches.some((reach) => !reach)) return null;
+  const nearest = (values: Array<number | null>) => values.reduce<number | null>(
+    (min, value) => (value === null ? min : min === null || value < min ? value : min), null);
+  return {
+    blocked: reaches.every((reach) => !reach!.originStopsFound || !reach!.destinationStopsFound),
+    nearestOriginStopMeters: nearest(reaches.map((reach) => reach!.nearestOriginStopMeters)),
+    nearestDestinationStopMeters: nearest(reaches.map((reach) => reach!.nearestDestinationStopMeters)),
+  };
 }
 
 /** Optional lower graph limits let tests exercise bounded retention deterministically. */
@@ -1262,7 +1313,22 @@ function nearestShapeIndexes(feed: GtfsTimetableFeed, shapeId: string, shape: Ar
   return closest;
 }
 
-function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number): Array<[number, number]> | undefined {
+type ShapeRideProjection = {
+  from: [number, number];
+  to: [number, number];
+  shape: Array<[number, number]>;
+  start: number;
+  end: number;
+};
+
+/**
+ * Project a ride's boarding and alighting stops onto the trip's shape polyline.
+ * This is the single authority behind both shape-backed geometry and shape-backed distance:
+ * a distant or ambiguous match (loops) yields nothing rather than the wrong path.
+ */
+function projectRideOntoShape(
+  feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number,
+): ShapeRideProjection | undefined {
   const trip = feed.trips.get(tripId);
   const shapeId = trip?.shapeId;
   const shape = shapeId ? feed.shapes?.get(shapeId) : undefined;
@@ -1281,6 +1347,13 @@ function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex
   }
   // Refuse distant shape matches; on loops this avoids drawing the wrong direction.
   if (!best || best.snapDistance > 600) return undefined;
+  return { from, to, shape, start: best.start, end: best.end };
+}
+
+function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number): Array<[number, number]> | undefined {
+  const projection = projectRideOntoShape(feed, tripId, fromIndex, toIndex);
+  if (!projection) return undefined;
+  const { from, to, shape, start, end } = projection;
 
   const coordinates: Array<[number, number]> = [];
   const append = (coordinate: [number, number]) => {
@@ -1288,12 +1361,35 @@ function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex
     if (!previous || previous[0] !== coordinate[0] || previous[1] !== coordinate[1]) coordinates.push(coordinate);
   };
   append(from);
-  for (const coordinate of shape.slice(best.start, best.end + 1)) append(coordinate);
+  for (const coordinate of shape.slice(start, end + 1)) append(coordinate);
   append(to);
   if (coordinates.length <= MAX_ROUTE_GEOMETRY_POINTS) return coordinates;
   return Array.from({ length: MAX_ROUTE_GEOMETRY_POINTS }, (_, index) =>
     coordinates[Math.round(index * (coordinates.length - 1) / (MAX_ROUTE_GEOMETRY_POINTS - 1))],
   );
+}
+
+/**
+ * Measures the riding distance of a trip segment along the trip's shape polyline, following
+ * exactly the projected path `routeGeometryForTrip` draws: boarding stop → shape[start..end]
+ * → alighting stop. Returns null when the trip has no shape, either stop does not project
+ * onto it, or the path does not measure to a positive finite length. It never falls back to
+ * straight-line distance — an unknown riding distance must stay unknown in the response.
+ */
+export function measureGtfsTripRidingMeters(
+  feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number,
+): number | null {
+  const projection = projectRideOntoShape(feed, tripId, fromIndex, toIndex);
+  if (!projection) return null;
+  const { from, to, shape, start, end } = projection;
+  let meters = 0;
+  let previous = from;
+  for (const coordinate of shape.slice(start, end + 1)) {
+    meters += distanceMeters(previous, coordinate);
+    previous = coordinate;
+  }
+  meters += distanceMeters(previous, to);
+  return Number.isFinite(meters) && meters > 0 ? Math.ceil(meters) : null;
 }
 
 type DatedTripStop = { arrivalAt: Date; departureAt: Date; skipped: boolean; updated: boolean };
@@ -1811,9 +1907,14 @@ export function findGtfsItinerariesWithStats(
 
   let stopSelectionTruncated = false;
   const closestStops = (point: [number, number], radius: number) => {
-    const ranked = [...feed.stops.values()]
+    const measured = [...feed.stops.values()]
       .filter((stop) => feed.stopTimesByStop.has(stop.id))
-      .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]) }))
+      .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]) }));
+    // The radius filter below would discard the only measurement of the nearest stop,
+    // so take the minimum from the full mapped pass that already ran over every stop.
+    let nearestMeters: number | null = null;
+    for (const { distance } of measured) if (nearestMeters === null || distance < nearestMeters) nearestMeters = distance;
+    const ranked = measured
       .filter(({ distance }) => distance <= radius)
       .sort((a, b) => a.distance - b.distance);
     const selected = new Map<string, typeof ranked[number]>();
@@ -1884,13 +1985,22 @@ export function findGtfsItinerariesWithStats(
       addSelected(item);
     }
     if (selected.size < ranked.length) stopSelectionTruncated = true;
-    return [...selected.values()];
+    return { stops: [...selected.values()], nearestMeters };
   };
-  const originStops = closestStops(input.origin, accessRadius);
-  const destinationStops = closestStops(input.destination, egressRadius);
+  const originReach = closestStops(input.origin, accessRadius);
+  const destinationReach = closestStops(input.destination, egressRadius);
+  const originStops = originReach.stops;
+  const destinationStops = destinationReach.stops;
+  const walkReach: GtfsWalkReach = {
+    originStopsFound: originStops.length > 0,
+    destinationStopsFound: destinationStops.length > 0,
+    nearestOriginStopMeters: originReach.nearestMeters,
+    nearestDestinationStopMeters: destinationReach.nearestMeters,
+  };
   debugStage('stops-selected', { originStops: originStops.length, destinationStops: destinationStops.length });
   if (!originStops.length || !destinationStops.length) {
     return { itineraries: [], searchTruncated: false, resultLimitReached: false, candidateGraphTruncated: false,
+      walkReach,
       truncation: { stopSelection: false, candidateGraph: false, searchBudget: false,
         searchStepLimit: false, candidatePoolLimit: false, candidateSampling: false, responsePage: false } };
   }
@@ -3683,6 +3793,10 @@ export function findGtfsItinerariesWithStats(
       const indexes = shapeIndexesBySegment.get(segment);
       if (!indexes) continue;
       segment.routeGeometry ??= routeGeometryForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex);
+      if (segment.ridingDistanceMeters === undefined) {
+        const ridingMeters = measureGtfsTripRidingMeters(feed, segment.tripId, indexes.fromIndex, indexes.toIndex);
+        if (ridingMeters !== null) segment.ridingDistanceMeters = ridingMeters;
+      }
       segment.stops ??= stopCallsForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex, indexes.serviceDate);
       segment.traveledZoneIds = (feed.stopTimes.get(segment.tripId) ?? [])
         .slice(indexes.fromIndex, indexes.toIndex + 1)
@@ -3706,6 +3820,7 @@ export function findGtfsItinerariesWithStats(
     resultLimitReached: Number(rankedResults.length > itineraries.length || candidateSamplingTruncated) });
   return {
     itineraries,
+    walkReach,
     searchTruncated: stopSelectionTruncated || segmentGraphTruncated || searchBudgetTruncated || searchSteps >= MAX_SEARCH_STEPS
       || results.size >= MAX_SEARCH_RESULTS || candidateSamplingTruncated,
     resultLimitReached: rankedResults.length > itineraries.length || candidateSamplingTruncated,

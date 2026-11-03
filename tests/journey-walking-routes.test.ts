@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
 import {
-  applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, type WalkingRoutePath,
+  applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor,
+  walkingRoutingConfigured, walkingRoutingConfiguredFor, type WalkingRoutePath,
 } from '../server/journey/walkingRoutes';
 
 const start = Date.parse('2026-10-01T08:00:00Z');
@@ -195,4 +196,33 @@ test('selects the foot graph that covers both endpoints and refuses cross-city o
 
   process.env.WALKING_ROUTING_URLS = 'not-json';
   assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://single:5000/route/v1/foot');
+});
+
+// The pipeline gate has to open for a per-area graph set even when no single WALKING_ROUTING_URL
+// exists: that was the acceptance-Lviv configuration where every foot leg stayed an estimate.
+test('opens the walking pipeline for a per-area graph set and keeps it closed for uncovered pairs', (t) => {
+  const originalUrl = process.env.WALKING_ROUTING_URL;
+  const originalUrls = process.env.WALKING_ROUTING_URLS;
+  t.after(() => {
+    if (originalUrl === undefined) delete process.env.WALKING_ROUTING_URL; else process.env.WALKING_ROUTING_URL = originalUrl;
+    if (originalUrls === undefined) delete process.env.WALKING_ROUTING_URLS; else process.env.WALKING_ROUTING_URLS = originalUrls;
+  });
+
+  delete process.env.WALKING_ROUTING_URL;
+  delete process.env.WALKING_ROUTING_URLS;
+  assert.equal(walkingRoutingConfigured(), false);
+  assert.equal(walkingRoutingConfiguredFor([24.03, 49.84], [24.02, 49.89]), false);
+
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([
+    { bbox: [23.9, 49.75, 24.2, 49.95], url: 'http://lviv:5000/route/v1/foot' },
+    { bbox: [30.2, 50.25, 30.8, 50.62], url: 'http://kyiv:5000/route/v1/foot' },
+  ]);
+  assert.equal(walkingRoutingConfigured(), true);
+  assert.equal(walkingRoutingConfiguredFor([24.03, 49.84], [24.02, 49.89]), true);
+  // A pair no graph covers must stay unroutable rather than reach the wrong city's graph.
+  assert.equal(walkingRoutingConfiguredFor([24.03, 49.84], [30.48, 50.44]), false);
+
+  process.env.WALKING_ROUTING_URL = 'http://single:5000/route/v1/foot';
+  delete process.env.WALKING_ROUTING_URLS;
+  assert.equal(walkingRoutingConfiguredFor([30.52, 50.45], [30.48, 50.44]), true);
 });

@@ -67,8 +67,29 @@ function bboxContains(bbox: [number, number, number, number], point: [number, nu
  */
 export function walkingEndpointFor(from: [number, number], to?: [number, number]): string | undefined {
   const rules = walkingEndpointRules();
-  if (!rules.length) return process.env.WALKING_ROUTING_URL;
+  if (!rules.length) return process.env.WALKING_ROUTING_URL?.trim() || undefined;
   return rules.find(({ bbox }) => bboxContains(bbox, from) && (!to || bboxContains(bbox, to)))?.url;
+}
+
+/**
+ * Whether any usable foot router exists at all: a single global endpoint or at least one
+ * parsed per-area graph. This gates the routing pipeline; per-leg coverage is still resolved
+ * through `walkingEndpointFor`, so a leg no graph covers stays unrouted instead of silently
+ * falling back to a router that would answer from the wrong city.
+ */
+export function walkingRoutingConfigured(): boolean {
+  return Boolean(process.env.WALKING_ROUTING_URL?.trim()) || walkingEndpointRules().length > 0;
+}
+
+/**
+ * Whether a walking router can answer for this exact origin/destination pair: any OD for a
+ * single-router deployment, only an OD whose points share one configured graph otherwise.
+ * A straddling or uncovered pair is genuinely unroutable — callers must degrade honestly
+ * (estimated walks plus the `walking_routing_unavailable` label) instead of pretending the
+ * router exists or sending the pair to the wrong graph.
+ */
+export function walkingRoutingConfiguredFor(origin: [number, number], destination: [number, number]): boolean {
+  return Boolean(walkingEndpointFor(origin, destination));
 }
 
 export interface WalkingRouteBudget {
