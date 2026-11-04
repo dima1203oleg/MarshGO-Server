@@ -156,6 +156,8 @@ export interface GtfsDirectJourney {
   distanceFromDestinationStopMeters: number;
   /** Present only when the source supplied a usable GTFS shape for this ride segment. */
   routeGeometry?: Array<[number, number]>;
+  /** Metres ridden, summed along that shape; absent when the feed has no usable shape. */
+  shapeDistanceMeters?: number;
   /** Timed stop calls copied from this exact GTFS trip segment. */
   stops?: Array<{ id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string; pickupType: number; dropOffType: number; skipped?: boolean }>;
   realtimeUpdatedAt?: Date;
@@ -1262,7 +1264,12 @@ function nearestShapeIndexes(feed: GtfsTimetableFeed, shapeId: string, shape: Ar
   return closest;
 }
 
-function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex: number, toIndex: number): Array<[number, number]> | undefined {
+function routeGeometryForTrip(
+  feed: GtfsTimetableFeed,
+  tripId: string,
+  fromIndex: number,
+  toIndex: number,
+): { coordinates: Array<[number, number]>; distanceMeters: number } | undefined {
   const trip = feed.trips.get(tripId);
   const shapeId = trip?.shapeId;
   const shape = shapeId ? feed.shapes?.get(shapeId) : undefined;
@@ -1290,10 +1297,17 @@ function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex
   append(from);
   for (const coordinate of shape.slice(best.start, best.end + 1)) append(coordinate);
   append(to);
-  if (coordinates.length <= MAX_ROUTE_GEOMETRY_POINTS) return coordinates;
-  return Array.from({ length: MAX_ROUTE_GEOMETRY_POINTS }, (_, index) =>
-    coordinates[Math.round(index * (coordinates.length - 1) / (MAX_ROUTE_GEOMETRY_POINTS - 1))],
-  );
+  // Measured on the full shape slice: the decimated drawing polyline would
+  // understate the ride, so the number never comes from the simplified line.
+  let ridingMeters = 0;
+  for (let index = 1; index < coordinates.length; index += 1) ridingMeters += distanceMeters(coordinates[index - 1], coordinates[index]);
+  const shapeMeters = Math.round(ridingMeters);
+  if (coordinates.length <= MAX_ROUTE_GEOMETRY_POINTS) return { coordinates, distanceMeters: shapeMeters };
+  return {
+    coordinates: Array.from({ length: MAX_ROUTE_GEOMETRY_POINTS }, (_, index) =>
+      coordinates[Math.round(index * (coordinates.length - 1) / (MAX_ROUTE_GEOMETRY_POINTS - 1))]),
+    distanceMeters: shapeMeters,
+  };
 }
 
 type DatedTripStop = { arrivalAt: Date; departureAt: Date; skipped: boolean; updated: boolean };
@@ -1750,7 +1764,11 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
   for (const journey of selected) {
     const indexes = segmentIndexes.get(journey);
     if (!indexes) continue;
-    journey.routeGeometry = routeGeometryForTrip(feed, journey.tripId, indexes.fromIndex, indexes.toIndex);
+    const shape = routeGeometryForTrip(feed, journey.tripId, indexes.fromIndex, indexes.toIndex);
+    if (shape) {
+      journey.routeGeometry = shape.coordinates;
+      journey.shapeDistanceMeters = shape.distanceMeters;
+    }
     journey.stops = stopCallsForTrip(feed, journey.tripId, indexes.fromIndex, indexes.toIndex, indexes.serviceDate);
   }
   return selected;
@@ -3682,7 +3700,13 @@ export function findGtfsItinerariesWithStats(
     for (const segment of itinerary.segments) {
       const indexes = shapeIndexesBySegment.get(segment);
       if (!indexes) continue;
-      segment.routeGeometry ??= routeGeometryForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex);
+      if (!segment.routeGeometry) {
+        const shape = routeGeometryForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex);
+        if (shape) {
+          segment.routeGeometry = shape.coordinates;
+          segment.shapeDistanceMeters = shape.distanceMeters;
+        }
+      }
       segment.stops ??= stopCallsForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex, indexes.serviceDate);
       segment.traveledZoneIds = (feed.stopTimes.get(segment.tripId) ?? [])
         .slice(indexes.fromIndex, indexes.toIndex + 1)
