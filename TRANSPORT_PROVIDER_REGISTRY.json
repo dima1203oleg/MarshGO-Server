@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-10-31T16:30:05.999Z",
+  "generatedAt": "2026-11-04T13:33:19.707Z",
   "generator": "scripts/build-transport-registry.ts",
   "productStatus": "NOT_RELEASED",
   "evidenceRule": "VERIFIED/VERIFIED_LIVE only when this run measured it; NOT_MEASURED means no evidence was collected, never \"none exists\"",
   "sources": {
     "catalog": "server/mobility/ukraineCatalog.ts (canonical, 52 rows); legacy root copy holds the same first 43 rows",
-    "probe": "/tmp/feed-probe-20261031.json",
+    "probe": "/tmp/feed-probe-20261104.json",
     "operators": "server/mobility/providerRegistry.ts",
     "database": "SELECT-only aggregation over marshgo-acceptance-db-1"
   },
@@ -14,15 +14,15 @@
     "catalogRows": 52,
     "probedToday": 52,
     "byState": {
-      "HEALTHY": 24,
-      "OFFLINE": 19,
+      "HEALTHY": 26,
+      "OFFLINE": 17,
       "DEGRADED": 4,
       "SKIPPED": 5
     },
     "blockedOnAccess": 5,
-    "routableToday": 28,
+    "routableToday": 30,
     "feedsWithLivePositions": 14,
-    "feedsWithArrivalPredictions": 0,
+    "feedsWithArrivalPredictions": 1,
     "feedsWithServiceAlerts": 0,
     "feedsWithVerifiedPricing": 0,
     "feedsWithReservation": 0
@@ -242,16 +242,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 2287,
+        "responseMs": 2186,
         "measured": {
           "stops": 1071,
           "routes": 72,
-          "trips": 15716,
-          "stopTimes": 426685,
+          "trips": 15141,
+          "stopTimes": 406422,
           "routes_bus": 55,
           "routes_tram": 8,
           "routes_trolleybus": 9
@@ -289,16 +289,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 245,
+        "responseMs": 356,
         "measured": {
-          "vehicles": 443,
+          "vehicles": 603,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 19
+          "ageSeconds": 2
         },
         "failedChecks": []
       },
@@ -324,7 +324,7 @@
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
         "livePositions": "EMPTY",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "arrivalPredictions": "VERIFIED_LIVE",
         "serviceAlerts": "NONE_OBSERVED",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -333,18 +333,21 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "OFFLINE",
+        "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 293,
-        "measured": {},
-        "failedChecks": [
-          "Valid GTFS-Realtime protobuf"
-        ]
+        "responseMs": 172,
+        "measured": {
+          "vehicles": 0,
+          "tripUpdates": 701,
+          "alerts": 0,
+          "ageSeconds": 5
+        },
+        "failedChecks": []
       },
       "productUse": {
-        "routable": false,
+        "routable": true,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -374,11 +377,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 586,
+        "responseMs": 342,
         "measured": {
           "stops": 295,
           "routes": 34,
@@ -419,11 +422,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 286,
+        "responseMs": 386,
         "measured": {
           "stops": 217,
           "routes": 18,
@@ -464,11 +467,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 362,
+        "responseMs": 261,
         "measured": {
           "stops": 2,
           "routes": 1,
@@ -559,7 +562,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -598,7 +601,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -637,7 +640,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -676,7 +679,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -715,18 +718,18 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 1286,
+        "responseMs": 675,
         "measured": {
-          "stops": 211,
-          "routes": 21,
-          "trips": 2420,
-          "stopTimes": 40909,
-          "routes_bus": 12,
-          "routes_trolleybus": 9
+          "stops": 207,
+          "routes": 23,
+          "trips": 2424,
+          "stopTimes": 36283,
+          "routes_trolleybus": 11,
+          "routes_bus": 12
         },
         "failedChecks": []
       },
@@ -761,16 +764,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 538,
+        "responseMs": 122,
         "measured": {
-          "vehicles": 47,
+          "vehicles": 99,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 2
+          "ageSeconds": 19
         },
         "failedChecks": []
       },
@@ -805,18 +808,18 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 707,
+        "responseMs": 451,
         "measured": {
-          "stops": 522,
-          "routes": 50,
-          "trips": 2829,
-          "stopTimes": 68227,
-          "routes_bus": 42,
-          "routes_trolleybus": 8
+          "stops": 525,
+          "routes": 55,
+          "trips": 3319,
+          "stopTimes": 82455,
+          "routes_bus": 46,
+          "routes_trolleybus": 9
         },
         "failedChecks": []
       },
@@ -851,13 +854,13 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
         "responseMs": 21,
         "measured": {
-          "vehicles": 96,
+          "vehicles": 164,
           "tripUpdates": 0,
           "alerts": 0,
           "ageSeconds": 13
@@ -895,16 +898,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 23,
+        "responseMs": 20,
         "measured": {
-          "vehicles": 30,
+          "vehicles": 63,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 2
+          "ageSeconds": 11
         },
         "failedChecks": []
       },
@@ -939,17 +942,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 519,
+        "responseMs": 272,
         "measured": {
-          "stops": 163,
-          "routes": 15,
-          "trips": 1274,
-          "stopTimes": 22602,
-          "routes_bus": 15
+          "stops": 181,
+          "routes": 17,
+          "trips": 1454,
+          "stopTimes": 26089,
+          "routes_bus": 17
         },
         "failedChecks": []
       },
@@ -984,16 +987,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 35,
+        "responseMs": 33,
         "measured": {
-          "vehicles": 21,
+          "vehicles": 32,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 14
+          "ageSeconds": 5
         },
         "failedChecks": []
       },
@@ -1028,16 +1031,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 40,
+        "responseMs": 110,
         "measured": {
           "vehicles": 0,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 21
+          "ageSeconds": 5
         },
         "failedChecks": [
           "Entities: 0 vehicles, 0 trip updates, 0 alerts"
@@ -1074,11 +1077,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 443,
+        "responseMs": 478,
         "measured": {
           "stops": 152,
           "routes": 6,
@@ -1121,16 +1124,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 222,
+        "responseMs": 336,
         "measured": {
-          "vehicles": 11,
-          "vehicles_marshrutka": 6,
-          "vehicles_bus": 5,
-          "ageSeconds": 18
+          "vehicles": 16,
+          "vehicles_bus": 7,
+          "vehicles_marshrutka": 9,
+          "ageSeconds": 20
         },
         "failedChecks": []
       },
@@ -1165,11 +1168,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 50,
+        "responseMs": 59,
         "measured": {},
         "failedChecks": [
           "Vehicle list found: 0 entries"
@@ -1206,14 +1209,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 99,
+        "responseMs": 169,
         "measured": {
-          "vehicles": 71,
-          "vehicles_bus": 71
+          "vehicles": 78,
+          "vehicles_bus": 78
         },
         "failedChecks": []
       },
@@ -1248,15 +1251,15 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 113,
+        "responseMs": 233,
         "measured": {
-          "vehicles": 126,
-          "vehicles_trolleybus": 22,
-          "vehicles_bus": 104
+          "vehicles": 176,
+          "vehicles_trolleybus": 36,
+          "vehicles_bus": 140
         },
         "failedChecks": []
       },
@@ -1291,18 +1294,18 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 1364,
+        "responseMs": 1365,
         "measured": {
-          "vehicles": 32,
-          "vehicles_bus": 32,
-          "ageSeconds": 1
+          "vehicles": 268,
+          "vehicles_bus": 268,
+          "ageSeconds": 2
         },
         "failedChecks": [
-          "Coordinates: 32 valid, 384 invalid"
+          "Coordinates: 268 valid, 193 invalid"
         ]
       },
       "productUse": {
@@ -1336,7 +1339,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -1375,17 +1378,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 85,
+        "responseMs": 83,
         "measured": {
-          "vehicles": 177,
-          "vehicles_marshrutka": 124,
-          "vehicles_bus": 29,
-          "vehicles_trolleybus": 24,
-          "ageSeconds": -10
+          "vehicles": 169,
+          "vehicles_marshrutka": 129,
+          "vehicles_bus": 23,
+          "vehicles_trolleybus": 17,
+          "ageSeconds": 6
         },
         "failedChecks": []
       },
@@ -1420,11 +1423,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 785,
+        "responseMs": 1089,
         "measured": {
           "stops": 37,
           "routes": 2,
@@ -1465,17 +1468,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 5092,
+        "responseMs": 6926,
         "measured": {
           "stops": 167,
-          "routes": 125,
-          "trips": 125,
-          "stopTimes": 1345,
-          "routes_train": 122,
+          "routes": 118,
+          "trips": 118,
+          "stopTimes": 1246,
+          "routes_train": 115,
           "routes_suburban": 3
         },
         "failedChecks": []
@@ -1511,18 +1514,18 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 1337,
+        "responseMs": 4146,
         "measured": {
-          "stops": 1535,
-          "routes": 166,
-          "trips": 24310,
-          "stopTimes": 103533,
+          "stops": 1528,
+          "routes": 165,
+          "trips": 24401,
+          "stopTimes": 104038,
           "routes_tram": 17,
-          "routes_trolleybus": 45,
+          "routes_trolleybus": 44,
           "routes_bus": 104
         },
         "failedChecks": []
@@ -1558,17 +1561,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 721,
+        "responseMs": 429,
         "measured": {
-          "stops": 224,
-          "routes": 11,
-          "trips": 2256,
-          "stopTimes": 52144,
-          "routes_bus": 11
+          "stops": 239,
+          "routes": 15,
+          "trips": 2416,
+          "stopTimes": 55620,
+          "routes_bus": 15
         },
         "failedChecks": []
       },
@@ -1603,14 +1606,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 110,
+        "responseMs": 174,
         "measured": {
-          "vehicles": 138,
-          "vehicles_bus": 138
+          "vehicles": 143,
+          "vehicles_bus": 143
         },
         "failedChecks": []
       },
@@ -1645,17 +1648,18 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 64,
+        "responseMs": 42,
         "measured": {
-          "stops": 342,
-          "routes": 18,
-          "trips": 189,
-          "stopTimes": 5451,
-          "routes_bus": 18
+          "stops": 345,
+          "routes": 20,
+          "trips": 233,
+          "stopTimes": 6275,
+          "routes_bus": 19,
+          "routes_trolleybus": 1
         },
         "failedChecks": []
       },
@@ -1690,14 +1694,15 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 116,
+        "responseMs": 135,
         "measured": {
-          "vehicles": 128,
-          "vehicles_bus": 128
+          "vehicles": 129,
+          "vehicles_bus": 128,
+          "vehicles_trolleybus": 1
         },
         "failedChecks": []
       },
@@ -1720,8 +1725,8 @@
       "sourceRef": "github.com/jqueguiner/gtfs (агрегатор GTFS-джерел)",
       "priority": 40,
       "capabilities": {
-        "staticNetwork": "UNAVAILABLE",
-        "timetables": "UNAVAILABLE",
+        "staticNetwork": "VERIFIED",
+        "timetables": "VERIFIED",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
         "serviceAlerts": "NOT_APPLICABLE",
@@ -1732,25 +1737,23 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "OFFLINE",
+        "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 45,
+        "responseMs": 83,
         "measured": {
-          "stops": 0,
-          "routes": 0,
-          "trips": 0,
-          "stopTimes": 0
+          "stops": 356,
+          "routes": 46,
+          "trips": 822,
+          "stopTimes": 20222,
+          "routes_trolleybus": 20,
+          "routes_bus": 26
         },
-        "failedChecks": [
-          "Stops: 0 stops, 0 with invalid coordinates",
-          "Routes and trips: 0 routes, 0 trips",
-          "Scheduled service in next 7 days: no active trip service in the next 7 days"
-        ]
+        "failedChecks": []
       },
       "productUse": {
-        "routable": false,
+        "routable": true,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1780,17 +1783,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 88,
+        "responseMs": 21,
         "measured": {
-          "stops": 204,
-          "routes": 14,
-          "trips": 189,
-          "stopTimes": 3919,
-          "routes_bus": 14
+          "stops": 184,
+          "routes": 12,
+          "trips": 169,
+          "stopTimes": 3344,
+          "routes_bus": 12
         },
         "failedChecks": []
       },
@@ -1825,14 +1828,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 21,
+        "responseMs": 20,
         "measured": {
-          "vehicles": 11,
-          "vehicles_bus": 11
+          "vehicles": 13,
+          "vehicles_bus": 13
         },
         "failedChecks": []
       },
@@ -2195,14 +2198,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 15357,
+        "responseMs": 443,
         "measured": {},
         "failedChecks": [
-          "GeoJSON feed: The operation was aborted due to timeout"
+          "GeoJSON feed: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -2236,14 +2239,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 15135,
+        "responseMs": 159,
         "measured": {},
         "failedChecks": [
-          "GeoJSON feed: The operation was aborted due to timeout"
+          "GeoJSON feed: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -2277,14 +2280,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 15240,
+        "responseMs": 115,
         "measured": {},
         "failedChecks": [
-          "GeoJSON feed: The operation was aborted due to timeout"
+          "GeoJSON feed: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -2318,14 +2321,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 15146,
+        "responseMs": 191,
         "measured": {},
         "failedChecks": [
-          "GeoJSON feed: The operation was aborted due to timeout"
+          "GeoJSON feed: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -2359,14 +2362,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 15139,
+        "responseMs": 221,
         "measured": {},
         "failedChecks": [
-          "GeoJSON feed: The operation was aborted due to timeout"
+          "GeoJSON feed: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -2400,14 +2403,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 15239,
+        "responseMs": 192,
         "measured": {},
         "failedChecks": [
-          "GeoJSON feed: The operation was aborted due to timeout"
+          "GeoJSON feed: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -2441,14 +2444,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:16:52.866Z",
+        "checkedAt": "2026-11-04T13:33:07.760Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 15186,
+        "responseMs": 110,
         "measured": {},
         "failedChecks": [
-          "GeoJSON feed: The operation was aborted due to timeout"
+          "GeoJSON feed: Host cannot be resolved"
         ]
       },
       "productUse": {
