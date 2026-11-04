@@ -2040,6 +2040,7 @@ app.get('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/v1/bookings/:id/events', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) throw new ApiError(400, 'invalid booking ID');
   const { rows } = await pool.query(
     `SELECT e.id,e.from_status,e.to_status,e.actor_id,e.reason,e.created_at
        FROM booking_events e JOIN bookings b ON b.id=e.booking_id JOIN offers o ON o.id=b.offer_id
@@ -2245,6 +2246,7 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) throw new ApiError(400, 'invalid booking ID');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -2635,6 +2637,7 @@ app.post('/api/v1/rendezvous/:id/end', requireAuth, asyncHandler(async (req, res
 }));
 
 app.get('/api/v1/bookings/:id/ticket', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) throw new ApiError(400, 'invalid booking ID');
   const { rows } = await pool.query<{ id: string; status: string; departure_at: Date }>(
     `SELECT b.id,b.status,o.departure_at FROM bookings b JOIN offers o ON o.id=b.offer_id
       WHERE b.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2)`, [req.params.id, req.userId],
@@ -2675,6 +2678,7 @@ app.post('/api/v1/bookings/:id/boarding', requireAuth, asyncHandler(async (req, 
 }));
 
 app.post('/api/v1/bookings/:id/start', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) throw new ApiError(400, 'invalid booking ID');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -2712,6 +2716,7 @@ app.post('/api/v1/bookings/:id/start', requireAuth, asyncHandler(async (req, res
 }));
 
 app.post('/api/v1/bookings/:id/complete', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.id)) throw new ApiError(400, 'invalid booking ID');
   const client = await pool.connect();
   let completionFinalized = false;
   try {
