@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-04T13:33:19.707Z",
+  "generatedAt": "2026-11-04T15:13:28.597Z",
   "generator": "scripts/build-transport-registry.ts",
   "productStatus": "NOT_RELEASED",
   "evidenceRule": "VERIFIED/VERIFIED_LIVE only when this run measured it; NOT_MEASURED means no evidence was collected, never \"none exists\"",
   "sources": {
     "catalog": "server/mobility/ukraineCatalog.ts (canonical, 52 rows); legacy root copy holds the same first 43 rows",
-    "probe": "/tmp/feed-probe-20261104.json",
+    "probe": "/tmp/feed-probe-wave3.json",
     "operators": "server/mobility/providerRegistry.ts",
     "database": "SELECT-only aggregation over marshgo-acceptance-db-1"
   },
   "inventory": {
-    "catalogRows": 52,
-    "probedToday": 52,
+    "catalogRows": 88,
+    "probedToday": 88,
     "byState": {
-      "HEALTHY": 26,
-      "OFFLINE": 17,
-      "DEGRADED": 4,
+      "HEALTHY": 48,
+      "DEGRADED": 14,
+      "OFFLINE": 21,
       "SKIPPED": 5
     },
     "blockedOnAccess": 5,
-    "routableToday": 30,
-    "feedsWithLivePositions": 14,
+    "routableToday": 62,
+    "feedsWithLivePositions": 46,
     "feedsWithArrivalPredictions": 1,
     "feedsWithServiceAlerts": 0,
     "feedsWithVerifiedPricing": 0,
@@ -95,25 +95,25 @@
     }
   ],
   "databaseSnapshot": {
-    "capturedAt": "2026-10-31T16:24:00Z",
+    "capturedAt": "2026-11-04T15:12:00Z",
     "container": "marshgo-acceptance-db-1",
-    "mobilityProviders": 52,
+    "mobilityProviders": 88,
     "byDiscoveryStatus": {
-      "DISCOVERED": 10,
-      "ENABLED": 15,
-      "TEMPORARILY_UNAVAILABLE": 27
+      "DISCOVERED": 6,
+      "ENABLED": 62,
+      "TEMPORARILY_UNAVAILABLE": 20
     },
     "enabledBySourceType": {
-      "gtfs": 7,
-      "gtfs_rt": 1,
-      "json": 7
+      "gtfs": 13,
+      "gtfs_rt": 12,
+      "json": 36
     },
     "mobilityOperators": 7,
     "mobilityNetworks": 4,
     "rentalLocations": 0,
     "rentalAvailabilitySnapshots": 0,
     "providerSourceRecords": 0,
-    "vehicles": 14
+    "vehicles": 19
   },
   "operators": [
     {
@@ -242,19 +242,18 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 2186,
+        "responseMs": 1888,
         "measured": {
           "stops": 1071,
           "routes": 72,
           "trips": 15141,
           "stopTimes": 406422,
-          "routes_bus": 55,
-          "routes_tram": 8,
-          "routes_trolleybus": 9
+          "routes_bus": 64,
+          "routes_tram": 8
         },
         "failedChecks": []
       },
@@ -289,18 +288,26 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 356,
+        "responseMs": 434,
         "measured": {
-          "vehicles": 603,
+          "vehicles": 616,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 2
+          "vehicleEntities": 616,
+          "vehiclePositions": 616,
+          "freshVehiclePositions": 0,
+          "staleVehiclePositions": 616,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 4
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Individual vehicle positions: 0/616 vehicle entities have valid coordinates and fresh timestamps; 616 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
       },
       "productUse": {
         "routable": true,
@@ -333,16 +340,22 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 172,
+        "responseMs": 47,
         "measured": {
           "vehicles": 0,
-          "tripUpdates": 701,
+          "tripUpdates": 115,
           "alerts": 0,
-          "ageSeconds": 5
+          "vehicleEntities": 0,
+          "vehiclePositions": 0,
+          "freshVehiclePositions": 0,
+          "staleVehiclePositions": 0,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 10
         },
         "failedChecks": []
       },
@@ -359,7 +372,7 @@
       "sourceType": "gtfs",
       "feedUrl": "https://track.ua-gis.com/gtfs/stryi/static.zip",
       "access": "open",
-      "license": null,
+      "license": "Відкриті дані Стрийської міської ради (data.gov.ua; mdb-2932)",
       "updateFrequency": "періодично",
       "coverageClaim": "Міський транспорт Стрия",
       "sourceRef": "mdb:ua-stryi-gtfs-2932",
@@ -377,11 +390,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 342,
+        "responseMs": 429,
         "measured": {
           "stops": 295,
           "routes": 34,
@@ -404,7 +417,7 @@
       "sourceType": "gtfs",
       "feedUrl": "https://track.ua-gis.com/gtfs/uzhhorod/static.zip",
       "access": "open",
-      "license": null,
+      "license": "Відкриті дані Ужгородської міської ради (data.gov.ua; mdb-2931)",
       "updateFrequency": "періодично",
       "coverageClaim": "Міський транспорт Ужгорода",
       "sourceRef": "mdb:ua-uzhhorod-gtfs-2931",
@@ -422,11 +435,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 386,
+        "responseMs": 407,
         "measured": {
           "stops": 217,
           "routes": 18,
@@ -467,11 +480,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 261,
+        "responseMs": 570,
         "measured": {
           "stops": 2,
           "routes": 1,
@@ -516,20 +529,16 @@
       "probe": {
         "checkedAt": "2026-10-31T16:23:30Z",
         "tool": "curl read-only probe",
-        "state": "DEGRADED",
+        "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 272,
+        "responseMs": 747,
         "measured": {
-          "discoveryHttp": 200,
           "feeds": 9,
           "vehicles": 1048,
           "stations": 0,
-          "ageSeconds": 0,
-          "vehiclesOutsideUkraine": 1
+          "ageSeconds": 0
         },
-        "failedChecks": [
-          "Positions are in Ukraine: bbox -77.06, -12.05, 37.30, 50.47"
-        ]
+        "failedChecks": []
       },
       "productUse": {
         "routable": true,
@@ -562,7 +571,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -601,7 +610,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -640,7 +649,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -679,7 +688,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -706,8 +715,8 @@
       "sourceRef": "data.gov.ua:Рівненська міська рада",
       "priority": 10,
       "capabilities": {
-        "staticNetwork": "VERIFIED",
-        "timetables": "VERIFIED",
+        "staticNetwork": "UNAVAILABLE",
+        "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
         "serviceAlerts": "NOT_APPLICABLE",
@@ -718,11 +727,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 675,
+        "responseMs": 711,
         "measured": {
           "stops": 207,
           "routes": 23,
@@ -731,10 +740,12 @@
           "routes_trolleybus": 11,
           "routes_bus": 12
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Scheduled service in next 7 days: no active trip service in the next 7 days"
+        ]
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -764,18 +775,26 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 122,
+        "responseMs": 40,
         "measured": {
-          "vehicles": 99,
+          "vehicles": 93,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 19
+          "vehicleEntities": 93,
+          "vehiclePositions": 93,
+          "freshVehiclePositions": 91,
+          "staleVehiclePositions": 2,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 15
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Individual vehicle positions: 91/93 vehicle entities have valid coordinates and fresh timestamps; 2 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
       },
       "productUse": {
         "routable": true,
@@ -808,18 +827,18 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 451,
+        "responseMs": 830,
         "measured": {
           "stops": 525,
           "routes": 55,
           "trips": 3319,
           "stopTimes": 82455,
-          "routes_bus": 46,
-          "routes_trolleybus": 9
+          "routes_bus": 47,
+          "routes_trolleybus": 8
         },
         "failedChecks": []
       },
@@ -854,18 +873,26 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 21,
+        "responseMs": 162,
         "measured": {
-          "vehicles": 164,
+          "vehicles": 160,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 13
+          "vehicleEntities": 160,
+          "vehiclePositions": 160,
+          "freshVehiclePositions": 143,
+          "staleVehiclePositions": 17,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 14
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Individual vehicle positions: 143/160 vehicle entities have valid coordinates and fresh timestamps; 17 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
       },
       "productUse": {
         "routable": true,
@@ -898,18 +925,26 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "DEGRADED",
         "skipReason": null,
         "responseMs": 20,
         "measured": {
           "vehicles": 63,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 11
+          "vehicleEntities": 63,
+          "vehiclePositions": 63,
+          "freshVehiclePositions": 26,
+          "staleVehiclePositions": 37,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 8
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Individual vehicle positions: 26/63 vehicle entities have valid coordinates and fresh timestamps; 37 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
       },
       "productUse": {
         "routable": true,
@@ -930,8 +965,8 @@
       "sourceRef": "probe:city.dozor.tech",
       "priority": 30,
       "capabilities": {
-        "staticNetwork": "VERIFIED",
-        "timetables": "VERIFIED",
+        "staticNetwork": "UNAVAILABLE",
+        "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
         "serviceAlerts": "NOT_APPLICABLE",
@@ -942,11 +977,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 272,
+        "responseMs": 625,
         "measured": {
           "stops": 181,
           "routes": 17,
@@ -954,10 +989,13 @@
           "stopTimes": 26089,
           "routes_bus": 17
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Agency timezone: missing or invalid agency_timezone; schedule cannot be evaluated safely",
+          "Scheduled service in next 7 days: no active trip service in the next 7 days"
+        ]
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -969,7 +1007,7 @@
       "sourceType": "gtfs_rt",
       "feedUrl": "https://track.ua-gis.com/gtfs/stryi/vehicle_position",
       "access": "open",
-      "license": null,
+      "license": "Відкриті дані Стрийської міської ради (data.gov.ua)",
       "updateFrequency": "реальний час",
       "coverageClaim": "Позиції транспорту Стрия",
       "sourceRef": "probe:track.ua-gis.com",
@@ -987,18 +1025,26 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 33,
+        "responseMs": 125,
         "measured": {
           "vehicles": 32,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 5
+          "vehicleEntities": 32,
+          "vehiclePositions": 32,
+          "freshVehiclePositions": 0,
+          "staleVehiclePositions": 32,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 7
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Individual vehicle positions: 0/32 vehicle entities have valid coordinates and fresh timestamps; 32 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
       },
       "productUse": {
         "routable": true,
@@ -1013,7 +1059,7 @@
       "sourceType": "gtfs_rt",
       "feedUrl": "https://track.ua-gis.com/gtfs/truskavets/vehicle_position",
       "access": "open",
-      "license": null,
+      "license": "Відкриті дані Трускавецької міської ради (data.gov.ua)",
       "updateFrequency": "реальний час",
       "coverageClaim": "Позиції транспорту Трускавця (фід може бути порожнім)",
       "sourceRef": "probe:track.ua-gis.com",
@@ -1031,16 +1077,22 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 110,
+        "responseMs": 107,
         "measured": {
           "vehicles": 0,
           "tripUpdates": 0,
           "alerts": 0,
-          "ageSeconds": 5
+          "vehicleEntities": 0,
+          "vehiclePositions": 0,
+          "freshVehiclePositions": 0,
+          "staleVehiclePositions": 0,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 2
         },
         "failedChecks": [
           "Entities: 0 vehicles, 0 trip updates, 0 alerts"
@@ -1077,11 +1129,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 478,
+        "responseMs": 239,
         "measured": {
           "stops": 152,
           "routes": 6,
@@ -1124,16 +1176,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 336,
+        "responseMs": 304,
         "measured": {
           "vehicles": 16,
+          "timestamped": 16,
           "vehicles_bus": 7,
           "vehicles_marshrutka": 9,
-          "ageSeconds": 20
+          "ageSeconds": 29
         },
         "failedChecks": []
       },
@@ -1168,11 +1221,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 59,
+        "responseMs": 104,
         "measured": {},
         "failedChecks": [
           "Vehicle list found: 0 entries"
@@ -1209,14 +1262,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 169,
+        "responseMs": 104,
         "measured": {
-          "vehicles": 78,
-          "vehicles_bus": 78
+          "vehicles": 82,
+          "timestamped": 82,
+          "vehicles_bus": 82,
+          "ageSeconds": 32
         },
         "failedChecks": []
       },
@@ -1251,15 +1306,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 233,
+        "responseMs": 248,
         "measured": {
-          "vehicles": 176,
-          "vehicles_trolleybus": 36,
-          "vehicles_bus": 140
+          "vehicles": 174,
+          "timestamped": 174,
+          "vehicles_trolleybus": 39,
+          "vehicles_bus": 135,
+          "ageSeconds": 36
         },
         "failedChecks": []
       },
@@ -1276,7 +1333,7 @@
       "sourceType": "json",
       "feedUrl": "https://api-t900.icity.com.ua/api/gps_data/",
       "access": "open",
-      "license": "відкриті дані Дніпровської міської ради (data.gov.ua)",
+      "license": "Відкриті дані Дніпровської міської ради (commercial use permitted; data.gov.ua)",
       "updateFrequency": "реальний час",
       "coverageClaim": "Позиції транспорту Дніпра",
       "sourceRef": "data.gov.ua:Дніпровська міська рада",
@@ -1294,18 +1351,19 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 1365,
+        "responseMs": 1210,
         "measured": {
-          "vehicles": 268,
-          "vehicles_bus": 268,
-          "ageSeconds": 2
+          "vehicles": 6,
+          "timestamped": 6,
+          "vehicles_bus": 6,
+          "ageSeconds": 3
         },
         "failedChecks": [
-          "Coordinates: 268 valid, 193 invalid"
+          "Coordinates: 6 valid, 458 invalid"
         ]
       },
       "productUse": {
@@ -1339,7 +1397,7 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
         "skipReason": null,
@@ -1378,17 +1436,18 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 83,
+        "responseMs": 126,
         "measured": {
-          "vehicles": 169,
-          "vehicles_marshrutka": 129,
-          "vehicles_bus": 23,
-          "vehicles_trolleybus": 17,
-          "ageSeconds": 6
+          "vehicles": 188,
+          "timestamped": 188,
+          "vehicles_marshrutka": 131,
+          "vehicles_trolleybus": 27,
+          "vehicles_bus": 30,
+          "ageSeconds": 1
         },
         "failedChecks": []
       },
@@ -1423,11 +1482,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 1089,
+        "responseMs": 779,
         "measured": {
           "stops": 37,
           "routes": 2,
@@ -1468,11 +1527,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 6926,
+        "responseMs": 9104,
         "measured": {
           "stops": 167,
           "routes": 118,
@@ -1514,11 +1573,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 4146,
+        "responseMs": 1873,
         "measured": {
           "stops": 1528,
           "routes": 165,
@@ -1561,11 +1620,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 429,
+        "responseMs": 567,
         "measured": {
           "stops": 239,
           "routes": 15,
@@ -1606,14 +1665,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 174,
+        "responseMs": 182,
         "measured": {
           "vehicles": 143,
-          "vehicles_bus": 143
+          "timestamped": 143,
+          "vehicles_bus": 143,
+          "ageSeconds": 16
         },
         "failedChecks": []
       },
@@ -1648,11 +1709,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 42,
+        "responseMs": 49,
         "measured": {
           "stops": 345,
           "routes": 20,
@@ -1694,15 +1755,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 135,
+        "responseMs": 138,
         "measured": {
-          "vehicles": 129,
-          "vehicles_bus": 128,
-          "vehicles_trolleybus": 1
+          "vehicles": 130,
+          "timestamped": 130,
+          "vehicles_bus": 129,
+          "vehicles_trolleybus": 1,
+          "ageSeconds": 24
         },
         "failedChecks": []
       },
@@ -1725,8 +1788,8 @@
       "sourceRef": "github.com/jqueguiner/gtfs (агрегатор GTFS-джерел)",
       "priority": 40,
       "capabilities": {
-        "staticNetwork": "VERIFIED",
-        "timetables": "VERIFIED",
+        "staticNetwork": "UNAVAILABLE",
+        "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
         "serviceAlerts": "NOT_APPLICABLE",
@@ -1737,11 +1800,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 83,
+        "responseMs": 220,
         "measured": {
           "stops": 356,
           "routes": 46,
@@ -1750,10 +1813,12 @@
           "routes_trolleybus": 20,
           "routes_bus": 26
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Scheduled service in next 7 days: no active trip service in the next 7 days"
+        ]
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1771,8 +1836,8 @@
       "sourceRef": "github.com/jqueguiner/gtfs (агрегатор GTFS-джерел)",
       "priority": 40,
       "capabilities": {
-        "staticNetwork": "VERIFIED",
-        "timetables": "VERIFIED",
+        "staticNetwork": "UNAVAILABLE",
+        "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
         "serviceAlerts": "NOT_APPLICABLE",
@@ -1783,11 +1848,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 21,
+        "responseMs": 107,
         "measured": {
           "stops": 184,
           "routes": 12,
@@ -1795,10 +1860,12 @@
           "stopTimes": 3344,
           "routes_bus": 12
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Scheduled service in next 7 days: no active trip service in the next 7 days"
+        ]
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1828,14 +1895,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 20,
+        "responseMs": 25,
         "measured": {
-          "vehicles": 13,
-          "vehicles_bus": 13
+          "vehicles": 15,
+          "timestamped": 15,
+          "vehicles_bus": 15,
+          "ageSeconds": 32
         },
         "failedChecks": []
       },
@@ -1846,6 +1915,1652 @@
     },
     {
       "id": "feed-38",
+      "name": "Шептицький — розклад (GTFS, UA-GIS)",
+      "city": "Шептицький",
+      "providerType": "public_transit",
+      "sourceType": "gtfs",
+      "feedUrl": "https://track.ua-gis.com/gtfs/chervonograd/static.zip",
+      "access": "open",
+      "license": "Відкриті дані Шептицької міської ради (commercial use permitted; data.gov.ua)",
+      "updateFrequency": "періодично",
+      "coverageClaim": "Автобусні маршрути Шептицького (Червонограда)",
+      "sourceRef": "track.ua-gis.com:chervonograd",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "VERIFIED",
+        "timetables": "VERIFIED",
+        "livePositions": "NOT_APPLICABLE",
+        "arrivalPredictions": "NOT_APPLICABLE",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 314,
+        "measured": {
+          "stops": 80,
+          "routes": 7,
+          "trips": 560,
+          "stopTimes": 7189,
+          "routes_bus": 7
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-39",
+      "name": "Малин — розклад (GTFS)",
+      "city": "Малин",
+      "providerType": "public_transit",
+      "sourceType": "gtfs",
+      "feedUrl": "https://malin.kiev.ua/transport/gtfs.zip",
+      "access": "open",
+      "license": "OwnNet Source License 1.1 (commercial use permitted; mdb-3615)",
+      "updateFrequency": "щотижня",
+      "coverageClaim": "Міський транспорт Малина (Житомирська область)",
+      "sourceRef": "mdb:ua-malyn-gtfs-3615",
+      "priority": 25,
+      "capabilities": {
+        "staticNetwork": "VERIFIED",
+        "timetables": "VERIFIED",
+        "livePositions": "NOT_APPLICABLE",
+        "arrivalPredictions": "NOT_APPLICABLE",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 887,
+        "measured": {
+          "stops": 98,
+          "routes": 9,
+          "trips": 250,
+          "stopTimes": 4423,
+          "routes_bus": 9
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-40",
+      "name": "Одеса — розклад (GTFS, дзеркало)",
+      "city": "Одеса",
+      "providerType": "public_transit",
+      "sourceType": "gtfs",
+      "feedUrl": "https://files.mobilitydatabase.org/mdb-2946/latest.zip",
+      "access": "open",
+      "license": "Відкриті дані Одеської міської ради (commercial use permitted; omr.gov.ua; mdb-2946)",
+      "updateFrequency": "щотижня",
+      "coverageClaim": "Трамваї, тролейбуси та автобуси Одеси (офіційне дзеркало MDB)",
+      "sourceRef": "mdb:ua-odesa-gtfs-2946",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "VERIFIED",
+        "timetables": "VERIFIED",
+        "livePositions": "NOT_APPLICABLE",
+        "arrivalPredictions": "NOT_APPLICABLE",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 6567,
+        "measured": {
+          "stops": 3719,
+          "routes": 87,
+          "trips": 11090,
+          "stopTimes": 470314,
+          "routes_tram": 18,
+          "routes_trolleybus": 7,
+          "routes_bus": 62
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-41",
+      "name": "Буча — розклад (GTFS, дзеркало)",
+      "city": "Буча",
+      "providerType": "public_transit",
+      "sourceType": "gtfs",
+      "feedUrl": "https://files.mobilitydatabase.org/mdb-2945/latest.zip",
+      "access": "open",
+      "license": "Відкриті дані КП «Бучатранссервіс» (commercial use permitted; mdb-2945)",
+      "updateFrequency": "щотижня",
+      "coverageClaim": "Автобуси КП «Бучатранссервіс» (офіційне дзеркало MDB)",
+      "sourceRef": "mdb:ua-bucha-gtfs-2945",
+      "priority": 25,
+      "capabilities": {
+        "staticNetwork": "VERIFIED",
+        "timetables": "VERIFIED",
+        "livePositions": "NOT_APPLICABLE",
+        "arrivalPredictions": "NOT_APPLICABLE",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 276,
+        "measured": {
+          "stops": 129,
+          "routes": 4,
+          "trips": 27,
+          "stopTimes": 563,
+          "routes_bus": 4
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-42",
+      "name": "Шептицький — позиції (GTFS-RT, UA-GIS)",
+      "city": "Шептицький",
+      "providerType": "public_transit",
+      "sourceType": "gtfs_rt",
+      "feedUrl": "https://track.ua-gis.com/gtfs/chervonograd/vehicle_position",
+      "access": "open",
+      "license": "Відкриті дані Шептицької міської ради (commercial use permitted; data.gov.ua)",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Позиції автобусів Шептицького",
+      "sourceRef": "probe:track.ua-gis.com",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NONE_OBSERVED",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "DEGRADED",
+        "skipReason": null,
+        "responseMs": 227,
+        "measured": {
+          "vehicles": 4,
+          "tripUpdates": 0,
+          "alerts": 0,
+          "vehicleEntities": 4,
+          "vehiclePositions": 4,
+          "freshVehiclePositions": 0,
+          "staleVehiclePositions": 4,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 2
+        },
+        "failedChecks": [
+          "Individual vehicle positions: 0/4 vehicle entities have valid coordinates and fresh timestamps; 4 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-43",
+      "name": "Ужгород — позиції (GTFS-RT, UA-GIS)",
+      "city": "Ужгород",
+      "providerType": "public_transit",
+      "sourceType": "gtfs_rt",
+      "feedUrl": "https://track.ua-gis.com/gtfs/uzhhorod/vehicle_position",
+      "access": "open",
+      "license": "Відкриті дані Ужгородської міської ради (data.gov.ua)",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Позиції автобусів Ужгорода (UA-GIS)",
+      "sourceRef": "probe:track.ua-gis.com",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NONE_OBSERVED",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "DEGRADED",
+        "skipReason": null,
+        "responseMs": 93,
+        "measured": {
+          "vehicles": 70,
+          "tripUpdates": 0,
+          "alerts": 0,
+          "vehicleEntities": 70,
+          "vehiclePositions": 70,
+          "freshVehiclePositions": 0,
+          "staleVehiclePositions": 70,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 7
+        },
+        "failedChecks": [
+          "Individual vehicle positions: 0/70 vehicle entities have valid coordinates and fresh timestamps; 70 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-44",
+      "name": "Біла Церква — позиції (GTFS-RT, Dozor)",
+      "city": "Біла Церква",
+      "providerType": "public_transit",
+      "sourceType": "gtfs_rt",
+      "feedUrl": "https://city.dozor.tech/bila-cerkva/gtfs/vehicle_position",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Позиції транспорту Білої Церкви (GTFS-RT)",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 20,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NONE_OBSERVED",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "DEGRADED",
+        "skipReason": null,
+        "responseMs": 23,
+        "measured": {
+          "vehicles": 59,
+          "tripUpdates": 0,
+          "alerts": 0,
+          "vehicleEntities": 59,
+          "vehiclePositions": 59,
+          "freshVehiclePositions": 47,
+          "staleVehiclePositions": 12,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 20
+        },
+        "failedChecks": [
+          "Individual vehicle positions: 47/59 vehicle entities have valid coordinates and fresh timestamps; 12 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-45",
+      "name": "Хмельницький — позиції (GTFS-RT, Dozor)",
+      "city": "Хмельницький",
+      "providerType": "public_transit",
+      "sourceType": "gtfs_rt",
+      "feedUrl": "https://city.dozor.tech/khmelnyckyi/gtfs/vehicle_position",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Позиції тролейбусів та автобусів Хмельницького (GTFS-RT)",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NONE_OBSERVED",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "DEGRADED",
+        "skipReason": null,
+        "responseMs": 20,
+        "measured": {
+          "vehicles": 133,
+          "tripUpdates": 0,
+          "alerts": 0,
+          "vehicleEntities": 133,
+          "vehiclePositions": 133,
+          "freshVehiclePositions": 121,
+          "staleVehiclePositions": 12,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 15
+        },
+        "failedChecks": [
+          "Individual vehicle positions: 121/133 vehicle entities have valid coordinates and fresh timestamps; 12 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-46",
+      "name": "Олександрія — позиції (GTFS-RT, Dozor)",
+      "city": "Олександрія",
+      "providerType": "public_transit",
+      "sourceType": "gtfs_rt",
+      "feedUrl": "https://city.dozor.tech/oleksandriya/gtfs/vehicle_position",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Позиції автобусів Олександрії (GTFS-RT)",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 20,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NONE_OBSERVED",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "DEGRADED",
+        "skipReason": null,
+        "responseMs": 23,
+        "measured": {
+          "vehicles": 10,
+          "tripUpdates": 0,
+          "alerts": 0,
+          "vehicleEntities": 10,
+          "vehiclePositions": 10,
+          "freshVehiclePositions": 9,
+          "staleVehiclePositions": 1,
+          "missingVehicleTimestamps": 0,
+          "missingVehiclePositions": 0,
+          "ageSeconds": 6
+        },
+        "failedChecks": [
+          "Individual vehicle positions: 9/10 vehicle entities have valid coordinates and fresh timestamps; 1 stale, 0 without timestamp, 0 without valid coordinates"
+        ]
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-47",
+      "name": "Житомир — позиції (Dozor JSON)",
+      "city": "Житомир",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/zhytomyr/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Автобуси та маршрутки Житомира",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 65,
+        "measured": {
+          "vehicles": 59,
+          "timestamped": 59,
+          "vehicles_bus": 59,
+          "ageSeconds": 4
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-48",
+      "name": "Вінниця — позиції (Dozor JSON)",
+      "city": "Вінниця",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/vinnytsya/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Трамваї, тролейбуси та автобуси Вінниці",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 128,
+        "measured": {
+          "vehicles": 196,
+          "timestamped": 196,
+          "vehicles_trolleybus": 39,
+          "vehicles_bus": 121,
+          "vehicles_tram": 36,
+          "ageSeconds": 34
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-49",
+      "name": "Запоріжжя — позиції (Dozor JSON)",
+      "city": "Запоріжжя",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/zaporizhya/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Трамваї, тролейбуси та автобуси Запоріжжя",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 110,
+        "measured": {
+          "vehicles": 56,
+          "timestamped": 56,
+          "vehicles_tram": 13,
+          "vehicles_trolleybus": 8,
+          "vehicles_bus": 35,
+          "ageSeconds": 21
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-50",
+      "name": "Черкаси — позиції (Dozor JSON)",
+      "city": "Черкаси",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/cherkasy/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Тролейбуси й автобуси Черкас",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 45,
+        "measured": {
+          "vehicles": 90,
+          "timestamped": 90,
+          "vehicles_trolleybus": 21,
+          "vehicles_bus": 69,
+          "ageSeconds": 25
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-51",
+      "name": "Черкаська область — позиції (Dozor JSON)",
+      "city": "Черкаси",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/cherkasy-oblast/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Приміські автобуси Черкаської області",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 20,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 23,
+        "measured": {
+          "vehicles": 11,
+          "timestamped": 11,
+          "vehicles_bus": 11,
+          "ageSeconds": 24
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-52",
+      "name": "Чернівці — позиції (Dozor JSON)",
+      "city": "Чернівці",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/chernivtsi/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Тролейбуси й автобуси Чернівців",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 122,
+        "measured": {
+          "vehicles": 76,
+          "timestamped": 76,
+          "vehicles_bus": 33,
+          "vehicles_trolleybus": 43,
+          "ageSeconds": 44
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-53",
+      "name": "Чернівці — позиції (EasyWay JSON)",
+      "city": "Чернівці",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://public.easyway.info/gps/chernivtsi.json",
+      "access": "open",
+      "license": "EasyWay (public.easyway.info); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Громадський транспорт Чернівців (EasyWay)",
+      "sourceRef": "probe:public.easyway.info",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 312,
+        "measured": {
+          "vehicles": 87,
+          "timestamped": 87,
+          "vehicles_bus": 37,
+          "vehicles_trolleybus": 50,
+          "ageSeconds": 21
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-54",
+      "name": "Харків — позиції (Dozor JSON)",
+      "city": "Харків",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/kharkiv/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Тролейбуси, трамваї й автобуси Харкова",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "DEGRADED",
+        "skipReason": null,
+        "responseMs": 20,
+        "measured": {
+          "vehicles": 7,
+          "timestamped": 7,
+          "vehicles_bus": 2,
+          "vehicles_trolleybus": 5,
+          "ageSeconds": 203
+        },
+        "failedChecks": [
+          "Freshness: 203s old; live threshold is 90s"
+        ]
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-55",
+      "name": "Одеса — позиції (Dozor JSON)",
+      "city": "Одеса",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/odesa/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Трамваї, тролейбуси й автобуси Одеси (Dozor)",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 473,
+        "measured": {
+          "vehicles": 49,
+          "timestamped": 49,
+          "vehicles_trolleybus": 16,
+          "vehicles_tram": 20,
+          "vehicles_bus": 13,
+          "ageSeconds": 12
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-56",
+      "name": "Хмельницький — позиції (Dozor JSON)",
+      "city": "Хмельницький",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/khmelnyckyi/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Тролейбуси й автобуси Хмельницького",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 290,
+        "measured": {
+          "vehicles": 140,
+          "timestamped": 140,
+          "vehicles_bus": 95,
+          "vehicles_trolleybus": 45,
+          "ageSeconds": 17
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-57",
+      "name": "Мукачево — позиції (Dozor JSON)",
+      "city": "Мукачево",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/mukachevo/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Міські автобуси Мукачева",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 68,
+        "measured": {
+          "vehicles": 35,
+          "timestamped": 35,
+          "vehicles_bus": 35,
+          "ageSeconds": 33
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-58",
+      "name": "Дрогобич — позиції (Dozor JSON)",
+      "city": "Дрогобич",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/drogobych/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Автобуси Дрогобича",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 22,
+        "measured": {
+          "vehicles": 18,
+          "timestamped": 18,
+          "vehicles_bus": 18,
+          "ageSeconds": 22
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-59",
+      "name": "Коломия — позиції (Dozor JSON)",
+      "city": "Коломия",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/kolomyia/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Автобуси Коломиї",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 21,
+        "measured": {
+          "vehicles": 15,
+          "timestamped": 15,
+          "vehicles_bus": 15,
+          "ageSeconds": 33
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-60",
+      "name": "Бердичів — позиції (Dozor JSON)",
+      "city": "Бердичів",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/berdychiv/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Міський транспорт Бердичева",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 117,
+        "measured": {
+          "vehicles": 55,
+          "timestamped": 55,
+          "vehicles_bus": 55,
+          "ageSeconds": 16
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-61",
+      "name": "Володимир — позиції (Dozor JSON)",
+      "city": "Володимир",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/volodymyr/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Міські автобуси Володимира",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 23,
+        "measured": {
+          "vehicles": 11,
+          "timestamped": 11,
+          "vehicles_bus": 11,
+          "ageSeconds": 34
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-62",
+      "name": "Звягель — позиції (Dozor JSON)",
+      "city": "Звягель",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/zvyagel/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Автобуси Звягеля",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 36,
+        "measured": {
+          "vehicles": 9,
+          "timestamped": 9,
+          "vehicles_bus": 9,
+          "ageSeconds": 18
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-63",
+      "name": "Чортків — позиції (Dozor JSON)",
+      "city": "Чортків",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/chortkiv/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Автобуси Чорткова",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 22,
+        "measured": {
+          "vehicles": 5,
+          "timestamped": 5,
+          "vehicles_bus": 5,
+          "ageSeconds": 29
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-64",
+      "name": "Коростень — позиції (Dozor JSON)",
+      "city": "Коростень",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/korosten/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Автобуси Коростеня (Dozor)",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 22,
+        "measured": {
+          "vehicles": 13,
+          "timestamped": 13,
+          "vehicles_bus": 13,
+          "ageSeconds": 35
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-65",
+      "name": "Коростень — позиції (EasyWay JSON)",
+      "city": "Коростень",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://public.easyway.info/gps/korosten.json",
+      "access": "open",
+      "license": "EasyWay (public.easyway.info); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Маршрутки Коростеня (EasyWay)",
+      "sourceRef": "probe:public.easyway.info",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 82,
+        "measured": {
+          "vehicles": 13,
+          "timestamped": 13,
+          "vehicles_marshrutka": 13,
+          "ageSeconds": 35
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-66",
+      "name": "Дубно — позиції (Dozor JSON)",
+      "city": "Дубно",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/dubno/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Міські автобуси Дубна",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 20,
+        "measured": {
+          "vehicles": 7,
+          "timestamped": 7,
+          "vehicles_bus": 7,
+          "ageSeconds": 35
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-67",
+      "name": "Борислав — позиції (Dozor JSON)",
+      "city": "Борислав",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/boryslav/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Автобуси Борислава",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 19,
+        "measured": {
+          "vehicles": 3,
+          "timestamped": 3,
+          "vehicles_bus": 3,
+          "ageSeconds": 22
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-68",
+      "name": "Нововолинськ — позиції (Dozor JSON)",
+      "city": "Нововолинськ",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/novovolynsk/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Автобуси Нововолинська",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 21,
+        "measured": {
+          "vehicles": 4,
+          "timestamped": 4,
+          "vehicles_bus": 4,
+          "ageSeconds": 44
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-69",
+      "name": "Костопіль — позиції (Dozor JSON)",
+      "city": "Костопіль",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/kostopil/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Міські автобуси Костополя",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 10,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 25,
+        "measured": {
+          "vehicles": 4,
+          "timestamped": 4,
+          "vehicles_bus": 4,
+          "ageSeconds": 44
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-70",
+      "name": "Рівне — позиції (Dozor JSON)",
+      "city": "Рівне",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/rivne/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Тролейбуси й автобуси Рівного (Dozor)",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 206,
+        "measured": {
+          "vehicles": 155,
+          "timestamped": 155,
+          "vehicles_bus": 114,
+          "vehicles_trolleybus": 41,
+          "ageSeconds": 28
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-71",
+      "name": "Рівне — позиції (EasyWay JSON)",
+      "city": "Рівне",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://public.easyway.info/gps/rivne.json",
+      "access": "open",
+      "license": "EasyWay (public.easyway.info); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Тролейбуси й автобуси Рівного (EasyWay)",
+      "sourceRef": "probe:public.easyway.info",
+      "priority": 20,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 147,
+        "measured": {
+          "vehicles": 142,
+          "timestamped": 142,
+          "vehicles_bus": 100,
+          "vehicles_trolleybus": 42,
+          "ageSeconds": 50
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-72",
+      "name": "Київ — маршрутки (Dozor JSON)",
+      "city": "Київ",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/kyiv/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Маршрутні автобуси Києва (Dozor Tech)",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 90,
+        "measured": {
+          "vehicles": 199,
+          "timestamped": 199,
+          "vehicles_bus": 199,
+          "ageSeconds": 45
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-73",
+      "name": "Полтава — позиції (Dozor JSON)",
+      "city": "Полтава",
+      "providerType": "public_transit",
+      "sourceType": "json",
+      "feedUrl": "https://city.dozor.tech/poltava/devices.json",
+      "access": "open",
+      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "updateFrequency": "реальний час",
+      "coverageClaim": "Тролейбуси й автобуси Полтави (Dozor Tech)",
+      "sourceRef": "probe:city.dozor.tech",
+      "priority": 15,
+      "capabilities": {
+        "staticNetwork": "NOT_APPLICABLE",
+        "timetables": "NOT_APPLICABLE",
+        "livePositions": "VERIFIED_LIVE",
+        "arrivalPredictions": "NONE_OBSERVED",
+        "serviceAlerts": "NOT_APPLICABLE",
+        "pricing": "NOT_MEASURED",
+        "seatAvailability": "NOT_APPLICABLE",
+        "reservation": "NOT_MEASURED",
+        "cancellation": "NOT_MEASURED",
+        "deepLink": "NOT_MEASURED"
+      },
+      "probe": {
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
+        "state": "HEALTHY",
+        "skipReason": null,
+        "responseMs": 178,
+        "measured": {
+          "vehicles": 172,
+          "timestamped": 172,
+          "vehicles_trolleybus": 27,
+          "vehicles_bus": 145,
+          "ageSeconds": 42
+        },
+        "failedChecks": []
+      },
+      "productUse": {
+        "routable": true,
+        "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
+      }
+    },
+    {
+      "id": "feed-74",
       "name": "Київ — міська електричка (розклад)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -1874,11 +3589,11 @@
         "tool": "curl read-only probe",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 19911,
-        "measured": {
-          "httpStatus": 522
-        },
-        "failedChecks": []
+        "responseMs": 502,
+        "measured": {},
+        "failedChecks": [
+          "Kyiv Open Data schedule API: Host cannot be resolved"
+        ]
       },
       "productUse": {
         "routable": false,
@@ -1886,7 +3601,7 @@
       }
     },
     {
-      "id": "feed-39",
+      "id": "feed-75",
       "name": "Київ — метро (перший/останній поїзд)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -1915,11 +3630,11 @@
         "tool": "curl read-only probe",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 19686,
-        "measured": {
-          "httpStatus": 522
-        },
-        "failedChecks": []
+        "responseMs": 57,
+        "measured": {},
+        "failedChecks": [
+          "Kyiv Open Data schedule API: Host cannot be resolved"
+        ]
       },
       "productUse": {
         "routable": false,
@@ -1927,7 +3642,7 @@
       }
     },
     {
-      "id": "feed-40",
+      "id": "feed-76",
       "name": "Київ — метро (інтервали руху)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -1956,11 +3671,11 @@
         "tool": "curl read-only probe",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 19675,
-        "measured": {
-          "httpStatus": 522
-        },
-        "failedChecks": []
+        "responseMs": 2,
+        "measured": {},
+        "failedChecks": [
+          "Kyiv Open Data schedule API: Host cannot be resolved"
+        ]
       },
       "productUse": {
         "routable": false,
@@ -1968,7 +3683,7 @@
       }
     },
     {
-      "id": "feed-41",
+      "id": "feed-77",
       "name": "Київ — метро (пересадкові вузли)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -1997,11 +3712,11 @@
         "tool": "curl read-only probe",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 19378,
-        "measured": {
-          "httpStatus": 522
-        },
-        "failedChecks": []
+        "responseMs": 2,
+        "measured": {},
+        "failedChecks": [
+          "Kyiv Open Data schedule API: Host cannot be resolved"
+        ]
       },
       "productUse": {
         "routable": false,
@@ -2009,7 +3724,7 @@
       }
     },
     {
-      "id": "feed-42",
+      "id": "feed-78",
       "name": "Київ — метро (години роботи станцій)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2038,11 +3753,11 @@
         "tool": "curl read-only probe",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 19538,
-        "measured": {
-          "httpStatus": 522
-        },
-        "failedChecks": []
+        "responseMs": 4,
+        "measured": {},
+        "failedChecks": [
+          "Kyiv Open Data schedule API: Host cannot be resolved"
+        ]
       },
       "productUse": {
         "routable": false,
@@ -2050,7 +3765,7 @@
       }
     },
     {
-      "id": "feed-43",
+      "id": "feed-79",
       "name": "Київ — фунікулер (перший/останній рейс)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2079,11 +3794,11 @@
         "tool": "curl read-only probe",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 19894,
-        "measured": {
-          "httpStatus": 522
-        },
-        "failedChecks": []
+        "responseMs": 293,
+        "measured": {},
+        "failedChecks": [
+          "Kyiv Open Data schedule API: Host cannot be resolved"
+        ]
       },
       "productUse": {
         "routable": false,
@@ -2091,7 +3806,7 @@
       }
     },
     {
-      "id": "feed-44",
+      "id": "feed-80",
       "name": "Київ — фунікулер (інтервали руху)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2120,11 +3835,11 @@
         "tool": "curl read-only probe",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 19661,
-        "measured": {
-          "httpStatus": 522
-        },
-        "failedChecks": []
+        "responseMs": 139,
+        "measured": {},
+        "failedChecks": [
+          "Kyiv Open Data schedule API: Host cannot be resolved"
+        ]
       },
       "productUse": {
         "routable": false,
@@ -2132,7 +3847,7 @@
       }
     },
     {
-      "id": "feed-45",
+      "id": "feed-81",
       "name": "Київ — фунікулер (години роботи станцій)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2161,11 +3876,11 @@
         "tool": "curl read-only probe",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 19589,
-        "measured": {
-          "httpStatus": 522
-        },
-        "failedChecks": []
+        "responseMs": 127,
+        "measured": {},
+        "failedChecks": [
+          "Kyiv Open Data schedule API: Host cannot be resolved"
+        ]
       },
       "productUse": {
         "routable": false,
@@ -2173,7 +3888,7 @@
       }
     },
     {
-      "id": "feed-46",
+      "id": "feed-82",
       "name": "Київ — маршрутки (офіційна геометрія)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2198,11 +3913,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 443,
+        "responseMs": 154,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -2214,7 +3929,7 @@
       }
     },
     {
-      "id": "feed-47",
+      "id": "feed-83",
       "name": "Київ — метро (геометрія ліній)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2239,11 +3954,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 159,
+        "responseMs": 0,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -2255,7 +3970,7 @@
       }
     },
     {
-      "id": "feed-48",
+      "id": "feed-84",
       "name": "Київ — метро (станції)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2280,11 +3995,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 115,
+        "responseMs": 1,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -2296,7 +4011,7 @@
       }
     },
     {
-      "id": "feed-49",
+      "id": "feed-85",
       "name": "Київ — міська електричка (геометрія)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2321,11 +4036,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 191,
+        "responseMs": 133,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -2337,7 +4052,7 @@
       }
     },
     {
-      "id": "feed-50",
+      "id": "feed-86",
       "name": "Київ — фунікулер (геометрія)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2362,11 +4077,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 221,
+        "responseMs": 185,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -2378,7 +4093,7 @@
       }
     },
     {
-      "id": "feed-51",
+      "id": "feed-87",
       "name": "Київ — фунікулер (станції)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2403,11 +4118,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 192,
+        "responseMs": 177,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -2419,7 +4134,7 @@
       }
     },
     {
-      "id": "feed-52",
+      "id": "feed-88",
       "name": "Київ — міська електричка (станції)",
       "city": "Київ",
       "providerType": "public_transit",
@@ -2444,11 +4159,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T13:33:07.760Z",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 110,
+        "responseMs": 104,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
