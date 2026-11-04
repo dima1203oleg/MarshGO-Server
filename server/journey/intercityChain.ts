@@ -237,7 +237,6 @@ export function composeChain(
 
   // 3. Intercity leg (e.g. train or intercity bus)
   allLegs.push(intercityLeg);
-  currentTime = intercityLeg.arrivalAt;
 
   // 4. Local egress legs (e.g. urban metro/bus in destination city)
   for (let i = 0; i < localEgressLegs.length; i++) {
@@ -256,7 +255,6 @@ export function composeChain(
     }
 
     allLegs.push(leg);
-    currentTime = leg.arrivalAt;
   }
 
   const firstLeg = allLegs[0];
