@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
 import {
@@ -223,4 +224,14 @@ test('a bbox rule set alone counts as a configured foot router', (t) => {
   assert.equal(walkingRoutingEnabled(), false);
   process.env.WALKING_ROUTING_URLS = 'not-json';
   assert.equal(walkingRoutingEnabled(), false);
+});
+
+// A bbox-only configuration used to leave the planner gated on the single-city variable: streets
+// disappeared from every walk leg while the disclosure said the router was configured. The gate
+// therefore has to stay on walkingRoutingEnabled(), which this source check pins down.
+test('the search gate reads walkingRoutingEnabled(), not the single-city URL variable', () => {
+  const plannerSource = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
+  assert.ok(plannerSource.includes('const walkingRoutingConfigured = walkingRoutingEnabled();'));
+  assert.equal(plannerSource.includes('walkingRoutingUrl'), false);
+  assert.ok(plannerSource.includes('door-to-door-walking:requires-WALKING_ROUTING_URL-or-WALKING_ROUTING_URLS'));
 });
