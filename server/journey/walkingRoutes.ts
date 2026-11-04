@@ -71,6 +71,14 @@ export function walkingEndpointFor(from: [number, number], to?: [number, number]
   return rules.find(({ bbox }) => bboxContains(bbox, from) && (!to || bboxContains(bbox, to)))?.url;
 }
 
+/**
+ * A bbox rule set configures the foot router just as a single URL does; requiring both
+ * would leave the coverage-safe form unable to turn pedestrian routing on at all.
+ */
+export function walkingRoutingEnabled(): boolean {
+  return Boolean(process.env.WALKING_ROUTING_URL?.trim()) || walkingEndpointRules().length > 0;
+}
+
 export interface WalkingRouteBudget {
   readonly limit: number;
   remaining: number;

@@ -25,7 +25,7 @@ import { composeCommunityTransitJourneys, type CommunityRideOption } from './jou
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, resolveTransitCandidateBudget, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
@@ -3027,7 +3027,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     preferenceValues.minimumTransferBufferSeconds ?? DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
     DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS,
   );
-  const walkingRoutingUrl = process.env.WALKING_ROUTING_URL?.trim();
+  const walkingRoutingConfigured = walkingRoutingEnabled();
   const walkingRouteBudget = createWalkingRouteBudget();
   const providerErrors: string[] = [];
   let gtfsSecondarySearchUnavailable = false;
@@ -3151,7 +3151,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const first = itinerary.segments[0];
     const last = itinerary.segments.at(-1);
     if (!first || !last) return null;
-    if (!walkingRoutingUrl) {
+    if (!walkingRoutingConfigured) {
       if (requireMeasuredWalks && (first.distanceToOriginStopMeters > 0 || last.distanceFromDestinationStopMeters > 0
         || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
           && !itinerary.transferWalkingGeometries[index]))) return null;
@@ -3198,12 +3198,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const feasibleItineraries = itineraries.filter((candidate) => candidate.segments.every((segment) => transitAllowed(segment.mode)
       && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes))
       && candidate.segments.every((segment) => transitProviderAllowed(search.preferences, segment.transportType, segment.providerName))
-      && (walkingRoutingUrl || (search.preferences.maxWalkingMeters === undefined && search.preferences.maxTotalDurationSeconds === undefined)
+      && (walkingRoutingConfigured || (search.preferences.maxWalkingMeters === undefined && search.preferences.maxTotalDurationSeconds === undefined)
         || (candidate.segments[0]?.distanceToOriginStopMeters === 0
           && candidate.segments.at(-1)?.distanceFromDestinationStopMeters === 0
           && candidate.transferWalkingMeters.every((meters, index) => meters === 0 || candidate.transferInSeat[index]
             || Boolean(candidate.transferWalkingGeometries[index]))))
-      && (walkingRoutingUrl || search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
+      && (walkingRoutingConfigured || search.preferences.maxWalkingMeters === undefined || candidate.walkingMeters <= search.preferences.maxWalkingMeters)
       && (search.preferences.maxTransfers === undefined || candidate.transfers <= search.preferences.maxTransfers));
     for (const itinerary of feasibleItineraries) {
       const comparableUahFare = itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null;
@@ -3217,7 +3217,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       scheduledCandidates.push(itinerary);
     }
   }
-  if (walkingRoutingUrl) {
+  if (walkingRoutingConfigured) {
     const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary) => {
       const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, search.destination.coordinates, walkingRouteBudget, false);
       if (!routed) {
@@ -3670,7 +3670,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const blockedProviders = [
     ...canonicalRouteTypes.filter((type) => !routePlannerTypes.has(type))
       .map((type) => `transportType:${type}:no-routed-provider-in-corridor`),
-    ...(!walkingRoutingUrl && !process.env.WALKING_ROUTING_URLS?.trim() ? ['door-to-door-walking:requires-WALKING_ROUTING_URL'] : []),
+    ...(!walkingRoutingConfigured ? ['door-to-door-walking:requires-WALKING_ROUTING_URL-or-WALKING_ROUTING_URLS'] : []),
     'walking-transfers-between-unmatched-stops',
     'community-intermediate-pickup:requires-explicit-driver-approved-stop',
   ];
@@ -4243,7 +4243,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     providerErrorCount: providerErrors.length,
     unsupportedPreferenceCount: unsupportedPreferences.length,
     scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0
-      && (!walkingRoutingUrl || pedestrianRoutesUnavailable),
+      && (!walkingRoutingConfigured || pedestrianRoutesUnavailable),
   });
   const truncationState = getJourneySearchTruncationState({
     candidateGenerationTruncated,
