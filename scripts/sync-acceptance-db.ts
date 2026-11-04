@@ -26,7 +26,11 @@ function sqlEscape(val: unknown): string {
 }
 
 function main() {
-  const probeData = JSON.parse(readFileSync('/tmp/feed-probe-wave3.json', 'utf8')) as {
+  const argv = process.argv.slice(2);
+  const isApply = argv.includes('--apply');
+  const probeFile = argv.find((a, i) => argv[i - 1] === '--probe') || '/tmp/feed-probe-wave3.json';
+
+  const probeData = JSON.parse(readFileSync(probeFile, 'utf8')) as {
     catalog: ProbeResult[];
   };
   const probeByNameCity = new Map<string, ProbeResult>();
@@ -35,6 +39,9 @@ function main() {
   }
 
   const sqlStatements: string[] = ['BEGIN;'];
+  let planEnabled = 0;
+  let planDisabled = 0;
+  let planDiscovered = 0;
 
   for (const entry of catalog) {
     const key = `${entry.name}__${entry.city}`;
@@ -65,6 +72,7 @@ function main() {
             ? 'INSECURE_ENDPOINT: джерело доступне лише по http, не підключено'
             : 'LICENSE_UNVERIFIED: licence terms are required before enabling';
       discoveryStatus = entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP' : 'DISCOVERED';
+      planDiscovered++;
     } else if (probe) {
       health = probe.state.toLowerCase();
       error = probe.error ?? null;
@@ -72,13 +80,18 @@ function main() {
       if (probe.state === 'HEALTHY') {
         status = 'enabled';
         discoveryStatus = 'ENABLED';
+        planEnabled++;
       } else if (probe.state === 'DEGRADED') {
         status = 'enabled';
         discoveryStatus = 'ENABLED'; // Keep degraded feeds with live vehicles enabled so users can see them
+        planEnabled++;
       } else {
         status = 'disabled';
         discoveryStatus = 'TEMPORARILY_UNAVAILABLE';
+        planDisabled++;
       }
+    } else {
+      planDiscovered++;
     }
 
     const insertSql = `
@@ -145,6 +158,26 @@ ON CONFLICT (name, city) DO UPDATE SET
 
   sqlStatements.push('COMMIT;');
 
+  if (!isApply) {
+    console.log(`[DRY RUN] Acceptance DB sync plan generated:`);
+    console.log(`  - Total catalog entries: ${catalog.length}`);
+    console.log(`  - Planned ENABLED: ${planEnabled}`);
+    console.log(`  - Planned TEMPORARILY_UNAVAILABLE: ${planDisabled}`);
+    console.log(`  - Planned DISCOVERED / REQUIRES_PARTNERSHIP: ${planDiscovered}`);
+    console.log(`  - Target container: marshgo-acceptance-db-1`);
+    console.log(`\nDry run completed with no DB changes. To execute, pass --apply flag.`);
+    return;
+  }
+
+  const getCount = (): string => {
+    const res = spawnSync('docker', ['exec', 'marshgo-acceptance-db-1', 'psql', '-U', 'marshgo', '-d', 'marshgo', '-t', '-A', '-c', 'SELECT count(*) FROM mobility_providers;'], {
+      encoding: 'utf8',
+    });
+    return (res.stdout || '').trim();
+  };
+
+  const beforeCount = getCount();
+
   const combinedSql = sqlStatements.join('\n');
   const res = spawnSync('docker', ['exec', '-i', 'marshgo-acceptance-db-1', 'psql', '-U', 'marshgo', '-d', 'marshgo'], {
     input: combinedSql,
@@ -156,7 +189,8 @@ ON CONFLICT (name, city) DO UPDATE SET
     process.exit(1);
   }
 
-  console.log('Successfully synced acceptance DB!');
+  const afterCount = getCount();
+  console.log(`Successfully synced acceptance DB! Count before: ${beforeCount}, Count after: ${afterCount}`);
 }
 
 main();

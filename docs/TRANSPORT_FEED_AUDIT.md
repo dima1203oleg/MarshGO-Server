@@ -1,6 +1,6 @@
 # MARSHGO — TRANSPORT FEED AUDIT
 
-**Generated:** 2026-11-04T15:13:28.597Z
+**Generated:** 2026-11-04T15:58:40.253Z
 **Generator:** `scripts/build-transport-registry.ts` (re-run: `npx tsx scripts/build-transport-registry.ts --probe <json>`)
 **Product status:** NOT_RELEASED
 **Evidence rule:** a row says VERIFIED only when this run measured it. NOT_MEASURED = no evidence collected, not "does not exist".

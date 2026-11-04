@@ -1,6 +1,6 @@
 # MARSHGO — 12-MODE TRANSPORT COVERAGE MATRIX
 
-**Generated:** 2026-11-04T15:13:28.597Z · **Product status:** NOT_RELEASED
+**Generated:** 2026-11-04T15:58:40.253Z · **Product status:** NOT_RELEASED
 **Routable** column reflects `journeySearchSupportedTypes` in the web client. **Static/live** city lists are computed from feeds that were reachable and parseable in the 2026-11-04T15:11:12.378Z probe, not from intentions.
 
 | Transport category | Routable in planner | Static network (cities with data today) | Live positions (cities today) | Honest status |

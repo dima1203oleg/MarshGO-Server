@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-04T15:13:28.597Z",
+  "generatedAt": "2026-11-04T15:58:40.253Z",
   "generator": "scripts/build-transport-registry.ts",
   "productStatus": "NOT_RELEASED",
   "evidenceRule": "VERIFIED/VERIFIED_LIVE only when this run measured it; NOT_MEASURED means no evidence was collected, never \"none exists\"",
@@ -527,8 +527,8 @@
         "deepLink": "VERIFIED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:23:30Z",
-        "tool": "curl read-only probe",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
         "responseMs": 747,
@@ -3585,8 +3585,8 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:23:30Z",
-        "tool": "curl read-only probe",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
         "responseMs": 502,
@@ -3626,8 +3626,8 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:23:30Z",
-        "tool": "curl read-only probe",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
         "responseMs": 57,
@@ -3667,8 +3667,8 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:23:30Z",
-        "tool": "curl read-only probe",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
         "responseMs": 2,
@@ -3708,8 +3708,8 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:23:30Z",
-        "tool": "curl read-only probe",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
         "responseMs": 2,
@@ -3749,8 +3749,8 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:23:30Z",
-        "tool": "curl read-only probe",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
         "responseMs": 4,
@@ -3790,8 +3790,8 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:23:30Z",
-        "tool": "curl read-only probe",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
         "responseMs": 293,
@@ -3831,8 +3831,8 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:23:30Z",
-        "tool": "curl read-only probe",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
         "responseMs": 139,
@@ -3872,8 +3872,8 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-10-31T16:23:30Z",
-        "tool": "curl read-only probe",
+        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
         "responseMs": 127,

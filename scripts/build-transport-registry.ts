@@ -5,7 +5,7 @@
  * as NOT_MEASURED rather than guessed.
  *   npx tsx scripts/build-transport-registry.ts --probe /tmp/feed-probe-20261031.json
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3, kyivOpenDataCatalog, type CatalogEntry } from '../server/mobility/ukraineCatalog';
 import { initialMobilityOperators } from '../server/mobility/providerRegistry';
@@ -16,19 +16,6 @@ interface ProbeRow { state: string; counts?: Record<string, number>; responseMs?
 
 /** Canonical catalog: 52 base rows + 30 Wave 3 rows. */
 const catalog: CatalogEntry[] = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
-
-/** The 9 canonical-only rows were probed separately on 2026-10-31 (they are absent from the legacy probe tool). */
-const supplementaryProbe: Record<string, ProbeRow> = {
-  'Zelectra — е-самокати (GBFS 3.0)': { state: 'DEGRADED', responseMs: 272, counts: { discoveryHttp: 200, feeds: 9, vehicles: 1048, stations: 0, ageSeconds: 0, vehiclesOutsideUkraine: 1 }, failed: ['Positions are in Ukraine: bbox -77.06, -12.05, 37.30, 50.47'] },
-  'Київ — міська електричка (розклад)': { state: 'OFFLINE', responseMs: 19911, counts: { httpStatus: 522 } },
-  'Київ — метро (перший/останній поїзд)': { state: 'OFFLINE', responseMs: 19686, counts: { httpStatus: 522 } },
-  'Київ — метро (інтервали руху)': { state: 'OFFLINE', responseMs: 19675, counts: { httpStatus: 522 } },
-  'Київ — метро (пересадкові вузли)': { state: 'OFFLINE', responseMs: 19378, counts: { httpStatus: 522 } },
-  'Київ — метро (години роботи станцій)': { state: 'OFFLINE', responseMs: 19538, counts: { httpStatus: 522 } },
-  'Київ — фунікулер (перший/останній рейс)': { state: 'OFFLINE', responseMs: 19894, counts: { httpStatus: 522 } },
-  'Київ — фунікулер (інтервали руху)': { state: 'OFFLINE', responseMs: 19661, counts: { httpStatus: 522 } },
-  'Київ — фунікулер (години роботи станцій)': { state: 'OFFLINE', responseMs: 19589, counts: { httpStatus: 522 } },
-};
 
 /** SELECT-only aggregation re-run against the acceptance PostGIS container on 2026-11-04. */
 const databaseSnapshot = {
@@ -102,11 +89,15 @@ function capabilities(entry: CatalogEntry, probe: ProbeRow | undefined): Record<
 }
 
 const argv = process.argv.slice(2);
-const probePath = resolve(argv.indexOf('--probe') >= 0 ? argv[argv.indexOf('--probe') + 1] : '/tmp/feed-probe-20261031.json');
+const probeArgIndex = argv.indexOf('--probe');
+const defaultProbePath = existsSync('/tmp/feed-probe-wave3.json')
+  ? '/tmp/feed-probe-wave3.json'
+  : '/tmp/feed-probe-20261031.json';
+const probePath = resolve(probeArgIndex >= 0 ? argv[probeArgIndex + 1] : defaultProbePath);
 const probeRun = probeFromRun(probePath);
 
 const feeds = catalog.map((entry, index) => {
-  const probe = probeRun.byName[entry.name] ?? supplementaryProbe[entry.name];
+  const probe = probeRun.byName[entry.name];
   return {
     id: `feed-${String(index + 1).padStart(2, '0')}`,
     name: entry.name,
@@ -122,8 +113,8 @@ const feeds = catalog.map((entry, index) => {
     priority: entry.priority ?? null,
     capabilities: capabilities(entry, probe),
     probe: probe ? {
-      checkedAt: entry.name in supplementaryProbe ? '2026-10-31T16:23:30Z' : probeRun.checkedAt,
-      tool: entry.name in supplementaryProbe ? 'curl read-only probe' : 'npm run acceptance:transport-feeds',
+      checkedAt: probeRun.checkedAt,
+      tool: 'npm run acceptance:transport-feeds',
       state: probe.state,
       skipReason: probe.skipReason ?? null,
       responseMs: probe.responseMs ?? null,
