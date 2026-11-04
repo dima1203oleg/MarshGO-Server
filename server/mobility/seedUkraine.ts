@@ -2,14 +2,14 @@ import 'dotenv/config';
 import { Pool } from 'pg';
 import { testProviderConnection } from './connection';
 import { commercialUseFromLicense } from './licensePolicy';
-import { kyivOpenDataCatalog, ukraineCatalog, ukraineCatalogWave2 } from './ukraineCatalog';
+import { kyivOpenDataCatalog, ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3 } from './ukraineCatalog';
 
 /** Idempotent: registers every catalogue source, tests the open ones and enables those that are healthy. */
 async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {
     const scope = process.argv[2] ?? 'all';
-    const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...kyivOpenDataCatalog];
+    const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
     const entries = scope === '--kyiv-metro'
       ? catalog.filter((entry) => entry.city === 'Київ' && entry.name.toLocaleLowerCase('uk-UA').includes('метро'))
       : scope === 'all' ? catalog : null;

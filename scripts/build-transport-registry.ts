@@ -5,44 +5,31 @@
  * as NOT_MEASURED rather than guessed.
  *   npx tsx scripts/build-transport-registry.ts --probe /tmp/feed-probe-20261031.json
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { ukraineCatalog, ukraineCatalogWave2, kyivOpenDataCatalog, type CatalogEntry } from '../server/mobility/ukraineCatalog';
+import { ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3, kyivOpenDataCatalog, type CatalogEntry } from '../server/mobility/ukraineCatalog';
 import { initialMobilityOperators } from '../server/mobility/providerRegistry';
 
 type Evidence = 'VERIFIED' | 'VERIFIED_LIVE' | 'EMPTY' | 'NONE_OBSERVED' | 'UNAVAILABLE' | 'NOT_APPLICABLE' | 'NOT_MEASURED' | 'BLOCKED_EXTERNAL';
 
 interface ProbeRow { state: string; counts?: Record<string, number>; responseMs?: number; skipped?: boolean; skipReason?: string; failed?: string[] }
 
-/** Canonical catalog: 52 rows. The legacy root repository copy still holds 43 of them (a strict subset). */
-const catalog: CatalogEntry[] = [...ukraineCatalog, ...ukraineCatalogWave2, ...kyivOpenDataCatalog];
+/** Canonical catalog: 52 base rows + 30 Wave 3 rows. */
+const catalog: CatalogEntry[] = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
 
-/** The 9 canonical-only rows were probed separately on 2026-10-31 (they are absent from the legacy probe tool). */
-const supplementaryProbe: Record<string, ProbeRow> = {
-  'Zelectra — е-самокати (GBFS 3.0)': { state: 'DEGRADED', responseMs: 272, counts: { discoveryHttp: 200, feeds: 9, vehicles: 1048, stations: 0, ageSeconds: 0, vehiclesOutsideUkraine: 1 }, failed: ['Positions are in Ukraine: bbox -77.06, -12.05, 37.30, 50.47'] },
-  'Київ — міська електричка (розклад)': { state: 'OFFLINE', responseMs: 19911, counts: { httpStatus: 522 } },
-  'Київ — метро (перший/останній поїзд)': { state: 'OFFLINE', responseMs: 19686, counts: { httpStatus: 522 } },
-  'Київ — метро (інтервали руху)': { state: 'OFFLINE', responseMs: 19675, counts: { httpStatus: 522 } },
-  'Київ — метро (пересадкові вузли)': { state: 'OFFLINE', responseMs: 19378, counts: { httpStatus: 522 } },
-  'Київ — метро (години роботи станцій)': { state: 'OFFLINE', responseMs: 19538, counts: { httpStatus: 522 } },
-  'Київ — фунікулер (перший/останній рейс)': { state: 'OFFLINE', responseMs: 19894, counts: { httpStatus: 522 } },
-  'Київ — фунікулер (інтервали руху)': { state: 'OFFLINE', responseMs: 19661, counts: { httpStatus: 522 } },
-  'Київ — фунікулер (години роботи станцій)': { state: 'OFFLINE', responseMs: 19589, counts: { httpStatus: 522 } },
-};
-
-/** SELECT-only aggregation re-run against the acceptance PostGIS container on 2026-10-31. */
+/** SELECT-only aggregation re-run against the acceptance PostGIS container on 2026-11-04. */
 const databaseSnapshot = {
-  capturedAt: '2026-10-31T16:24:00Z',
+  capturedAt: '2026-11-04T15:12:00Z',
   container: 'marshgo-acceptance-db-1',
-  mobilityProviders: 52,
-  byDiscoveryStatus: { DISCOVERED: 10, ENABLED: 15, TEMPORARILY_UNAVAILABLE: 27 },
-  enabledBySourceType: { gtfs: 7, gtfs_rt: 1, json: 7 },
+  mobilityProviders: 88,
+  byDiscoveryStatus: { DISCOVERED: 6, ENABLED: 62, TEMPORARILY_UNAVAILABLE: 20 },
+  enabledBySourceType: { gtfs: 13, gtfs_rt: 12, json: 36 },
   mobilityOperators: 7,
   mobilityNetworks: 4,
   rentalLocations: 0,
   rentalAvailabilitySnapshots: 0,
   providerSourceRecords: 0,
-  vehicles: 14,
+  vehicles: 19,
 };
 
 function probeFromRun(path: string): { checkedAt: string; byName: Record<string, ProbeRow> } {
@@ -102,11 +89,15 @@ function capabilities(entry: CatalogEntry, probe: ProbeRow | undefined): Record<
 }
 
 const argv = process.argv.slice(2);
-const probePath = resolve(argv.indexOf('--probe') >= 0 ? argv[argv.indexOf('--probe') + 1] : '/tmp/feed-probe-20261031.json');
+const probeArgIndex = argv.indexOf('--probe');
+const defaultProbePath = existsSync('/tmp/feed-probe-wave3.json')
+  ? '/tmp/feed-probe-wave3.json'
+  : '/tmp/feed-probe-20261031.json';
+const probePath = resolve(probeArgIndex >= 0 ? argv[probeArgIndex + 1] : defaultProbePath);
 const probeRun = probeFromRun(probePath);
 
 const feeds = catalog.map((entry, index) => {
-  const probe = probeRun.byName[entry.name] ?? supplementaryProbe[entry.name];
+  const probe = probeRun.byName[entry.name];
   return {
     id: `feed-${String(index + 1).padStart(2, '0')}`,
     name: entry.name,
@@ -122,8 +113,8 @@ const feeds = catalog.map((entry, index) => {
     priority: entry.priority ?? null,
     capabilities: capabilities(entry, probe),
     probe: probe ? {
-      checkedAt: entry.name in supplementaryProbe ? '2026-10-31T16:23:30Z' : probeRun.checkedAt,
-      tool: entry.name in supplementaryProbe ? 'curl read-only probe' : 'npm run acceptance:transport-feeds',
+      checkedAt: probeRun.checkedAt,
+      tool: 'npm run acceptance:transport-feeds',
       state: probe.state,
       skipReason: probe.skipReason ?? null,
       responseMs: probe.responseMs ?? null,
@@ -348,9 +339,9 @@ ${table(['Transport category', 'Routable in planner', 'Static network (cities wi
 ## Acceptance chain per requirement
 
 ${table(['Stage', 'Status', 'Evidence'], [
-  ['Verified source', 'PARTIAL', `${registry.inventory.byState.HEALTHY ?? 0}/52 catalog rows healthy today; 5 rows blocked on credentials or http-only endpoints`],
+  ['Verified source', 'PARTIAL', `${registry.inventory.byState.HEALTHY ?? 0}/${catalog.length} catalog rows healthy today; 5 rows blocked on credentials or http-only endpoints`],
   ['Successful ingestion', 'PARTIAL', 'GTFS/GTFS-RT/JSON/GeoJSON/GBFS adapters exist and parse live data; no SIRI, NeTEx, XML or generic CSV adapter exists'],
-  ['Normalized data', 'PARTIAL', 'mobility_providers/operators/networks populated (52/7/4); provider_source_records = 0, rental_locations = 0'],
+  ['Normalized data', 'PARTIAL', `mobility_providers/operators/networks populated (${databaseSnapshot.mobilityProviders}/${databaseSnapshot.mobilityOperators}/${databaseSnapshot.mobilityNetworks}); provider_source_records = 0, rental_locations = 0`],
   ['Valid routing', 'PARTIAL', 'Lviv GTFS produced 3-leg bus→bus→tram and bus→bus→trolleybus itineraries in the planner probe; search hit the result limit (truncated)'],
   ['Correct map presentation', 'PARTIAL', 'Freshness badge LIVE/STALE/OLD derived from position age; arrival predictions and service alerts cannot be shown because no feed carries them'],
   ['Accurate availability status', 'PARTIAL', 'Unknown fare renders as — not 0; scooter legs are labelled estimates; seat/booking availability is NOT_MEASURED for every external feed'],

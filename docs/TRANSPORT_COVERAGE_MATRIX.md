@@ -1,14 +1,14 @@
 # MARSHGO — 12-MODE TRANSPORT COVERAGE MATRIX
 
-**Generated:** 2026-10-31T16:30:05.999Z · **Product status:** NOT_RELEASED
-**Routable** column reflects `journeySearchSupportedTypes` in the web client. **Static/live** city lists are computed from feeds that were reachable and parseable in the 2026-10-31T16:16:52.866Z probe, not from intentions.
+**Generated:** 2026-11-04T15:58:40.253Z · **Product status:** NOT_RELEASED
+**Routable** column reflects `journeySearchSupportedTypes` in the web client. **Static/live** city lists are computed from feeds that were reachable and parseable in the 2026-11-04T15:11:12.378Z probe, not from intentions.
 
 | Transport category | Routable in planner | Static network (cities with data today) | Live positions (cities today) | Honest status |
 |---|---|---|---|---|
-| Автобуси | yes | Львів, Стрий, Ужгород, Рівне, Івано-Франківськ, Україна, Київ, Кам’янець-Подільський, Біла Церква, Олександрія | Львів, Рівне, Івано-Франківськ, Ужгород, Стрий, Червоноград, Дніпро, Полтава, Кам’янець-Подільський, Біла Церква, Олександрія | Static network measured in 10 catalog cities; live positions measured in 11 cities. |
-| Маршрутки | yes | — | Червоноград, Полтава | Live positions only (EasyWay JSON typed as marshrutka). No marshrutka GTFS network is reachable: the official Kyiv marshrutka GeoJSON returned HTTP 522 today. |
-| Тролейбуси | yes | Львів, Рівне, Івано-Франківськ, Київ | Івано-Франківськ, Полтава | Static in 4 cities, live typed positions in 2. |
-| Трамваї | yes | Львів, Київ | — | Static in Lviv and Kyiv (Київпастранс mirror). No tram GTFS-RT source found. |
+| Автобуси | yes | Львів, Стрий, Ужгород, Івано-Франківськ, Україна, Київ, Кам’янець-Подільський, Біла Церква, Шептицький, Малин, Одеса, Буча | Львів, Рівне, Івано-Франківськ, Ужгород, Стрий, Червоноград, Дніпро, Полтава, Кам’янець-Подільський, Біла Церква, Олександрія, Шептицький, Хмельницький, Житомир, Вінниця, Запоріжжя, Черкаси, Чернівці, Харків, Одеса, Мукачево, Дрогобич, Коломия, Бердичів, Володимир, Звягель, Чортків, Коростень, Дубно, Борислав, Нововолинськ, Костопіль, Київ | Static network measured in 12 catalog cities; live positions measured in 33 cities. |
+| Маршрутки | yes | — | Червоноград, Полтава, Коростень | Live positions only (EasyWay JSON typed as marshrutka). No marshrutka GTFS network is reachable: the official Kyiv marshrutka GeoJSON returned HTTP 522 today. |
+| Тролейбуси | yes | Івано-Франківськ, Київ, Біла Церква, Одеса | Івано-Франківськ, Полтава, Біла Церква, Вінниця, Запоріжжя, Черкаси, Чернівці, Харків, Одеса, Хмельницький, Рівне | Static in 4 cities, live typed positions in 11. |
+| Трамваї | yes | Львів, Київ, Одеса | — | Static in Lviv and Kyiv (Київпастранс mirror). No tram GTFS-RT source found. |
 | Метро | yes | — | — | No provider feed available today: every Kyiv metro row (geometry, stations, first/last train, intervals, interchanges, opening hours) timed out or returned HTTP 522. Hand-built `kyivMetroTimetable.ts` depends on the same portal. |
 | Поїзди/електрички | yes | Україна | — | UZ GTFS mirror (ODbL, OpenStreetMap-derived, not official УЗ) responded 200 with 125 routes / 167 stops; no realtime train feed. |
 | Попутки | yes | — | — | Own marketplace supply, not a feed: 14 vehicles and the two-account lifecycle were proven in the acceptance environment on 2026-10-31. |
@@ -22,9 +22,9 @@
 
 | Stage | Status | Evidence |
 |---|---|---|
-| Verified source | PARTIAL | 24/52 catalog rows healthy today; 5 rows blocked on credentials or http-only endpoints |
+| Verified source | PARTIAL | 48/88 catalog rows healthy today; 5 rows blocked on credentials or http-only endpoints |
 | Successful ingestion | PARTIAL | GTFS/GTFS-RT/JSON/GeoJSON/GBFS adapters exist and parse live data; no SIRI, NeTEx, XML or generic CSV adapter exists |
-| Normalized data | PARTIAL | mobility_providers/operators/networks populated (52/7/4); provider_source_records = 0, rental_locations = 0 |
+| Normalized data | PARTIAL | mobility_providers/operators/networks populated (88/7/4); provider_source_records = 0, rental_locations = 0 |
 | Valid routing | PARTIAL | Lviv GTFS produced 3-leg bus→bus→tram and bus→bus→trolleybus itineraries in the planner probe; search hit the result limit (truncated) |
 | Correct map presentation | PARTIAL | Freshness badge LIVE/STALE/OLD derived from position age; arrival predictions and service alerts cannot be shown because no feed carries them |
 | Accurate availability status | PARTIAL | Unknown fare renders as — not 0; scooter legs are labelled estimates; seat/booking availability is NOT_MEASURED for every external feed |
