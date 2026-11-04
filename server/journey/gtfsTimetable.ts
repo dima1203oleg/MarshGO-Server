@@ -57,6 +57,7 @@ export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
 const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
 const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
 const MAX_IMPLICIT_INTERMODAL_STATION_WALK_METERS = 150;
+const MAX_IMPLICIT_METRO_WALK_METERS = 350;
 const isNamedRailwayStation = (name: string) => /(?:залізничн\p{L}*|вокзал|railway station|train station)/u.test(
   name.normalize('NFKC').toLocaleLowerCase('uk-UA').replace(/[^\p{L}\p{N}]+/gu, ' ').trim(),
 );
@@ -1901,7 +1902,7 @@ export function findGtfsItinerariesWithStats(
   // bounded local detour for city trips.
   const corridorWidth = routeDistance > 30_000
     ? Math.max(12_000, Math.min(60_000, routeDistance * 0.2))
-    : Math.max(2_500, Math.min(8_000, routeDistance * 0.25));
+    : Math.max(5_000, Math.min(10_000, routeDistance * 0.4));
   const originLat = (input.origin[1] + input.destination[1]) / 2;
   const toXY = ([lon, lat]: [number, number]) => [lon * 111_320 * Math.cos(originLat * Math.PI / 180), lat * 110_574] as const;
   const [ax, ay] = toXY(input.origin), [bx, by] = toXY(input.destination);
@@ -3018,8 +3019,13 @@ export function findGtfsItinerariesWithStats(
 
   const walkingSeconds = (meters: number) => Math.ceil(meters / 1.25);
   const isVerifiedIntermodalWalkingTransfer = (previous: GtfsDirectJourney, candidate: GtfsDirectJourney) => {
-    const intermodal = ['train', 'suburban_train', 'city_train', 'intercity_bus', 'metro'].includes(previous.transportType)
-      || ['train', 'suburban_train', 'city_train', 'intercity_bus', 'metro'].includes(candidate.transportType);
+    const isMetro = previous.transportType === 'metro' || candidate.transportType === 'metro';
+    if (isMetro) {
+      return distanceMeters(previous.destinationStop.coordinates, candidate.originStop.coordinates)
+        <= MAX_IMPLICIT_METRO_WALK_METERS;
+    }
+    const intermodal = ['train', 'suburban_train', 'city_train', 'intercity_bus'].includes(previous.transportType)
+      || ['train', 'suburban_train', 'city_train', 'intercity_bus'].includes(candidate.transportType);
     const stationNamed = isNamedRailwayStation(previous.destinationStop.name) || isNamedRailwayStation(candidate.originStop.name);
     return intermodal && stationNamed
       && distanceMeters(previous.destinationStop.coordinates, candidate.originStop.coordinates)

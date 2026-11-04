@@ -3095,6 +3095,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   let gtfsWorkerSearch: Awaited<ReturnType<typeof gtfsSearchWorker.search>> = { descriptors: [], errors: [], searches: [] };
   let transitSearchFailed = false;
   const transitCandidateBudget = resolveTransitCandidateBudget(process.env.JOURNEY_TRANSIT_CANDIDATE_LIMIT);
+  const effectiveMaxAccessMeters = search.preferences.maxWalkingMeters !== undefined
+    ? Math.min(Math.max(DEFAULT_MAX_ACCESS_WALKING_METERS, search.preferences.maxWalkingMeters), 5_000)
+    : (routeDistanceMeters > 30_000 ? 5_000 : 1_200);
+  const effectiveMaxEgressMeters = search.preferences.maxWalkingMeters !== undefined
+    ? Math.min(Math.max(DEFAULT_MAX_EGRESS_WALKING_METERS, search.preferences.maxWalkingMeters), 5_000)
+    : (routeDistanceMeters > 30_000 ? 5_000 : 1_200);
+  const effectiveMaxTransferMeters = search.preferences.maxWalkingMeters !== undefined
+    ? Math.min(Math.max(DEFAULT_MAX_TRANSFER_WALKING_METERS, search.preferences.maxWalkingMeters), 2_000)
+    : 800;
   try {
     if (eligibleGtfsProviders.length > 0 || metroSources) {
       gtfsWorkerSearch = await gtfsSearchWorker.search({
@@ -3108,9 +3117,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           ? maximumSearchDurationSeconds
           : maximumGtfsWaitWithinJourney(maximumSearchDurationSeconds),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
-        maximumAccessWalkingMeters: routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS,
-        maximumEgressWalkingMeters: routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS,
-        maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+        maximumAccessWalkingMeters: effectiveMaxAccessMeters,
+        maximumEgressWalkingMeters: effectiveMaxEgressMeters,
+        maximumTransferWalkingMeters: effectiveMaxTransferMeters,
         allowedModes: allowedTransitModes, allowedTransportTypes: search.preferences.allowedTransportTypes,
       }, eligibleGtfsProviders.map((provider) => ({ id: provider.id, name: provider.name, city: provider.city,
         feedUrl: provider.feed_url, ...(provider.realtime_url ? { realtimeUrl: provider.realtime_url } : {}) })), metroSources);
@@ -3179,12 +3188,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       || (last.distanceFromDestinationStopMeters > 0 && !egress)
       || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
         && !itinerary.transferWalkingGeometries[index] && !transfers[index]))) return null;
-    const effectiveMaxAccessMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS;
-    const effectiveMaxEgressMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS;
     return applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
       maximumAccessMeters: effectiveMaxAccessMeters,
       maximumEgressMeters: effectiveMaxEgressMeters,
-      maximumTransferMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+      maximumTransferMeters: effectiveMaxTransferMeters,
     });
   };
 
@@ -3393,8 +3400,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         maximumWaitSeconds: maximumGtfsWaitWithinJourney(Math.max(60,
           maximumSearchDurationSeconds - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000)))),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
-        maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS, maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
-        maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS, allowedModes: ['METRO'],
+        maximumAccessWalkingMeters: effectiveMaxAccessMeters, maximumEgressWalkingMeters: effectiveMaxEgressMeters,
+        maximumTransferWalkingMeters: effectiveMaxTransferMeters, allowedModes: ['METRO'],
         allowedTransportTypes: search.preferences.allowedTransportTypes,
         }); } catch {
           gtfsSecondarySearchUnavailable = true;
@@ -3507,9 +3514,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         maximumWaitSeconds: maximumGtfsWaitWithinJourney(Math.max(60, maximumSearchDurationSeconds
           - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000)))),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
-        maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
-        maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
-        maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+        maximumAccessWalkingMeters: effectiveMaxAccessMeters,
+        maximumEgressWalkingMeters: effectiveMaxEgressMeters,
+        maximumTransferWalkingMeters: effectiveMaxTransferMeters,
         allowedModes: allowedTransitModes,
         allowedTransportTypes: search.preferences.allowedTransportTypes,
       }); } catch {

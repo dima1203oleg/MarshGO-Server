@@ -108,3 +108,73 @@ test('searches and renders an interline metro chain with stop calls and one shap
       || Date.parse(stop.arrivalAt) >= Date.parse(all[index - 1]!.departureAt)));
   }
 });
+
+test('composes multimodal cross-provider transit chain connecting tram to metro via walking transfer', () => {
+  const { timetable: metroTimetable, stops: metroStops } = metroFixture();
+  const metroStart = metroStops.get('m1-02')!;
+
+  // Create a synthetic surface transit feed (tram connecting to m1-02 via ~100m walk)
+  const tramStopCoords: [number, number] = [metroStart.coordinates[0] + 0.001, metroStart.coordinates[1]];
+  const tramFeed: Parameters<typeof mergeGtfsTimetables>[0][number]['feed'] = {
+    fetchedAt: new Date('2026-10-13T00:00:00Z'),
+    timezone: 'Europe/Kyiv',
+    routes: new Map([
+      ['tram-3', { name: 'Трамвай 3', mode: 'TRAM', transportType: 'tram' }]
+    ]),
+    stops: new Map([
+      ['tram-origin', { id: 'tram-origin', name: 'Початкова зупинка', lon: 30.070, lat: 50.40 }],
+      ['tram-transfer', { id: 'tram-transfer', name: 'Пересадочна зупинка', lon: tramStopCoords[0], lat: tramStopCoords[1] }]
+    ]),
+    trips: new Map([
+      ['tram-trip-1', { routeId: 'tram-3', serviceId: 'tram-cal', directionId: 0, headsign: 'Центр' }]
+    ]),
+    stopTimes: new Map([
+      ['tram-trip-1', [
+        { stopId: 'tram-origin', sequence: 1, departureSeconds: 18300, arrivalSeconds: 18300, pickupType: 0, dropOffType: 0 },
+        { stopId: 'tram-transfer', sequence: 2, departureSeconds: 18600, arrivalSeconds: 18600, pickupType: 0, dropOffType: 0 }
+      ]]
+    ]),
+    stopTimesByStop: new Map([
+      ['tram-origin', [{
+        tripId: 'tram-trip-1', stopId: 'tram-origin', stopSequence: 1,
+        departureTime: '05:05:00', arrivalTime: '05:05:00', pickupType: 0, dropOffType: 0
+      }]],
+      ['tram-transfer', [{
+        tripId: 'tram-trip-1', stopId: 'tram-transfer', stopSequence: 2,
+        departureTime: '05:10:00', arrivalTime: '05:10:00', pickupType: 0, dropOffType: 0
+      }]]
+    ]),
+    calendars: new Map([
+      ['tram-cal', { start: '20260101', end: '20261231', weekdays: [true, true, true, true, true, true, true] }]
+    ]),
+    exceptions: new Map(),
+  };
+
+  const merged = mergeGtfsTimetables([
+    { providerId: 'kyiv-tram', providerName: 'Київпастранс', providerCity: 'Київ', feed: tramFeed },
+    { providerId: 'kyiv-metro', providerName: 'Київське метро', providerCity: 'Київ', feed: metroTimetable },
+  ]);
+  assert.ok(merged);
+
+  const destinationStation = metroStops.get('m1-05')!;
+  const result = findGtfsItinerariesWithStats(merged, {
+    origin: [30.070, 50.40],
+    destination: destinationStation.coordinates,
+    earliestDeparture: new Date('2026-10-14T02:00:00Z'),
+    latestDeparture: new Date('2026-10-14T02:15:00Z'),
+    now: new Date('2026-10-13T00:00:00Z'),
+    maximumTransfers: 2,
+    maximumJourneySeconds: 7200,
+    maximumWaitSeconds: 3600,
+    maximumAccessWalkingMeters: 1200,
+    maximumEgressWalkingMeters: 1200,
+    maximumTransferWalkingMeters: 800,
+    limit: 10,
+  });
+
+  const intermodal = result.itineraries.find((it) => it.segments.some((s) => s.transportType === 'tram')
+    && it.segments.some((s) => s.transportType === 'metro'));
+  assert.ok(intermodal, 'expected a combined tram + metro multimodal itinerary');
+  assert.equal(intermodal.segments[0].transportType, 'tram');
+  assert.equal(intermodal.segments[1].transportType, 'metro');
+});

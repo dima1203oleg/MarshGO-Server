@@ -174,6 +174,26 @@ function makeKyivMetroFeed(input: {
     if (root !== stop.id) stop.parentStation = `kyiv-metro-interchange:${root}`;
   }
 
+  const transfers: Array<{ fromStopId: string; toStopId: string; transferType: number; minTransferTimeSeconds?: number }> = [];
+  for (const stop of stops.values()) {
+    if (stop.transferStopId && stops.has(stop.transferStopId)) {
+      transfers.push({
+        fromStopId: stop.id,
+        toStopId: stop.transferStopId,
+        transferType: 2,
+        minTransferTimeSeconds: 180,
+      });
+    }
+  }
+  for (const row of interchanges) {
+    const from = text(row.from_code1), to = text(row.to_code1);
+    if (stops.has(from) && stops.has(to) && from !== to) {
+      if (!transfers.some((t) => t.fromStopId === from && t.toStopId === to)) {
+        transfers.push({ fromStopId: from, toStopId: to, transferType: 2, minTransferTimeSeconds: 180 });
+      }
+    }
+  }
+
   const stopTimeRows = parseRows(input.scheduleRows, 'stop_times');
   const headwayRows = parseRows(input.scheduleRows, 'headways');
   const firstLast = new Map<string, Record<string, unknown>>();
@@ -325,7 +345,7 @@ function makeKyivMetroFeed(input: {
   }
   return { fetchedAt: input.fetchedAt, timezone: 'Europe/Kyiv', routes, stops: new Map([...stops].map(([id, stop]) => [id, {
     id, name: stop.name, lon: stop.coordinates[0], lat: stop.coordinates[1], ...(stop.parentStation ? { parentStation: stop.parentStation } : {}),
-  }])), trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions: new Map() };
+  }])), trips, shapes, stopTimes, stopTimesByStop, calendars, exceptions: new Map(), transfers };
 }
 
 const CANONICAL_KYIV_METRO_LINES = [
