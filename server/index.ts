@@ -3068,7 +3068,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const { rows } = await pool.query<{ id: string; name: string; city: string; feed_url: string; source_ref: string | null; source_type: string; last_sync_at: Date | null }>(
       `SELECT id,name,city,feed_url,source_ref,source_type,last_sync_at FROM mobility_providers
         WHERE city='Київ' AND provider_type='public_transit' AND source_type IN ('rest','geojson')
-          AND status='enabled' AND health IN ('healthy','degraded') AND name ILIKE '%метро%'
+          AND status='enabled' AND name ILIKE '%метро%'
         ORDER BY priority,name`);
     const stations = rows.find((row) => row.source_type === 'geojson' && row.name.toLocaleLowerCase('uk-UA').includes('метро (станції)'));
     const route = rows.find((row) => row.source_type === 'geojson' && row.name.toLocaleLowerCase('uk-UA').includes('метро (геометрія ліній)'));
@@ -3379,7 +3379,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   // For a real bike/scooter + metro chain, route the rental leg to/from an actual
   // timetable station and ask the same metro feed for the connecting service.
   if (requestedMicromobilityModes.length && allowedTransitModes.includes('METRO')) {
-    const maxMicromobilityTransferStations = 6;
+    const maxMicromobilityTransferStations = 2;
     const stationPathSearch = (group: GtfsWorkerGroup, providerId: string, providerName: string) => memoizeRequestSearch(
       (origin: [number, number], destination: [number, number], earliestDeparture: Date) => JSON.stringify([
         origin, destination, earliestDeparture.getTime(), providerId, group.id,
@@ -3408,7 +3408,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const stations = group.metroStations;
       const closestStations = (place: { coordinates: [number, number] }) => stations
         .map((station) => ({ station, distance: Math.hypot((station.coordinates[0] - place.coordinates[0]) * 70_000, (station.coordinates[1] - place.coordinates[1]) * 111_000) }))
-        .filter((item) => item.distance <= 18_000).sort((a, b) => a.distance - b.distance)
+        .filter((item) => item.distance <= 8_000).sort((a, b) => a.distance - b.distance)
         .slice(0, maxMicromobilityTransferStations).map((item) => item.station);
       const providerId = group.sources[0]?.providerId;
       const providerName = group.sources[0]?.providerName ?? 'Київ — метро';
@@ -3439,6 +3439,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const destinationStations = closestStations(search.destination);
       for (const station of destinationStations) {
         const stationPlace = { name: station.name, coordinates: station.coordinates };
+        const hasEstimates = requestedMicromobilityModes.some((mode) =>
+          estimateMicromobility(mode, stationPlace, search.destination, search.departureAt).length > 0
+        );
+        if (!hasEstimates) continue;
         const found = await searchStationPath(search.origin.coordinates, station.coordinates, search.departureAt);
         candidateGenerationTruncated ||= found.searchTruncated;
         resultSamplingTruncated ||= found.resultLimitReached;
