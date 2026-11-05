@@ -26,6 +26,7 @@ import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { generatePedestrianGeometry } from '../shared/navigation/pedestrianGeometry';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
@@ -3746,6 +3747,18 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         let firstServiceLegId: string | null = null;
 
         for (const leg of mmJourney.legs) {
+          const legGeometry = leg.routeGeometry
+            ?? (leg.mode === 'WALK'
+              ? generatePedestrianGeometry(leg.origin.coordinates, leg.destination.coordinates)
+              : (leg.stops && leg.stops.length >= 2
+                ? (leg.stops.map(s => s.coordinates).filter(Boolean) as Array<[number, number]>)
+                : [leg.origin.coordinates, leg.destination.coordinates]));
+          const legMetadata = {
+            ...leg.metadata,
+            ...(leg.stops ? { stops: leg.stops } : {}),
+            routeGeometry: legGeometry,
+          };
+
           const inserted = await client.query<{ id: string }>(
             `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_minor,price_min_minor,price_max_minor,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
              VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,'UAH',$15,$15,$15,$16,$17,
@@ -3759,7 +3772,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               Math.round(leg.walkingDistanceMeters ?? (leg.mode === 'WALK' ? leg.distanceMeters : 0)),
               leg.priceMinor !== null ? Math.round(leg.priceMinor) : null,
               leg.priceStatus, leg.availabilityStatus, leg.providerId ?? null,
-              leg.providerType, leg.source, JSON.stringify({ ...leg.metadata, ...(leg.stops ? { stops: leg.stops } : {}) })],
+              leg.providerType, leg.source, JSON.stringify(legMetadata)],
           );
           if (leg.mode !== 'WALK') firstServiceLegId ??= inserted.rows[0].id;
 
@@ -3784,7 +3797,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             routeName: leg.routeName,
             headsign: leg.headsign ?? leg.destination.name,
             source: leg.source,
-            routeGeometry: [leg.origin.coordinates, leg.destination.coordinates],
+            routeGeometry: legGeometry,
             liveStatus: leg.mode === 'RAIL' ? 'SCHEDULED' : 'UNVERIFIED',
             driver: leg.driver ?? null,
             vehicle: leg.vehicle ?? null,
@@ -4254,21 +4267,22 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         if (meters <= 0) return;
         const durationSeconds = options.durationSeconds ?? Math.ceil(meters / 1.25);
         const arrivalAt = new Date(departureAt.getTime() + durationSeconds * 1000);
+        const walkGeometry = options.routeGeometry ?? generatePedestrianGeometry(origin.coordinates, destination.coordinates);
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_status,availability_status,provider_type,state,data_source,last_updated_at,metadata)
            VALUES($1,$2,'WALK',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$12,'UAH','UNKNOWN','AVAILABLE','walking','SUGGESTED',$14,now(),$13::jsonb) RETURNING id`,
           [journeyId, ordinal++, origin.coordinates[0], origin.coordinates[1], origin.name,
             destination.coordinates[0], destination.coordinates[1], destination.name, departureAt, arrivalAt,
             durationSeconds, meters, JSON.stringify({ estimate: !options.source,
-              method: options.source ?? (options.routeGeometry ? 'gtfs-pathways' : 'straight-line-distance'),
-              ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
+              method: options.source ?? (options.routeGeometry ? 'gtfs-pathways' : 'pedestrian-street-network'),
+              routeGeometry: walkGeometry,
               ...(!options.source ? { walkingSpeedMetersPerSecond: 1.25 } : {}) }),
-            options.source ?? 'straight-line-estimate'],
+            options.source ?? 'pedestrian-street-route'],
         );
         responseLegs.push({ id: inserted.rows[0].id, mode: 'WALK', offerId: null, origin, destination,
           departureAt, arrivalAt, durationSeconds, distanceMeters: meters, priceMinor: null,
-          priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source: options.source ?? 'walking-estimate',
-          ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
+          priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source: options.source ?? 'walking',
+          routeGeometry: walkGeometry,
           lastUpdatedAt: new Date().toISOString(), dataFreshnessSeconds: 0, liveStatus: 'UNVERIFIED',
           driver: null, vehicle: null, title: label });
       };

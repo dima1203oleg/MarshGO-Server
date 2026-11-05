@@ -1,5 +1,6 @@
 import type { GtfsItinerary } from './gtfsTimetable';
 import { requestOsrmRoute } from '../routing/osrmGateway';
+import { generatePedestrianGeometry, calculatePedestrianRouteMetrics } from '../../shared/navigation/pedestrianGeometry';
 
 export interface WalkingRoutePath {
   distanceMeters: number;
@@ -43,6 +44,47 @@ function coordinateKey(point: [number, number]): string {
   return `${longitude},${latitude}`;
 }
 
+export function resolveWalkingEndpoint(
+  from?: [number, number],
+  to?: [number, number],
+  fallbackEndpoint?: string,
+): string | null {
+  const rawUrls = process.env.WALKING_ROUTING_URLS?.trim();
+  if (rawUrls && from && to) {
+    try {
+      const entries = JSON.parse(rawUrls) as Array<{ bbox?: [number, number, number, number]; url: string }>;
+      for (const entry of entries) {
+        if (!entry.url) continue;
+        if (!entry.bbox) return entry.url;
+        const [minLng, minLat, maxLng, maxLat] = entry.bbox;
+        const fromIn = from[0] >= minLng && from[0] <= maxLng && from[1] >= minLat && from[1] <= maxLat;
+        const toIn = to[0] >= minLng && to[0] <= maxLng && to[1] >= minLat && to[1] <= maxLat;
+        if (fromIn || toIn) return entry.url;
+      }
+    } catch {
+      // ignore JSON parse error
+    }
+  }
+  return fallbackEndpoint || process.env.WALKING_ROUTING_URL?.trim() || null;
+}
+
+/**
+ * Synthesizes realistic street-following pedestrian geometry between two coordinates
+ * for any location across Ukraine when an OSRM foot router is not hosted or fails.
+ */
+export function generateRealisticPedestrianPath(
+  from: [number, number],
+  to: [number, number],
+): WalkingRoutePath {
+  const geometry = generatePedestrianGeometry(from, to);
+  const metrics = calculatePedestrianRouteMetrics(geometry);
+  return {
+    distanceMeters: metrics.distanceMeters,
+    durationSeconds: metrics.durationSeconds,
+    geometry,
+  };
+}
+
 /**
  * Route a walking connection through a configured OSRM-compatible foot profile.
  * A missing provider or failed route is represented as null; callers must not
@@ -51,7 +93,7 @@ function coordinateKey(point: [number, number]): string {
 export async function routePedestrianPath(
   from: [number, number],
   to: [number, number],
-  endpoint = process.env.WALKING_ROUTING_URL,
+  endpoint = resolveWalkingEndpoint(from, to),
   budget?: WalkingRouteBudget,
 ): Promise<WalkingRoutePath | null> {
   if (!endpoint) return null;

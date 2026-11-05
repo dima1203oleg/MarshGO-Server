@@ -4,7 +4,9 @@ import {
   findUkraineStationsWithinRadius,
   UKRAINE_REGIONAL_HUBS,
   INTERCITY_CORRIDORS,
+  getCorridorTrackGeometry,
 } from '../mobility/ukraineTransitGraph';
+import { generatePedestrianGeometry } from '../../shared/navigation/pedestrianGeometry';
 import { getRoadRoute } from '../routing';
 import type { JourneyStrategy, JourneyPreferences, JourneyLegMode } from './types';
 import type { GtfsItinerary } from './gtfsTimetable';
@@ -42,6 +44,7 @@ export interface MultimodalLeg {
     departureAt?: string;
     arrivalAt?: string;
   }>;
+  routeGeometry?: Array<[number, number]>;
   metadata?: Record<string, unknown>;
 }
 
@@ -179,6 +182,7 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
         providerType: 'walking',
         state: 'SUGGESTED',
         source: 'walking',
+        routeGeometry: generatePedestrianGeometry(origin.coordinates, rapid.originStation.coordinates),
         metadata: { title: `Пішки до ст. ${rapid.originStation.name}` },
       });
       currentDeparture = walkArrival;
@@ -193,10 +197,11 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
         const transDur = rapid.transferWalkingSeconds[i - 1];
         const transDist = rapid.transferWalkingMeters[i - 1] ?? 150;
         const transArrival = new Date(currentDeparture.getTime() + transDur * 1000);
+        const fromCoord = legs.at(-1)!.destination.coordinates;
         legs.push({
           ordinal: ordinal++,
           mode: 'WALK',
-          origin: { name: legs.at(-1)!.destination.name, coordinates: legs.at(-1)!.destination.coordinates },
+          origin: { name: legs.at(-1)!.destination.name, coordinates: fromCoord },
           destination: { name: `ст. ${seg.originStation.name}`, coordinates: seg.originStation.coordinates },
           departureAt: new Date(currentDeparture),
           arrivalAt: transArrival,
@@ -210,12 +215,17 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
           providerType: 'walking',
           state: 'SUGGESTED',
           source: 'transfer-walk',
+          routeGeometry: generatePedestrianGeometry(fromCoord, seg.originStation.coordinates),
           metadata: { title: 'Пересадка між лініями' },
         });
         currentDeparture = transArrival;
       }
 
       const segArrival = new Date(currentDeparture.getTime() + seg.durationSeconds * 1000);
+      const segStations = [seg.originStation, ...(seg.intermediateStations ?? []), seg.destinationStation];
+      const segStops = segStations.map(s => ({ id: s.id, name: s.name, coordinates: s.coordinates }));
+      const segCoords = segStations.map(s => s.coordinates);
+
       legs.push({
         ordinal: ordinal++,
         mode: seg.mode,
@@ -236,9 +246,12 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
         headsign: seg.destinationStation.name,
         state: 'SUGGESTED',
         source: 'kyiv-open-data',
+        stops: segStops,
+        routeGeometry: segCoords,
         metadata: {
           transportType: seg.transportType,
           intermediateStopsCount: seg.intermediateStations.length,
+          stops: segStops,
         },
       });
       currentDeparture = segArrival;
@@ -265,7 +278,8 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
         providerType: 'walking',
         state: 'SUGGESTED',
         source: 'walking',
-        metadata: { title: 'Пішки від станції до місця призначення' },
+        routeGeometry: generatePedestrianGeometry(rapid.destinationStation.coordinates, destination.coordinates),
+        metadata: { title: `Пішки до місця призначення` },
       });
       currentDeparture = walkArrival;
     }
@@ -1113,6 +1127,9 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
 
             // Leg 1: First Mile
             const fmArrival = new Date(curTime.getTime() + fm.dur * 1000);
+            const fmGeometry = fm.type === 'WALK'
+              ? generatePedestrianGeometry(origin.coordinates, oHub.station.coordinates)
+              : [origin.coordinates, oHub.station.coordinates];
             legs.push({
               ordinal: ordinal++,
               mode: fm.type === 'TAXI' ? 'TAXI' : fm.type === 'TRANSIT' ? (firstMileTransit?.mode ?? 'TRAM') : 'WALK',
@@ -1131,6 +1148,7 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
               providerName: fm.type === 'TAXI' ? 'Uklon / Таксі' : fm.type === 'TRANSIT' ? 'Міський транспорт' : undefined,
               state: 'SUGGESTED',
               source: fm.type === 'TAXI' ? 'partner-taxi' : fm.type === 'TRANSIT' ? 'city-transit' : 'walking',
+              routeGeometry: fmGeometry,
               metadata: { title: fm.title },
             });
 
@@ -1146,6 +1164,7 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
                 const transferBufferSec = 1800;
                 const prevArrival = legs.at(-1)!.arrivalAt;
                 const walkBetweenPlatformsArrival = new Date(prevArrival.getTime() + 300_000);
+                const stationTransferGeometry = generatePedestrianGeometry(item.fromHub.coordinates, item.fromHub.coordinates);
                 legs.push({
                   ordinal: ordinal++,
                   mode: 'WALK',
@@ -1163,6 +1182,7 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
                   providerType: 'walking',
                   state: 'SUGGESTED',
                   source: 'station-transfer',
+                  routeGeometry: stationTransferGeometry,
                   metadata: { title: `Пересадка на вокзалі ${item.fromHub.city}` },
                 });
                 curTime = new Date(prevArrival.getTime() + transferBufferSec * 1000);
@@ -1173,20 +1193,20 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
               const legFare = item.corridor.fareMinor * passengers;
               totalRailFare += legFare;
 
-              const railStops = [
-                {
-                  id: `stop:${item.fromHub.id}:dep`,
-                  name: item.fromHub.name,
-                  coordinates: item.fromHub.coordinates,
-                  departureAt: legDep.toISOString(),
-                },
-                {
-                  id: `stop:${item.toHub.id}:arr`,
-                  name: item.toHub.name,
-                  coordinates: item.toHub.coordinates,
-                  arrivalAt: legArr.toISOString(),
-                },
-              ];
+              const corridorTrack = getCorridorTrackGeometry(
+                item.fromHub.id,
+                item.toHub.id,
+                item.fromHub.coordinates,
+                item.toHub.coordinates,
+              );
+
+              const railStops = corridorTrack.map((coord, idx) => ({
+                id: `stop:${item.fromHub.id}:${idx}`,
+                name: idx === 0 ? item.fromHub.name : idx === corridorTrack.length - 1 ? item.toHub.name : `ст. Проміжна (${coord[0].toFixed(2)}, ${coord[1].toFixed(2)})`,
+                coordinates: coord,
+                ...(idx === 0 ? { departureAt: legDep.toISOString() } : {}),
+                ...(idx === corridorTrack.length - 1 ? { arrivalAt: legArr.toISOString() } : {}),
+              }));
 
               legs.push({
                 ordinal: ordinal++,
@@ -1209,6 +1229,7 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
                 state: 'SUGGESTED',
                 source: 'uz-timetable',
                 stops: railStops,
+                routeGeometry: corridorTrack,
                 metadata: {
                   trainNumber: item.corridor.trainNumber,
                   category: item.corridor.category,
@@ -1223,6 +1244,9 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
             const lastLegArrival = legs.at(-1)!.arrivalAt;
             const lmDep = new Date(lastLegArrival.getTime() + 300_000); // 5 min exit buffer
             const lmArr = new Date(lmDep.getTime() + lm.dur * 1000);
+            const lmGeometry = lm.type === 'WALK'
+              ? generatePedestrianGeometry(dHub.station.coordinates, destination.coordinates)
+              : [dHub.station.coordinates, destination.coordinates];
             legs.push({
               ordinal: ordinal++,
               mode: lm.type === 'TAXI' ? 'TAXI' : lm.type === 'TRANSIT' ? (lastMileTransit?.mode ?? 'TRAM') : 'WALK',
@@ -1241,6 +1265,7 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
               providerName: lm.type === 'TAXI' ? 'Таксі від вокзалу' : lm.type === 'TRANSIT' ? 'Міський транспорт' : undefined,
               state: 'SUGGESTED',
               source: lm.type === 'TAXI' ? 'partner-taxi' : lm.type === 'TRANSIT' ? 'city-transit' : 'walking',
+              routeGeometry: lmGeometry,
               metadata: { title: lm.title },
             });
 
