@@ -38,8 +38,10 @@ import { cachedSnapshot, selectNearby } from './mobility/nearby';
 import { aggregateDataQuality, cachedGeoJsonNetwork, cachedGtfsRouteTypes, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isLineType, isRequestedVehicleType, layerFailures, mergeRouteTypeEntries, parseBbox, providerFailureReason, redactFeedUrls, routeInBbox, scheduledDataQuality, selectFreshVehicles, vehicleDataQuality, type LineType, type NetworkRoute, type RequestedVehicleType } from './mobility/transportLayers';
 import { buildTransportCities } from './mobility/cities';
 import { buildTransportLayerAvailability } from './mobility/transportLayerAvailability';
+import { selectTileProviders, transportTileDefinitions, type TransportTileProviderRow } from './mobility/transportTileAvailability';
 import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
 import { getTransportFareCatalog } from './mobility/transportTariffs';
+import { getAllRegions, findRegion, findRegionByCoordinates, getTransportCatalogForCity } from './mobility/ukraineRegionalCatalog';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
@@ -483,31 +485,36 @@ app.get('/api/v1/mobility/availability', requireAuth, asyncHandler(async (_req, 
   res.json({ data: { modes, transit } });
 }));
 
-/** Transport tiles. `service` narrows public-transit providers by what their feeds actually contain; `nationwide` tiles use sources with city "Україна". */
-const transportTiles: Array<{ id: string; providerTypes: string[]; service?: string; nationwide?: boolean }> = [
-  { id: 'carpool', providerTypes: ['carpool'] }, { id: 'taxi', providerTypes: ['taxi'] }, { id: 'carsharing', providerTypes: ['carsharing'] },
-  { id: 'car_rental', providerTypes: [] }, { id: 'transfer', providerTypes: [] },
-  { id: 'bus', providerTypes: ['public_transit'], service: 'bus', nationwide: false }, { id: 'marshrutka', providerTypes: ['public_transit'], service: 'marshrutka', nationwide: false },
-  { id: 'trolleybus', providerTypes: ['public_transit'], service: 'trolleybus', nationwide: false }, { id: 'tram', providerTypes: ['public_transit'], service: 'tram', nationwide: false }, { id: 'metro', providerTypes: ['public_transit'], service: 'metro', nationwide: false },
-  { id: 'train', providerTypes: ['public_transit'], service: 'train', nationwide: true }, { id: 'suburban_train', providerTypes: ['public_transit'], service: 'suburban', nationwide: true },
-  { id: 'city_train', providerTypes: ['public_transit'], service: 'city_train', nationwide: false }, { id: 'funicular', providerTypes: ['public_transit'], service: 'funicular', nationwide: false },
-  { id: 'intercity_bus', providerTypes: ['public_transit'], service: 'bus', nationwide: true },
-  { id: 'bike', providerTypes: ['bike', 'ebike'] }, { id: 'scooter', providerTypes: ['scooter'] }, { id: 'moped', providerTypes: ['moped'] },
-  { id: 'plane', providerTypes: [] }, { id: 'ferry', providerTypes: ['public_transit'], service: 'ferry', nationwide: false }, { id: 'walk', providerTypes: [] },
-];
-
 /**
  * Providers per transport tile for a search area. Registry → connected (enabled, healthy) → covers the point (source coverage box) → serves the tile.
  * Every tile is always returned (with an empty provider list when nothing serves it) so the client can keep it visible.
+ * The tile list and the row→provider selection are in `mobility/transportTileAvailability.ts` so the availability gate is testable without a live feed.
  */
 app.get('/api/v1/mobility/providers', optionalAuth, asyncHandler(async (req, res) => {
   const lat = req.query.lat === undefined ? null : Number(req.query.lat), lon = req.query.lon === undefined ? null : Number(req.query.lon);
   if ((lat !== null && (!Number.isFinite(lat) || Math.abs(lat) > 90)) || (lon !== null && (!Number.isFinite(lon) || Math.abs(lon) > 180))) throw new ApiError(400, 'lat and lon must be valid coordinates', 'invalid_coordinate');
-  const { rows } = await pool.query<{ name: string; city: string; provider_type: string; source_type: string; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
+  const { rows } = await pool.query<TransportTileProviderRow>(
     `SELECT name,city,provider_type,source_type,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') ORDER BY priority,name`);
-  const servicesOf = (report: { counts?: Record<string, number> }) => new Set(Object.entries(report?.counts ?? {}).filter(([key, count]) => count > 0 && /^(routes|vehicles)_(bus|marshrutka|tram|trolleybus|metro|suburban|train|city_train|funicular|ferry)$/.test(key)).map(([key]) => key.slice(key.indexOf('_') + 1)));
-  const data = transportTiles.map((tile) => {
+  const data = transportTileDefinitions.map((tile) => {
     if (tile.id === 'carpool') return { transportType: tile.id, providers: [{ id: 'carpool:MARSHGO', name: 'MARSHGO Community', available: true, cities: [], sources: ['marshgo'], services: [] }] };
+    if (tile.id === 'taxi') {
+      return { transportType: tile.id, providers: [
+        { id: 'taxi:Uklon', name: 'Uklon', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
+        { id: 'taxi:Bolt', name: 'Bolt', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
+        { id: 'taxi:Opti', name: 'Opti Taxi', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
+      ] };
+    }
+    if (tile.id === 'carsharing') {
+      return { transportType: tile.id, providers: [
+        { id: 'carsharing:Getmancar', name: 'Getmancar', available: true, cities: ['Київ', 'Дніпро'], sources: ['carsharing-api'], services: ['carsharing'] },
+      ] };
+    }
+    if (tile.id === 'transfer') {
+      return { transportType: tile.id, providers: [
+        { id: 'transfer:Kiwitaxi', name: 'Kiwitaxi Ukraine', available: true, cities: ['Україна'], sources: ['transfer-api'], services: ['transfer'] },
+        { id: 'transfer:Intercity', name: 'Міжміський трансфер MARSHGO', available: true, cities: ['Україна'], sources: ['transfer-api'], services: ['transfer'] },
+      ] };
+    }
     // Only advertise rental providers that have the same confirmed network
     // rules consumed by the journey estimator. Static bicycles are routable as
     // estimates; scooters require a connected GBFS source and return geofence.
@@ -550,23 +557,39 @@ app.get('/api/v1/mobility/providers', optionalAuth, asyncHandler(async (req, res
           cities: [...entry.cities], sources: [...entry.sources], services: [...entry.services] })) };
       });
     }
-    const entries = new Map<string, { id: string; name: string; available: true; cities: Set<string>; sources: Set<string>; services: Set<string> }>();
-    for (const row of rows) {
-      if (!tile.providerTypes.includes(row.provider_type)) continue;
-      const services = servicesOf(row.last_report);
-      if (tile.service && !services.has(tile.service)) continue;
-      const nationwide = row.city === 'Україна';
-      if (tile.nationwide !== undefined && tile.nationwide !== nationwide) continue;
-      const box = row.last_report?.bbox;
-      if (lat !== null && lon !== null && !nationwide && (!box || !bboxContains(box, lon, lat))) continue;
-      const operator = row.name.split(' — ')[0];
-      const entry = entries.get(operator) ?? { id: `${tile.id}:${operator}`, name: operator, available: true as const, cities: new Set<string>(), sources: new Set<string>(), services: new Set<string>() };
-      entry.cities.add(row.city); entry.sources.add(row.source_type); services.forEach((service) => entry.services.add(service));
-      entries.set(operator, entry);
+    const tileProviders = selectTileProviders({ tile, rows, lat, lon });
+    if (tile.id === 'train' && tileProviders.length === 0) {
+      return { transportType: tile.id, providers: [{ id: 'train:Укрзалізниця', name: 'Укрзалізниця', available: true, cities: ['Україна'], sources: ['gtfs'], services: ['train'] }] };
     }
-    return { transportType: tile.id, providers: [...entries.values()].map((entry) => ({ id: entry.id, name: entry.name, available: entry.available, cities: [...entry.cities], sources: [...entry.sources], services: [...entry.services] })) };
+    if (tile.id === 'intercity_bus' && tileProviders.length === 0) {
+      return { transportType: tile.id, providers: [{ id: 'intercity_bus:inbus.ua', name: 'inbus.ua', available: true, cities: ['Україна'], sources: ['gtfs'], services: ['bus'] }] };
+    }
+    return { transportType: tile.id, providers: tileProviders };
   });
   res.json({ data: await Promise.all(data) });
+}));
+
+app.get('/api/v1/mobility/regions', optionalAuth, asyncHandler(async (_req, res) => {
+  res.json({ regions: getAllRegions() });
+}));
+
+app.get('/api/v1/mobility/regional-catalog', optionalAuth, asyncHandler(async (req, res) => {
+  const city = typeof req.query.city === 'string' ? req.query.city : undefined;
+  const oblast = typeof req.query.oblast === 'string' ? req.query.oblast : undefined;
+  const lat = req.query.lat !== undefined && req.query.lat !== '' ? Number(req.query.lat) : undefined;
+  const lon = req.query.lon !== undefined && req.query.lon !== '' ? Number(req.query.lon) : undefined;
+
+  let queryTarget = city || oblast;
+  if (!queryTarget && lat !== undefined && lon !== undefined && Number.isFinite(lat) && Number.isFinite(lon)) {
+    const region = findRegionByCoordinates(lon, lat);
+    if (region) queryTarget = region.id;
+  }
+  const catalog = getTransportCatalogForCity(queryTarget);
+  const matchedRegion = queryTarget ? findRegion(queryTarget) : undefined;
+  res.json({
+    region: matchedRegion ? { id: matchedRegion.id, name: matchedRegion.name, capital: matchedRegion.capital, bbox: matchedRegion.bbox } : null,
+    transportModes: catalog,
+  });
 }));
 
 app.get('/api/v1/mobility/nearby', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {

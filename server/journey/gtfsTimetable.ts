@@ -41,7 +41,7 @@ export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
 const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
 const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
 const MAX_IMPLICIT_INTERMODAL_STATION_WALK_METERS = 150;
-const isNamedRailwayStation = (name: string) => /(?:залізничн\p{L}*|вокзал|railway station|train station)/u.test(
+const isNamedRailwayStation = (name: string) => /(?:залізничн\p{L}*|вокзал\p{L}*|двірцев\p{L}*|пасажирськ\p{L}*|підзамч\p{L}*|дарниц\p{L}*|автовокзал\p{L}*|автостанці\p{L}*|\bас[- ]?\d+\b|railway station|train station|bus station|bus terminal)/u.test(
   name.normalize('NFKC').toLocaleLowerCase('uk-UA').replace(/[^\p{L}\p{N}]+/gu, ' ').trim(),
 );
 

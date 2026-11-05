@@ -75,4 +75,104 @@ describe('Nominatim-compatible place search adapter', () => {
     delete process.env.GEOCODING_ENGINE_URL;
     await assert.rejects(() => suggestPlaces('Стрий'), GeocodingUnavailableError);
   });
+
+  it('asks the provider for structured addresses', async () => {
+    let askedForDetails: string | null = 'missing';
+    server = createServer((request, response) => {
+      const url = new URL(request.url ?? '/', 'http://localhost');
+      askedForDetails = url.searchParams.get('addressdetails');
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('[]');
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/search`;
+    await suggestPlaces('Київ');
+    assert.equal(askedForDetails, '1');
+    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+    server = undefined;
+  });
+});
+
+describe('short place labels', () => {
+  const city = {
+    place_id: 192146642, name: 'Київ', addresstype: 'city',
+    display_name: 'Київ, Україна', lat: '50.4500336', lon: '30.5241361',
+    address: { city: 'Київ', state: 'Київ', country: 'Україна' },
+  };
+  const crimeanVillage = {
+    place_id: 203488119, addresstype: 'hamlet',
+    display_name: 'Львів, Семисотське сільське поселення, Керченський район, Автономна Республіка Крим, Україна',
+    lat: '45.2606004', lon: '35.4732144',
+    // The provider files the hromada under `city`, so following `city` would hide that this is Crimea.
+    address: { hamlet: 'Львів', city: 'Семисотське сільське поселення', county: 'Керченський район', state: 'Автономна Республіка Крим', country: 'Україна' },
+  };
+  // Three OSM elements of the same house, all within ~40 m of each other.
+  const chernivtsiHouse = (placeId: number, lat: string, lon: string) => ({
+    place_id: placeId, addresstype: 'house',
+    display_name: '46, Головна вулиця, Старе Місто, Чернівці, Чернівецька міська громада, Чернівецький район, Чернівецька область, 58002, Україна',
+    lat, lon,
+    address: { road: 'Головна вулиця', house_number: '46', suburb: 'Старе Місто', city: 'Чернівці', state: 'Чернівецька область', country: 'Україна' },
+  });
+
+  it('keeps only the place and the region that separates equally named places', () => {
+    const labels = parseNominatimSuggestions([city, crimeanVillage]).map((place) => place.label);
+    assert.deepEqual(labels, ['Київ', 'Львів, Автономна Республіка Крим']);
+  });
+
+  it('collapses the same address into one choice', () => {
+    const places = parseNominatimSuggestions([
+      chernivtsiHouse(191289985, '48.2895749', '25.9340922'),
+      chernivtsiHouse(191422011, '48.2896114', '25.9343379'),
+      chernivtsiHouse(190894588, '48.2896586', '25.9341087'),
+    ]);
+    assert.deepEqual(places.map((place) => place.label), ['Головна вулиця, 46, Чернівці']);
+    assert.equal(places.length, 1);
+  });
+
+  // A long street is cut into OSM segments kilometres apart, so a coordinate bucket cannot merge them;
+  // the passenger still sees one name and cannot tell the rows apart.
+  it('collapses one street split across distant segments', () => {
+    const naukova = (placeId: number, lat: string, lon: string) => ({
+      place_id: placeId, name: 'вулиця Наукова', addresstype: 'road',
+      display_name: 'вулиця Наукова, Одеса, Україна', lat, lon,
+      address: { road: 'вулиця Наукова', city: 'Одеса', country: 'Україна' },
+    });
+    const places = parseNominatimSuggestions([
+      naukova(501, '46.4600000', '30.7000000'),
+      naukova(502, '46.4900000', '30.7400000'),
+      naukova(503, '46.5200000', '30.7900000'),
+      naukova(504, '46.4700000', '30.7100000'),
+    ]);
+    assert.equal(places.length, 1);
+    assert.equal(places[0]?.providerId, '501');
+  });
+
+  it('shows a street for a street and the venue for a venue', () => {
+    const [road] = parseNominatimSuggestions([{
+      place_id: 301, name: 'вулиця Наукова', addresstype: 'road',
+      display_name: 'вулиця Наукова, Франківський район, Львів, Україна', lat: '49.8347', lon: '24.0155',
+      address: { road: 'вулиця Наукова', suburb: 'Франківський район', city: 'Львів', state: 'Львівська область', country: 'Україна' },
+    }]);
+    const [venue] = parseNominatimSuggestions([{
+      place_id: 302, name: 'Львівська політехніка', addresstype: 'university',
+      display_name: 'Львівська політехніка, 2, вулиця Карпінського, Львів, Україна', lat: '49.8390', lon: '24.0297',
+      address: { road: 'вулиця Карпінського', house_number: '2', city: 'Львів', state: 'Львівська область', country: 'Україна' },
+    }]);
+    assert.equal(road?.label, 'вулиця Наукова, Львів');
+    assert.equal(venue?.label, 'Львівська політехніка, Львів');
+  });
+
+  it('truncates a long venue name but keeps its city', () => {
+    const [place] = parseNominatimSuggestions([{
+      place_id: 401, name: 'Навчально-науковий інститут аерокосмічних технологій імені академіка Корольова', addresstype: 'building',
+      display_name: 'Інститут, Львів, Україна', lat: '49.8390', lon: '24.0297',
+      address: { city: 'Львів', state: 'Львівська область', country: 'Україна' },
+    }]);
+    assert.ok(place);
+    assert.ok(place.label.length <= 64, `${place.label.length}: ${place.label}`);
+    assert.ok(place.label.endsWith(', Львів'), place.label);
+  });
 });
