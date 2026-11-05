@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { calculateCityTariffFare, getTransportFareCatalog } from '../server/mobility/transportTariffs';
+import { calculateCashFare, calculateCityTariffFare, getTransportFareCatalog, scaleCashFareForPassengers } from '../server/mobility/transportTariffs';
 
 function leg(input: {
   city?: string;
@@ -102,4 +102,52 @@ test('Lviv monthly fare records do not invent an exact validity window', () => {
   assert.equal(records.length, 2);
   assert.ok(records.every((record) => record.validitySeconds === undefined));
   assert.ok(records.every((record) => record.effectiveFrom === undefined));
+});
+
+test('cash fare charges every boarding from audited in-vehicle tariffs, never a card product', () => {
+  const lviv = calculateCashFare([
+    leg({ city: 'Львів', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
+    leg({ city: 'Львів', type: 'tram', departure: '2026-10-13T08:25:00Z', arrival: '2026-10-13T08:45:00Z' }),
+  ]);
+  assert.equal(lviv?.priceMinor, 6_000);
+  assert.equal(lviv?.source, 'city-tariff-registry');
+  assert.deepEqual(lviv?.allocations.map((item) => item.priceMinor), [3_000, 3_000]);
+  assert.deepEqual(lviv?.allocations.map((item) => item.fareProductId), ['lviv-cash-adult', 'lviv-cash-adult']);
+  assert.equal(calculateCashFare([
+    leg({ city: 'Київ', type: 'metro', mode: 'METRO', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
+  ])?.allocations[0]?.fareProductId, 'kyiv-communal-single-ride');
+  assert.equal(calculateCashFare([
+    leg({ city: 'Дніпро', type: 'metro', mode: 'METRO', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
+  ])?.priceMinor, 1_000);
+  assert.equal(calculateCashFare([
+    leg({ city: 'Харків', type: 'metro', mode: 'METRO', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
+  ])?.priceMinor, 0);
+});
+
+test('cash fare stays unknown for private minibuses, foreign cities, and mixed-city chains', () => {
+  assert.equal(calculateCashFare([
+    leg({ city: 'Львів', type: 'marshrutka', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
+  ]), null);
+  assert.equal(calculateCashFare([
+    leg({ city: 'Ужгород', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
+  ]), null);
+  assert.equal(calculateCashFare([
+    leg({ city: 'Київ', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
+    leg({ city: 'Львів', type: 'tram', departure: '2026-10-13T08:30:00Z', arrival: '2026-10-13T08:45:00Z' }),
+  ]), null);
+  assert.equal(calculateCashFare([]), null);
+});
+
+test('cash fare scales per passenger without drifting from the registry amounts', () => {
+  const fare = calculateCashFare([
+    leg({ city: 'Львів', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
+    leg({ city: 'Львів', type: 'tram', departure: '2026-10-13T08:25:00Z', arrival: '2026-10-13T08:45:00Z' }),
+  ]);
+  const scaled = scaleCashFareForPassengers(fare, 2);
+  assert.equal(scaled?.priceMinor, 12_000);
+  assert.deepEqual(scaled?.allocations.map((item) => item.priceMinor), [6_000, 6_000]);
+  assert.equal(scaleCashFareForPassengers(fare, 1)?.priceMinor, 6_000);
+  assert.equal(scaleCashFareForPassengers(fare, 0), null);
+  assert.equal(scaleCashFareForPassengers(fare, 21), null);
+  assert.equal(scaleCashFareForPassengers(null, 2), null);
 });

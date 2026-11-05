@@ -1,5 +1,5 @@
 import { calculateGtfsItineraryFare } from '../../server/journey/gtfsFares';
-import { calculateCityTariffFare } from '../../server/mobility/transportTariffs';
+import { calculateCashFare, calculateCityTariffFare } from '../../server/mobility/transportTariffs';
 import { scoreJourneys } from '../../server/journey/scoring';
 import { createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findGtfsItinerariesWithStats,
   materializeTripInstanceLegs,
@@ -366,7 +366,9 @@ export function lazyEventLabelSearchForRequest(feed: GtfsTimetableFeed, input: G
       transferWalkingMeters, transferWalkingSeconds, transferWalkingGeometries: decisions.map(({ measure }) => measure.geometry),
       transferInSeat: decisions.map(({ measure }) => measure.inSeat),
       transferMinimumBufferSeconds: decisions.map(({ minimumBufferSeconds }) => minimumBufferSeconds),
-      transferRuleMinimumSeconds: decisions.map(({ ruleMinimumSeconds }) => ruleMinimumSeconds), fare });
+      transferRuleMinimumSeconds: decisions.map(({ ruleMinimumSeconds }) => ruleMinimumSeconds), fare,
+      cashFare: calculateCashFare(segments.map((segment) => ({ providerCity: segment.providerCity, mode: segment.mode,
+        transportType: segment.transportType, departureAt: segment.departureAt, arrivalAt: segment.arrivalAt }))) });
   }
   candidates.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || a.id.localeCompare(b.id));
   const byDuration = [...candidates].sort((a, b) => a.durationSeconds - b.durationSeconds || a.transfers - b.transfers || a.id.localeCompare(b.id));

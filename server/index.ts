@@ -23,6 +23,7 @@ import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
+import { scaleCashFareForPassengers } from './mobility/transportTariffs';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, resolveTransitCandidateBudget, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
@@ -2840,6 +2841,8 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
          'routeId',l.metadata->>'routeId','routeName',l.metadata->>'routeName','transportType',l.metadata->>'transportType','headsign',l.metadata->>'headsign',
          'fareProductId',l.metadata->>'fareProductId','fareSource',l.metadata->>'fareSource',
          'fareIncludedByPreviousSegment',COALESCE((l.metadata->>'fareIncludedByPreviousSegment')::boolean,false),
+         'cashPriceMinor',(l.metadata->>'cashPriceMinor')::int,'cashCurrency',l.metadata->>'cashCurrency',
+         'cashFareProductId',l.metadata->>'cashFareProductId','cashFareSource',l.metadata->>'cashFareSource',
          'scheduleSemantics',l.metadata->>'scheduleSemantics',
          'bookingId',l.booking_id,'demandId',l.demand_id,'state',l.state,'dataSource',l.data_source,
          'lastUpdatedAt',l.last_updated_at,'source',l.data_source,'dataSource',l.data_source,
@@ -3079,8 +3082,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary,
     'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified' | 'walkingRoutesUnconfirmed'>>;
   const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
-    if (!itinerary.fare || search.passengers === 1) return itinerary;
-    return { ...itinerary, fare: scaleGtfsFareForPassengers(itinerary.fare, search.passengers) };
+    if (search.passengers === 1) return itinerary;
+    const fare = itinerary.fare ? scaleGtfsFareForPassengers(itinerary.fare, search.passengers) : null;
+    const cashFare = scaleCashFareForPassengers(itinerary.cashFare, search.passengers);
+    if (fare === itinerary.fare && cashFare === itinerary.cashFare) return itinerary;
+    return { ...itinerary, fare, cashFare };
   };
   let metroSources: GtfsWorkerMetroSources | undefined;
   if (kyivMetroSourcesTask) {
@@ -4151,6 +4157,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         }
         const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
         const provider = providerMetadata.get(segment.providerId);
+        const cashAllocation = itinerary.cashFare?.allocations[segmentIndex] ?? null;
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
            VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb) RETURNING id`,
@@ -4173,6 +4180,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               ...(itinerary.fare?.allocations[segmentIndex] ? { fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
                 fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
                 fareSource: itinerary.fare.source } : {}),
+              ...(cashAllocation ? { cashPriceMinor: cashAllocation.priceMinor, cashCurrency: cashAllocation.currency,
+                cashFareProductId: cashAllocation.fareProductId, cashFareSource: itinerary.cashFare?.source } : {}),
               ...(segment.stops ? { stops: segment.stops } : {}),
               ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
         );
@@ -4191,6 +4200,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
             fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
             fareSource: itinerary.fare.source,
+          } : {}),
+          ...(cashAllocation ? {
+            cashPriceMinor: cashAllocation.priceMinor,
+            cashCurrency: cashAllocation.currency,
+            cashFareProductId: cashAllocation.fareProductId,
+            cashFareSource: itinerary.cashFare?.source,
           } : {}),
           ...(segment.stops ? { stops: segment.stops } : {}),
           liveStatus: segment.realtimeUpdatedAt ? 'PREDICTED' : 'SCHEDULED',
