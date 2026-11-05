@@ -66,20 +66,34 @@ type QueuedRequest = {
   reject: (error: Error) => void;
 };
 
+/** Production request budget; measured cold multi-feed parses land just under this on the preview box. */
+const DEFAULT_WORKER_REQUEST_TIMEOUT_MS = 90_000;
+
 /** One bounded worker owns GTFS parsing and CPU-bound itinerary searches for this API process. */
 export class GtfsSearchWorkerClient {
   private worker: Worker | null = null;
   private ready: Promise<void> | null = null;
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; done: () => void; timer: NodeJS.Timeout }>();
+  /**
+   * Requests whose caller-facing promise already rejected on timeout but whose work is still
+   * finishing inside the live worker. The dispatch slot is held until the worker reports that
+   * id back (or the settle deadline/errors force a restart), so a single slow cold parse no
+   * longer terminates the worker and throws away the parsed-feed cache that every follow-up
+   * request needs.
+   */
+  private abandoned = new Map<number, { done: () => void; timer: NodeJS.Timeout }>();
   private queue: QueuedRequest[] = [];
   private busy = false;
   private closed = false;
   private readonly maxQueuedRequests = 8;
 
-  constructor(private readonly testFixtureDirectory?: string) {
+  constructor(private readonly testFixtureDirectory?: string, readonly requestTimeoutMs = DEFAULT_WORKER_REQUEST_TIMEOUT_MS) {
     if (testFixtureDirectory && !isAbsolute(testFixtureDirectory)) {
       throw new TypeError('GTFS test fixture directory must be absolute');
+    }
+    if (!Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs < 1) {
+      throw new TypeError('GTFS worker request timeout must be a positive integer of milliseconds');
     }
   }
 
@@ -125,18 +139,33 @@ export class GtfsSearchWorkerClient {
     });
   }
 
-  private async ensureWorker(): Promise<void> {
-    if (this.ready) return this.ready;
-    const worker = new Worker(new URL('./gtfsSearchWorker.mjs', import.meta.url), {
+  /** Overridable for deterministic tests of the queue and timeout behaviour. */
+  protected createWorker(): Worker {
+    return new Worker(new URL('./gtfsSearchWorker.mjs', import.meta.url), {
       workerData: { testFixtureDirectory: this.testFixtureDirectory },
     });
+  }
+
+  private async ensureWorker(): Promise<void> {
+    if (this.ready) return this.ready;
+    const worker = this.createWorker();
     this.worker = worker;
     this.ready = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('GTFS search worker startup timed out')), 10_000);
       worker.on('message', (message: WorkerResponse<unknown> & { type?: string }) => {
         if (message.type === 'ready') { clearTimeout(timer); resolve(); return; }
         const entry = this.pending.get(message.id);
-        if (!entry) return;
+        if (!entry) {
+          // A response for a request whose caller already timed out: the worker stayed alive to
+          // finish it, so its parsed-feed cache is warm again and the dispatch slot can move on.
+          const abandonedEntry = this.abandoned.get(message.id);
+          if (abandonedEntry) {
+            clearTimeout(abandonedEntry.timer);
+            this.abandoned.delete(message.id);
+            abandonedEntry.done();
+          }
+          return;
+        }
         clearTimeout(entry.timer);
         this.pending.delete(message.id);
         if (message.ok) entry.resolve(message.value);
@@ -171,9 +200,17 @@ export class GtfsSearchWorkerClient {
         if (!pending) return;
         this.pending.delete(id);
         pending.reject(new Error('GTFS search worker request timed out'));
-        pending.done();
-        this.failWorker(new Error('GTFS search worker request timed out'));
-      }, 90_000);
+        // Do not terminate on the first timeout: the planner and feed fetchers are internally
+        // bounded, so the abandoned request still finishes and leaves the parsed feeds warm for
+        // the next one. The dispatch slot stays held until that response arrives; only if the
+        // worker never reports back within a second equal window is it restarted.
+        const settleTimer = setTimeout(() => {
+          if (!this.abandoned.delete(id)) return;
+          pending.done();
+          this.failWorker(new Error('GTFS search worker request timed out'));
+        }, this.requestTimeoutMs);
+        this.abandoned.set(id, { done: pending.done, timer: settleTimer });
+      }, this.requestTimeoutMs);
       this.pending.set(id, { resolve: request.resolve, reject: request.reject, done: markDone, timer });
       try { worker.postMessage({ id, ...request.payload }); }
       catch (error) {
@@ -196,6 +233,8 @@ export class GtfsSearchWorkerClient {
     if (worker) void worker.terminate();
     for (const entry of this.pending.values()) { clearTimeout(entry.timer); entry.reject(error); entry.done(); }
     this.pending.clear();
+    for (const entry of this.abandoned.values()) { clearTimeout(entry.timer); entry.done(); }
+    this.abandoned.clear();
   }
 }
 

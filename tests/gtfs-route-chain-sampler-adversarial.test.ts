@@ -34,6 +34,7 @@ function makeCandidate(
       allocations: [],
       source: 'gtfs-v1' as const,
     },
+    cashFare: null,
   };
 }
 

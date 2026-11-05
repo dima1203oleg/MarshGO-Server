@@ -19,7 +19,7 @@ function itinerary(): GtfsItinerary {
     transfers: 1, walkingMeters: 650,
     transferWalkingMeters: [250], transferWalkingSeconds: [200], transferWalkingGeometries: [null],
     transferInSeat: [false], transferMinimumBufferSeconds: [180], transferRuleMinimumSeconds: [null],
-    fare: null,
+    fare: null, cashFare: null,
     segments: [
       {
         departureAt: at(600), arrivalAt: at(1800),
