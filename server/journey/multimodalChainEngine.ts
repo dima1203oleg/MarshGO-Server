@@ -35,6 +35,13 @@ export interface MultimodalLeg {
   vehicle?: { id?: string; make?: string; model?: string } | null;
   state: 'SUGGESTED' | 'SELECTED';
   source: string;
+  stops?: Array<{
+    id: string;
+    name: string;
+    coordinates?: [number, number];
+    departureAt?: string;
+    arrivalAt?: string;
+  }>;
   metadata?: Record<string, unknown>;
 }
 
@@ -1166,6 +1173,21 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
               const legFare = item.corridor.fareMinor * passengers;
               totalRailFare += legFare;
 
+              const railStops = [
+                {
+                  id: `stop:${item.fromHub.id}:dep`,
+                  name: item.fromHub.name,
+                  coordinates: item.fromHub.coordinates,
+                  departureAt: legDep.toISOString(),
+                },
+                {
+                  id: `stop:${item.toHub.id}:arr`,
+                  name: item.toHub.name,
+                  coordinates: item.toHub.coordinates,
+                  arrivalAt: legArr.toISOString(),
+                },
+              ];
+
               legs.push({
                 ordinal: ordinal++,
                 mode: 'RAIL',
@@ -1186,10 +1208,12 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
                 headsign: item.toHub.city,
                 state: 'SUGGESTED',
                 source: 'uz-timetable',
+                stops: railStops,
                 metadata: {
                   trainNumber: item.corridor.trainNumber,
                   category: item.corridor.category,
                   distanceKm: Math.round(item.corridor.distanceMeters / 1000),
+                  stops: railStops,
                 },
               });
               curTime = legArr;

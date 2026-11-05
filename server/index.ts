@@ -3759,7 +3759,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               Math.round(leg.walkingDistanceMeters ?? (leg.mode === 'WALK' ? leg.distanceMeters : 0)),
               leg.priceMinor !== null ? Math.round(leg.priceMinor) : null,
               leg.priceStatus, leg.availabilityStatus, leg.providerId ?? null,
-              leg.providerType, leg.source, JSON.stringify(leg.metadata ?? {})],
+              leg.providerType, leg.source, JSON.stringify({ ...leg.metadata, ...(leg.stops ? { stops: leg.stops } : {}) })],
           );
           if (leg.mode !== 'WALK') firstServiceLegId ??= inserted.rows[0].id;
 
@@ -3788,6 +3788,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             liveStatus: leg.mode === 'RAIL' ? 'SCHEDULED' : 'UNVERIFIED',
             driver: leg.driver ?? null,
             vehicle: leg.vehicle ?? null,
+            stops: leg.stops ?? (leg.metadata?.stops as unknown[] | undefined) ?? null,
             ...leg.metadata,
           });
         }
