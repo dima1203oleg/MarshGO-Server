@@ -3791,8 +3791,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
             const provider = providerMetadata.get(segment.providerId);
             const inserted = await client.query<{ id: string }>(
-              `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
-               VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,NULL,NULL,$12,$13,$13,$13,$14,$15,'UNKNOWN',$16,'public_transit','SUGGESTED',$17,$18,$19::jsonb) RETURNING id`,
+              `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata,distance_m)
+               VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,NULL,NULL,$12,$13,$13,$13,$14,$15,'UNKNOWN',$16,'public_transit','SUGGESTED',$17,$18,$19::jsonb,$20) RETURNING id`,
               [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
                 segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
                 segment.scheduledDepartureAt, segment.scheduledArrivalAt, durationSeconds, allocation?.priceMinor ?? null,
@@ -3806,14 +3806,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                   fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
                   fromStopFeedId: segment.originTransferNodeIds[0] ?? segment.originStop.id,
                   toStopFeedId: segment.destinationTransferNodeIds[0] ?? segment.destinationStop.id,
-                  ...(segment.stops ? { stops: segment.stops } : {}), ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
+                  ...(segment.stops ? { stops: segment.stops } : {}), ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) }),
+                    segment.shapeDistanceMeters ?? null],
             );
             firstServiceLegId ??= inserted.rows[0].id;
             responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, transportType: segment.transportType,
               origin: { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
               destination: { name: segment.destinationStop.name, coordinates: segment.destinationStop.coordinates },
               departureAt: segment.departureAt, arrivalAt: segment.arrivalAt, scheduledDepartureAt: segment.scheduledDepartureAt,
-              scheduledArrivalAt: segment.scheduledArrivalAt, durationSeconds, distanceMeters: null,
+              scheduledArrivalAt: segment.scheduledArrivalAt, durationSeconds, distanceMeters: segment.shapeDistanceMeters ?? null,
               priceMinor: allocation?.priceMinor ?? null, currency: allocation ? path.fare?.currency ?? null : null,
               priceStatus: allocation ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN', source: 'gtfs-static',
               providerName: segment.providerName, routeName: segment.routeName, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс',
@@ -3930,8 +3931,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
             const provider = providerMetadata.get(segment.providerId);
             const inserted = await client.query<{ id: string }>(
-              `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
-               VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb) RETURNING id`,
+              `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata,distance_m)
+               VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb,$22) RETURNING id`,
               [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
                 segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
                 segment.scheduledDepartureAt, segment.scheduledArrivalAt,
@@ -3948,7 +3949,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                   ...(allocation ? { fareProductId: allocation.fareProductId,
                     fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
                   ...(segment.stops ? { stops: segment.stops } : {}),
-                  ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
+                  ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) }),
+                    segment.shapeDistanceMeters ?? null],
             );
             firstServiceLegId ??= inserted.rows[0].id;
             responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, offerId: null,
@@ -3958,7 +3960,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
               scheduledDepartureAt: segment.scheduledDepartureAt, scheduledArrivalAt: segment.scheduledArrivalAt,
               ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
-              durationSeconds, distanceMeters: null, priceMinor: allocation?.priceMinor ?? null,
+              durationSeconds, distanceMeters: segment.shapeDistanceMeters ?? null, priceMinor: allocation?.priceMinor ?? null,
               currency: allocation ? path.fare?.currency ?? null : null,
               priceStatus: allocation ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
               ...(allocation ? { fareProductId: allocation.fareProductId,
@@ -4159,8 +4161,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const provider = providerMetadata.get(segment.providerId);
         const cashAllocation = itinerary.cashFare?.allocations[segmentIndex] ?? null;
         const inserted = await client.query<{ id: string }>(
-          `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
-           VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb) RETURNING id`,
+          `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata,distance_m)
+           VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb,$22) RETURNING id`,
           [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
             segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
             segment.scheduledDepartureAt, segment.scheduledArrivalAt,
@@ -4183,7 +4185,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               ...(cashAllocation ? { cashPriceMinor: cashAllocation.priceMinor, cashCurrency: cashAllocation.currency,
                 cashFareProductId: cashAllocation.fareProductId, cashFareSource: itinerary.cashFare?.source } : {}),
               ...(segment.stops ? { stops: segment.stops } : {}),
-              ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) })],
+              ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) }),
+                segment.shapeDistanceMeters ?? null],
         );
         firstTransitLegId ??= inserted.rows[0].id;
         responseLegs.push({ id: inserted.rows[0].id, mode: segment.mode, offerId: null,
@@ -4194,7 +4197,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           scheduledDepartureAt: segment.scheduledDepartureAt, scheduledArrivalAt: segment.scheduledArrivalAt,
           ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
           durationSeconds,
-          distanceMeters: null, priceMinor: itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
+          distanceMeters: segment.shapeDistanceMeters ?? null, priceMinor: itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
           currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
           ...(itinerary.fare?.allocations[segmentIndex] ? {
             fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,

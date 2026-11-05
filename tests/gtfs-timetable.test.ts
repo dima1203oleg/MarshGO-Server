@@ -6,14 +6,14 @@ import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, Gtfs
 import { queryDirectedEventIndexPrototype, validateEventIndexCandidatesWithProductionTransfers } from './helpers/gtfs-event-label-prototype';
 import { lazyEventLabelSearch, lazyEventLabelSearchForRequest } from './helpers/gtfs-lazy-event-label-search';
 
-function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
+function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: string; exceptionType?: string; pickup?: string; dropoff?: string; departure?: string; arrival?: string; routeType?: string; routeName?: string; withShape?: boolean; withDenseShape?: boolean; withIntermediate?: boolean; withArrivalAlternatives?: boolean } = {}) {
   const routeRows = [
     'route_id,agency_id,route_short_name,route_long_name,route_type',
     `r,a,7,${overrides.routeName ?? 'Test bus'},${overrides.routeType ?? '3'}`,
     ...(overrides.withArrivalAlternatives ? ['r2,a,8,Other route,3'] : []),
   ];
   const tripRows = [
-    `r,weekday,t1,Central station${overrides.withShape ? ',shape-1' : ''}`,
+    `r,weekday,t1,Central station${overrides.withShape || overrides.withDenseShape ? ',shape-1' : ''}`,
     ...(overrides.withArrivalAlternatives ? ['r2,weekday,t2,Central station', 'r,weekday,t3,Opposite direction'] : []),
   ];
   const files: Record<string, Uint8Array> = {
@@ -25,7 +25,7 @@ function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: st
       ...(overrides.withIntermediate ? ['middle,Middle stop,49.8450,24.0250'] : []),
       'destination,Destination stop,49.8500,24.0300',
     ].join('\n')),
-    'trips.txt': new TextEncoder().encode(`route_id,service_id,trip_id,trip_headsign${overrides.withShape ? ',shape_id' : ''}\n${tripRows.join('\n')}`),
+    'trips.txt': new TextEncoder().encode(`route_id,service_id,trip_id,trip_headsign${overrides.withShape || overrides.withDenseShape ? ',shape_id' : ''}\n${tripRows.join('\n')}`),
     'stop_times.txt': new TextEncoder().encode([
       'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
       `t1,${overrides.departure ?? '08:00:00'},${overrides.departure ?? '08:00:00'},origin,1,${overrides.pickup ?? '0'},0`,
@@ -41,6 +41,18 @@ function feed(overrides: { monday?: string; tuesday?: string; exceptionDate?: st
     'shape-1,49.8450,24.0240,2',
     'shape-1,49.8500,24.0300,3',
   ].join('\n'));
+  if (overrides.withDenseShape) {
+    // A winding 601-point shape: longer than the drawing polyline can keep once it is
+    // decimated to 500 points, so distance and drawing are proved independently.
+    const dense = ['shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence'];
+    for (let index = 0; index <= 600; index += 1) {
+      const ratio = index / 600;
+      const lat = 49.8400 + 0.0100 * ratio + (index % 2 === 1 ? 0.00002 : 0);
+      const lon = 24.0200 + 0.0100 * ratio;
+      dense.push(`shape-1,${lat.toFixed(6)},${lon.toFixed(6)},${index + 1}`);
+    }
+    files['shapes.txt'] = new TextEncoder().encode(dense.join('\n'));
+  }
   if (overrides.exceptionDate) files['calendar_dates.txt'] = new TextEncoder().encode(`service_id,date,exception_type\nweekday,${overrides.exceptionDate},${overrides.exceptionType ?? '1'}`);
   return parseGtfsTimetable(files);
 }
@@ -673,6 +685,49 @@ test('carries clipped source GTFS shape geometry on a routed segment', () => {
   assert.deepEqual(geometry[0], [24.02, 49.84]);
   assert.deepEqual(geometry.at(-1), [24.03, 49.85]);
   assert.deepEqual(geometry[1], [24.024, 49.845]);
+});
+
+function chainMeters(points: Array<[number, number]>): number {
+  const radians = (value: number) => value * Math.PI / 180;
+  let total = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    const a = points[index - 1];
+    const b = points[index];
+    const dLat = radians(b[1] - a[1]);
+    const dLon = radians(b[0] - a[0]);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(radians(a[1])) * Math.cos(radians(b[1])) * Math.sin(dLon / 2) ** 2;
+    total += 2 * 6_371_000 * Math.asin(Math.sqrt(h));
+  }
+  return total;
+}
+
+const denseShapePoints = (): Array<[number, number]> => Array.from({ length: 601 }, (_, index) => {
+  const ratio = index / 600;
+  return [Number((24.0200 + 0.0100 * ratio).toFixed(6)),
+    Number((49.8400 + 0.0100 * ratio + (index % 2 === 1 ? 0.00002 : 0)).toFixed(6))];
+});
+
+test('measures a routed segment along its GTFS shape, not along the decimated drawing', () => {
+  const segment = findGtfsItinerariesWithStats(feed({ withDenseShape: true }), {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+  }).itineraries[0]?.segments[0];
+  const drawing = segment?.routeGeometry;
+  const ridden = segment?.shapeDistanceMeters;
+  assert.ok(drawing && ridden !== undefined, 'dense shape must produce geometry and a measured distance');
+  assert.equal(drawing.length, 500, 'the drawing polyline keeps the point cap');
+  assert.ok(Math.abs(ridden - Math.round(chainMeters(denseShapePoints()))) <= 2,
+    `ridden metres ${ridden} must match the independent shape-chain sum`);
+  assert.ok(ridden > Math.round(chainMeters(drawing)),
+    'the distance may not be taken from the shortened drawing polyline');
+});
+
+test('reports the ridden distance of a shaped segment and keeps it absent without a shape', () => {
+  const options = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0 };
+  const shaped = findGtfsItinerariesWithStats(feed({ withShape: true }), options).itineraries[0]?.segments[0];
+  assert.equal(shaped?.shapeDistanceMeters,
+    Math.round(chainMeters([[24.02, 49.84], [24.024, 49.845], [24.03, 49.85]])));
+  const bare = findGtfsItinerariesWithStats(feed(), options).itineraries[0]?.segments[0];
+  assert.equal(bare?.shapeDistanceMeters, undefined, 'a missing source shape must not invent a ridden distance');
 });
 
 test('preserves shape identifiers and geometry when compatible GTFS providers are merged', () => {
