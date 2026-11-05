@@ -1108,6 +1108,15 @@ export function mergeGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gt
  * Cached segments are the exact objects the search would have produced; the
  * only fields the search later writes on them (`routeGeometry`, `stops`,
  * `traveledZoneIds`) are idempotent for a fixed feed and shape index.
+ *
+ * Realtime is deliberately not part of the key. A GTFS-RT snapshot is
+ * re-fetched every 15 s and its `updatedAt`/`feedTimestamp` change on every
+ * fetch, so including the snapshot in the key made the cache unreachable on a
+ * live feed (measured: `candidateGraphCacheHit: 0` on every repeat of an
+ * identical query). The retained graph is instead treated as structural and
+ * `applyGtfsRealtimeOverlay` re-derives cancellations, skipped stops and
+ * delayed times from the current snapshot on both the restored and the freshly
+ * built graph, so no request can serve times from an older snapshot.
  */
 const CANDIDATE_GRAPH_CACHE_TTL_MS = 5 * 60_000;
 const MAX_CACHED_CANDIDATE_GRAPHS = 2;
@@ -1213,14 +1222,18 @@ function fingerprintTimestamp(accumulator: number, value: number): number {
 }
 
 /**
- * Content version of a parsed (merged) feed. A re-fetched or re-merged source
- * always changes at least one recorded `fetchedAt`, and a realtime refresh
- * changes the update timestamps, but neither is trusted alone: the hash walks
- * the actual graph inputs (stops, routes, trips, calendars, exceptions,
- * stop_times, transfers, pathways, shapes, fares) so two feeds parsed in the
- * same millisecond - or a provider that rewrites a schedule without bumping
- * `fetchedAt` - can never share a cached candidate graph. Memoised per feed
- * object, so the O(feed) walk happens once per merged feed, not per request.
+ * Content version of a parsed (merged) feed's structural inputs. A re-fetched
+ * or re-merged source always changes at least one recorded provider `fetchedAt`,
+ * but that stamp is not trusted alone: the hash walks the actual graph inputs
+ * (stops, routes, trips, calendars, exceptions, stop_times, transfers,
+ * pathways, shapes, fares) so two feeds parsed in the same millisecond - or a
+ * provider that rewrites a schedule without bumping `fetchedAt` - can never
+ * share a cached candidate graph. Memoised per feed object, so the O(feed) walk
+ * happens once per merged feed, not per request.
+ *
+ * Realtime is excluded on purpose: the overlay is applied to the retained graph
+ * on every search (see `applyGtfsRealtimeOverlay`), so a new snapshot must not
+ * invalidate the structural graph.
  */
 export function gtfsFeedContentFingerprint(feed: GtfsTimetableFeed): string {
   const cached = candidateGraphFeedFingerprints.get(feed);
@@ -1324,28 +1337,10 @@ export function gtfsFeedContentFingerprint(feed: GtfsTimetableFeed): string {
   for (const [ruleSetId, ruleList] of feed.fareRules ?? []) {
     fares = fingerprintText(fingerprintText(fares, ruleSetId), JSON.stringify(ruleList));
   }
-  // Realtime snapshots are graph inputs: cancellations remove trips, skips
-  // remove boarding and delays move segment times (datedTripStops).
-  let realtime = '-';
-  const realtimeUpdates = feed.realtimeTripUpdates;
-  if (realtimeUpdates && realtimeUpdates.size > 0) {
-    let realtimeHash = fingerprintText(FINGERPRINT_FNV_OFFSET, `realtime:${realtimeUpdates.size}`);
-    for (const update of realtimeUpdates.values()) {
-      realtimeHash = fingerprintText(realtimeHash, `${update.tripId}\u0000${update.startDate}\u0000${update.relationship}`);
-      realtimeHash = fingerprintTimestamp(realtimeHash, update.updatedAt.getTime());
-      realtimeHash = fingerprintTimestamp(realtimeHash, update.feedTimestamp.getTime());
-      realtimeHash = fingerprintNumber(realtimeHash, update.stops.length);
-      for (const stop of update.stops) {
-        realtimeHash = fingerprintNumber(realtimeHash, stop.stopSequence);
-        realtimeHash = fingerprintText(realtimeHash, `${stop.stopId ?? ''}\u0000${stop.relationship}`);
-        realtimeHash = fingerprintTimestamp(realtimeHash, stop.arrival?.time?.getTime() ?? 0);
-        realtimeHash = fingerprintNumber(realtimeHash, stop.arrival?.delaySeconds ?? -2_147_483_648);
-        realtimeHash = fingerprintTimestamp(realtimeHash, stop.departure?.time?.getTime() ?? 0);
-        realtimeHash = fingerprintNumber(realtimeHash, stop.departure?.delaySeconds ?? -2_147_483_648);
-      }
-    }
-    realtime = `${realtimeUpdates.size}:${realtimeHash}`;
-  }
+  // Realtime is not part of the structural version. Cancellations, skipped
+  // stops and delays are re-applied to the retained graph on every search by
+  // `applyGtfsRealtimeOverlay`, so including them here only made an otherwise
+  // identical graph unreachable whenever the RT feed refreshed.
   const fingerprint = [
     feed.timezone, feed.fetchedAt.getTime(), providerStamp,
     feed.routes.size, feed.trips.size, feed.stops.size,
@@ -1353,10 +1348,37 @@ export function gtfsFeedContentFingerprint(feed: GtfsTimetableFeed): string {
     feed.calendars.size, feed.exceptions.size,
     `${identitySum}:${identityXor}`,
     `s:${schedule}`, `u:${rules}`, `h:${geometry}`, `f:${fares}`,
-    realtime,
   ].join('|');
   candidateGraphFeedFingerprints.set(feed, fingerprint);
   return fingerprint;
+}
+
+/**
+ * Content version of a realtime overlay, used only to label the overlay work a
+ * request performed. It covers exactly what changes graph times and membership
+ * (relationship, per-stop sequence/relationship/arrival/departure) and not the
+ * snapshot fetch stamps, because a new stamp alone never changes a journey.
+ */
+export function gtfsRealtimeContentFingerprint(
+  updates: ReadonlyMap<string, GtfsRealtimeTripUpdate> | undefined,
+): string {
+  if (!updates || updates.size === 0) return '-';
+  let hash = FINGERPRINT_FNV_OFFSET;
+  const ordered = [...updates].sort(([left], [right]) => compareStableId(left, right));
+  for (const [key, update] of ordered) {
+    hash = fingerprintText(hash, key);
+    hash = fingerprintText(hash, update.relationship);
+    hash = fingerprintNumber(hash, update.stops.length);
+    for (const stop of update.stops) {
+      hash = fingerprintNumber(hash, stop.stopSequence);
+      hash = fingerprintText(hash, `${stop.stopId ?? ''}\u0000${stop.relationship}`);
+      hash = fingerprintTimestamp(hash, stop.arrival?.time?.getTime() ?? 0);
+      hash = fingerprintNumber(hash, stop.arrival?.delaySeconds ?? -2_147_483_648);
+      hash = fingerprintTimestamp(hash, stop.departure?.time?.getTime() ?? 0);
+      hash = fingerprintNumber(hash, stop.departure?.delaySeconds ?? -2_147_483_648);
+    }
+  }
+  return `${updates.size}:${hash}`;
 }
 
 function gtfsCandidateGraphCacheKey(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput, derived: {
@@ -1877,6 +1899,175 @@ function datedTripStops(feed: GtfsTimetableFeed, tripId: string, serviceDate: st
   return { stops, ...(update ? { update } : {}) };
 }
 
+export interface GtfsRealtimeOverlayCounts {
+  /** Trip instances cancelled or deleted by the current snapshot. */
+  cancellations: number;
+  /** Segments removed because a boarding/alighting stop is skipped. */
+  skips: number;
+  /** Retained segments whose effective times are delayed by the snapshot. */
+  delays: number;
+  /** Segments pushed outside the requested journey window by the snapshot. */
+  outOfWindow: number;
+  /** Segments whose trip could not be aligned with its update vector. */
+  unattributable: number;
+}
+
+export type GtfsCandidateShapeIndex = { fromIndex: number; toIndex: number; serviceDate: string };
+
+/**
+ * Apply the current GTFS-RT snapshot to a candidate graph. This is the only
+ * place a retained graph is overlaid, and it runs on both the restored and the
+ * freshly built graph:
+ *
+ * - a segment of a cancelled/deleted instance is removed;
+ * - a segment boarding or alighting at a skipped stop is removed;
+ * - `delaySeconds`/absolute times re-derive departure and arrival from the
+ *   segment's preserved `scheduledDepartureAt`/`scheduledArrivalAt` through the
+ *   same `datedTripStops` vector the inline graph builder uses, so a delayed
+ *   trip never keeps a pre-delay time;
+ * - the journey window is re-checked exactly as `visitTripInstanceLegs` checks
+ *   it, so a delayed departure cannot outlive the requested window.
+ *
+ * On a fresh build every retained segment already satisfies these rules, so the
+ * function returns them unchanged (it is idempotent); a restored graph is
+ * corrected to the same representation. Segment objects are copied only when a
+ * field changes, so a cancelled trip can never be re-admitted and a cached
+ * object is never mutated into a different snapshot's times.
+ */
+export function applyGtfsRealtimeOverlay(
+  feed: GtfsTimetableFeed,
+  segments: readonly GtfsDirectJourney[],
+  shapeIndexes: readonly GtfsCandidateShapeIndex[],
+  bounds: { earliestDeparture: Date; journeyEnd: Date },
+): { segments: GtfsDirectJourney[]; shapeIndexes: GtfsCandidateShapeIndex[]; counts: GtfsRealtimeOverlayCounts } {
+  const counts: GtfsRealtimeOverlayCounts = { cancellations: 0, skips: 0, delays: 0, outOfWindow: 0, unattributable: 0 };
+  const updates = feed.realtimeTripUpdates;
+  if (!updates || updates.size === 0) return { segments: [...segments], shapeIndexes: [...shapeIndexes], counts };
+  const earliestMs = bounds.earliestDeparture.getTime();
+  const journeyEndMs = bounds.journeyEnd.getTime();
+  const maximumRideMs = 12 * 60 * 60_000;
+  type DatedInstance = { stops: DatedTripStop[]; update: GtfsRealtimeTripUpdate; updatedPrefix: Int32Array };
+  const datedInstances = new Map<string, DatedInstance | null>();
+  const datedInstance = (tripId: string, serviceDate: string): DatedInstance | null => {
+    const key = gtfsRealtimeTripUpdateKey(tripId, serviceDate);
+    if (datedInstances.has(key)) return datedInstances.get(key) ?? null;
+    const dated = datedTripStops(feed, tripId, serviceDate);
+    const stopCount = feed.stopTimes.get(tripId)?.length ?? 0;
+    // A partially convertible trip vector cannot be index-aligned with the
+    // retained stop indexes; the inline builder excludes such an instance too.
+    if (!dated.update?.stops.length || dated.stops.length !== stopCount) {
+      datedInstances.set(key, null);
+      return null;
+    }
+    const updatedPrefix = new Int32Array(dated.stops.length + 1);
+    for (let index = 0; index < dated.stops.length; index++) {
+      updatedPrefix[index + 1] = (updatedPrefix[index] ?? 0) + (dated.stops[index]?.updated ? 1 : 0);
+    }
+    const instance = { stops: dated.stops, update: dated.update, updatedPrefix };
+    datedInstances.set(key, instance);
+    return instance;
+  };
+  const overlaidSegments: GtfsDirectJourney[] = [];
+  const overlaidShapeIndexes: GtfsCandidateShapeIndex[] = [];
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]!;
+    const shapeIndex = shapeIndexes[index];
+    const update = updates.get(gtfsRealtimeTripUpdateKey(segment.tripId, segment.serviceDate));
+    if (update && (update.relationship === 'CANCELED' || update.relationship === 'DELETED')) {
+      counts.cancellations++;
+      continue;
+    }
+    if (!update?.stops.length) {
+      overlaidSegments.push(segment);
+      if (shapeIndex) overlaidShapeIndexes.push(shapeIndex);
+      continue;
+    }
+    if (!shapeIndex) {
+      counts.unattributable++;
+      continue;
+    }
+    const instance = datedInstance(segment.tripId, segment.serviceDate);
+    const fromStop = instance?.stops[shapeIndex.fromIndex];
+    const toStop = instance?.stops[shapeIndex.toIndex];
+    if (!instance || !fromStop || !toStop) {
+      counts.unattributable++;
+      continue;
+    }
+    if (fromStop.skipped || toStop.skipped) {
+      counts.skips++;
+      continue;
+    }
+    const departureAt = fromStop.departureAt;
+    const arrivalAt = toStop.arrivalAt;
+    if (departureAt.getTime() < earliestMs || departureAt.getTime() > journeyEndMs
+      || arrivalAt.getTime() < departureAt.getTime() || arrivalAt.getTime() > journeyEndMs
+      || arrivalAt.getTime() - departureAt.getTime() > maximumRideMs) {
+      counts.outOfWindow++;
+      continue;
+    }
+    const anyStopUpdated = (instance.updatedPrefix[shapeIndex.toIndex + 1] ?? 0)
+      - (instance.updatedPrefix[shapeIndex.fromIndex] ?? 0) > 0;
+    // `datedTripStops` marks a stop updated only when its instant differs from
+    // the schedule, so a range without updates has the scheduled times at both
+    // ends and needs no dated stop calls. Keeping the immutable object here is
+    // what makes the overlay idempotent on a freshly built graph.
+    if (!anyStopUpdated && !segment.realtimeUpdatedAt
+      && departureAt.getTime() === segment.departureAt.getTime()
+      && arrivalAt.getTime() === segment.arrivalAt.getTime()) {
+      overlaidSegments.push(segment);
+      overlaidShapeIndexes.push(shapeIndex);
+      continue;
+    }
+    if (departureAt.getTime() !== segment.scheduledDepartureAt.getTime()
+      || arrivalAt.getTime() !== segment.scheduledArrivalAt.getTime()) counts.delays++;
+    const overlaid: GtfsDirectJourney = {
+      ...segment,
+      departureAt,
+      arrivalAt,
+      stops: stopCallsForTrip(feed, segment.tripId, shapeIndex.fromIndex, shapeIndex.toIndex,
+        segment.serviceDate, instance.stops),
+    };
+    if (anyStopUpdated) overlaid.realtimeUpdatedAt = instance.update.updatedAt;
+    else delete overlaid.realtimeUpdatedAt;
+    overlaidSegments.push(overlaid);
+    overlaidShapeIndexes.push(shapeIndex);
+  }
+  return { segments: overlaidSegments, shapeIndexes: overlaidShapeIndexes, counts };
+}
+
+/**
+ * A candidate graph is stored under a structural key, so it must not carry realtime
+ * values: `applyGtfsRealtimeOverlay` can only re-time a segment whose trip still has an
+ * update in the current snapshot, and it returns every segment untouched when the
+ * snapshot is missing altogether. Without this normalisation, a graph built while a
+ * delay feed was live would keep those delays visible for the rest of the cache TTL
+ * after the feed dropped — a passenger would board a published departure that has
+ * already left. The cached copy is therefore the published schedule; realtime is a
+ * per-search overlay, never a cached fact.
+ *
+ * Membership is a known, bounded exception: a trip that realtime had already cancelled
+ * or pushed out of the window when the graph was built is absent from it and cannot be
+ * re-admitted, so such a trip returns at most `CANDIDATE_GRAPH_CACHE_TTL_MS` late.
+ * Times are never stale; only a re-appearing ride can be, and the graph stays small.
+ */
+export function structuralGtfsCandidateSegments(
+  segments: readonly GtfsDirectJourney[],
+): GtfsDirectJourney[] {
+  return segments.map((segment) => {
+    if (segment.departureAt.getTime() === segment.scheduledDepartureAt.getTime()
+      && segment.arrivalAt.getTime() === segment.scheduledArrivalAt.getTime()
+      && !segment.realtimeUpdatedAt) return segment;
+    const structural: GtfsDirectJourney = {
+      ...segment,
+      departureAt: segment.scheduledDepartureAt,
+      arrivalAt: segment.scheduledArrivalAt,
+    };
+    delete structural.stops;
+    delete structural.realtimeUpdatedAt;
+    return structural;
+  });
+}
+
 /** Return one exact trip-instance stop arrival without inferring from another trip or service day. */
 export function getGtfsTripStopArrival(feed: GtfsTimetableFeed, tripId: string, routeId: string, serviceDate: string, stopId: string, now = new Date()): {
   status: 'PREDICTED' | 'SCHEDULED' | 'UNAVAILABLE';
@@ -2196,8 +2387,8 @@ export function findGtfsItinerariesWithStats(
     const y = lat * 111_132;
     return [Math.floor(x / transferCellMeters), Math.floor(y / transferCellMeters)] as const;
   };
-  const shapeIndexesBySegment = new WeakMap<GtfsDirectJourney, { fromIndex: number; toIndex: number; serviceDate: string }>();
-  const segmentShapeIndexes: Array<{ fromIndex: number; toIndex: number; serviceDate: string }> = [];
+  const shapeIndexesBySegment = new WeakMap<GtfsDirectJourney, GtfsCandidateShapeIndex>();
+  let segmentShapeIndexes: GtfsCandidateShapeIndex[] = [];
   let segmentGraphTruncated = false;
   let segments: GtfsDirectJourney[];
   const candidateGraphKey = gtfsCandidateGraphCacheKey(feed, input, {
@@ -2206,10 +2397,7 @@ export function findGtfsItinerariesWithStats(
   const cachedCandidateGraph = readGtfsCandidateGraph(candidateGraphKey);
   if (cachedCandidateGraph) {
     segments = cachedCandidateGraph.segments;
-    for (let index = 0; index < segments.length; index++) {
-      const shapeIndex = cachedCandidateGraph.shapeIndexes[index];
-      if (shapeIndex) shapeIndexesBySegment.set(segments[index]!, shapeIndex);
-    }
+    segmentShapeIndexes = [...cachedCandidateGraph.shapeIndexes];
     segmentGraphTruncated = cachedCandidateGraph.segmentGraphTruncated;
     stopSelectionTruncated ||= cachedCandidateGraph.stopSelectionTruncated;
     debugStage('graph-cached', {
@@ -3198,12 +3386,8 @@ export function findGtfsItinerariesWithStats(
       const shapeIndex = { fromIndex: candidate.fromIndex, toIndex: candidate.toIndex, serviceDate: candidate.serviceDate };
       shapeIndexesBySegment.set(segment, shapeIndex);
       segmentShapeIndexes.push(shapeIndex);
-      const update = feed.realtimeTripUpdates?.get(gtfsRealtimeTripUpdateKey(candidate.tripId, candidate.serviceDate));
-      if (update?.stops.length) {
-        const dated = datedTripStops(feed, candidate.tripId, candidate.serviceDate);
-        segment.stops = stopCallsForTrip(feed, candidate.tripId, candidate.fromIndex, candidate.toIndex,
-          candidate.serviceDate, dated.stops);
-      }
+      // Realtime stop calls are applied by `applyGtfsRealtimeOverlay` below, on
+      // this graph and on a restored one alike, so they are not written twice.
       return segment;
     }));
     const perRouteBudgetUsage = [...graphSegmentBudgetByRoute].map(([routeId, budget]) => ({
@@ -3276,10 +3460,30 @@ export function findGtfsItinerariesWithStats(
     selectedSegmentsByRoute.clear();
     redistributed.routes.clear();
     writeGtfsCandidateGraph(candidateGraphKey, {
-      segments, shapeIndexes: segmentShapeIndexes, segmentGraphTruncated, stopSelectionTruncated,
+      segments: structuralGtfsCandidateSegments(segments), shapeIndexes: segmentShapeIndexes,
+      segmentGraphTruncated, stopSelectionTruncated,
       corridorStops: corridorStops.size, interchangeStops: interchangeStopIds.size,
     });
   }
+  // Realtime is applied here, once, on both paths. A restored graph may have
+  // been retained under an older snapshot (or under none at all), and a freshly
+  // built graph already carries the snapshot it was built with; this call is
+  // idempotent, so it never changes a fresh graph but always re-times, drops or
+  // cancels the segments of a restored one to the current snapshot.
+  const realtimeOverlay = applyGtfsRealtimeOverlay(feed, segments, segmentShapeIndexes, {
+    earliestDeparture: input.earliestDeparture, journeyEnd,
+  });
+  segments = realtimeOverlay.segments;
+  segmentShapeIndexes = realtimeOverlay.shapeIndexes;
+  for (let index = 0; index < segments.length; index++) {
+    const shapeIndex = segmentShapeIndexes[index];
+    if (shapeIndex) shapeIndexesBySegment.set(segments[index]!, shapeIndex);
+  }
+  debugStage('graph-overlaid', {
+    segments: segments.length, candidateGraphStructuralHit: Number(cachedCandidateGraph !== undefined),
+    realtimeContent: gtfsRealtimeContentFingerprint(feed.realtimeTripUpdates),
+    realtimeOverlays: JSON.stringify(realtimeOverlay.counts),
+  });
   const outgoing = new Map<string, GtfsDirectJourney[]>();
   for (const segment of segments) {
     const choices = outgoing.get(segment.originStop.id) ?? [];
@@ -4008,7 +4212,11 @@ export function findGtfsItinerariesWithStats(
     }
   }
   debugStage('itineraries-ranked', { searchSteps, firstLegs: firstLegs.length, candidateResults: rankedResults.length,
+    // Kept for existing dashboards: this is now a *structural* hit, because the
+    // realtime snapshot is no longer part of the cache key.
     candidateGraphCacheHit: Number(cachedCandidateGraph !== undefined),
+    candidateGraphStructuralHit: Number(cachedCandidateGraph !== undefined),
+    candidateGraphRealtimeOverlay: JSON.stringify(realtimeOverlay.counts),
     ...Object.fromEntries(Array.from({ length: maxTransitLegs }, (_, index) =>
       [`candidatesWith${index + 1}Legs`, resultCountByLegCount.get(index + 1) ?? 0])),
     returned: itineraries.length,
