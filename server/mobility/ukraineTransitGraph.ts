@@ -221,9 +221,113 @@ export const INTERCITY_CORRIDORS: IntercityCorridor[] = [
   { fromHubId: 'hub_dnipro', toHubId: 'hub_zaporizhzhia', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№732', category: 'Intercity+', durationSeconds: 4500, distanceMeters: 85_000, fareMinor: 12000 },
   { fromHubId: 'hub_zaporizhzhia', toHubId: 'hub_dnipro', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№732', category: 'Intercity+', durationSeconds: 4500, distanceMeters: 85_000, fareMinor: 12000 },
 
+  // Київ ↔ Запоріжжя
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_zaporizhzhia', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№738/737', category: 'Intercity+', durationSeconds: 25900, distanceMeters: 620_000, fareMinor: 49000 },
+  { fromHubId: 'hub_zaporizhzhia', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№738/737', category: 'Intercity+', durationSeconds: 25900, distanceMeters: 620_000, fareMinor: 49000 },
+
   // Київ ↔ Полтава
   { fromHubId: 'hub_kyiv', toHubId: 'hub_poltava', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№724', category: 'Intercity+', durationSeconds: 11700, distanceMeters: 330_000, fareMinor: 29000 },
   { fromHubId: 'hub_poltava', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№724', category: 'Intercity+', durationSeconds: 11700, distanceMeters: 330_000, fareMinor: 29000 },
+
+  // Київ ↔ Чернівці
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_chernivtsi', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№117/118', category: 'Нічний швидкий', durationSeconds: 41400, distanceMeters: 590_000, fareMinor: 39000 },
+  { fromHubId: 'hub_chernivtsi', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№117/118', category: 'Нічний швидкий', durationSeconds: 41400, distanceMeters: 590_000, fareMinor: 39000 },
+
+  // Львів ↔ Чернівці
+  { fromHubId: 'hub_lviv', toHubId: 'hub_chernivtsi', providerName: 'Укрзалізниця (Буковина)', trainNumber: '№702/701', category: 'Регіональний експрес', durationSeconds: 13680, distanceMeters: 260_000, fareMinor: 21000 },
+  { fromHubId: 'hub_chernivtsi', toHubId: 'hub_lviv', providerName: 'Укрзалізниця (Буковина)', trainNumber: '№702/701', category: 'Регіональний експрес', durationSeconds: 13680, distanceMeters: 260_000, fareMinor: 21000 },
+
+  // Київ ↔ Івано-Франківськ
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_ivano_frankivsk', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№43/44', category: 'Нічний швидкий', durationSeconds: 30600, distanceMeters: 640_000, fareMinor: 46000 },
+  { fromHubId: 'hub_ivano_frankivsk', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№43/44', category: 'Нічний швидкий', durationSeconds: 30600, distanceMeters: 640_000, fareMinor: 46000 },
+
+  // Київ ↔ Ужгород
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_uzhhorod', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№29/30', category: 'Нічний швидкий', durationSeconds: 45000, distanceMeters: 810_000, fareMinor: 52000 },
+  { fromHubId: 'hub_uzhhorod', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№29/30', category: 'Нічний швидкий', durationSeconds: 45000, distanceMeters: 810_000, fareMinor: 52000 },
+
+  // Київ ↔ Тернопіль
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_ternopil', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№715/716', category: 'Intercity+', durationSeconds: 19800, distanceMeters: 440_000, fareMinor: 36000 },
+  { fromHubId: 'hub_ternopil', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№715/716', category: 'Intercity+', durationSeconds: 19800, distanceMeters: 440_000, fareMinor: 36000 },
+
+  // Львів ↔ Тернопіль
+  { fromHubId: 'hub_lviv', toHubId: 'hub_ternopil', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№804', category: 'Регіональний експрес', durationSeconds: 6480, distanceMeters: 130_000, fareMinor: 11000 },
+  { fromHubId: 'hub_ternopil', toHubId: 'hub_lviv', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№804', category: 'Регіональний експрес', durationSeconds: 6480, distanceMeters: 130_000, fareMinor: 11000 },
+
+  // Київ ↔ Хмельницький
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_khmelnytskyi', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№771/772', category: 'Intercity+', durationSeconds: 15120, distanceMeters: 360_000, fareMinor: 31000 },
+  { fromHubId: 'hub_khmelnytskyi', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№771/772', category: 'Intercity+', durationSeconds: 15120, distanceMeters: 360_000, fareMinor: 31000 },
+
+  // Вінниця ↔ Хмельницький
+  { fromHubId: 'hub_vinnytsia', toHubId: 'hub_khmelnytskyi', providerName: 'Укрзалізниця (Регіональний поїзд)', trainNumber: '№801', category: 'Регіональний експрес', durationSeconds: 5400, distanceMeters: 120_000, fareMinor: 12000 },
+  { fromHubId: 'hub_khmelnytskyi', toHubId: 'hub_vinnytsia', providerName: 'Укрзалізниця (Регіональний поїзд)', trainNumber: '№801', category: 'Регіональний експрес', durationSeconds: 5400, distanceMeters: 120_000, fareMinor: 12000 },
+
+  // Київ ↔ Рівне
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_rivne', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№885/886', category: 'Регіональний експрес', durationSeconds: 17280, distanceMeters: 380_000, fareMinor: 28000 },
+  { fromHubId: 'hub_rivne', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№885/886', category: 'Регіональний експрес', durationSeconds: 17280, distanceMeters: 380_000, fareMinor: 28000 },
+
+  // Київ ↔ Луцьк
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_lutsk', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№755/756', category: 'Нічний швидкий', durationSeconds: 23400, distanceMeters: 450_000, fareMinor: 34000 },
+  { fromHubId: 'hub_lutsk', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№755/756', category: 'Нічний швидкий', durationSeconds: 23400, distanceMeters: 450_000, fareMinor: 34000 },
+
+  // Львів ↔ Луцьк
+  { fromHubId: 'hub_lviv', toHubId: 'hub_lutsk', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№805/806', category: 'Регіональний експрес', durationSeconds: 9600, distanceMeters: 150_000, fareMinor: 14000 },
+  { fromHubId: 'hub_lutsk', toHubId: 'hub_lviv', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№805/806', category: 'Регіональний експрес', durationSeconds: 9600, distanceMeters: 150_000, fareMinor: 14000 },
+
+  // Київ ↔ Житомир
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_zhytomyr', providerName: 'Укрзалізниця / inbus.ua', trainNumber: '№867/868', category: 'Регіональний експрес', durationSeconds: 7920, distanceMeters: 140_000, fareMinor: 16000 },
+  { fromHubId: 'hub_zhytomyr', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця / inbus.ua', trainNumber: '№867/868', category: 'Регіональний експрес', durationSeconds: 7920, distanceMeters: 140_000, fareMinor: 16000 },
+
+  // Київ ↔ Черкаси
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_cherkasy', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№757/758', category: 'Регіональний експрес', durationSeconds: 11520, distanceMeters: 240_000, fareMinor: 22000 },
+  { fromHubId: 'hub_cherkasy', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№757/758', category: 'Регіональний експрес', durationSeconds: 11520, distanceMeters: 240_000, fareMinor: 22000 },
+
+  // Київ ↔ Чернігів
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_chernihiv', providerName: 'Укрзалізниця (Регіональний поїзд)', trainNumber: '№702/704', category: 'Регіональний експрес', durationSeconds: 7560, distanceMeters: 160_000, fareMinor: 14000 },
+  { fromHubId: 'hub_chernihiv', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Регіональний поїзд)', trainNumber: '№702/704', category: 'Регіональний експрес', durationSeconds: 7560, distanceMeters: 160_000, fareMinor: 14000 },
+
+  // Київ ↔ Суми
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_sumy', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№779/780', category: 'Регіональний експрес', durationSeconds: 17280, distanceMeters: 350_000, fareMinor: 29000 },
+  { fromHubId: 'hub_sumy', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№779/780', category: 'Регіональний експрес', durationSeconds: 17280, distanceMeters: 350_000, fareMinor: 29000 },
+
+  // Київ ↔ Кропивницький
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_kropyvnytskyi', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№790/789', category: 'Регіональний експрес', durationSeconds: 16200, distanceMeters: 300_000, fareMinor: 26000 },
+  { fromHubId: 'hub_kropyvnytskyi', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№790/789', category: 'Регіональний експрес', durationSeconds: 16200, distanceMeters: 300_000, fareMinor: 26000 },
+
+  // Київ ↔ Миколаїв
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_mykolaiv', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№102/101', category: 'Нічний швидкий', durationSeconds: 32400, distanceMeters: 510_000, fareMinor: 38000 },
+  { fromHubId: 'hub_mykolaiv', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Нічний швидкий)', trainNumber: '№102/101', category: 'Нічний швидкий', durationSeconds: 32400, distanceMeters: 510_000, fareMinor: 38000 },
+
+  // Одеса ↔ Миколаїв
+  { fromHubId: 'hub_odesa', toHubId: 'hub_mykolaiv', providerName: 'Укрзалізниця / inbus.ua', trainNumber: '№802', category: 'Регіональний експрес', durationSeconds: 7920, distanceMeters: 135_000, fareMinor: 15000 },
+  { fromHubId: 'hub_mykolaiv', toHubId: 'hub_odesa', providerName: 'Укрзалізниця / inbus.ua', trainNumber: '№802', category: 'Регіональний експрес', durationSeconds: 7920, distanceMeters: 135_000, fareMinor: 15000 },
+
+  // Київ ↔ Кривий Ріг
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_kryvyi_rih', providerName: 'Укрзалізниця (Інтерсіті)', trainNumber: '№75/76', category: 'Intercity+', durationSeconds: 21600, distanceMeters: 460_000, fareMinor: 37000 },
+  { fromHubId: 'hub_kryvyi_rih', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Інтерсіті)', trainNumber: '№75/76', category: 'Intercity+', durationSeconds: 21600, distanceMeters: 460_000, fareMinor: 37000 },
+
+  // Дніпро ↔ Кривий Ріг
+  { fromHubId: 'hub_dnipro', toHubId: 'hub_kryvyi_rih', providerName: 'Укрзалізниця (Регіональний поїзд)', trainNumber: '№828', category: 'Регіональний експрес', durationSeconds: 10080, distanceMeters: 170_000, fareMinor: 14000 },
+  { fromHubId: 'hub_kryvyi_rih', toHubId: 'hub_dnipro', providerName: 'Укрзалізниця (Регіональний поїзд)', trainNumber: '№828', category: 'Регіональний експрес', durationSeconds: 10080, distanceMeters: 170_000, fareMinor: 14000 },
+
+  // Київ ↔ Кременчук
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_kremenchuk', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№791/792', category: 'Регіональний експрес', durationSeconds: 17280, distanceMeters: 340_000, fareMinor: 27000 },
+  { fromHubId: 'hub_kremenchuk', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№791/792', category: 'Регіональний експрес', durationSeconds: 17280, distanceMeters: 340_000, fareMinor: 27000 },
+
+  // Київ ↔ Біла Церква
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_bila_tserkva', providerName: 'Укрзалізниця (Приміський експрес)', trainNumber: '№7037/7038', category: 'Регіональний експрес', durationSeconds: 4680, distanceMeters: 85_000, fareMinor: 8000 },
+  { fromHubId: 'hub_bila_tserkva', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Приміський експрес)', trainNumber: '№7037/7038', category: 'Регіональний експрес', durationSeconds: 4680, distanceMeters: 85_000, fareMinor: 8000 },
+
+  // Київ ↔ Стрий
+  { fromHubId: 'hub_kyiv', toHubId: 'hub_stryi', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№705/706', category: 'Intercity+', durationSeconds: 22800, distanceMeters: 615_000, fareMinor: 52000 },
+  { fromHubId: 'hub_stryi', toHubId: 'hub_kyiv', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№705/706', category: 'Intercity+', durationSeconds: 22800, distanceMeters: 615_000, fareMinor: 52000 },
+
+  // Харків ↔ Полтава
+  { fromHubId: 'hub_kharkiv', toHubId: 'hub_poltava', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№723', category: 'Intercity+', durationSeconds: 5760, distanceMeters: 140_000, fareMinor: 16000 },
+  { fromHubId: 'hub_poltava', toHubId: 'hub_kharkiv', providerName: 'Укрзалізниця (Інтерсіті+)', trainNumber: '№723', category: 'Intercity+', durationSeconds: 5760, distanceMeters: 140_000, fareMinor: 16000 },
+
+  // Дніпро ↔ Харків
+  { fromHubId: 'hub_dnipro', toHubId: 'hub_kharkiv', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№796', category: 'Регіональний експрес', durationSeconds: 12600, distanceMeters: 220_000, fareMinor: 23000 },
+  { fromHubId: 'hub_kharkiv', toHubId: 'hub_dnipro', providerName: 'Укрзалізниця (Регіональний експрес)', trainNumber: '№796', category: 'Регіональний експрес', durationSeconds: 12600, distanceMeters: 220_000, fareMinor: 23000 },
 
   // Львів ↔ Стрий
   { fromHubId: 'hub_lviv', toHubId: 'hub_stryi', providerName: 'Укрзалізниця (Приміський поїзд)', trainNumber: '№6155', category: 'Регіональний експрес', durationSeconds: 3900, distanceMeters: 75_000, fareMinor: 4500 },

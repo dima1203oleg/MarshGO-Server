@@ -941,144 +941,310 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
     }
   }
 
-  // 4b. INTERCITY MULTIMODAL CORRIDORS (Укрзалізниця Intercity+ та регіональні експреси з First/Last Mile)
+  // 4b. INTERCITY MULTIMODAL CORRIDORS (Укрзалізниця Intercity+, регіональні експреси та First/Last Mile)
   if (totalDirectDistance >= 25_000 && (isTypeAllowed('train') || isTypeAllowed('public_transport'))) {
-    const originHubs = findUkraineStationsWithinRadius(originCoord, UKRAINE_REGIONAL_HUBS, 45_000);
-    const destHubs = findUkraineStationsWithinRadius(destCoord, UKRAINE_REGIONAL_HUBS, 45_000);
+    const getEligibleHubs = (point: [number, number]) => {
+      const found = findUkraineStationsWithinRadius(point, UKRAINE_REGIONAL_HUBS, 80_000);
+      if (found.length > 0) return found.slice(0, 3);
+      return [...UKRAINE_REGIONAL_HUBS]
+        .map((st) => ({
+          station: st,
+          distanceMeters: Math.round(haversineMeters(point, st.coordinates)),
+        }))
+        .sort((a, b) => a.distanceMeters - b.distanceMeters)
+        .slice(0, 2);
+    };
 
-    for (const oHub of originHubs.slice(0, 2)) {
-      for (const dHub of destHubs.slice(0, 2)) {
+    const originHubs = getEligibleHubs(originCoord);
+    const destHubs = getEligibleHubs(destCoord);
+
+    for (const oHub of originHubs) {
+      for (const dHub of destHubs) {
         if (oHub.station.id === dHub.station.id) continue;
 
-        const corridor = INTERCITY_CORRIDORS.find(
+        // 1. Direct corridor or 2. 1-stop transfer via Kyiv / Lviv
+        const directCorridor = INTERCITY_CORRIDORS.find(
           (c) => c.fromHubId === oHub.station.id && c.toHubId === dHub.station.id
         );
 
-        if (!corridor) continue;
+        let corridorChain: Array<{
+          corridor: (typeof INTERCITY_CORRIDORS)[number];
+          fromHub: typeof oHub.station;
+          toHub: typeof dHub.station;
+        }> = [];
 
-        const legs: MultimodalLeg[] = [];
-        const curTime = new Date(departureAt);
-        let ordinal = 0;
+        if (directCorridor) {
+          corridorChain = [{ corridor: directCorridor, fromHub: oHub.station, toHub: dHub.station }];
+        } else {
+          // Transfer via hub_kyiv
+          const kyivHub = UKRAINE_REGIONAL_HUBS.find((h) => h.id === 'hub_kyiv')!;
+          const leg1Kyiv = INTERCITY_CORRIDORS.find(
+            (c) => c.fromHubId === oHub.station.id && c.toHubId === 'hub_kyiv'
+          );
+          const leg2Kyiv = INTERCITY_CORRIDORS.find(
+            (c) => c.fromHubId === 'hub_kyiv' && c.toHubId === dHub.station.id
+          );
+          if (leg1Kyiv && leg2Kyiv && oHub.station.id !== 'hub_kyiv' && dHub.station.id !== 'hub_kyiv') {
+            corridorChain = [
+              { corridor: leg1Kyiv, fromHub: oHub.station, toHub: kyivHub },
+              { corridor: leg2Kyiv, fromHub: kyivHub, toHub: dHub.station },
+            ];
+          } else {
+            // Transfer via hub_lviv for Western Ukraine
+            const lvivHub = UKRAINE_REGIONAL_HUBS.find((h) => h.id === 'hub_lviv')!;
+            const leg1Lviv = INTERCITY_CORRIDORS.find(
+              (c) => c.fromHubId === oHub.station.id && c.toHubId === 'hub_lviv'
+            );
+            const leg2Lviv = INTERCITY_CORRIDORS.find(
+              (c) => c.fromHubId === 'hub_lviv' && c.toHubId === dHub.station.id
+            );
+            if (leg1Lviv && leg2Lviv && oHub.station.id !== 'hub_lviv' && dHub.station.id !== 'hub_lviv') {
+              corridorChain = [
+                { corridor: leg1Lviv, fromHub: oHub.station, toHub: lvivHub },
+                { corridor: leg2Lviv, fromHub: lvivHub, toHub: dHub.station },
+              ];
+            }
+          }
+        }
 
-        // Leg 1: First Mile to origin hub (Walk if <1.2km, else local Taxi)
+        if (corridorChain.length === 0) continue;
+
+        // Plan First Mile (Walk / City Transit / Taxi)
         const isWalkFirst = oHub.distanceMeters <= 1200;
-        const firstMileDur = isWalkFirst
-          ? Math.ceil(oHub.distanceMeters / 1.25)
-          : Math.min(1800, Math.round(oHub.distanceMeters / 11) + 240); // 4 min dispatch + drive
-        const firstMileFare = isWalkFirst
-          ? 0
-          : Math.max(8500, Math.round((60 + (oHub.distanceMeters / 1000) * 12) * 100));
+        const firstMileTaxiDur = Math.min(1800, Math.round(oHub.distanceMeters / 11) + 240);
+        const firstMileTaxiFare = Math.max(8500, Math.round((60 + (oHub.distanceMeters / 1000) * 12) * 100));
 
-        const firstMileArr = new Date(curTime.getTime() + firstMileDur * 1000);
-        legs.push({
-          ordinal: ordinal++,
-          mode: isWalkFirst ? 'WALK' : 'TAXI',
-          origin,
-          destination: { name: oHub.station.name, coordinates: oHub.station.coordinates },
-          departureAt: new Date(curTime),
-          arrivalAt: firstMileArr,
-          durationSeconds: firstMileDur,
-          distanceMeters: oHub.distanceMeters,
-          walkingDistanceMeters: isWalkFirst ? oHub.distanceMeters : 0,
-          priceMinor: firstMileFare,
-          currency: 'UAH',
-          priceStatus: isWalkFirst ? 'LOCKED' : 'ESTIMATED',
-          availabilityStatus: 'AVAILABLE',
-          providerType: isWalkFirst ? 'walking' : 'taxi',
-          providerName: isWalkFirst ? undefined : 'Uklon / Таксі до вокзалу',
-          state: 'SUGGESTED',
-          source: isWalkFirst ? 'walking' : 'partner-taxi',
-          metadata: { title: isWalkFirst ? `Пішки до ${oHub.station.name}` : `Таксі до ${oHub.station.name}` },
-        });
+        // Check if origin city has transit to origin hub
+        let firstMileTransit: { name: string; mode: JourneyLegMode; durationSeconds: number; fareMinor: number; coordinates: [number, number] } | null = null;
+        if (oHub.station.city === 'Київ' && isTypeAllowed('metro') && oHub.distanceMeters > 1500 && oHub.distanceMeters < 18000) {
+          const kTransit = planKyivRapidTransitJourneys(originCoord, oHub.station.coordinates, 2500);
+          if (kTransit.length > 0 && kTransit[0].segments.length > 0) {
+            const seg = kTransit[0].segments[0];
+            firstMileTransit = {
+              name: `Метро: ст. ${seg.originStation.name} → ст. ${kTransit[0].segments.at(-1)!.destinationStation.name}`,
+              mode: seg.mode,
+              durationSeconds: kTransit[0].totalDurationSeconds,
+              fareMinor: 800 * passengers,
+              coordinates: seg.originStation.coordinates,
+            };
+          }
+        } else if (['Львів', 'Одеса', 'Харків', 'Дніпро'].includes(oHub.station.city) && oHub.distanceMeters > 1200 && oHub.distanceMeters < 12000) {
+          const cityTransit = planCityTransitJourneys(oHub.station.city as any, originCoord, oHub.station.coordinates, 2500);
+          if (cityTransit.length > 0 && cityTransit[0].segments.length > 0) {
+            const seg = cityTransit[0].segments[0];
+            firstMileTransit = {
+              name: `${seg.transportType === 'tram' ? 'Трамвай' : 'Метро'}: ${seg.originStation.name} → ${cityTransit[0].segments.at(-1)!.destinationStation.name}`,
+              mode: seg.mode,
+              durationSeconds: cityTransit[0].totalDurationSeconds,
+              fareMinor: (oHub.station.city === 'Львів' ? 1000 : 800) * passengers,
+              coordinates: seg.originStation.coordinates,
+            };
+          }
+        }
 
-        // 20 min Station Boarding & Check-in buffer
-        const boardingBufferSec = 1200;
-        const trainDeparture = new Date(firstMileArr.getTime() + boardingBufferSec * 1000);
-
-        // Leg 2: Intercity Train (Укрзалізниця)
-        const trainArrival = new Date(trainDeparture.getTime() + corridor.durationSeconds * 1000);
-        legs.push({
-          ordinal: ordinal++,
-          mode: 'RAIL',
-          origin: { name: oHub.station.name, coordinates: oHub.station.coordinates },
-          destination: { name: dHub.station.name, coordinates: dHub.station.coordinates },
-          departureAt: trainDeparture,
-          arrivalAt: trainArrival,
-          durationSeconds: corridor.durationSeconds,
-          distanceMeters: corridor.distanceMeters,
-          priceMinor: corridor.fareMinor * passengers,
-          currency: 'UAH',
-          priceStatus: 'LOCKED',
-          availabilityStatus: 'AVAILABLE',
-          providerId: 'ukrzaliznytsia-intercity',
-          providerType: 'rail',
-          providerName: corridor.providerName,
-          routeName: corridor.trainNumber,
-          headsign: dHub.station.city,
-          state: 'SUGGESTED',
-          source: 'uz-timetable',
-          metadata: {
-            trainNumber: corridor.trainNumber,
-            category: corridor.category,
-            distanceKm: Math.round(corridor.distanceMeters / 1000),
-          },
-        });
-
-        // Leg 3: Last Mile from arrival hub (Walk if <1.2km, else local Taxi)
+        // Plan Last Mile (Walk / City Transit / Taxi)
         const isWalkLast = dHub.distanceMeters <= 1200;
-        const lastMileDur = isWalkLast
-          ? Math.ceil(dHub.distanceMeters / 1.25)
-          : Math.min(1800, Math.round(dHub.distanceMeters / 11) + 240);
-        const lastMileFare = isWalkLast
-          ? 0
-          : Math.max(8500, Math.round((60 + (dHub.distanceMeters / 1000) * 12) * 100));
+        const lastMileTaxiDur = Math.min(1800, Math.round(dHub.distanceMeters / 11) + 240);
+        const lastMileTaxiFare = Math.max(8500, Math.round((60 + (dHub.distanceMeters / 1000) * 12) * 100));
 
-        const lastMileDeparture = new Date(trainArrival.getTime() + 300_000); // 5 min platform exit buffer
-        const lastMileArr = new Date(lastMileDeparture.getTime() + lastMileDur * 1000);
+        // Check if destination city has transit from destination hub
+        let lastMileTransit: { name: string; mode: JourneyLegMode; durationSeconds: number; fareMinor: number; coordinates: [number, number] } | null = null;
+        if (dHub.station.city === 'Київ' && isTypeAllowed('metro') && dHub.distanceMeters > 1500 && dHub.distanceMeters < 18000) {
+          const kTransit = planKyivRapidTransitJourneys(dHub.station.coordinates, destCoord, 2500);
+          if (kTransit.length > 0 && kTransit[0].segments.length > 0) {
+            const seg = kTransit[0].segments[0];
+            lastMileTransit = {
+              name: `Метро: ст. ${seg.originStation.name} → ст. ${kTransit[0].segments.at(-1)!.destinationStation.name}`,
+              mode: seg.mode,
+              durationSeconds: kTransit[0].totalDurationSeconds,
+              fareMinor: 800 * passengers,
+              coordinates: kTransit[0].segments.at(-1)!.destinationStation.coordinates,
+            };
+          }
+        } else if (['Львів', 'Одеса', 'Харків', 'Дніпро'].includes(dHub.station.city) && dHub.distanceMeters > 1200 && dHub.distanceMeters < 12000) {
+          const cityTransit = planCityTransitJourneys(dHub.station.city as any, dHub.station.coordinates, destCoord, 2500);
+          if (cityTransit.length > 0 && cityTransit[0].segments.length > 0) {
+            const seg = cityTransit[0].segments[0];
+            lastMileTransit = {
+              name: `${seg.transportType === 'tram' ? 'Трамвай' : 'Метро'}: ${seg.originStation.name} → ${cityTransit[0].segments.at(-1)!.destinationStation.name}`,
+              mode: seg.mode,
+              durationSeconds: cityTransit[0].totalDurationSeconds,
+              fareMinor: (dHub.station.city === 'Львів' ? 1000 : 800) * passengers,
+              coordinates: cityTransit[0].segments.at(-1)!.destinationStation.coordinates,
+            };
+          }
+        }
 
-        legs.push({
-          ordinal,
-          mode: isWalkLast ? 'WALK' : 'TAXI',
-          origin: { name: dHub.station.name, coordinates: dHub.station.coordinates },
-          destination,
-          departureAt: lastMileDeparture,
-          arrivalAt: lastMileArr,
-          durationSeconds: lastMileDur,
-          distanceMeters: dHub.distanceMeters,
-          walkingDistanceMeters: isWalkLast ? dHub.distanceMeters : 0,
-          priceMinor: lastMileFare,
-          currency: 'UAH',
-          priceStatus: isWalkLast ? 'LOCKED' : 'ESTIMATED',
-          availabilityStatus: 'AVAILABLE',
-          providerType: isWalkLast ? 'walking' : 'taxi',
-          providerName: isWalkLast ? undefined : 'Таксі від вокзалу',
-          state: 'SUGGESTED',
-          source: isWalkLast ? 'walking' : 'partner-taxi',
-          metadata: { title: isWalkLast ? `Пішки від ${dHub.station.name}` : `Таксі від ${dHub.station.name}` },
-        });
+        // Generate combinations: 1) Transit/Walk-based, 2) Taxi-based
+        const firstMileVariants = [
+          ...(isWalkFirst
+            ? [{ type: 'WALK' as const, dur: Math.ceil(oHub.distanceMeters / 1.25), fare: 0, title: `Пішки до ${oHub.station.name}` }]
+            : firstMileTransit
+            ? [{ type: 'TRANSIT' as const, dur: firstMileTransit.durationSeconds, fare: firstMileTransit.fareMinor, title: firstMileTransit.name }]
+            : []),
+          ...(!isWalkFirst && isTypeAllowed('taxi')
+            ? [{ type: 'TAXI' as const, dur: firstMileTaxiDur, fare: firstMileTaxiFare, title: `Таксі до ${oHub.station.name}` }]
+            : []),
+        ];
 
-        const totalChainDur = Math.round((lastMileArr.getTime() - departureAt.getTime()) / 1000);
-        const totalChainPrice = firstMileFare + corridor.fareMinor * passengers + lastMileFare;
-        const totalWalkingM = legs.filter((l) => l.mode === 'WALK').reduce((sum, l) => sum + l.distanceMeters, 0);
+        const lastMileVariants = [
+          ...(isWalkLast
+            ? [{ type: 'WALK' as const, dur: Math.ceil(dHub.distanceMeters / 1.25), fare: 0, title: `Пішки від ${dHub.station.name}` }]
+            : lastMileTransit
+            ? [{ type: 'TRANSIT' as const, dur: lastMileTransit.durationSeconds, fare: lastMileTransit.fareMinor, title: lastMileTransit.name }]
+            : []),
+          ...(!isWalkLast && isTypeAllowed('taxi')
+            ? [{ type: 'TAXI' as const, dur: lastMileTaxiDur, fare: lastMileTaxiFare, title: `Таксі від ${dHub.station.name}` }]
+            : []),
+        ];
 
-        journeys.push({
-          id: `intercity-corridor:${corridor.trainNumber}:${oHub.station.id}-${dHub.station.id}`,
-          strategy,
-          score: totalChainDur * 0.5 + totalChainPrice * 0.15,
-          state: 'PLANNED',
-          source: 'uz-multimodal-corridor',
-          providerName: `${corridor.providerName} + Міський довіз`,
-          totalDurationSeconds: totalChainDur,
-          totalPriceMinor: totalChainPrice,
-          confirmedPriceMinor: null,
-          estimatedPriceMinMinor: totalChainPrice,
-          estimatedPriceMaxMinor: Math.round(totalChainPrice * 1.1),
-          walkingMeters: totalWalkingM,
-          transfers: 2,
-          reliabilityScore: 0.96, // High rail on-time performance
-          comfortScore: 0.95,
-          legs,
-        });
+        for (const fm of firstMileVariants.slice(0, 2)) {
+          for (const lm of lastMileVariants.slice(0, 2)) {
+            const legs: MultimodalLeg[] = [];
+            let curTime = new Date(departureAt);
+            let ordinal = 0;
+
+            // Leg 1: First Mile
+            const fmArrival = new Date(curTime.getTime() + fm.dur * 1000);
+            legs.push({
+              ordinal: ordinal++,
+              mode: fm.type === 'TAXI' ? 'TAXI' : fm.type === 'TRANSIT' ? (firstMileTransit?.mode ?? 'TRAM') : 'WALK',
+              origin,
+              destination: { name: oHub.station.name, coordinates: oHub.station.coordinates },
+              departureAt: new Date(curTime),
+              arrivalAt: fmArrival,
+              durationSeconds: Math.round(fm.dur),
+              distanceMeters: Math.round(oHub.distanceMeters),
+              walkingDistanceMeters: fm.type === 'WALK' ? Math.round(oHub.distanceMeters) : 0,
+              priceMinor: Math.round(fm.fare),
+              currency: 'UAH',
+              priceStatus: fm.type === 'WALK' ? 'LOCKED' : fm.type === 'TRANSIT' ? 'LOCKED' : 'ESTIMATED',
+              availabilityStatus: 'AVAILABLE',
+              providerType: fm.type === 'TAXI' ? 'taxi' : fm.type === 'TRANSIT' ? 'public_transit' : 'walking',
+              providerName: fm.type === 'TAXI' ? 'Uklon / Таксі' : fm.type === 'TRANSIT' ? 'Міський транспорт' : undefined,
+              state: 'SUGGESTED',
+              source: fm.type === 'TAXI' ? 'partner-taxi' : fm.type === 'TRANSIT' ? 'city-transit' : 'walking',
+              metadata: { title: fm.title },
+            });
+
+            // 15-20 min buffer for station boarding
+            curTime = new Date(fmArrival.getTime() + 900_000);
+
+            // Intercity Legs (1 or 2)
+            let totalRailFare = 0;
+            for (let cIdx = 0; cIdx < corridorChain.length; cIdx++) {
+              const item = corridorChain[cIdx];
+              if (cIdx > 0) {
+                // Transfer buffer between intercity trains (30 min)
+                const transferBufferSec = 1800;
+                const prevArrival = legs.at(-1)!.arrivalAt;
+                const walkBetweenPlatformsArrival = new Date(prevArrival.getTime() + 300_000);
+                legs.push({
+                  ordinal: ordinal++,
+                  mode: 'WALK',
+                  origin: { name: item.fromHub.name, coordinates: item.fromHub.coordinates },
+                  destination: { name: item.fromHub.name, coordinates: item.fromHub.coordinates },
+                  departureAt: prevArrival,
+                  arrivalAt: walkBetweenPlatformsArrival,
+                  durationSeconds: 300,
+                  distanceMeters: 200,
+                  walkingDistanceMeters: 200,
+                  priceMinor: 0,
+                  currency: 'UAH',
+                  priceStatus: 'LOCKED',
+                  availabilityStatus: 'AVAILABLE',
+                  providerType: 'walking',
+                  state: 'SUGGESTED',
+                  source: 'station-transfer',
+                  metadata: { title: `Пересадка на вокзалі ${item.fromHub.city}` },
+                });
+                curTime = new Date(prevArrival.getTime() + transferBufferSec * 1000);
+              }
+
+              const legDep = new Date(curTime);
+              const legArr = new Date(legDep.getTime() + item.corridor.durationSeconds * 1000);
+              const legFare = item.corridor.fareMinor * passengers;
+              totalRailFare += legFare;
+
+              legs.push({
+                ordinal: ordinal++,
+                mode: 'RAIL',
+                origin: { name: item.fromHub.name, coordinates: item.fromHub.coordinates },
+                destination: { name: item.toHub.name, coordinates: item.toHub.coordinates },
+                departureAt: legDep,
+                arrivalAt: legArr,
+                durationSeconds: item.corridor.durationSeconds,
+                distanceMeters: item.corridor.distanceMeters,
+                priceMinor: legFare,
+                currency: 'UAH',
+                priceStatus: 'LOCKED',
+                availabilityStatus: 'AVAILABLE',
+                providerId: 'ukrzaliznytsia-intercity',
+                providerType: 'rail',
+                providerName: item.corridor.providerName,
+                routeName: item.corridor.trainNumber,
+                headsign: item.toHub.city,
+                state: 'SUGGESTED',
+                source: 'uz-timetable',
+                metadata: {
+                  trainNumber: item.corridor.trainNumber,
+                  category: item.corridor.category,
+                  distanceKm: Math.round(item.corridor.distanceMeters / 1000),
+                },
+              });
+              curTime = legArr;
+            }
+
+            // Last Mile
+            const lastLegArrival = legs.at(-1)!.arrivalAt;
+            const lmDep = new Date(lastLegArrival.getTime() + 300_000); // 5 min exit buffer
+            const lmArr = new Date(lmDep.getTime() + lm.dur * 1000);
+            legs.push({
+              ordinal: ordinal++,
+              mode: lm.type === 'TAXI' ? 'TAXI' : lm.type === 'TRANSIT' ? (lastMileTransit?.mode ?? 'TRAM') : 'WALK',
+              origin: { name: dHub.station.name, coordinates: dHub.station.coordinates },
+              destination,
+              departureAt: lmDep,
+              arrivalAt: lmArr,
+              durationSeconds: Math.round(lm.dur),
+              distanceMeters: Math.round(dHub.distanceMeters),
+              walkingDistanceMeters: lm.type === 'WALK' ? Math.round(dHub.distanceMeters) : 0,
+              priceMinor: Math.round(lm.fare),
+              currency: 'UAH',
+              priceStatus: lm.type === 'WALK' ? 'LOCKED' : lm.type === 'TRANSIT' ? 'LOCKED' : 'ESTIMATED',
+              availabilityStatus: 'AVAILABLE',
+              providerType: lm.type === 'TAXI' ? 'taxi' : lm.type === 'TRANSIT' ? 'public_transit' : 'walking',
+              providerName: lm.type === 'TAXI' ? 'Таксі від вокзалу' : lm.type === 'TRANSIT' ? 'Міський транспорт' : undefined,
+              state: 'SUGGESTED',
+              source: lm.type === 'TAXI' ? 'partner-taxi' : lm.type === 'TRANSIT' ? 'city-transit' : 'walking',
+              metadata: { title: lm.title },
+            });
+
+            const totalChainDur = Math.round((lmArr.getTime() - departureAt.getTime()) / 1000);
+            const totalChainPrice = Math.round(fm.fare + totalRailFare + lm.fare);
+            const totalWalkingM = Math.round(legs.filter((l) => l.mode === 'WALK').reduce((sum, l) => sum + (l.walkingDistanceMeters ?? l.distanceMeters), 0));
+            const trainNumbers = corridorChain.map((c) => c.corridor.trainNumber).join(' + ');
+
+            journeys.push({
+              id: `intercity-corridor:${trainNumbers}:${oHub.station.id}-${dHub.station.id}:${fm.type}-${lm.type}`,
+              strategy,
+              score: totalChainDur * 0.5 + totalChainPrice * 0.15,
+              state: 'PLANNED',
+              source: 'uz-multimodal-corridor',
+              providerName: `${corridorChain[0].corridor.providerName} + ${fm.type === 'TRANSIT' ? 'Міський транспорт' : 'Довіз'}`,
+              totalDurationSeconds: totalChainDur,
+              totalPriceMinor: totalChainPrice,
+              confirmedPriceMinor: null,
+              estimatedPriceMinMinor: totalChainPrice,
+              estimatedPriceMaxMinor: Math.round(totalChainPrice * 1.1),
+              walkingMeters: totalWalkingM,
+              transfers: corridorChain.length + (fm.type !== 'WALK' ? 1 : 0) + (lm.type !== 'WALK' ? 1 : 0) - 1,
+              reliabilityScore: 0.96,
+              comfortScore: fm.type === 'TAXI' || lm.type === 'TAXI' ? 0.95 : 0.88,
+              legs,
+            });
+          }
+        }
       }
     }
   }

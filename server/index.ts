@@ -45,6 +45,7 @@ import { getAllRegions, findRegion, findRegionByCoordinates, getTransportCatalog
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
+import { composeUkraineMultimodalChains, type MultimodalJourney } from './journey/multimodalChainEngine';
 import { buildBicycleRouteEstimates, buildScooterRouteEstimates, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
 import { micromobilityJourneyFareMinor } from './journey/micromobilityFare';
 import { memoizeRequestSearch } from './journey/requestSearchMemo';
@@ -3095,8 +3096,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
   }
   let gtfsWorkerSearch: Awaited<ReturnType<typeof gtfsSearchWorker.search>> = { descriptors: [], errors: [], searches: [] };
+  const shouldRunWorkerSearch = routeDistanceMeters < 45_000;
   try {
-    if (eligibleGtfsProviders.length > 0 || metroSources) {
+    if (shouldRunWorkerSearch && (eligibleGtfsProviders.length > 0 || metroSources)) {
       gtfsWorkerSearch = await gtfsSearchWorker.search({
         providerId: 'worker', providerName: 'worker', origin: search.origin.coordinates, destination: search.destination.coordinates,
         earliestDeparture: search.departureAt,
@@ -3599,10 +3601,54 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
     return routes.join('>');
   };
+
+  type MultimodalCandidate = JourneyOption & {
+    kind: 'multimodal';
+    journey: MultimodalJourney;
+  };
+  const multimodalCandidates: MultimodalCandidate[] = [];
+  const shouldRunUkraineMultimodal = routeDistanceMeters >= 20_000 || (scheduledCandidates.length === 0 && candidates.length === 0);
+  if (shouldRunUkraineMultimodal) {
+    try {
+      const generatedMultimodal = await composeUkraineMultimodalChains({
+        origin: search.origin,
+        destination: search.destination,
+        departureAt: search.departureAt,
+        passengers: search.passengers,
+        strategy: search.strategy,
+        preferences: search.preferences,
+      });
+      for (const mm of generatedMultimodal) {
+        if (search.preferences.maxPriceMinor !== undefined && mm.totalPriceMinor !== null && mm.totalPriceMinor > search.preferences.maxPriceMinor) continue;
+        if (search.preferences.maxTotalDurationSeconds !== undefined && mm.totalDurationSeconds > search.preferences.maxTotalDurationSeconds) continue;
+        if (search.preferences.maxTransfers !== undefined && mm.transfers > search.preferences.maxTransfers) continue;
+        if (search.preferences.maxWalkingMeters !== undefined && mm.walkingMeters > search.preferences.maxWalkingMeters) continue;
+
+        multimodalCandidates.push({
+          id: mm.id,
+          diversityKey: `multimodal:${mm.legs.map((l) => l.mode).join('>')}`,
+          durationSeconds: mm.totalDurationSeconds,
+          priceMinor: mm.totalPriceMinor,
+          transfers: mm.transfers,
+          walkingMeters: mm.walkingMeters,
+          reliability: mm.reliabilityScore,
+          transferRisk: mm.transfers > 0 ? Math.min(mm.transfers * 0.1, 0.4) : 0,
+          comfort: mm.comfortScore,
+          legs: mm.legs.map((l) => ({ mode: l.mode, providerId: l.providerId })),
+          kind: 'multimodal',
+          journey: mm,
+        });
+      }
+    } catch {
+      // Fallback if multimodal engine encounters unexpected data
+    }
+  }
+
   const rankedCandidates = [
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
     ...micromobilityCandidates.map((candidate) => ({ ...candidate })),
+    ...multimodalCandidates.map((candidate) => ({ ...candidate })),
     ...scheduledCandidates.map((itinerary) => ({
       id: itinerary.id,
       diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
@@ -3637,6 +3683,16 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   if (wantsBike && microPoints.length > 0) routePlannerTypes.add('bike');
   if (wantsScooter && scooterRouteProviders.length > 0) routePlannerTypes.add('scooter');
   for (const group of mergedFeedGroups) for (const routeType of group.routeTypes) routePlannerTypes.add(routeType);
+  for (const mc of multimodalCandidates) {
+    for (const leg of mc.journey.legs) {
+      if (leg.mode === 'RAIL') routePlannerTypes.add('train');
+      if (leg.mode === 'TAXI') routePlannerTypes.add('taxi');
+      if (leg.mode === 'METRO') routePlannerTypes.add('metro');
+      if (leg.mode === 'TRAM') routePlannerTypes.add('tram');
+      if (leg.mode === 'BUS') routePlannerTypes.add('bus');
+      if (leg.mode === 'COMMUNITY') routePlannerTypes.add('carpool');
+    }
+  }
   const canonicalRouteTypes = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'];
   const requestedRouteTypes = search.preferences.allowedTransportTypes ?? canonicalRouteTypes;
   const unsupportedSelectedTypes = requestedRouteTypes
@@ -3656,6 +3712,117 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     await client.query('BEGIN');
     for (const representative of representatives) {
       const candidate = representative.journey;
+      if (candidate.kind === 'multimodal') {
+        const mmCandidate = candidate as MultimodalCandidate;
+        const mmJourney = mmCandidate.journey;
+        const stored = await client.query<{ id: string }>(
+          `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
+           VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
+          [effectiveUserId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
+            search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
+            search.departureAt, representative.strategy, search.passengers,
+            mmJourney.totalPriceMinor !== null ? Math.round(mmJourney.totalPriceMinor) : null,
+            mmJourney.estimatedPriceMinMinor !== null ? Math.round(mmJourney.estimatedPriceMinMinor) : (mmJourney.totalPriceMinor !== null ? Math.round(mmJourney.totalPriceMinor) : null),
+            mmJourney.estimatedPriceMaxMinor !== null ? Math.round(mmJourney.estimatedPriceMaxMinor) : (mmJourney.totalPriceMinor !== null ? Math.round(mmJourney.totalPriceMinor) : null),
+            Math.round(mmJourney.totalDurationSeconds), Math.round(mmJourney.walkingMeters), Math.round(mmJourney.transfers),
+            mmJourney.reliabilityScore, mmJourney.comfortScore],
+        );
+        const journeyId = stored.rows[0].id;
+        await client.query(
+          `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
+          [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
+            preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
+            preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
+            preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
+            preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
+            configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
+            preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+            JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
+        );
+
+        const responseLegs: Array<Record<string, unknown>> = [];
+        let ordinal = 0;
+        let firstServiceLegId: string | null = null;
+
+        for (const leg of mmJourney.legs) {
+          const inserted = await client.query<{ id: string }>(
+            `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_minor,price_min_minor,price_max_minor,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
+             VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,'UAH',$15,$15,$15,$16,$17,
+               (SELECT id FROM mobility_providers WHERE operator_id=$18 ORDER BY (status='enabled') DESC,priority,id LIMIT 1),
+               $19,'SUGGESTED',$20,now(),$21::jsonb) RETURNING id`,
+            [journeyId, ordinal++, leg.mode, leg.origin.coordinates[0], leg.origin.coordinates[1], leg.origin.name,
+              leg.destination.coordinates[0], leg.destination.coordinates[1], leg.destination.name,
+              leg.departureAt, leg.arrivalAt,
+              Math.round(leg.durationSeconds),
+              Math.round(leg.distanceMeters),
+              Math.round(leg.walkingDistanceMeters ?? (leg.mode === 'WALK' ? leg.distanceMeters : 0)),
+              leg.priceMinor !== null ? Math.round(leg.priceMinor) : null,
+              leg.priceStatus, leg.availabilityStatus, leg.providerId ?? null,
+              leg.providerType, leg.source, JSON.stringify(leg.metadata ?? {})],
+          );
+          if (leg.mode !== 'WALK') firstServiceLegId ??= inserted.rows[0].id;
+
+          responseLegs.push({
+            id: inserted.rows[0].id,
+            mode: leg.mode,
+            transportType: leg.metadata?.transportType ?? (leg.mode === 'RAIL' ? 'train' : leg.mode === 'TAXI' ? 'taxi' : leg.mode === 'METRO' ? 'metro' : leg.mode === 'TRAM' ? 'tram' : leg.mode === 'WALK' ? 'walk' : 'bus'),
+            origin: leg.origin,
+            destination: leg.destination,
+            departureAt: leg.departureAt,
+            arrivalAt: leg.arrivalAt,
+            scheduledDepartureAt: leg.departureAt,
+            scheduledArrivalAt: leg.arrivalAt,
+            durationSeconds: leg.durationSeconds,
+            distanceMeters: leg.distanceMeters,
+            walkingDistanceMeters: leg.walkingDistanceMeters ?? (leg.mode === 'WALK' ? leg.distanceMeters : 0),
+            priceMinor: leg.priceMinor,
+            currency: leg.currency,
+            priceStatus: leg.priceStatus,
+            availabilityStatus: leg.availabilityStatus,
+            providerName: leg.providerName,
+            routeName: leg.routeName,
+            headsign: leg.headsign ?? leg.destination.name,
+            source: leg.source,
+            routeGeometry: [leg.origin.coordinates, leg.destination.coordinates],
+            liveStatus: leg.mode === 'RAIL' ? 'SCHEDULED' : 'UNVERIFIED',
+            driver: leg.driver ?? null,
+            vehicle: leg.vehicle ?? null,
+            ...leg.metadata,
+          });
+        }
+
+        if (firstServiceLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstServiceLegId]);
+
+        journeys.push({
+          id: journeyId,
+          offerId: mmJourney.offerId ?? null,
+          origin: search.origin,
+          destination: search.destination,
+          strategy: representative.strategy,
+          requestedDepartureAt: search.departureAt.toISOString(),
+          waitingSeconds: Math.max(0, Math.round((mmJourney.legs[0]?.departureAt.getTime() - search.departureAt.getTime()) / 1000)),
+          recommendedStrategies: representative.recommendedStrategies,
+          strategyRanks: representative.strategyRanks,
+          score: representative.score,
+          state: 'PLANNED',
+          source: mmJourney.source,
+          providerName: mmJourney.providerName,
+          totalDurationSeconds: mmJourney.totalDurationSeconds,
+          totalPriceMinor: mmJourney.totalPriceMinor,
+          confirmedPriceMinor: mmJourney.confirmedPriceMinor,
+          estimatedPriceMinMinor: mmJourney.estimatedPriceMinMinor ?? mmJourney.totalPriceMinor,
+          estimatedPriceMaxMinor: mmJourney.estimatedPriceMaxMinor ?? mmJourney.totalPriceMinor,
+          currency: 'UAH',
+          priceStatus: mmJourney.totalPriceMinor ? 'ESTIMATED' : 'UNKNOWN',
+          walkingMeters: mmJourney.walkingMeters,
+          transfers: mmJourney.transfers,
+          reliabilityScore: mmJourney.reliabilityScore,
+          comfortScore: mmJourney.comfortScore,
+          legs: responseLegs,
+        });
+        continue;
+      }
       if (candidate.kind === 'micromobility' || candidate.kind === 'micromobility-transit') {
         const route = candidate as MicromobilityCandidate;
         const stored = await client.query<{ id: string }>(
