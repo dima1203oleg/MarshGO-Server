@@ -32,7 +32,30 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-JOURNEY_TEST_DATABASE_URL="$DATABASE_URL" npm run test:integration:journey
+# Each integration suite is opt-in: without the managed API and a loopback database it prints
+# "tests 0" and exits 0. A green CI would then prove nothing, so every phase below has to show
+# that its suite actually executed. This keeps mandatory gates (P0 auth, P1 carpool rendezvous,
+# QR attestation) from silently degrading into skips if the env wiring is ever refactored away.
+run_suite() {
+  local label="$1"
+  shift
+  local log rc ran
+  log="$(mktemp)"
+  if "$@" 2>&1 | tee "$log"; then rc=0; else rc="${PIPESTATUS[0]}"; fi
+  ran="$(grep -oE 'tests [0-9]+$' "$log" | tail -1 | grep -oE '[0-9]+' || true)"
+  rm -f "$log"
+  if (( rc != 0 )); then
+    echo "✗ integration suite '$label' failed (exit $rc)." >&2
+    return "$rc"
+  fi
+  if [[ -z "$ran" || "$ran" == "0" ]]; then
+    echo "✗ integration suite '$label' reported no tests — it self-skipped, which is not a pass." >&2
+    return 1
+  fi
+  echo "✓ integration suite '$label' executed $ran test(s)."
+}
+
+run_suite journey env JOURNEY_TEST_DATABASE_URL="$DATABASE_URL" npm run test:integration:journey
 
 start_api() {
   local routing_url="${1:-}"
@@ -83,42 +106,43 @@ start_secondary_api() {
 }
 
 start_api
-API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" npm run test:integration:live-journey
-API_TEST_GTFS_FIXTURE=1 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+run_suite live-journey env API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:live-journey
+run_suite bookings env API_TEST_GTFS_FIXTURE=1 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:bookings
-API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+run_suite partners env API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:partners
 # These two suites default to a hand-started dev API, so they were only ever run manually.
 # Binding them to the managed API makes the P0 auth and carpool lifecycles real CI coverage.
-API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+run_suite auth-security env API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:auth-security
-API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+run_suite rendezvous env API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:rendezvous
-API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+run_suite qr-attestation env API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:qr-attestation
 stop_api
 
 OSRM_STUB_PORT=3304 node tests/fixtures/osrm-stub.mjs &
 OSRM_PID=$!
 start_api "http://127.0.0.1:3304/route/v1/driving"
-API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" API_TEST_NAVIGATION=true \
+run_suite navigation env API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" API_TEST_NAVIGATION=true \
   npm run test:integration:navigation
 stop_api
 
 start_api
 start_secondary_api
-API_TEST_URL="$API_URL" API_TEST_SECONDARY_URL="$SECONDARY_API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+run_suite realtime env API_TEST_URL="$API_URL" API_TEST_SECONDARY_URL="$SECONDARY_API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:realtime
 stop_secondary_api
 stop_api
-API_TEST_DATABASE_URL="$DATABASE_URL" API_TEST_RESTART=true API_TEST_RESTART_PORT=3308 \
+run_suite restart env API_TEST_DATABASE_URL="$DATABASE_URL" API_TEST_RESTART=true API_TEST_RESTART_PORT=3308 \
   npm run test:integration:restart
 
 API_TEST_TRUST_PROXY_HOPS=1 API_TEST_RATE_LIMIT_PREFIX_OVERRIDE="${RATE_LIMIT_TEST_PREFIX}strict:" \
   API_TEST_RATE_LIMIT_LIMIT=3 API_TEST_RATE_LIMIT_WINDOW_MS=60000 start_api
 API_TEST_TRUST_PROXY_HOPS=1 API_TEST_RATE_LIMIT_PREFIX_OVERRIDE="${RATE_LIMIT_TEST_PREFIX}strict:" \
   API_TEST_RATE_LIMIT_LIMIT=3 API_TEST_RATE_LIMIT_WINDOW_MS=60000 start_secondary_api
-API_TEST_URL="$API_URL" API_TEST_SECONDARY_URL="$SECONDARY_API_URL" \
+run_suite rate-limit env API_TEST_URL="$API_URL" API_TEST_SECONDARY_URL="$SECONDARY_API_URL" \
   npm run test:integration:rate-limit
 stop_secondary_api
 stop_api
