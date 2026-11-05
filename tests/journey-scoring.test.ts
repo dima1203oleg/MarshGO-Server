@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { JOURNEY_SCORE_WEIGHTS, paretoFrontier, scoreJourneys, selectRepresentativeJourneys, selectStrategyAlternatives, selectStrategyRecommendations, strategiesWithComparablePrices, TRANSFER_TIME_PENALTY_SECONDS } from '../server/journey/scoring';
-import type { JourneyOption } from '../server/journey/types';
+import type { ScoreWeights } from '../server/journey/scoring';
+import { compareStableId } from '../server/journey/stableOrdering';
+import type { JourneyOption, JourneyStrategy } from '../server/journey/types';
 
 const candidates: JourneyOption[] = [
   { id: 'bus', durationSeconds: 6600, priceMinor: 12000, transfers: 0, walkingMeters: 200, reliability: 0.82, transferRisk: 0, comfort: 0.6, legs: [{ mode: 'BUS' }] },
@@ -170,5 +172,86 @@ describe('Journey strategy scoring', () => {
   it('rejects incomplete or invalid option measurements instead of inventing values', () => {
     assert.throws(() => scoreJourneys([{ ...candidates[0], reliability: 1.2 }], 'RELIABLE'), /invalid scoring features/);
     assert.throws(() => scoreJourneys([{ ...candidates[0], priceMinor: -1 }], 'CHEAPEST'), /invalid scoring features/);
+  });
+
+  // The scorer runs ~10^5 times per city search through the candidate sampler, so its
+  // implementation was rewritten to stop allocating a closure table and per-journey metric
+  // records. That is only safe if the output does not move: this test keeps the previous
+  // algorithm verbatim as a reference and demands bit-identical scores and ordering over
+  // randomized sets for every strategy, including the two that sort by a single promise.
+  it('matches the pre-allocation-rewrite scorer exactly on randomized sets', () => {
+    const reference = <T extends JourneyOption>(journeys: readonly T[], strategy: JourneyStrategy, weights: Partial<ScoreWeights> = {}) => {
+      const normalizedValue = (value: number, min: number, max: number) => (max === min ? 0 : Math.max(0, Math.min(1, (value - min) / (max - min))));
+      const risk = (journey: JourneyOption) => Math.max(journey.transferRisk, journey.reliability === null ? 1 : 1 - journey.reliability);
+      const metrics: Record<string, (journey: T) => number> = {
+        durationSeconds: (journey) => journey.durationSeconds + journey.transfers * TRANSFER_TIME_PENALTY_SECONDS,
+        priceMinor: (journey) => journey.priceMinor ?? Number.MAX_SAFE_INTEGER,
+        transfers: (journey) => journey.transfers,
+        walkingMeters: (journey) => journey.walkingMeters,
+        risk: (journey) => risk(journey),
+        comfortPenalty: (journey) => journey.comfort === null ? 0.5 : 1 - journey.comfort,
+      };
+      const ranges = Object.fromEntries(Object.entries(metrics).map(([key, valueOf]) => {
+        const values = journeys.map(valueOf);
+        return [key, { min: Math.min(...values), max: Math.max(...values) }];
+      })) as Record<string, { min: number; max: number }>;
+      const combinedWeights = { ...JOURNEY_SCORE_WEIGHTS[strategy], ...weights };
+      const scored = journeys.map((journey) => {
+        const values: Record<string, number> = {
+          durationSeconds: metrics.durationSeconds!(journey),
+          priceMinor: metrics.priceMinor!(journey),
+          transfers: metrics.transfers!(journey),
+          walkingMeters: metrics.walkingMeters!(journey),
+          risk: metrics.risk!(journey),
+          comfortPenalty: metrics.comfortPenalty!(journey),
+        };
+        const score = (Object.entries(values) as Array<[string, number]>).reduce((sum, [metric, value]) => {
+          const weightKey = metric === 'durationSeconds' ? 'time'
+            : metric === 'priceMinor' ? 'price'
+              : metric === 'transfers' ? 'transfers'
+                : metric === 'walkingMeters' ? 'walking'
+                  : metric === 'risk' ? 'risk' : 'comfort';
+          return sum + normalizedValue(value, ranges[metric]!.min, ranges[metric]!.max) * (combinedWeights as Record<string, number>)[weightKey];
+        }, 0);
+        return { journey, score, strategy };
+      });
+      return scored.sort((a, b) => {
+        if (strategy === 'FASTEST' && a.journey.durationSeconds !== b.journey.durationSeconds) return a.journey.durationSeconds - b.journey.durationSeconds;
+        if (strategy === 'CHEAPEST') {
+          if (a.journey.priceMinor === null && b.journey.priceMinor !== null) return 1;
+          if (a.journey.priceMinor !== null && b.journey.priceMinor === null) return -1;
+          if (a.journey.priceMinor !== null && b.journey.priceMinor !== null && a.journey.priceMinor !== b.journey.priceMinor) {
+            return a.journey.priceMinor - b.journey.priceMinor;
+          }
+        }
+        return a.score - b.score || compareStableId(a.journey.id, b.journey.id);
+      });
+    };
+    const random = (() => { let state = 0x9e3779b9; return () => { state += 0x6d2b79f5; let t = state; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296; }; })();
+    const strategies: JourneyStrategy[] = ['FASTEST', 'CHEAPEST', 'BALANCED', 'PREMIUM', 'RELIABLE', 'CUSTOM'];
+    for (const size of [1, 2, 9, 25, 40]) {
+      // Deliberately sparse: half the sets carry unknown fares or unknown comfort, and some
+      // share durations exactly, so ties and null-handling are compared too.
+      const set: JourneyOption[] = Array.from({ length: size }, (unused, index) => ({
+        id: `j${index}`,
+        durationSeconds: 1_200 + Math.floor(random() * 12) * 300,
+        priceMinor: random() < 0.5 ? null : Math.floor(random() * 60) * 100,
+        transfers: Math.floor(random() * 3),
+        walkingMeters: Math.floor(random() * 2_400),
+        reliability: random() < 0.4 ? null : Number((random() * 60 + 39).toFixed(2)) / 100,
+        transferRisk: Number((random() * 60).toFixed(2)) / 100,
+        comfort: random() < 0.4 ? null : Number((random() * 90 + 10).toFixed(2)) / 100,
+        legs: [{ mode: 'BUS' }],
+      }));
+      for (const strategy of strategies) {
+        for (const weights of [{}, { time: 0.5, comfort: 0.1 }, { time: undefined }] as Array<Partial<ScoreWeights>>) {
+          assert.deepStrictEqual(
+            scoreJourneys(set, strategy, weights),
+            reference(set, strategy, weights),
+            `scorer drift for ${strategy} with weights ${JSON.stringify(weights)} at size ${size}`,
+          );
+        }
+      }
+    }
   });
 });

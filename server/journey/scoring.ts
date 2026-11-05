@@ -37,8 +37,6 @@ export function strategiesWithComparablePrices<T extends JourneyOption>(
   return hasComparableFare ? [...strategies] : strategies.filter((strategy) => strategy !== 'CHEAPEST');
 }
 
-type Metric = 'durationSeconds' | 'priceMinor' | 'transfers' | 'walkingMeters' | 'risk' | 'comfortPenalty';
-
 function riskMetric(journey: JourneyOption): number {
   return Math.max(journey.transferRisk, journey.reliability === null ? 1 : 1 - journey.reliability);
 }
@@ -159,48 +157,73 @@ export function scoreJourneys<T extends JourneyOption>(
     }
   }
 
-  const metrics: Record<Metric, (journey: T) => number> = {
-    // Composite strategies compare perceived time, while the FASTEST promise
-    // below continues to sort by the actual door-to-door duration. This makes
-    // transfer effort a stable 8-minute generalized-cost penalty instead of a
-    // data-set-dependent normalized count alone.
-    durationSeconds: (journey) => journey.durationSeconds + journey.transfers * TRANSFER_TIME_PENALTY_SECONDS,
-    priceMinor: (journey) => journey.priceMinor ?? Number.MAX_SAFE_INTEGER,
-    transfers: (journey) => journey.transfers,
-    walkingMeters: (journey) => journey.walkingMeters,
-    risk: riskMetric,
-    comfortPenalty: (journey) => journey.comfort === null ? 0.5 : 1 - journey.comfort,
-  };
-  const ranges = Object.fromEntries(Object.entries(metrics).map(([key, valueOf]) => {
-    const values = journeys.map(valueOf);
-    return [key, { min: Math.min(...values), max: Math.max(...values) }];
-  })) as Record<Metric, { min: number; max: number }>;
-  const combinedWeights = { ...JOURNEY_SCORE_WEIGHTS[strategy], ...weights };
+  // The six metrics and their weights are resolved once per call. The previous
+  // shape rebuilt a closure table, a range record and, per journey, a values
+  // object plus an Object.entries array of six sub-arrays — the candidate
+  // sampler calls this ~10^5 times per city search, so the arithmetic was
+  // cheap and the allocation was not.
+  const baseWeights = JOURNEY_SCORE_WEIGHTS[strategy];
+  // `{ ...base, ...weights }` lets an explicitly present key override even with
+  // undefined, so key presence, not truthiness, decides.
+  const weightFor = (key: keyof ScoreWeights): number => (Object.prototype.hasOwnProperty.call(weights, key)
+    ? weights[key] as number : baseWeights[key]);
+  const wTime = weightFor('time');
+  const wPrice = weightFor('price');
+  const wTransfers = weightFor('transfers');
+  const wWalking = weightFor('walking');
+  const wRisk = weightFor('risk');
+  const wComfort = weightFor('comfort');
+
+  // Composite strategies compare perceived time, while the FASTEST promise
+  // below continues to sort by the actual door-to-door duration. This makes
+  // transfer effort a stable 8-minute generalized-cost penalty instead of a
+  // data-set-dependent normalized count alone.
+  //
+  // Every value below is finite: the validation loop above guarantees it, which
+  // is what lets a plain comparison loop replace Math.min(...values).
+  let minTime = Infinity, maxTime = -Infinity;
+  let minPrice = Infinity, maxPrice = -Infinity;
+  let minTransfers = Infinity, maxTransfers = -Infinity;
+  let minWalking = Infinity, maxWalking = -Infinity;
+  let minRisk = Infinity, maxRisk = -Infinity;
+  let minComfort = Infinity, maxComfort = -Infinity;
+  for (const journey of journeys) {
+    const time = journey.durationSeconds + journey.transfers * TRANSFER_TIME_PENALTY_SECONDS;
+    if (time < minTime) minTime = time;
+    if (time > maxTime) maxTime = time;
+    const price = journey.priceMinor ?? Number.MAX_SAFE_INTEGER;
+    if (price < minPrice) minPrice = price;
+    if (price > maxPrice) maxPrice = price;
+    if (journey.transfers < minTransfers) minTransfers = journey.transfers;
+    if (journey.transfers > maxTransfers) maxTransfers = journey.transfers;
+    if (journey.walkingMeters < minWalking) minWalking = journey.walkingMeters;
+    if (journey.walkingMeters > maxWalking) maxWalking = journey.walkingMeters;
+    const risk = riskMetric(journey);
+    if (risk < minRisk) minRisk = risk;
+    if (risk > maxRisk) maxRisk = risk;
+    const comfort = journey.comfort === null ? 0.5 : 1 - journey.comfort;
+    if (comfort < minComfort) minComfort = comfort;
+    if (comfort > maxComfort) maxComfort = comfort;
+  }
 
   const scored = journeys.map((journey) => {
-    const values: Record<Metric, number> = {
-      durationSeconds: metrics.durationSeconds(journey),
-      priceMinor: metrics.priceMinor(journey),
-      transfers: journey.transfers,
-      walkingMeters: journey.walkingMeters,
-      risk: metrics.risk(journey),
-      comfortPenalty: journey.comfort === null ? 0.5 : 1 - journey.comfort,
-    };
-    const score = (Object.entries(values) as Array<[Metric, number]>).reduce((sum, [metric, value]) => {
-      const weightKey = metric === 'durationSeconds' ? 'time'
-        : metric === 'priceMinor' ? 'price'
-          : metric === 'transfers' ? 'transfers'
-            : metric === 'walkingMeters' ? 'walking'
-              : metric === 'risk' ? 'risk' : 'comfort';
-      return sum + normalized(value, ranges[metric].min, ranges[metric].max) * combinedWeights[weightKey];
-    }, 0);
+    // Same accumulation order as the previous reduce over Object.entries, so
+    // every score is bit-identical to the one the old scorer returned.
+    const score = normalized(journey.durationSeconds + journey.transfers * TRANSFER_TIME_PENALTY_SECONDS, minTime, maxTime) * wTime
+      + normalized(journey.priceMinor ?? Number.MAX_SAFE_INTEGER, minPrice, maxPrice) * wPrice
+      + normalized(journey.transfers, minTransfers, maxTransfers) * wTransfers
+      + normalized(journey.walkingMeters, minWalking, maxWalking) * wWalking
+      + normalized(riskMetric(journey), minRisk, maxRisk) * wRisk
+      + normalized(journey.comfort === null ? 0.5 : 1 - journey.comfort, minComfort, maxComfort) * wComfort;
     return { journey, score, strategy };
   });
+  const isFastest = strategy === 'FASTEST';
+  const isCheapest = strategy === 'CHEAPEST';
   return scored.sort((a, b) => {
     // These two strategies are promises about a single measurable value, so
     // make that value the primary key. The weighted score remains the tie-breaker.
-    if (strategy === 'FASTEST' && a.journey.durationSeconds !== b.journey.durationSeconds) return a.journey.durationSeconds - b.journey.durationSeconds;
-    if (strategy === 'CHEAPEST') {
+    if (isFastest && a.journey.durationSeconds !== b.journey.durationSeconds) return a.journey.durationSeconds - b.journey.durationSeconds;
+    if (isCheapest) {
       if (a.journey.priceMinor === null && b.journey.priceMinor !== null) return 1;
       if (a.journey.priceMinor !== null && b.journey.priceMinor === null) return -1;
       if (a.journey.priceMinor !== null && b.journey.priceMinor !== null && a.journey.priceMinor !== b.journey.priceMinor) {
