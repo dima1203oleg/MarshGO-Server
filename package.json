@@ -26,6 +26,7 @@
     "test:integration:rate-limit": "tsx --test tests/redis-rate-limit.integration.test.ts",
     "test:integration:restart": "tsx --test tests/booking-restart.integration.test.ts",
     "test:integration:journey": "tsx --test tests/journey-schema.integration.test.ts",
+    "test:integration:pg-socket-failure": "tsx --test tests/pg-socket-failure.integration.test.ts",
     "test:integration:journey-activation": "tsx --test tests/journey-activation.integration.test.ts",
     "test:integration:live-journey": "tsx --test tests/live-journey.integration.test.ts",
     "test:integration:auth-security": "tsx --test tests/auth-security-regressions.integration.test.ts",
