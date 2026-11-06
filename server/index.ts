@@ -2819,7 +2819,8 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
        json_build_array(ST_X(j.destination::geometry),ST_Y(j.destination::geometry)) AS destination_coordinates,
        j.requested_departure_at,j.requested_arrival_at,j.strategy,j.state,j.passenger_count,j.total_price_minor,
        j.confirmed_price_minor,j.estimated_price_min_minor,j.estimated_price_max_minor,j.total_duration_s,
-       j.walking_distance_m,j.transfer_count,j.reliability_score,j.comfort_score,j.current_leg_id,j.created_at,j.updated_at,
+       j.walking_distance_m,j.transfer_count,j.reliability_score,j.comfort_score,j.current_leg_id,j.started_at AS "startedAt",
+       j.completed_at AS "completedAt",j.created_at,j.updated_at,
        GREATEST(j.total_duration_s-COALESCE(SUM(l.duration_s),0),0)::int AS "waitingSeconds",
        COALESCE(json_agg(json_build_object(
          'id',l.id,'ordinal',l.ordinal,'mode',l.mode,'originName',l.origin_name,'originCoordinates',
@@ -2933,6 +2934,134 @@ app.get('/api/v1/journeys/:id/live', requireAuth, asyncHandler(async (req, res) 
     vehicles: null, network: null, timetable: null,
   }, now)));
   res.json({ data: { journeyId: req.params.id, checkedAt: new Date(now).toISOString(), segments } });
+}));
+
+// Passenger navigation lifecycle owns journeys.state and its navigation pointer only.
+// Booking and journey-leg business states remain controlled by their dedicated APIs.
+app.post('/api/v1/journeys/:id/activate', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid Journey ID', 'invalid_journey_id');
+  }
+  const requestedLegId = req.body?.legId;
+  if (requestedLegId !== undefined && requestedLegId !== null
+    && (typeof requestedLegId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestedLegId))) {
+    throw new ApiError(400, 'invalid Journey leg ID', 'invalid_journey_leg_id');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { rows } = await client.query<{ state: string; current_leg_id: string | null; started_at: Date | null }>(
+      'SELECT state,current_leg_id,started_at FROM journeys WHERE id=$1 AND user_id=$2 FOR UPDATE', [req.params.id, req.userId],
+    );
+    const journey = rows[0];
+    if (!journey) throw new ApiError(404, 'Journey not found');
+
+    let requestedLeg: string | null = null;
+    if (typeof requestedLegId === 'string') {
+      const leg = await client.query<{ id: string }>(
+        'SELECT id FROM journey_legs WHERE id=$1 AND journey_id=$2 FOR SHARE', [requestedLegId, req.params.id],
+      );
+      if (!leg.rows[0]) throw new ApiError(400, 'Journey leg does not belong to this journey', 'invalid_journey_leg');
+      requestedLeg = leg.rows[0].id;
+    }
+
+    if (journey.state === 'ACTIVE' || journey.state === 'TRANSFER') {
+      await client.query('COMMIT');
+      res.json({ data: { id: req.params.id, state: journey.state, currentLegId: journey.current_leg_id, startedAt: journey.started_at }, replayed: true });
+      return;
+    }
+    if (['COMPLETED','CANCELLED','FAILED'].includes(journey.state)) {
+      throw new ApiError(409, 'a finished journey cannot be activated', 'journey_already_finished');
+    }
+
+    let currentLegId = requestedLeg ?? journey.current_leg_id;
+    if (!currentLegId) {
+      const firstLeg = await client.query<{ id: string }>(
+        'SELECT id FROM journey_legs WHERE journey_id=$1 ORDER BY ordinal LIMIT 1 FOR SHARE', [req.params.id],
+      );
+      currentLegId = firstLeg.rows[0]?.id ?? null;
+    }
+    const activated = await client.query<{ started_at: Date }>(
+      `UPDATE journeys SET state='ACTIVE',started_at=COALESCE(started_at,now()),current_leg_id=$2,updated_at=now()
+       WHERE id=$1 AND user_id=$3 RETURNING started_at`, [req.params.id, currentLegId, req.userId],
+    );
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES($1,$2,$3,$4)',
+      [req.userId, 'journey.activated', 'journey', req.params.id]);
+    await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:activate:${req.params.id}:${crypto.randomUUID()}`,
+      [req.userId!], { journey_id: req.params.id, ...(currentLegId ? { journey_leg_id: currentLegId } : {}), state: 'ACTIVE' });
+    await client.query('COMMIT');
+    res.json({ data: { id: req.params.id, state: 'ACTIVE', currentLegId, startedAt: activated.rows[0]?.started_at ?? null } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
+}));
+
+app.post('/api/v1/journeys/:id/end', requireAuth, asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid Journey ID', 'invalid_journey_id');
+  }
+  const outcome = req.body?.outcome;
+  if (outcome !== 'COMPLETED' && outcome !== 'CANCELLED') {
+    throw new ApiError(400, 'outcome must be COMPLETED or CANCELLED', 'invalid_journey_outcome');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Booking lifecycle endpoints lock booking rows before they lock journeys. Keep the
+    // same lock order here to avoid a journey↔booking deadlock during start/completion.
+    await client.query(
+      `SELECT b.id FROM journey_legs l JOIN journeys j ON j.id=l.journey_id
+         JOIN bookings b ON b.id=l.booking_id
+        WHERE j.id=$1 AND j.user_id=$2 AND b.status IN ('confirmed','boarding','in_progress')
+        ORDER BY b.id FOR UPDATE OF b`, [req.params.id, req.userId],
+    );
+    const { rows } = await client.query<{ state: string; started_at: Date | null; completed_at: Date | null }>(
+      'SELECT state,started_at,completed_at FROM journeys WHERE id=$1 AND user_id=$2 FOR UPDATE', [req.params.id, req.userId],
+    );
+    const journey = rows[0];
+    if (!journey) throw new ApiError(404, 'Journey not found');
+
+    // Recheck after acquiring the journey lock: a booking creation transaction can hold
+    // the journey first, insert its booking, and commit before this transaction locks it.
+    const activeBookings = await client.query<{ id: string; status: string }>(
+      `SELECT b.id,b.status FROM journey_legs l JOIN bookings b ON b.id=l.booking_id
+        WHERE l.journey_id=$1 AND b.status IN ('confirmed','boarding','in_progress')
+        ORDER BY b.id`, [req.params.id],
+    );
+    if (activeBookings.rows.length > 0) {
+      throw new ApiError(409, 'end or cancel linked bookings before ending this journey', 'booking_lifecycle_active');
+    }
+
+    if (journey.state === outcome) {
+      await client.query('COMMIT');
+      res.json({ data: { id: req.params.id, state: journey.state, startedAt: journey.started_at, completedAt: journey.completed_at }, replayed: true });
+      return;
+    }
+    if (!['PLANNED','PARTIALLY_RESERVED','READY','ACTIVE','TRANSFER','REPLANNING'].includes(journey.state)) {
+      throw new ApiError(409, 'a finished journey cannot be ended again', 'journey_already_finished');
+    }
+    if (outcome === 'COMPLETED' && !journey.started_at) {
+      throw new ApiError(409, 'start the journey before completing it', 'journey_not_started');
+    }
+
+    const written = await client.query<{ started_at: Date | null; completed_at: Date | null }>(
+      `UPDATE journeys SET state=$2,completed_at=CASE WHEN $2='COMPLETED' THEN COALESCE(completed_at,now()) ELSE completed_at END,updated_at=now()
+       WHERE id=$1 AND user_id=$3 RETURNING started_at,completed_at`, [req.params.id, outcome, req.userId],
+    );
+    await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES($1,$2,$3,$4)',
+      [req.userId, `journey.${outcome === 'COMPLETED' ? 'completed' : 'cancelled'}`, 'journey', req.params.id]);
+    await insertRealtimeOutbox(client, 'journey.updated', `journey.updated:end:${req.params.id}:${outcome}`,
+      [req.userId!], { journey_id: req.params.id, state: outcome });
+    await client.query('COMMIT');
+    const result = written.rows[0] ?? { started_at: journey.started_at, completed_at: journey.completed_at };
+    res.json({ data: { id: req.params.id, state: outcome, startedAt: result.started_at, completedAt: result.completed_at } });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally { client.release(); }
 }));
 
 app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) => {
