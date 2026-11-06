@@ -4027,7 +4027,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                   ...(allocation ? { fareProductId: allocation.fareProductId,
                     fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
                   ...(segment.stops ? { stops: segment.stops } : {}),
-                  ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) }),
+                  ...(segment.routeGeometry ? {
+                    routeGeometrySource: provider?.routeGeometrySource ?? 'gtfs_shape',
+                    routeGeometry: segment.routeGeometry,
+                  } : {}) }),
                     segment.shapeDistanceMeters ?? null],
             );
             firstServiceLegId ??= inserted.rows[0].id;

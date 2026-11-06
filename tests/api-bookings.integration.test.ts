@@ -545,7 +545,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.equal(composedSearch.status, 200);
       const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partial: boolean; partialReasons: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated: boolean; candidateGenerationTruncated: boolean; resultSamplingTruncated: boolean; gtfsTruncation: Record<string, boolean>; journeys: Array<{
         id: string; offerId: string | null; source?: string; state: string;
-        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string }>;
+        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string; routeGeometry?: Array<[number, number]> }>;
       }> } });
       const composedData = composedPayload.data;
       assert.equal(typeof composedData.partial, 'boolean');
@@ -566,6 +566,25 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.deepEqual(composedJourney.legs.map((leg) => leg.mode), ['BUS','COMMUNITY','TRAM']);
       assert.equal(composedJourney.legs[1]!.offerId, ids.transitCompositionOffer);
       assert.equal(composedJourney.legs[1]!.availabilityStatus, 'AVAILABLE');
+
+      const composedJourneyRead = await fetch(`${apiUrl}/api/v1/journeys/${composedJourney.id}`, {
+        headers: { 'x-dev-user-id': compositionPassenger },
+      });
+      assert.equal(composedJourneyRead.status, 200);
+      const persistedComposition = (await composedJourneyRead.json() as { data: { legs: Array<{
+        id: string; metadata: { routeGeometrySource?: string; routeGeometry?: Array<[number, number]> };
+      }> } }).data;
+      const geometryTransitLegs = composedJourney.legs.filter((leg) => leg.mode !== 'COMMUNITY'
+        && (leg.routeGeometry?.length ?? 0) >= 2);
+      assert.ok(geometryTransitLegs.length > 0, 'the GTFS-composed fixture route includes source shape geometry');
+      for (const leg of geometryTransitLegs) {
+        const persistedLeg = persistedComposition.legs.find((candidate) => candidate.id === leg.id);
+        assert.ok(persistedLeg, `the selected GTFS leg ${leg.id} remains in the persisted journey`);
+        assert.deepEqual(persistedLeg.metadata.routeGeometry, leg.routeGeometry,
+          'journey reload preserves the GTFS route geometry returned by search');
+        assert.equal(persistedLeg.metadata.routeGeometrySource, 'gtfs_shape',
+          'journey reload preserves the trusted GTFS provenance required by live route rendering');
+      }
 
       const transferLimitedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
