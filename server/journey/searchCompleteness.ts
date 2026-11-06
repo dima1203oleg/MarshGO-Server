@@ -34,6 +34,16 @@ export type SearchCompleteness = {
   searchTruncated: boolean;
   searchComplete: boolean;
   transitSearchFailed: boolean;
+  /** Measured only when every queried feed missed a side at the walk radius; absent otherwise. */
+  nearestOriginStopMeters?: number | null;
+  nearestDestinationStopMeters?: number | null;
+  /**
+   * Set when the search planned from the closest stop although it sat outside the walking shed, so
+   * the walk is longer than the request asked for. The count is how many candidates carry it.
+   * Absent when every displayed journey walked inside the shed.
+   */
+  walkReachExtended?: true;
+  journeysWithExtendedReach?: number;
 };
 
 export type SearchCompletenessInput = {
@@ -50,6 +60,9 @@ export type SearchCompletenessInput = {
   searchTruncated: boolean;
   /** True when the transit provider search threw and returned nothing at all. */
   transitSearchFailed?: boolean | undefined;
+  /** Per-side nearest-stop distances measured during a walk-radius blocked transit search. */
+  walkingReach?: { nearestOriginStopMeters: number | null; nearestDestinationStopMeters: number | null;
+    extended?: boolean | undefined; journeysWithExtendedReach?: number | undefined } | undefined;
 };
 
 const CANONICAL = new Set<string>(CANONICAL_ROUTE_TYPES);
@@ -96,5 +109,15 @@ export function buildSearchCompleteness(input: SearchCompletenessInput): SearchC
     searchTruncated: input.searchTruncated,
     searchComplete: !input.searchTruncated && !transitSearchFailed && providersFailed === 0 && input.candidatesGenerated > 0,
     transitSearchFailed,
+    ...(input.walkingReach ? {
+      nearestOriginStopMeters: input.walkingReach.nearestOriginStopMeters,
+      nearestDestinationStopMeters: input.walkingReach.nearestDestinationStopMeters,
+      // The distances alone cannot tell the interface whether the journey shown is a longer walk or
+      // the search really was blocked, so the extended fact travels with them.
+      ...(input.walkingReach.extended ? {
+        walkReachExtended: true as const,
+        journeysWithExtendedReach: input.walkingReach.journeysWithExtendedReach ?? 0,
+      } : {}),
+    } : {}),
   };
 }

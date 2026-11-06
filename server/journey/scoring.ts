@@ -68,6 +68,65 @@ export interface StrategyRecommendation<T extends JourneyOption> {
   strategyRanks?: Partial<Record<JourneyStrategy, number>>;
 }
 
+/** Two search instants out of three leave a single non-dominated journey, which is too thin to compare. */
+export const MIN_COMPARABLE_ALTERNATIVES = 3;
+
+/** The smallest arrival difference a passenger reads as "another option" rather than a duplicate card. */
+export const MIN_PERCEPTIBLE_ARRIVAL_GAP_SECONDS = 120;
+
+/**
+ * Does this journey add a decision the already-shown cards do not offer? A card is only worth showing when it
+ * arrives at a materially different time or costs a materially different amount. Walk distance and transfer
+ * count are deliberately not differentiators: a card with the same arrival and the same fare that walks
+ * further or transfers once more is strictly worse, not a choice, and the better-walking twin of that card is
+ * already non-dominated so it reached the frontier on its own.
+ */
+function addsADecision<T extends JourneyOption>(candidate: T, shown: readonly T[]): boolean {
+  return shown.every((other) => other.id === candidate.id
+    || Math.abs(other.durationSeconds - candidate.durationSeconds) >= MIN_PERCEPTIBLE_ARRIVAL_GAP_SECONDS
+    || (other.priceMinor === null) !== (candidate.priceMinor === null)
+    || (other.priceMinor !== null && candidate.priceMinor !== null && other.priceMinor !== candidate.priceMinor));
+}
+
+/** The chain a passenger recognises as "that line", used both for the per-chain cap and for the backfill. */
+function routeChainKey<T extends JourneyOption>(journey: T): string {
+  const modeChain = journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.mode).join('>') || 'WALK';
+  return journey.diversityKey ?? modeChain;
+}
+
+/**
+ * A search at one instant usually produces exactly one non-dominated journey: the first direct ride beats every
+ * transfer chain and every later departure on duration, price and walk at once, so the frontier is a set of one
+ * and the passenger gets a single card to "compare" and "select" from. Being dominated is not being the same
+ * journey — the slower tram line is still a line the passenger may choose — so a thin frontier is backfilled
+ * with the best journey of each chain that is not represented yet.
+ *
+ * The backfill has a second test, because a different line chain is not automatically a different choice: the
+ * measured Lviv corridor returned three cards with the same 3 232 s arrival, the same 23 ₴ fare and walks of
+ * 1 867/1 867/2 192 m, differing only in that one ride was split across two or three route ids. Three copies
+ * of one decision read as a broken app, so a backfilled card must also arrive at a materially different time
+ * or cost a materially different amount (see `addsADecision`). That corridor then yields 3 232 s / 3 772 s /
+ * 3 952 s — three different arrivals on three different lines.
+ * Frontier members are ranked first and the per-chain cap is unchanged, so the FASTEST and CHEAPEST promises
+ * stay factual.
+ */
+function comparablePool<T extends JourneyOption>(journeys: readonly T[], frontier: readonly T[]): T[] {
+  const pool = [...frontier];
+  if (frontier.length >= MIN_COMPARABLE_ALTERNATIVES) return pool;
+  const represented = new Set(pool.map(routeChainKey));
+  const frontierIds = new Set(frontier.map((journey) => journey.id));
+  const rest = journeys.filter((journey) => !frontierIds.has(journey.id) && !represented.has(routeChainKey(journey)));
+  for (const { journey } of scoreJourneys(rest, 'BALANCED')) {
+    if (pool.length >= MIN_COMPARABLE_ALTERNATIVES) break;
+    const chain = routeChainKey(journey);
+    if (represented.has(chain)) continue;
+    if (!addsADecision(journey, pool)) continue;
+    represented.add(chain);
+    pool.push(journey);
+  }
+  return pool;
+}
+
 /** Keep a bounded, diverse-enough set of Pareto alternatives for each visible strategy. */
 export function selectStrategyAlternatives<T extends JourneyOption>(
   journeys: readonly T[],
@@ -77,19 +136,18 @@ export function selectStrategyAlternatives<T extends JourneyOption>(
   if (!Number.isInteger(maximumPerStrategy) || maximumPerStrategy < 1 || maximumPerStrategy > 50) {
     throw new TypeError('maximum alternatives per strategy must be between 1 and 50');
   }
-  const frontier = paretoFrontier(journeys);
+  const pool = comparablePool(journeys, paretoFrontier(journeys));
   const alternatives = new Map<string, StrategyRecommendation<T>>();
   for (const strategy of strategies) {
     // An unknown fare is not a zero or a comparable amount. Keep such routes
     // available to other strategies, but never include them in CHEAPEST.
     const strategyCandidates = strategy === 'CHEAPEST'
-      ? frontier.filter((journey) => journey.priceMinor !== null)
-      : frontier;
+      ? pool.filter((journey) => journey.priceMinor !== null)
+      : pool;
     const chainCounts = new Map<string, number>();
     let rank = 0;
     for (const { journey, score } of scoreJourneys(strategyCandidates, strategy)) {
-      const modeChain = journey.legs.filter((leg) => leg.mode !== 'WALK').map((leg) => leg.mode).join('>') || 'WALK';
-      const diversityKey = journey.diversityKey ?? modeChain;
+      const diversityKey = routeChainKey(journey);
       const count = chainCounts.get(diversityKey) ?? 0;
       if (count >= 3) continue;
       chainCounts.set(diversityKey, count + 1);
