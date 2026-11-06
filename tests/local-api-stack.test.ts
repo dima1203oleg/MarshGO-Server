@@ -83,6 +83,12 @@ describe('local API stack compose isolation', () => {
     assert.doesNotMatch(compose, /NODE_ENV: production/);
   });
 
+  it('passes the selected local geocoder through without enabling one by default', () => {
+    assert.match(compose, /GEOCODING_PROVIDER: \$\{LOCAL_API_GEOCODING_PROVIDER:-nominatim\}/);
+    assert.match(envExample, /LOCAL_API_GEOCODING_PROVIDER=nominatim/);
+    assert.match(compose, /GEOCODING_ENGINE_URL: \$\{LOCAL_API_GEOCODING_ENGINE_URL:-\}/);
+  });
+
   it('sequences the api behind healthy db and redis', () => {
     assert.match(compose, /pg_isready/);
     assert.match(compose, /redis-cli/, 'redis healthcheck missing');

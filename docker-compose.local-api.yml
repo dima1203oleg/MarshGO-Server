@@ -66,6 +66,7 @@ services:
       # (labelled estimates / unavailable) instead of inventing results.
       OSRM_URL: ${LOCAL_API_OSRM_URL:-}
       WALKING_ROUTING_URL: ${LOCAL_API_WALKING_ROUTING_URL:-}
+      GEOCODING_PROVIDER: ${LOCAL_API_GEOCODING_PROVIDER:-nominatim}
       GEOCODING_ENGINE_URL: ${LOCAL_API_GEOCODING_ENGINE_URL:-}
       GEOCODING_REVERSE_URL: ${LOCAL_API_GEOCODING_REVERSE_URL:-}
     ports:

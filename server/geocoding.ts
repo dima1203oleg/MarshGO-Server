@@ -17,6 +17,7 @@ export class GeocodingUnavailableError extends Error {
  * one region that separates equally named places (Львів the city from Львів the Crimean village).
  */
 const MAX_SUGGESTION_LABEL_LENGTH = 64;
+const UKRAINE_BOUNDS = '22.137,44.386,40.228,52.379';
 const SETTLEMENT_KEYS = ['city', 'town', 'village', 'municipality', 'hamlet'] as const;
 const CITY_KEYS = ['city', 'town'] as const;
 const LOCALITY_KEYS = ['suburb', 'neighbourhood', 'quarter', 'county'] as const;
@@ -81,6 +82,58 @@ export function parseNominatimSuggestions(payload: unknown): PlaceSuggestion[] {
   });
 }
 
+/** Photon returns GeoJSON, with OSM provenance in `properties` and WGS84 [lon, lat] geometry. */
+export function parsePhotonSuggestions(payload: unknown): PlaceSuggestion[] {
+  if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { features?: unknown }).features)) {
+    throw new GeocodingUnavailableError('Geocoder returned an invalid response');
+  }
+  const features = (payload as { features: unknown[] }).features;
+  const suggestions = features.flatMap((feature): PlaceSuggestion[] => {
+    if (!feature || typeof feature !== 'object') return [];
+    const item = feature as Record<string, unknown>;
+    const rawProperties = item.properties;
+    const rawGeometry = item.geometry;
+    if (!rawProperties || typeof rawProperties !== 'object' || !rawGeometry || typeof rawGeometry !== 'object') return [];
+    const properties = rawProperties as Record<string, unknown>;
+    const geometry = rawGeometry as Record<string, unknown>;
+    const coordinates = geometry.coordinates;
+    const text = (value: unknown) => typeof value === 'string' ? value.trim() : '';
+    if (text(properties.countrycode).toLowerCase() !== 'ua' || geometry.type !== 'Point'
+      || !Array.isArray(coordinates) || coordinates.length < 2) return [];
+    const longitude = Number(coordinates[0]);
+    const latitude = Number(coordinates[1]);
+    const osmType = text(properties.osm_type);
+    const osmId = properties.osm_id;
+    if (!Number.isFinite(longitude) || Math.abs(longitude) > 180 || !Number.isFinite(latitude) || Math.abs(latitude) > 90
+      || !osmType || (typeof osmId !== 'string' && typeof osmId !== 'number')) return [];
+
+    const name = text(properties.name);
+    const street = text(properties.street);
+    const houseNumber = text(properties.housenumber);
+    const city = text(properties.city) || text(properties.town) || text(properties.village);
+    const district = text(properties.district);
+    const state = text(properties.state);
+    const main = street ? `${street}${houseNumber ? `, ${houseNumber}` : ''}` : name || city || district || state;
+    if (!main) return [];
+    const locality = city && city.toLowerCase() !== main.toLowerCase() ? city : '';
+    const region = locality || (state && state.toLowerCase() !== main.toLowerCase() ? state : '');
+    const labelParts = [main, region].filter((part, index, all) => part && all.findIndex((other) => other.toLowerCase() === part.toLowerCase()) === index);
+    let label = labelParts.join(', ');
+    if (label.length > MAX_SUGGESTION_LABEL_LENGTH) {
+      const tail = region ? `, ${region}` : '';
+      label = `${main.slice(0, Math.max(1, MAX_SUGGESTION_LABEL_LENGTH - tail.length - 1))}…${tail}`;
+    }
+    return [{ label, latitude, longitude, providerId: `${osmType.toLowerCase()}:${String(osmId)}` }];
+  });
+  const seen = new Set<string>();
+  return suggestions.filter((place) => {
+    const key = place.label.toLowerCase().replace(/\s+/g, ' ');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 const reverseCache = new Map<string, { at: number; place: PlaceSuggestion }>();
 const reverseCacheTtlMs = 10 * 60_000;
 
@@ -109,16 +162,19 @@ async function reverseGeocodeUncached(latitude: number, longitude: number): Prom
   }
   url.searchParams.set('lat', String(latitude));
   url.searchParams.set('lon', String(longitude));
-  url.searchParams.set('format', 'jsonv2');
-  url.searchParams.set('addressdetails', '1');
-  url.searchParams.set('accept-language', 'uk');
+  const photon = process.env.GEOCODING_PROVIDER === 'photon';
+  if (!photon) {
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('addressdetails', '1');
+    url.searchParams.set('accept-language', 'uk');
+  }
   const headers = new Headers({ accept: 'application/json', 'user-agent': 'MARSHGO/1.0 (reverse geocoding)' });
   const apiKey = process.env.GEOCODING_API_KEY;
   if (apiKey) headers.set('authorization', `Bearer ${apiKey}`);
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) }).catch(() => null);
   if (!response?.ok) throw new GeocodingUnavailableError('Reverse geocoder request failed');
   const record = await response.json().catch(() => { throw new GeocodingUnavailableError('Reverse geocoder returned invalid JSON'); });
-  const [place] = parseNominatimSuggestions([record]);
+  const [place] = photon ? parsePhotonSuggestions(record) : parseNominatimSuggestions([record]);
   if (!place) throw new GeocodingUnavailableError('Reverse geocoder returned no valid place');
   return place;
 }
@@ -138,21 +194,37 @@ export async function suggestPlaces(query: string, bias?: PlaceBias): Promise<Pl
   let url: URL;
   try { url = new URL(endpoint); }
   catch { throw new GeocodingUnavailableError('Geocoder endpoint is invalid'); }
+  const photon = process.env.GEOCODING_PROVIDER === 'photon';
+  if (!photon && url.hostname === 'nominatim.openstreetmap.org') {
+    throw new GeocodingUnavailableError('Public Nominatim does not support place autocomplete; configure Photon or an approved geocoder');
+  }
   if (url.protocol !== 'https:' && process.env.NODE_ENV === 'production') {
     throw new GeocodingUnavailableError('Production geocoder must use HTTPS');
   }
   url.searchParams.set('q', query);
-  url.searchParams.set('format', 'jsonv2');
-  url.searchParams.set('addressdetails', '1');
-  url.searchParams.set('countrycodes', 'ua');
-  url.searchParams.set('accept-language', 'uk');
-  url.searchParams.set('limit', '6');
-  if (bias) url.searchParams.set('viewbox', biasViewbox(bias));
+  if (photon) {
+    url.searchParams.set('countrycode', 'UA');
+    url.searchParams.set('bbox', UKRAINE_BOUNDS);
+    url.searchParams.set('limit', '6');
+  } else {
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('addressdetails', '1');
+    url.searchParams.set('countrycodes', 'ua');
+    url.searchParams.set('accept-language', 'uk');
+    url.searchParams.set('limit', '6');
+    if (bias) url.searchParams.set('viewbox', biasViewbox(bias));
+  }
+  if (photon && bias) {
+    url.searchParams.set('lat', String(bias.latitude));
+    url.searchParams.set('lon', String(bias.longitude));
+    url.searchParams.set('zoom', '12');
+  }
 
   const headers = new Headers({ accept: 'application/json', 'user-agent': 'MARSHGO/1.0 (place search)' });
   const apiKey = process.env.GEOCODING_API_KEY;
   if (apiKey) headers.set('authorization', `Bearer ${apiKey}`);
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) }).catch(() => null);
   if (!response?.ok) throw new GeocodingUnavailableError('Geocoder request failed');
-  return parseNominatimSuggestions(await response.json());
+  const payload = await response.json();
+  return photon ? parsePhotonSuggestions(payload) : parseNominatimSuggestions(payload);
 }

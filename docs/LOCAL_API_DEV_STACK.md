@@ -88,6 +88,12 @@ Every failure path exits nonzero. On readiness timeout, `start` dumps the last
   Without them the API degrades honestly (labelled estimates or
   `RoutingUnavailableError`), never inventing data. Point them at real
   engines you operate via `.env.local-api` if needed.
+* Place autocomplete supports the Nominatim JSON contract and Photon GeoJSON
+  when `LOCAL_API_GEOCODING_PROVIDER` is set to `nominatim` or `photon`.
+  Public Nominatim autocomplete is rejected because its usage policy forbids
+  it. Photon’s public demo may be used only for low-volume manual evaluation;
+  production requires an approved contracted or self-hosted endpoint with
+  suitable availability and capacity.
 * Session/realtime/rate-limit Redis is the stack's own instance; no shared
   infrastructure is touched.
 
