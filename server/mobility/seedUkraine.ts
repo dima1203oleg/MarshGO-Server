@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { Pool } from 'pg';
 import { testProviderConnection } from './connection';
-import { commercialUseFromLicense } from './licensePolicy';
+import { canEnableCommercialProvider, commercialUseFromLicense } from './licensePolicy';
 import { kyivOpenDataCatalog, ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3 } from './ukraineCatalog';
 
 /** Idempotent: registers every catalogue source, tests the open ones and enables those that are healthy. */
@@ -22,7 +22,7 @@ async function main() {
          RETURNING id,status`,
         [entry.name, entry.city, entry.providerType, entry.sourceType, entry.feedUrl, entry.realtimeUrl ?? null, entry.vehiclePositionUrl ?? null, entry.priority ?? 100, entry.access, entry.license ?? null, entry.updateFrequency ?? null, entry.coverage, entry.sourceRef,
           entry.access === 'open' ? commercialUseFromLicense(entry.license) : null,
-          entry.access === 'open' && Boolean(entry.license), entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP' : entry.access === 'open' && Boolean(entry.license) ? 'VALIDATED' : 'DISCOVERED'],
+          entry.access === 'open' && Boolean(entry.license), entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP' : canEnableCommercialProvider(entry.access, entry.license) ? 'VALIDATED' : 'DISCOVERED'],
       );
       const provider = rows[0];
       // Canonicalize the operator link for the public Zelectra GBFS system so
@@ -31,9 +31,9 @@ async function main() {
         && entry.feedUrl.replace(/\/$/, '') === 'https://zelectra.rideatom.com/gbfs/66/v3.0/gbfs') {
         await pool.query("UPDATE mobility_providers SET operator_id='zelectra' WHERE id=$1 AND operator_id IS DISTINCT FROM 'zelectra'", [provider.id]);
       }
-      if (entry.access !== 'open' || !entry.license) {
+      if (!canEnableCommercialProvider(entry.access, entry.license)) {
         await pool.query(`UPDATE mobility_providers SET health='offline',last_error=$2,last_checked_at=now(),status='disabled',discovery_status=$3 WHERE id=$1`,
-          [provider.id, entry.access === 'requires_credentials' ? 'REQUIRES_CREDENTIALS: потрібен ключ API від оператора' : entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP: умови комерційного використання не підтверджені' : entry.access === 'insecure_endpoint' ? 'INSECURE_ENDPOINT: джерело доступне лише по http, не підключено' : 'LICENSE_UNVERIFIED: licence terms are required before enabling', entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP' : 'DISCOVERED']);
+          [provider.id, entry.access === 'requires_credentials' ? 'REQUIRES_CREDENTIALS: потрібен ключ API від оператора' : entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP: умови комерційного використання не підтверджені' : entry.access === 'insecure_endpoint' ? 'INSECURE_ENDPOINT: джерело доступне лише по http, не підключено' : commercialUseFromLicense(entry.license) === false ? 'NONCOMMERCIAL_LICENSE: commercial reuse is not permitted' : 'LICENSE_UNVERIFIED: explicit commercial-use terms are required before enabling', entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP' : 'DISCOVERED']);
         console.log(`registered (${entry.access}): ${entry.name}`);
         continue;
       }
