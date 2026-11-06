@@ -400,20 +400,21 @@ test('oracle: seeded random small graphs agree with exhaustive enumeration on fr
   for (let iteration = 0; iteration < iterations; iteration += 1) {
     const grace = rand() < 0.5 ? 0 : 60;
     const options: ProviderOption[] = [];
-    // Every even iteration seeds an O→A→B→D skeleton so 3-leg coverage never depends
-    // on luck; every fourth skeleton is built with provably feasible transfer gaps.
+    // Every even iteration seeds an O→A→B→D skeleton whose transfer gaps are provably
+    // feasible (slack >= 0 by construction), so 3-leg coverage is guaranteed rather than
+    // left to random luck. Fares, uncertainty, grace and the extra random options still
+    // vary, and the odd iterations stay fully random for infeasible/negative cases.
     const skeletonChain = iteration % 2 === 0;
-    const guaranteedChain = iteration % 4 === 0;
     if (skeletonChain) {
       const chainNodes = ['O', 'A', 'B', 'D'];
       let cursor = Math.floor(rand() * 600);
       for (let leg = 0; leg < 3; leg += 1) {
         const ride = 300 + Math.floor(rand() * 600);
-        const uncertainty = guaranteedChain ? 0 : pick([0, 60, 120, 240]);
+        const uncertainty = pick([0, 60, 120, 240]);
         const price = rand() < 0.25 ? null : Math.floor(rand() * 5000);
         options.push(option(`chain-${leg}`, chainNodes[leg]!, chainNodes[leg + 1]!, cursor, cursor + ride, price, uncertainty));
         const required = uncertainty + 120 + grace;
-        cursor += ride + (guaranteedChain ? required + Math.floor(rand() * 600) : Math.floor(rand() * 900));
+        cursor += ride + required + Math.floor(rand() * 600);
       }
     }
     const count = (skeletonChain ? 2 : 4) + Math.floor(rand() * 5);
