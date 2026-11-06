@@ -8,7 +8,10 @@ test('keeps explicitly sourced geometry only for a compatible transport mode', (
   assert.deepEqual(trustedRouteGeometry({ mode: 'WALK', source: 'osrm-foot-route', routeGeometry: shape }), shape);
   assert.deepEqual(trustedRouteGeometry({ mode: 'BUS', metadata: { routeGeometrySource: 'gtfs_shape' }, routeGeometry: shape }), shape);
   assert.deepEqual(trustedRouteGeometry({ mode: 'METRO', metadata: { routeGeometrySource: 'official_geojson' }, routeGeometry: shape }), shape);
-  assert.deepEqual(trustedRouteGeometry({ mode: 'COMMUNITY', source: 'community-offer', routeGeometry: shape }), shape);
+  assert.equal(trustedRouteGeometry({ mode: 'COMMUNITY', source: 'community-offer', routeGeometry: shape }), null,
+    'the generic community-offer label does not prove road geometry provenance');
+  assert.equal(trustedRouteGeometry({ mode: 'COMMUNITY', metadata: { routeGeometrySource: 'unknown-router' }, routeGeometry: shape }), null);
+  assert.deepEqual(trustedRouteGeometry({ mode: 'COMMUNITY', metadata: { routeGeometrySource: 'osrm-car-route' }, routeGeometry: shape }), shape);
   assert.equal(trustedRouteGeometry({ mode: 'RAIL', source: 'uz-timetable', routeGeometry: shape }), null);
   assert.equal(trustedRouteGeometry({ mode: 'WALK', source: 'walking-straight-line-estimate', routeGeometry: shape }), null);
   assert.equal(trustedRouteGeometry({ mode: 'BUS', metadata: { routeGeometrySource: 'official_geojson' }, routeGeometry: shape }), null);

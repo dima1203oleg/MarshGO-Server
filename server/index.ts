@@ -3772,6 +3772,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const rating = offer.average_rating === null ? null : Number(offer.average_rating);
       return (search.preferences.minDriverRating === undefined || search.preferences.minDriverRating <= 0
         || (rating !== null && offer.review_count > 0 && rating >= search.preferences.minDriverRating))
+        && offer.route_source === 'osrm'
         && parseOfferGeometry(offer.route_geojson) !== null;
     });
     if (composableOffers.length > MAX_COMMUNITY_COMPOSITION_OFFERS) candidateGenerationTruncated = true;
@@ -3786,7 +3787,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         distanceMeters: Number(offer.distance_m), pricePerSeatMinor: Number(offer.price_per_seat_minor),
         currency: offer.currency.trim().toUpperCase(), availableSeats: Number(offer.available_seats),
         routeGeometry: parseOfferGeometry(offer.route_geojson), snapshotAt: offer.snapshot_at,
-        metadata: { driverName: offer.driver_name, vehicleId: offer.vehicle_id,
+        metadata: { routeGeometrySource: 'osrm-car-route', driverName: offer.driver_name, vehicleId: offer.vehicle_id,
           vehicleMake: offer.vehicle_make, vehicleModel: offer.vehicle_model,
           rating: offer.average_rating === null ? null : Number(offer.average_rating),
           reviewCount: offer.review_count, offerCreatedAt: offer.created_at },
@@ -4303,7 +4304,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         [journeyId, offer.origin_lon, offer.origin_lat, offer.origin_name, offer.destination_lon, offer.destination_lat,
           offer.destination_name, offer.departure_at, candidate.arrivalAt, offer.duration_s, offer.distance_m,
           candidate.totalPriceMinor, offer.currency, offer.offer_id, offer.snapshot_at,
-          JSON.stringify({ driverId: offer.driver_id, driverName: offer.driver_name, vehicleId: offer.vehicle_id,
+          JSON.stringify({ ...(offer.route_source === 'osrm' ? {
+            routeGeometrySource: 'osrm-car-route', routeGeometry: parseOfferGeometry(offer.route_geojson),
+          } : {}), driverId: offer.driver_id, driverName: offer.driver_name, vehicleId: offer.vehicle_id,
             vehicleMake: offer.vehicle_make, vehicleModel: offer.vehicle_model, rating: offer.average_rating,
             reviewCount: offer.review_count, availableSeatsAtSearch: offer.available_seats, offerCreatedAt: offer.created_at })],
       );
@@ -4322,7 +4325,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           destination: { name: offer.destination_name, coordinates: [offer.destination_lon, offer.destination_lat] },
           departureAt: offer.departure_at, arrivalAt: candidate.arrivalAt, durationSeconds: offer.duration_s,
           distanceMeters: offer.distance_m, priceMinor: candidate.totalPriceMinor, priceStatus: 'ESTIMATED',
-          availabilityStatus: 'AVAILABLE', source: 'community-offer', lastUpdatedAt: offer.snapshot_at,
+          availabilityStatus: 'AVAILABLE', source: 'community-offer',
+          ...(offer.route_source === 'osrm' && parseOfferGeometry(offer.route_geojson)
+            ? { routeGeometry: parseOfferGeometry(offer.route_geojson), metadata: {
+              routeGeometrySource: 'osrm-car-route', routeGeometry: parseOfferGeometry(offer.route_geojson),
+            } } : {}),
+          lastUpdatedAt: offer.snapshot_at,
           transportType: 'carpool', liveStatus: 'SCHEDULED',
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshot_at.getTime()) / 1000)),
           driver: { id: offer.driver_id, name: offer.driver_name,

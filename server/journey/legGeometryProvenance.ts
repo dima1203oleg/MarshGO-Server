@@ -5,11 +5,11 @@ const TRUSTED_GEOMETRY_MODES: Readonly<Record<string, ReadonlySet<string>>> = {
   'osrm-foot-route': new Set(['WALK']),
   'gtfs-pathway': new Set(['WALK']),
   'gtfs-pathways': new Set(['WALK']),
-  'osrm-car-route': new Set(['TAXI']),
+  'osrm-car-route': new Set(['TAXI', 'COMMUNITY']),
   gtfs_shape: new Set(['BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO', 'URBAN_BUS', 'FERRY', 'FUNICULAR']),
   official_geojson: new Set(['METRO']),
-  // Published community offers persist route geometry only when it was obtained from the road router.
-  'community-offer': new Set(['COMMUNITY']),
+  // Community offer geometry is trusted only when its persisted offer route_source
+  // was explicitly mapped to this road-router provenance token.
 };
 
 export type LegGeometryClaim = {

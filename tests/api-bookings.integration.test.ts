@@ -533,6 +533,26 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         [ids.transitCompositionOffer, ids.driver, ids.vehicle, offerOrigin[0], offerOrigin[1], offerDestination[0], offerDestination[1],
           offerRouteGeoJson, compositionDepartureAt, compositionArrivalAt, offerDistanceMeters, compositionDurationSeconds],
       );
+      const untrustedOfferSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
+        body: JSON.stringify({
+          origin: { name: 'API offer origin', coordinates: offerOrigin },
+          destination: { name: 'API offer destination', coordinates: offerDestination },
+          departureAt: compositionDepartureAt.toISOString(), passengers: 1, strategy: 'FASTEST',
+          preferences: { allowCommunity: true, allowedTransportTypes: ['carpool'] },
+        }),
+      });
+      assert.equal(untrustedOfferSearch.status, 200);
+      const untrustedOfferPayload = (await untrustedOfferSearch.json() as { data: { journeys: Array<{
+        offerId: string | null; legs: Array<{ mode: string; routeGeometry?: unknown; metadata?: Record<string, unknown> }>;
+      }> } }).data;
+      const untrustedOfferJourney = untrustedOfferPayload.journeys.find((journey) => journey.offerId === ids.transitCompositionOffer);
+      assert.ok(untrustedOfferJourney, 'an offer with an unknown route source may still be returned as an offer');
+      const untrustedCommunityLeg = untrustedOfferJourney.legs.find((leg) => leg.mode === 'COMMUNITY');
+      assert.ok(untrustedCommunityLeg);
+      assert.equal(untrustedCommunityLeg.routeGeometry, undefined, 'untrusted route_source must omit corridor geometry');
+      assert.equal(untrustedCommunityLeg.metadata?.routeGeometrySource, undefined);
+      await pool.query(`UPDATE offers SET route_source='osrm' WHERE id=$1`, [ids.transitCompositionOffer]);
       const composedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
         body: JSON.stringify({
@@ -567,6 +587,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.deepEqual(composedJourney.legs.map((leg) => leg.mode), ['BUS','COMMUNITY','TRAM']);
       assert.equal(composedJourney.legs[1]!.offerId, ids.transitCompositionOffer);
       assert.equal(composedJourney.legs[1]!.availabilityStatus, 'AVAILABLE');
+      assert.equal(composedJourney.legs[1]!.metadata?.routeGeometrySource, 'osrm-car-route',
+        'community route provenance is derived from the persisted OSRM offer source');
 
       const composedJourneyRead = await fetch(`${apiUrl}/api/v1/journeys/${composedJourney.id}`, {
         headers: { 'x-dev-user-id': compositionPassenger },
