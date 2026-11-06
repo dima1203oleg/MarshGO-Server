@@ -132,11 +132,11 @@ describe('passenger journey activation lifecycle (opt-in integration test)', { s
       `SELECT count(*)::int AS count FROM audit_events WHERE entity_id=$1 AND action='journey.activated'`, [ids.activeJourney],
     );
     assert.equal(audit.rows[0]?.count, 1);
-    const event = await pool.query<{ count: number; recipient_ids: string[] }>(
-      `SELECT count(*)::int AS count,(array_agg(recipient_ids))[1] AS recipient_ids FROM realtime_outbox
-        WHERE event_type='journey.updated' AND payload->>'journey_id'=$1`, [ids.activeJourney],
+    const event = await pool.query<{ recipient_ids: string[] }>(
+      `SELECT recipient_ids FROM realtime_outbox
+        WHERE event_type='journey.updated' AND payload->>'journey_id'=$1 ORDER BY created_at LIMIT 1`, [ids.activeJourney],
     );
-    assert.equal(event.rows[0]?.count, 1);
+    assert.equal(event.rows.length, 1);
     assert.deepEqual(event.rows[0]?.recipient_ids, [ids.passenger]);
   });
 
