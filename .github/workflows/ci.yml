@@ -59,3 +59,47 @@ jobs:
             sleep 1
           done
           curl --fail --silent http://127.0.0.1:3002/readyz
+      - name: Exercise local API Compose lifecycle end-to-end
+        run: |
+          set -euo pipefail
+          # CI runtime contract for scripts/local-api.sh + docker-compose.local-api.yml.
+          # Isolated stack ports must never collide with the CI service ports
+          # (postgres 5434, redis 6380) or the previous image smoke port (3002).
+          stack_db_port=5444
+          stack_redis_port=6390
+          stack_api_port=3012
+          for reserved in 5434 6380 3002; do
+            for chosen in "$stack_db_port" "$stack_redis_port" "$stack_api_port"; do
+              if [ "$chosen" = "$reserved" ]; then
+                echo "local-api CI: stack port $chosen collides with reserved CI port $reserved" >&2
+                exit 1
+              fi
+            done
+          done
+          # Disposable secrets: generated inside the runner, never printed,
+          # written to the gitignored env file with owner-only permissions.
+          umask 077
+          db_password="$(openssl rand -hex 16)"
+          session_secret="$(openssl rand -hex 32)"
+          {
+            printf 'LOCAL_API_POSTGRES_PASSWORD=%s\n' "$db_password"
+            printf 'LOCAL_API_SESSION_SECRET=%s\n' "$session_secret"
+            printf 'LOCAL_API_DB_PORT=%s\n' "$stack_db_port"
+            printf 'LOCAL_API_REDIS_PORT=%s\n' "$stack_redis_port"
+            printf 'LOCAL_API_PORT=%s\n' "$stack_api_port"
+            printf 'LOCAL_API_TRUST_PROXY_HOPS=0\n'
+          } > .env.local-api
+          unset db_password session_secret
+          # Always tear down (containers/network only, volumes preserved, never
+          # -v) and re-exit with the original status so start/smoke failures
+          # are never masked by cleanup.
+          cleanup() {
+            local status=$?
+            npm run local:api:down || echo "local-api CI: cleanup down failed" >&2
+            rm -f .env.local-api
+            exit "$status"
+          }
+          trap cleanup EXIT
+          npm run local:api:start
+          npm run local:api:smoke
+          echo "local-api CI: lifecycle OK on 127.0.0.1:$stack_api_port (start + exact-SHA smoke)"

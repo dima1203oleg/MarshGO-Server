@@ -9,6 +9,12 @@
   "scripts": {
     "api": "tsx server/index.ts",
     "db:migrate": "tsx server/migrate.ts",
+    "local:api:start": "bash scripts/local-api.sh start",
+    "local:api:stop": "bash scripts/local-api.sh stop",
+    "local:api:down": "bash scripts/local-api.sh down",
+    "local:api:status": "bash scripts/local-api.sh status",
+    "local:api:smoke": "bash scripts/local-api.sh smoke",
+    "local:api:version": "bash scripts/local-api.sh version",
     "lint": "npm run lint:all",
     "lint:all": "eslint server tests",
     "typecheck": "tsc --noEmit",

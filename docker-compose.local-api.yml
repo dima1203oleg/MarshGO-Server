@@ -1,0 +1,86 @@
+# Isolated local API development stack. Separate Compose project, volumes and
+# host ports from the acceptance stack in docker-compose.yml: this file must
+# never attach to, recreate, or delete marshgo-postgres / marshgo-redis data.
+# All host port binds are loopback-only. Managed exclusively via
+# scripts/local-api.sh (start/stop/down/status/smoke/version); stop/down never
+# pass -v, so named volumes survive every lifecycle operation.
+name: marshgo-local-api
+
+services:
+  db:
+    image: postgis/postgis:17-3.5
+    # The upstream postgis/postgis image currently publishes amd64 only.
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: marshgo_local
+      POSTGRES_USER: marshgo
+      POSTGRES_PASSWORD: ${LOCAL_API_POSTGRES_PASSWORD:?set LOCAL_API_POSTGRES_PASSWORD in .env.local-api}
+    ports:
+      - "127.0.0.1:${LOCAL_API_DB_PORT:-5444}:5432"
+    volumes:
+      - marshgo-local-api-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marshgo -d marshgo_local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${LOCAL_API_REDIS_PORT:-6390}:6379"
+    volumes:
+      - marshgo-local-api-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MARSHGO_BUILD_ID: ${MARSHGO_BUILD_ID:-local-dev}
+        MARSHGO_BUILD_SHA: ${MARSHGO_BUILD_SHA:-unknown}
+        MARSHGO_BUILD_TIME: ${MARSHGO_BUILD_TIME:-unknown}
+        MARSHGO_SOURCE_STATE: ${MARSHGO_SOURCE_STATE:-unknown}
+    environment:
+      NODE_ENV: development
+      # 0.0.0.0 is container-internal only; the host bind below is loopback.
+      API_HOST: 0.0.0.0
+      API_PORT: "3002"
+      TRUST_PROXY_HOPS: ${LOCAL_API_TRUST_PROXY_HOPS:-0}
+      DATABASE_URL: postgres://marshgo:${LOCAL_API_POSTGRES_PASSWORD:?set LOCAL_API_POSTGRES_PASSWORD in .env.local-api}@db:5432/marshgo_local
+      REDIS_URL: redis://redis:6379
+      SESSION_SECRET: ${LOCAL_API_SESSION_SECRET:?set LOCAL_API_SESSION_SECRET in .env.local-api (openssl rand -hex 32)}
+      CORS_ORIGINS: ${LOCAL_API_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:3103,http://127.0.0.1:3103,http://localhost:4178,http://127.0.0.1:4178,capacitor://localhost}
+      # Development auth hardening: real auth flow only, never the dev bypass or
+      # visible OTP, and never the GTFS test-fixture / fake-estimate mode.
+      AUTH_DEV_BYPASS: "false"
+      AUTH_DEV_OTP: "false"
+      MARSHGO_API_TEST_FIXTURE_MODE: "0"
+      # Optional upstreams; empty by design so routing degrades honestly
+      # (labelled estimates / unavailable) instead of inventing results.
+      OSRM_URL: ${LOCAL_API_OSRM_URL:-}
+      WALKING_ROUTING_URL: ${LOCAL_API_WALKING_ROUTING_URL:-}
+      GEOCODING_ENGINE_URL: ${LOCAL_API_GEOCODING_ENGINE_URL:-}
+      GEOCODING_REVERSE_URL: ${LOCAL_API_GEOCODING_REVERSE_URL:-}
+    ports:
+      - "127.0.0.1:${LOCAL_API_PORT:-3002}:3002"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  # Explicit names: without `name:` Compose would prefix them with the project
+  # (marshgo-local-api_marshgo-local-api-postgres), contradicting the docs and
+  # the isolation contract. These exact names must not pre-exist elsewhere.
+  marshgo-local-api-postgres:
+    name: marshgo-local-api-postgres
+  marshgo-local-api-redis:
+    name: marshgo-local-api-redis
