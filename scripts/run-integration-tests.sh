@@ -106,6 +106,8 @@ start_secondary_api() {
 }
 
 start_api
+run_suite journey-activation env API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:journey-activation
 run_suite live-journey env API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:live-journey
 run_suite bookings env API_TEST_GTFS_FIXTURE=1 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
