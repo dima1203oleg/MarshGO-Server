@@ -4391,7 +4391,6 @@ export function findGtfsItinerariesWithStats(
         const shapeMeters = measureGtfsTripRidingMeters(feed, segment.tripId, indexes.fromIndex, indexes.toIndex);
         if (shapeMeters !== null) segment.shapeDistanceMeters = shapeMeters;
       }
-      }
       segment.stops ??= stopCallsForTrip(feed, segment.tripId, indexes.fromIndex, indexes.toIndex, indexes.serviceDate);
       segment.traveledZoneIds = (feed.stopTimes.get(segment.tripId) ?? [])
         .slice(indexes.fromIndex, indexes.toIndex + 1)
