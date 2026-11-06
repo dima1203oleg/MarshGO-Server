@@ -22,11 +22,11 @@ import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
 import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
-import { scaleGtfsFareForPassengers } from './journey/gtfsFares';
+import { priceStatusFor, scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { scaleCashFareForPassengers } from './mobility/transportTariffs';
-import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, resolveTransitCandidateBudget, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, effectiveWalkingReachMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS, resolveTransitCandidateBudget, summarizeGtfsWalkReach, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, routePedestrianPath, STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
@@ -3080,7 +3080,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     return { stationSource: stations, routeSource: route, scheduleSources };
   })() : null;
   type SearchItinerary = GtfsItinerary & Partial<Pick<WalkingRoutedItinerary,
-    'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified' | 'walkingRoutesUnconfirmed'>>;
+    'accessWalk' | 'egressWalk' | 'transferWalks' | 'walkingRoutesVerified' | 'walkingRoutesUnconfirmed' | 'walkReachExtended'>>;
   const fareForPassengerCount = (itinerary: SearchItinerary): SearchItinerary => {
     if (search.passengers === 1) return itinerary;
     const fare = itinerary.fare ? scaleGtfsFareForPassengers(itinerary.fare, search.passengers) : null;
@@ -3101,6 +3101,30 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   let gtfsWorkerSearch: Awaited<ReturnType<typeof gtfsSearchWorker.search>> = { descriptors: [], errors: [], searches: [] };
   let transitSearchFailed = false;
   const transitCandidateBudget = resolveTransitCandidateBudget(process.env.JOURNEY_TRANSIT_CANDIDATE_LIMIT);
+  // The walking preference is a reach bound too: a pin in the middle of a block must not read
+  // as "no routes" while a stop sits 1.2 km away. Capped expansion, never a shrink.
+  const transitAccessWalkingMeters = effectiveWalkingReachMeters(
+    routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS, search.preferences.maxWalkingMeters);
+  const transitEgressWalkingMeters = effectiveWalkingReachMeters(
+    routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS, search.preferences.maxWalkingMeters);
+  // Those two numbers are straight-line stop-reach radii: they decide which stops the timetable
+  // search may look at. The legs they then cap are street paths, and a confirmed foot route leaves
+  // a block at more than the crow-flight line. Without the allowance the Lviv search measured at
+  // 2026-11-03 generated 100 real itineraries and returned none, because a 1 594 m walk to a stop
+  // 1 243 m away was rejected by the 1 500 m line that had selected that very stop.
+  const walkStreetDetourAllowance = search.preferences.maxWalkingMeters === undefined
+    ? STREET_WALKING_DETOUR_ALLOWANCE : 1;
+  // A walk limit the passenger typed is a street distance and stays a hard cap. The engine's own
+  // radii are not a request at all, so when no stop lies inside one, the closest stop there is
+  // becomes the fallback budget — bounded by the same ceiling a passenger may explicitly ask for,
+  // and every journey built on it is disclosed as needing a longer walk than planned.
+  const explicitWalkLimit = search.preferences.maxWalkingMeters !== undefined;
+  const extendedTransitAccessWalkingMeters = explicitWalkLimit
+    ? transitAccessWalkingMeters
+    : Math.max(transitAccessWalkingMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS);
+  const extendedTransitEgressWalkingMeters = explicitWalkLimit
+    ? transitEgressWalkingMeters
+    : Math.max(transitEgressWalkingMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS);
   try {
     if (eligibleGtfsProviders.length > 0 || metroSources) {
       gtfsWorkerSearch = await gtfsSearchWorker.search({
@@ -3114,8 +3138,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           ? maximumSearchDurationSeconds
           : maximumGtfsWaitWithinJourney(maximumSearchDurationSeconds),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
-        maximumAccessWalkingMeters: routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS,
-        maximumEgressWalkingMeters: routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS,
+        maximumAccessWalkingMeters: transitAccessWalkingMeters,
+        maximumEgressWalkingMeters: transitEgressWalkingMeters,
         maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
         allowedModes: allowedTransitModes, allowedTransportTypes: search.preferences.allowedTransportTypes,
       }, eligibleGtfsProviders.map((provider) => ({ id: provider.id, name: provider.name, city: provider.city,
@@ -3147,6 +3171,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   let pedestrianRoutesUnavailable = false;
   let pedestrianCandidatesRejected = false;
   let hasUnpricedTransitCandidates = false;
+  let walkReachExtendedCandidates = 0;
+  const walkRejections = createWalkingRejectionReasons();
   const routeTransitItinerary = async (
     itinerary: GtfsItinerary,
     origin: [number, number],
@@ -3163,20 +3189,28 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           && !itinerary.transferWalkingGeometries[index]))) return null;
       return itinerary;
     }
+    // Each leg resolves its own foot graph. When a configured graph set does not cover the
+    // pair, that walk is unroutable and must not fall through to a global fallback router;
+    // it stays null so the leg keeps its estimate and is reported as unconfirmed.
+    const routeLeg = (from: [number, number], to: [number, number]) => {
+      const endpoint = walkingEndpointFor(from, to);
+      if (!endpoint) {
+        walkRejections.unroutableWalkPair += 1;
+        return Promise.resolve(null);
+      }
+      return routePedestrianPath(from, to, endpoint, routeBudget);
+    };
     const transferRequests = itinerary.transferWalkingMeters.map(async (meters, index) => {
       const previous = itinerary.segments[index];
       const next = itinerary.segments[index + 1];
       if (!previous || !next || itinerary.transferInSeat[index] || meters <= 0 || itinerary.transferWalkingGeometries[index]) return null;
-      return routePedestrianPath(previous.destinationStop.coordinates, next.originStop.coordinates,
-        walkingEndpointFor(previous.destinationStop.coordinates, next.originStop.coordinates), routeBudget);
+      return routeLeg(previous.destinationStop.coordinates, next.originStop.coordinates);
     });
     const [access, egress, ...transfers] = await Promise.all([
       first.distanceToOriginStopMeters > 0
-        ? routePedestrianPath(origin, first.originStop.coordinates,
-          walkingEndpointFor(origin, first.originStop.coordinates), routeBudget) : null,
+        ? routeLeg(origin, first.originStop.coordinates) : null,
       last.distanceFromDestinationStopMeters > 0
-        ? routePedestrianPath(last.destinationStop.coordinates, destination,
-          walkingEndpointFor(last.destinationStop.coordinates, destination), routeBudget) : null,
+        ? routeLeg(last.destinationStop.coordinates, destination) : null,
       ...transferRequests,
     ]);
     // A carpool pickup has no timetable to fall back on: an unmeasured walk to the
@@ -3185,13 +3219,16 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       || (last.distanceFromDestinationStopMeters > 0 && !egress)
       || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
         && !itinerary.transferWalkingGeometries[index] && !transfers[index]))) return null;
-    const effectiveMaxAccessMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS;
-    const effectiveMaxEgressMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS;
-    return applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
-      maximumAccessMeters: effectiveMaxAccessMeters,
-      maximumEgressMeters: effectiveMaxEgressMeters,
+    const routed = applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
+      maximumAccessMeters: transitAccessWalkingMeters,
+      maximumEgressMeters: transitEgressWalkingMeters,
       maximumTransferMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
-    });
+      streetDetourAllowance: walkStreetDetourAllowance,
+      extendedMaximumAccessMeters: extendedTransitAccessWalkingMeters,
+      extendedMaximumEgressMeters: extendedTransitEgressWalkingMeters,
+    }, walkRejections);
+    if (routed?.walkReachExtended) walkReachExtendedCandidates += 1;
+    return routed;
   };
 
   for (const itinerarySearch of gtfsWorkerSearch.searches) {
@@ -3224,7 +3261,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
   }
   if (walkingRoutingConfigured) {
-    const routedCandidates = await Promise.all(scheduledCandidates.map(async (itinerary) => {
+    const routeStartedAt = Date.now();
+    const routeCandidate = async (itinerary: SearchItinerary): Promise<SearchItinerary | null> => {
       const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, search.destination.coordinates, walkingRouteBudget, false);
       if (!routed) {
         pedestrianCandidatesRejected = true;
@@ -3232,10 +3270,46 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       }
       if (routed.walkingRoutesUnconfirmed && walkingRouteBudget.remaining > 0) pedestrianRoutesUnavailable = true;
       return routed;
-    }));
-    scheduledCandidates = routedCandidates.filter((itinerary): itinerary is SearchItinerary => itinerary !== null)
-      .filter((itinerary) => (search.preferences.maxWalkingMeters === undefined || itinerary.walkingMeters <= search.preferences.maxWalkingMeters)
-        && (search.preferences.maxTotalDurationSeconds === undefined || itinerary.durationSeconds <= search.preferences.maxTotalDurationSeconds));
+    };
+    // Route in bounded waves. Issuing the whole candidate pool at once overflows the routing
+    // queue, whose rejection path also spends the request budget, so the search would pay for
+    // routes that never reached a foot graph and still show estimated walks.
+    const candidateBatchSize = walkingRouteCandidateBatchSize();
+    const routedCandidates: Array<SearchItinerary | null> = [];
+    for (let index = 0; index < scheduledCandidates.length; index += candidateBatchSize) {
+      const batch = scheduledCandidates.slice(index, index + candidateBatchSize);
+      routedCandidates.push(...await Promise.all(batch.map(routeCandidate)));
+    }
+    const routed = routedCandidates.filter((itinerary): itinerary is SearchItinerary => itinerary !== null);
+    const withinPreferences = routed.filter((itinerary) => {
+      if (search.preferences.maxWalkingMeters !== undefined && itinerary.walkingMeters > search.preferences.maxWalkingMeters) {
+        walkRejections.overPreferenceWalk += 1;
+        return false;
+      }
+      if (search.preferences.maxTotalDurationSeconds !== undefined
+        && itinerary.durationSeconds > search.preferences.maxTotalDurationSeconds) {
+        walkRejections.overPreferenceDuration += 1;
+        return false;
+      }
+      return true;
+    });
+    scheduledCandidates = withinPreferences;
+    if (process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1') {
+      const walked = withinPreferences.map((itinerary) => itinerary.walkingMeters);
+      console.info(JSON.stringify({ event: 'walking.route.debug', candidates: routedCandidates.length,
+        retained: scheduledCandidates.length, budgetLimit: walkingRouteBudget.limit, requestsSpent: walkingRouteBudget.spent,
+        exhausted: walkingRouteBudget.exhausted, unconfirmed: pedestrianRoutesUnavailable,
+        rejected: pedestrianCandidatesRejected, durationMs: Date.now() - routeStartedAt,
+        accessCapMeters: transitAccessWalkingMeters, egressCapMeters: transitEgressWalkingMeters,
+        preferenceWalkMeters: search.preferences.maxWalkingMeters ?? null,
+        streetDetourAllowance: walkStreetDetourAllowance,
+        extendedAccessCapMeters: extendedTransitAccessWalkingMeters,
+        extendedEgressCapMeters: extendedTransitEgressWalkingMeters,
+        beyondStandardReachCandidates: walkReachExtendedCandidates,
+        rejections: walkRejections,
+        // How close the best confirmed candidate was, so a cap can be judged against reality.
+        bestWalkedMeters: walked.length ? Math.min(...walked) : (routed.length ? Math.min(...routed.map(i => i.walkingMeters)) : null) }));
+    }
     if (pedestrianRoutesUnavailable) {
       providerErrors.push('Пішохідний маршрутизатор не повернув підтверджений шлях для частини варіантів; їхні піші ділянки залишено як оцінку.');
     }
@@ -3669,7 +3743,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   if (wantsScooter && scooterRouteProviders.length > 0) routePlannerTypes.add('scooter');
   for (const group of mergedFeedGroups) for (const routeType of group.routeTypes) routePlannerTypes.add(routeType);
   const canonicalRouteTypes = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'];
-  const requestedRouteTypes = search.preferences.allowedTransportTypes ?? canonicalRouteTypes;
+  // Only an explicit category selection is a passenger preference. An unrestricted search asks
+  // for everything, so reporting twelve unmet conditions would be invented noise: categories with
+  // no provider in this corridor are already disclosed through completeness.modesUnavailable.
+  const requestedRouteTypes = search.preferences.allowedTransportTypes ?? [];
   const unsupportedSelectedTypes = requestedRouteTypes
     .filter((type) => !routePlannerTypes.has(type))
     .map((type) => `transportType:${type}:not-in-route-engine`);
@@ -3683,6 +3760,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const effectiveUserId = req.userId ?? '00000000-0000-0000-0000-000000000001';
   const client = await pool.connect();
   const journeys: Array<Record<string, unknown>> = [];
+  let returnedWalkReachExtendedCount = 0;
   try {
     await client.query('BEGIN');
     for (const representative of representatives) {
@@ -3796,7 +3874,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               [journeyId, ordinal++, segment.mode, segment.originStop.coordinates[0], segment.originStop.coordinates[1], segment.originStop.name,
                 segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
                 segment.scheduledDepartureAt, segment.scheduledArrivalAt, durationSeconds, allocation?.priceMinor ?? null,
-                path.fare?.currency ?? 'UAH', allocation ? 'ESTIMATED' : 'UNKNOWN', segment.providerId,
+                path.fare?.currency ?? 'UAH', priceStatusFor(allocation?.priceMinor), segment.providerId,
                 segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
                 segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
                 JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
@@ -3816,7 +3894,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               departureAt: segment.departureAt, arrivalAt: segment.arrivalAt, scheduledDepartureAt: segment.scheduledDepartureAt,
               scheduledArrivalAt: segment.scheduledArrivalAt, durationSeconds, distanceMeters: segment.shapeDistanceMeters ?? null,
               priceMinor: allocation?.priceMinor ?? null, currency: allocation ? path.fare?.currency ?? null : null,
-              priceStatus: allocation ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN', source: 'gtfs-static',
+              priceStatus: priceStatusFor(allocation?.priceMinor), availabilityStatus: 'UNKNOWN', source: 'gtfs-static',
               providerName: segment.providerName, routeName: segment.routeName, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс',
               scheduleSemantics: segment.scheduleSemantics,
               ...(segment.stops ? { stops: segment.stops } : {}),
@@ -3937,7 +4015,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                 segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
                 segment.scheduledDepartureAt, segment.scheduledArrivalAt,
                 segment.realtimeUpdatedAt ? segment.departureAt : null, segment.realtimeUpdatedAt ? segment.arrivalAt : null,
-                durationSeconds, allocation?.priceMinor ?? null, path.fare?.currency ?? 'UAH', allocation ? 'ESTIMATED' : 'UNKNOWN',
+                durationSeconds, allocation?.priceMinor ?? null, path.fare?.currency ?? 'UAH', priceStatusFor(allocation?.priceMinor),
                 segment.providerId, segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
                 segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
                 JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
@@ -3962,7 +4040,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
               durationSeconds, distanceMeters: segment.shapeDistanceMeters ?? null, priceMinor: allocation?.priceMinor ?? null,
               currency: allocation ? path.fare?.currency ?? null : null,
-              priceStatus: allocation ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+              priceStatus: priceStatusFor(allocation?.priceMinor), availabilityStatus: 'UNKNOWN',
               ...(allocation ? { fareProductId: allocation.fareProductId,
                 fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
               ...(segment.stops ? { stops: segment.stops } : {}),
@@ -4170,7 +4248,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             segment.realtimeUpdatedAt ? segment.arrivalAt : null,
             durationSeconds,
             itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
-            itinerary.fare?.currency ?? 'UAH', itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', segment.providerId,
+            itinerary.fare?.currency ?? 'UAH', priceStatusFor(itinerary.fare?.allocations[segmentIndex]?.priceMinor), segment.providerId,
             segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
             segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
           JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
@@ -4198,7 +4276,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           ...(segment.realtimeUpdatedAt ? { predictedDepartureAt: segment.departureAt, predictedArrivalAt: segment.arrivalAt } : {}),
           durationSeconds,
           distanceMeters: segment.shapeDistanceMeters ?? null, priceMinor: itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
-          currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'UNKNOWN',
+          currency: itinerary.fare?.currency ?? null, priceStatus: priceStatusFor(itinerary.fare?.allocations[segmentIndex]?.priceMinor), availabilityStatus: 'UNKNOWN',
           ...(itinerary.fare?.allocations[segmentIndex] ? {
             fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
             fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
@@ -4235,8 +4313,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         totalPriceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null, confirmedPriceMinor: null,
         estimatedPriceMinMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
         estimatedPriceMaxMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
-        currency: itinerary.fare?.currency ?? null, priceStatus: itinerary.fare ? 'ESTIMATED' : 'UNKNOWN', walkingMeters: itinerary.walkingMeters,
+        currency: itinerary.fare?.currency ?? null, priceStatus: priceStatusFor(itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null), walkingMeters: itinerary.walkingMeters,
         transfers: itinerary.transfers, reliabilityScore: null, legs: responseLegs });
+      if (itinerary.walkReachExtended || (!walkingRoutingConfigured
+        && (first.distanceToOriginStopMeters > transitAccessWalkingMeters
+          || last.distanceFromDestinationStopMeters > transitEgressWalkingMeters))) {
+        returnedWalkReachExtendedCount += 1;
+      }
     }
     await client.query('COMMIT');
   } catch (error) {
@@ -4256,12 +4339,21 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...(search.strategy === 'CHEAPEST' && (scheduledCandidates.length > 0 || hasUnpricedTransitCandidates || hasUnpricedMicromobilityCandidates) ? ['CHEAPEST:unpriced-route-segments-unavailable'] : []),
     ...(search.preferences.maxTransfers !== undefined && search.preferences.maxTransfers > MAX_GTFS_TRANSFERS ? [`maxTransfers:limited-to-${MAX_GTFS_TRANSFERS}`] : []),
   ];
+  // Only searched groups measure reach; a thrown search is a failure, not an empty corridor,
+  // so the reason must not turn a worker crash into "no stops nearby".
+  const walkReachSummary = transitSearchFailed ? null : summarizeGtfsWalkReach(gtfsWorkerSearch.searches);
+  const noStopWithinWalkingDistance = walkReachSummary?.blocked === true;
+  // Disclose only selected GTFS journeys that were actually persisted and returned. The raw
+  // worker summary and routed candidate counter may describe candidates later filtered or unranked.
+  const walkReachExtended = returnedWalkReachExtendedCount > 0;
   const partialReasons = getJourneySearchPartialReasons({
     candidateGenerationTruncated,
     providerErrorCount: providerErrors.length,
     unsupportedPreferenceCount: unsupportedPreferences.length,
     scheduledCandidatesNeedWalkingRouting: scheduledCandidates.length > 0
       && (!walkingRoutingConfigured || pedestrianRoutesUnavailable),
+    noStopWithinWalkingDistance,
+    walkReachExtended,
   });
   const truncationState = getJourneySearchTruncationState({
     candidateGenerationTruncated,
@@ -4283,6 +4375,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     resultsReturned: journeys.length,
     searchTruncated: Object.values(truncationState).some(Boolean),
     transitSearchFailed,
+    ...((noStopWithinWalkingDistance || walkReachExtended) ? { walkingReach: {
+      nearestOriginStopMeters: walkReachSummary?.nearestOriginStopMeters ?? null,
+      nearestDestinationStopMeters: walkReachSummary?.nearestDestinationStopMeters ?? null,
+      // The routes are shown even though the walk overshoots the standard reach; the client needs
+      // the fact and the distance to say so instead of leaving a long walk unsuspicious.
+      ...(walkReachExtended ? { extended: true, journeysWithExtendedReach: returnedWalkReachExtendedCount } : {}),
+    } } : {}),
   });
   res.json({ data: {
     journeys,

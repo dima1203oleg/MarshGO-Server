@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS } from '../server/journey/gtfsTimetable';
 import {
-  applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, walkingEndpointFor, walkingRoutingEnabled, type WalkingRoutePath,
+  applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH, routePedestrianPath,
+  STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRouteRequestLimit,
+  walkingRoutingEnabled, walkingRoutingConfiguredFor, type WalkingRoutePath,
 } from '../server/journey/walkingRoutes';
 
 const start = Date.parse('2026-10-01T08:00:00Z');
@@ -143,7 +145,54 @@ test('caps external foot-route requests per search without caching a budget miss
   assert.equal(await routePedestrianPath([25.02, 49], [25.03, 49.01], endpoint, budget), null);
   assert.equal(budget.remaining, 0);
   assert.equal(budget.exhausted, true);
+  assert.equal(budget.spent, 1, 'only a request that reached a router is charged to the budget');
   assert.equal(fetchCount, 1);
+});
+
+test('the foot-route budget covers a real candidate pool and stays hard-bounded', (t) => {
+  t.diagnostic('regression: a live Lviv search generated 73 candidates; a 32-request budget left displayed journeys with estimated walks');
+  const original = process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH;
+  const restore = () => {
+    if (original === undefined) delete process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH;
+    else process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH = original;
+  };
+  t.after(restore);
+
+  delete process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH;
+  const fallback = walkingRouteRequestLimit();
+  assert.ok(fallback >= 96, `an ordinary corridor must not be starved: got ${fallback}`);
+  assert.ok(fallback <= MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH);
+  assert.equal(createWalkingRouteBudget().limit, fallback, 'a search uses the configured budget by default');
+
+  process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH = '500';
+  assert.equal(walkingRouteRequestLimit(), MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH, 'no search may fan out without a ceiling');
+  process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH = '4';
+  assert.equal(walkingRouteRequestLimit(), 16, 'an override too small to price one corridor is not trusted');
+  process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH = 'not-a-number';
+  assert.equal(walkingRouteRequestLimit(), fallback, 'an unreadable override falls back to the default');
+  restore();
+
+  assert.equal(createWalkingRouteBudget(24).limit, 24, 'a per-stage sub-budget stays below the ceiling');
+  assert.equal(createWalkingRouteBudget(100_000).limit, MAX_WALKING_ROUTE_REQUESTS_PER_SEARCH);
+  assert.equal(createWalkingRouteBudget(-1).limit, 0, 'a negative budget requests nothing');
+  assert.equal(createWalkingRouteBudget(1.5).limit, 0, 'a non-integer budget is not trusted');
+});
+
+test('candidate waves stay inside the routing queue capacity', (t) => {
+  const original = process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH;
+  t.after(() => {
+    if (original === undefined) delete process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH;
+    else process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH = original;
+  });
+  // ROUTING_MAX_CONCURRENCY(12) + ROUTING_MAX_QUEUE(24) accept 36 requests; beyond that the
+  // gateway rejects them and the rejected request still paid its budget.
+  delete process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH;
+  const wave = walkingRouteCandidateBatchSize();
+  assert.ok(wave >= 1 && wave * 3 <= 36, `a wave of ${wave} candidates must fit the default queue`);
+  process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH = '99';
+  assert.equal(walkingRouteCandidateBatchSize(), 12, 'wave size stays bounded');
+  process.env.WALKING_ROUTE_CANDIDATES_PER_BATCH = '0';
+  assert.equal(walkingRouteCandidateBatchSize(), 1, 'a wave of zero candidates would stall the search');
 });
 
 test('bounds concurrent provider work and drops excess queued walking paths', async (t) => {
@@ -198,7 +247,9 @@ test('selects the foot graph that covers both endpoints and refuses cross-city o
   assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://single:5000/route/v1/foot');
 });
 
-test('a bbox rule set alone counts as a configured foot router', (t) => {
+// The pipeline gate has to open for a per-area graph set even when no single WALKING_ROUTING_URL
+// exists: that was the acceptance-Lviv configuration where every foot leg stayed an estimate.
+test('opens the walking pipeline for a per-area graph set and keeps it closed for uncovered pairs', (t) => {
   const originalUrl = process.env.WALKING_ROUTING_URL;
   const originalUrls = process.env.WALKING_ROUTING_URLS;
   t.after(() => {
@@ -209,29 +260,91 @@ test('a bbox rule set alone counts as a configured foot router', (t) => {
   delete process.env.WALKING_ROUTING_URL;
   delete process.env.WALKING_ROUTING_URLS;
   assert.equal(walkingRoutingEnabled(), false);
+  assert.equal(walkingRoutingConfiguredFor([24.03, 49.84], [24.02, 49.89]), false);
 
-  process.env.WALKING_ROUTING_URL = '  ';
-  assert.equal(walkingRoutingEnabled(), false);
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([
+    { bbox: [23.9, 49.75, 24.2, 49.95], url: 'http://lviv:5000/route/v1/foot' },
+    { bbox: [30.2, 50.25, 30.8, 50.62], url: 'http://kyiv:5000/route/v1/foot' },
+  ]);
+  assert.equal(walkingRoutingEnabled(), true);
+  assert.equal(walkingRoutingConfiguredFor([24.03, 49.84], [24.02, 49.89]), true);
+  // A pair no graph covers must stay unroutable rather than reach the wrong city's graph.
+  assert.equal(walkingRoutingConfiguredFor([24.03, 49.84], [30.48, 50.44]), false);
 
   process.env.WALKING_ROUTING_URL = 'http://single:5000/route/v1/foot';
-  assert.equal(walkingRoutingEnabled(), true);
-
-  delete process.env.WALKING_ROUTING_URL;
-  process.env.WALKING_ROUTING_URLS = JSON.stringify([{ bbox: [23.9, 49.75, 24.2, 49.95], url: 'http://lviv:5000/route/v1/foot' }]);
-  assert.equal(walkingRoutingEnabled(), true);
-
-  process.env.WALKING_ROUTING_URLS = '[]';
-  assert.equal(walkingRoutingEnabled(), false);
-  process.env.WALKING_ROUTING_URLS = 'not-json';
-  assert.equal(walkingRoutingEnabled(), false);
+  delete process.env.WALKING_ROUTING_URLS;
+  assert.equal(walkingRoutingConfiguredFor([30.52, 50.45], [30.48, 50.44]), true);
 });
 
-// A bbox-only configuration used to leave the planner gated on the single-city variable: streets
-// disappeared from every walk leg while the disclosure said the router was configured. The gate
-// therefore has to stay on walkingRoutingEnabled(), which this source check pins down.
-test('the search gate reads walkingRoutingEnabled(), not the single-city URL variable', () => {
-  const plannerSource = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
-  assert.ok(plannerSource.includes('const walkingRoutingConfigured = walkingRoutingEnabled();'));
-  assert.equal(plannerSource.includes('walkingRoutingUrl'), false);
-  assert.ok(plannerSource.includes('door-to-door-walking:requires-WALKING_ROUTING_URL-or-WALKING_ROUTING_URLS'));
+/**
+ * The Lviv numbers measured on the live feed at 2026-11-03, rebuilt as fixtures: the destination
+ * stop lies 1 243 m from the pin in a straight line and 1 594 m along the foot graph, and the old
+ * comparison of those two numbers dropped all 100 itineraries the engine had built. Fixtures, not
+ * live evidence — the live proof is the search run after this change.
+ */
+function farEgressItinerary(straightLineMeters: number): GtfsItinerary {
+  const base = itinerary();
+  return {
+    ...base,
+    segments: [base.segments[0], { ...base.segments[1], distanceFromDestinationStopMeters: straightLineMeters }],
+  } as unknown as GtfsItinerary;
+}
+
+const walkTo = (egressMeters: number) => ({
+  access: path(200, 180),
+  egress: path(egressMeters, Math.ceil(egressMeters / 1.25)),
+  transfers: [path(100, 90)],
+});
+
+/** Mirrors how server/index.ts builds them: a straight-line radius, a street allowance over it, and
+ *  the walk ceiling as the budget of the last-resort nearest stop. */
+const defaultWalkLimits = {
+  maximumAccessMeters: DEFAULT_MAX_ACCESS_WALKING_METERS,
+  maximumEgressMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
+  maximumTransferMeters: 400,
+  streetDetourAllowance: STREET_WALKING_DETOUR_ALLOWANCE,
+  extendedMaximumAccessMeters: 2_000,
+  extendedMaximumEgressMeters: 2_000,
+};
+
+test('keeps a journey whose confirmed street walk overshoots the straight-line radius that selected its stop', () => {
+  const reasons = createWalkingRejectionReasons();
+  const routed = applyRoutedWalkingPaths(farEgressItinerary(1_243), walkTo(1_594), defaultWalkLimits, reasons);
+  assert.ok(routed, '1 594 m of pavement against a 1 000 m crow-flight radius is a street detour, not an unreachable stop');
+  assert.equal(routed.walkReachExtended, true, 'the walk is longer than the search planned for, and the passenger is told');
+  assert.equal(routed.walkingMeters, 200 + 1_594 + 100);
+  assert.equal(reasons.egressOverCap, 0);
+  assert.equal(reasons.minimumRejectedEgressMeters, null);
+});
+
+test('a walk inside the detour allowance is an ordinary journey, not an extended reach', () => {
+  const routed = applyRoutedWalkingPaths(farEgressItinerary(900), walkTo(1_250), defaultWalkLimits);
+  assert.ok(routed);
+  assert.equal(routed.walkReachExtended, false, 'flagging every journey as a long walk would train the passenger to ignore it');
+});
+
+test('an unconfirmed walk estimate gets no street slack but still reaches the closest stop', () => {
+  const degraded = applyRoutedWalkingPaths(farEgressItinerary(1_594),
+    { access: path(200, 180), egress: null, transfers: [path(100, 90)] }, defaultWalkLimits);
+  assert.ok(degraded, 'a stop 1 594 m away in a straight line is inside the walk ceiling the search may fall back to');
+  assert.equal(degraded.walkReachExtended, true);
+  assert.equal(degraded.walkingRoutesUnconfirmed, true, 'the leg stays labelled as an estimate');
+});
+
+test('a walk beyond even the fallback ceiling is rejected with its measured distance kept', () => {
+  const reasons = createWalkingRejectionReasons();
+  assert.equal(applyRoutedWalkingPaths(farEgressItinerary(1_243), walkTo(2_400), defaultWalkLimits, reasons), null);
+  assert.equal(reasons.egressOverCap, 1);
+  assert.equal(reasons.minimumRejectedEgressMeters, 2_400);
+});
+
+test('an explicit walk limit stays a hard street cap and the shortfall is measured, not guessed', () => {
+  // With maxWalkingMeters the caller passes no allowance and no fallback budget: the number the
+  // passenger typed means street metres, so 1 594 m of walking is refused — honestly, and with the
+  // distance named so the interface can say how far it missed by.
+  const explicit = { maximumAccessMeters: 1_500, maximumEgressMeters: 1_500, maximumTransferMeters: 400 };
+  const reasons = createWalkingRejectionReasons();
+  assert.equal(applyRoutedWalkingPaths(farEgressItinerary(1_243), walkTo(1_594), explicit, reasons), null);
+  assert.equal(reasons.egressOverCap, 1);
+  assert.equal(reasons.minimumRejectedEgressMeters, 1_594, '94 m short is a different answer for the passenger than 1 400 m');
 });
