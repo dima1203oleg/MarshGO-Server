@@ -175,11 +175,14 @@ describe('Nominatim-compatible place search adapter', () => {
     assert.ok(address && typeof address !== 'string');
     process.env.NODE_ENV = 'test';
     process.env.GEOCODING_REVERSE_URL = `http://127.0.0.1:${address.port}/reverse`;
-    assert.deepEqual(await reverseGeocode(49.25, 23.85), {
-      label: 'Стрий, Україна', latitude: 49.25, longitude: 23.85, providerId: '7',
-    });
-    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
-    server = undefined;
+    try {
+      assert.deepEqual(await reverseGeocode(49.25, 23.85), {
+        label: 'Стрий, Україна', latitude: 49.25, longitude: 23.85, providerId: '7',
+      });
+    } finally {
+      if (server?.listening) await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+      server = undefined;
+    }
   });
 
   it('fails closed when the geocoder is not configured', async () => {

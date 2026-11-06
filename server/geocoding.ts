@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export type PlaceSuggestion = {
   label: string;
   latitude: number;
@@ -139,7 +141,15 @@ const reverseCacheTtlMs = 10 * 60_000;
 
 /** Map-picker pans fire many nearby lookups; a ~100 m grid cache keeps providers within their rate limits. */
 export async function reverseGeocode(latitude: number, longitude: number): Promise<PlaceSuggestion> {
-  const key = `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+  // Provider/endpoint/auth configuration can change during a process lifetime (and tests can switch
+  // adapters); never serve a cached place from a different geocoder configuration. Hash the scope so
+  // credentials in URL parameters or headers are not retained verbatim as Map keys.
+  const scope = createHash('sha256').update(JSON.stringify([
+    process.env.GEOCODING_PROVIDER ?? 'nominatim',
+    process.env.GEOCODING_REVERSE_URL ?? '',
+    process.env.GEOCODING_API_KEY ?? '',
+  ])).digest('hex');
+  const key = `${scope}:${latitude.toFixed(3)},${longitude.toFixed(3)}`;
   const hit = reverseCache.get(key);
   if (hit && Date.now() - hit.at < reverseCacheTtlMs) return hit.place;
   const place = await reverseGeocodeUncached(latitude, longitude);
