@@ -521,3 +521,48 @@ describe('bounded-review failure-edge regressions', () => {
     assert.equal((stop.match(/echo "local-api: stopped/g) ?? []).length, 1);
   });
 });
+
+describe('CI runtime contract (.github/workflows/ci.yml)', () => {
+  const workflow = repoFile('.github/workflows/ci.yml');
+  const lifecycleAt = workflow.indexOf('Exercise local API Compose lifecycle end-to-end');
+  assert.ok(workflow.indexOf('Smoke-test API image') > -1, 'image smoke step must exist');
+  assert.ok(lifecycleAt > workflow.indexOf('Smoke-test API image'), 'lifecycle step must run after the image smoke');
+  const step = workflow.slice(lifecycleAt);
+
+  it('runs start and exact-SHA smoke, and always tears down via trap without masking failures', () => {
+    assert.match(step, /set -euo pipefail/);
+    assert.match(step, /npm run local:api:start/);
+    assert.match(step, /npm run local:api:smoke/);
+    assert.match(step, /cleanup\(\) \{\s*\n\s*local status=\$\?/);
+    assert.match(step, /npm run local:api:down \|\| echo "local-api CI: cleanup down failed"/);
+    assert.match(step, /rm -f \.env\.local-api/);
+    assert.match(step, /exit "\$status"/, 'cleanup must re-exit with the original failure status');
+    assert.match(step, /trap cleanup EXIT/);
+    assert.doesNotMatch(step, /local:api:down[^\n]*(-v\b|--volumes|--rmi)/);
+    assert.doesNotMatch(step, /docker volume rm|docker system prune/);
+  });
+
+  it('generates disposable in-runner hex secrets and never prints them', () => {
+    assert.match(step, /umask 077/);
+    assert.match(step, /openssl rand -hex 16/);
+    assert.match(step, /openssl rand -hex 32/);
+    assert.match(step, /> \.env\.local-api/);
+    assert.match(step, /unset db_password session_secret/);
+    assert.doesNotMatch(step, /echo[^\n]*(db_password|session_secret)/);
+    assert.doesNotMatch(step, /echo[^\n]*\$(LOCAL_API_POSTGRES_PASSWORD|LOCAL_API_SESSION_SECRET)/);
+  });
+
+  it('guards stack ports against CI service and image-smoke ports', () => {
+    assert.match(step, /stack_db_port=5444/);
+    assert.match(step, /stack_redis_port=6390/);
+    assert.match(step, /stack_api_port=3012/);
+    assert.match(step, /for reserved in 5434 6380 3002/);
+    assert.match(step, /collides with reserved CI port/);
+  });
+
+  it('never enables fixture mode, OTP, or auth bypass in the lifecycle step', () => {
+    assert.doesNotMatch(step, /AUTH_DEV_BYPASS/);
+    assert.doesNotMatch(step, /AUTH_DEV_OTP/);
+    assert.doesNotMatch(step, /FIXTURE_MODE/);
+  });
+});

@@ -128,6 +128,32 @@ recreated with the new value. The public origin is deliberately **not** part
 of the compose default or `.env.local-api.example`: committed defaults stay
 local-only, and only your ignored env file can widen CORS.
 
+## CI runtime contract
+
+The `verify` job in `.github/workflows/ci.yml` exercises this stack
+end-to-end on the ubuntu runner, as the step `Exercise local API Compose
+lifecycle end-to-end` right after the production image smoke:
+
+* A disposable `.env.local-api` is written inside the runner (`umask 077`)
+  with `openssl rand -hex` secrets that are never printed, on isolated ports
+  **5444 / 6390 / 3012** — guarded fail-closed against collision with the CI
+  service ports (postgres `5434`, redis `6380`) and the image smoke port
+  (`3002`).
+* It runs `npm run local:api:start` (build once → healthy db/redis →
+  migrations from the same image → api → `/readyz`) and then
+  `npm run local:api:smoke`, which enforces exact full-SHA build identity
+  against the CI checkout.
+* A trap always runs `npm run local:api:down` — containers/network removed,
+  named volumes preserved, never `-v` — deletes the disposable env file, and
+  re-exits with the original failure status, so no start/smoke failure can be
+  masked by cleanup.
+* Fixture mode, dev OTP, and auth bypass are never enabled by this step; the
+  compose file pins `AUTH_DEV_BYPASS=false`, `AUTH_DEV_OTP=false`, and
+  `MARSHGO_API_TEST_FIXTURE_MODE=0`.
+* Only GitHub CI can prove the actual runner behavior (image build, PostGIS
+  start, migrations, readiness timing); locally this contract is covered by
+  the static checks in `tests/local-api-stack.test.ts`.
+
 ## Known limits
 
 * The PostGIS image runs under `linux/amd64` emulation on Apple Silicon
