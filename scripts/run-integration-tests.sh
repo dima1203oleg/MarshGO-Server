@@ -56,6 +56,8 @@ run_suite() {
 }
 
 run_suite journey env JOURNEY_TEST_DATABASE_URL="$DATABASE_URL" npm run test:integration:journey
+run_suite pg-socket-failure env PG_SOCKET_FAILURE_TEST=1 API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:pg-socket-failure
 
 start_api() {
   local routing_url="${1:-}"
