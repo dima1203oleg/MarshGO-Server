@@ -6,6 +6,7 @@ import { getAuth } from 'firebase-admin/auth';
 import express, { NextFunction, Request, Response, type RequestHandler } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { Pool, PoolClient } from 'pg';
+import { observePgPoolClientErrors } from './database/poolClientErrors';
 import { WebSocket, WebSocketServer } from 'ws';
 import { createClient } from 'redis';
 import { RedisRateLimitStore } from './redisRateLimitStore';
@@ -78,6 +79,7 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 12, idl
 pool.on('error', (error: Error) => {
   console.error(JSON.stringify({ level: 'error', event: 'database.pool_idle_client_error', message: error.message }));
 });
+observePgPoolClientErrors(pool);
 type RealtimeTicket = { userId: string; sessionId: string; expiresAt: number };
 type RealtimeMessage = { id: string; conversation_id: string; sender_id: string; sender_name: string; body: string; created_at: Date };
 const realtimeTickets = new Map<string, RealtimeTicket>();
