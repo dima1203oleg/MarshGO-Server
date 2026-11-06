@@ -3981,7 +3981,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             routeAccuracy, bookingAvailable: false,
             lastUpdatedAt: input.metadata.geofenceSnapshotUpdatedAt ?? null, dataFreshnessSeconds: null,
             liveStatus: 'UNVERIFIED', driver: null, vehicle: null, ...legMetadata,
-            ...(legGeometry ? { routeGeometry: legGeometry } : {}), routeAccuracy });
+            ...(legGeometry ? { routeGeometry: legGeometry } : {}) });
         };
         const insertMicromobility = async () => {
           let departureAt = route.estimate.departureAt;

@@ -78,7 +78,7 @@ export function sanitizePersistedJourneyLeg<T extends Record<string, unknown>>(l
     ...withoutTopLevelGeometry,
     metadata,
     ...(metadata.routeGeometry ? { routeGeometry: metadata.routeGeometry } : {}),
-  } as T;
+  } as unknown as T;
 }
 
 export function sanitizePersistedJourney<T extends { legs?: unknown }>(journey: T): T {
