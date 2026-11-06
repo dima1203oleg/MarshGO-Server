@@ -12,3 +12,8 @@ export function commercialUseFromLicense(license: string | null | undefined): bo
   if (/\bodbl\b|open database license|\bodc[ -]?by\b|open data commons attribution license|\bpddl\b/.test(value)) return true;
   return null;
 }
+
+/** A reachable/public URL is not enough: activate only sources with explicit commercial-use permission. */
+export function canEnableCommercialProvider(access: string, license: string | null | undefined): boolean {
+  return access === 'open' && commercialUseFromLicense(license) === true;
+}

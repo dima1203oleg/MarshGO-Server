@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3, kyivOpenDataCatalog } from '../server/mobility/ukraineCatalog';
-import { commercialUseFromLicense } from '../server/mobility/licensePolicy';
+import { canEnableCommercialProvider, commercialUseFromLicense } from '../server/mobility/licensePolicy';
 
 const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
 
@@ -50,9 +50,10 @@ function main() {
     const commercialUse = entry.access === 'open' ? commercialUseFromLicense(entry.license) : null;
     const attributionRequired = entry.access === 'open' && Boolean(entry.license);
 
+    const licenseAllowsCommercialUse = canEnableCommercialProvider(entry.access, entry.license);
     let discoveryStatus = entry.access === 'requires_partner_access'
       ? 'REQUIRES_PARTNERSHIP'
-      : entry.access === 'open' && Boolean(entry.license)
+      : licenseAllowsCommercialUse
         ? 'VALIDATED'
         : 'DISCOVERED';
 
@@ -61,7 +62,7 @@ function main() {
     let error: string | null = null;
     let reportJson = '{}';
 
-    if (entry.access !== 'open' || !entry.license) {
+    if (!licenseAllowsCommercialUse) {
       health = 'offline';
       status = 'disabled';
       error = entry.access === 'requires_credentials'
@@ -70,7 +71,9 @@ function main() {
           ? 'REQUIRES_PARTNERSHIP: умови комерційного використання не підтверджені'
           : entry.access === 'insecure_endpoint'
             ? 'INSECURE_ENDPOINT: джерело доступне лише по http, не підключено'
-            : 'LICENSE_UNVERIFIED: licence terms are required before enabling';
+            : commercialUse === false
+              ? 'NONCOMMERCIAL_LICENSE: commercial reuse is not permitted'
+              : 'LICENSE_UNVERIFIED: explicit commercial-use terms are required before enabling';
       discoveryStatus = entry.access === 'requires_partner_access' ? 'REQUIRES_PARTNERSHIP' : 'DISCOVERED';
       planDiscovered++;
     } else if (probe) {
