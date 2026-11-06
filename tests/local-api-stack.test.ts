@@ -38,7 +38,7 @@ const bashFunction = (name: string) => {
 };
 
 const runBash = (program: string, args: string[] = [], options: { input?: string; env?: NodeJS.ProcessEnv } = {}) =>
-  execFileSync('bash', ['-c', program, 'bash', ...args], { encoding: 'utf8', input: options.input, env: options.env ?? process.env, stderr: 'pipe' });
+  execFileSync('bash', ['-c', program, 'bash', ...args], { encoding: 'utf8', input: options.input, env: options.env ?? process.env });
 
 describe('local API stack compose isolation', () => {
   it('pins an isolated compose project name', () => {
@@ -336,7 +336,6 @@ describe('safety-edge regressions (stubbed docker/lsof, no daemon)', () => {
       execFileSync('bash', ['-c', harness, 'bash', port, service], {
         encoding: 'utf8',
         env: { PATH: `${stubDir}:${process.env.PATH ?? ''}`, ...envOverrides },
-        stderr: 'pipe',
       });
       return { ok: true, stderr: '' };
     } catch (error) {
