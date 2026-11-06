@@ -67,10 +67,19 @@ interface OraclePath {
 
 const connectionKey = (from: string, to: string) => `${from}\u0000${to}`;
 
+type RoutableOracleOption = ProviderOption & {
+  originNodeId: string;
+  destinationNodeId: string;
+  departureAt: Date;
+  arrivalAt: Date;
+};
+
 /** Mirrors the composer's published option-validation contract, not its code. */
-function oracleValid(option: ProviderOption): boolean {
+function oracleValid(option: ProviderOption): option is RoutableOracleOption {
+  if (typeof option.originNodeId !== 'string' || typeof option.destinationNodeId !== 'string'
+    || !(option.departureAt instanceof Date) || !(option.arrivalAt instanceof Date)) return false;
   return Boolean(option.id && option.providerId
-    && option.originNodeId && option.destinationNodeId && option.originNodeId !== option.destinationNodeId
+    && option.originNodeId !== option.destinationNodeId
     && Number.isFinite(option.departureAt.getTime()) && Number.isFinite(option.arrivalAt.getTime())
     && option.arrivalAt >= option.departureAt
     && Number.isInteger(option.etaUncertaintySeconds) && option.etaUncertaintySeconds >= 0
@@ -83,7 +92,7 @@ function transferRiskValue(slackSeconds: number): number {
   return slackSeconds < 300 ? 0.7 : slackSeconds < 900 ? 0.3 : 0.05;
 }
 
-function summarizePath(legs: ProviderOption[], transferWalkMeters: number[], transferSlacks: number[], input: OracleInput): OraclePath {
+function summarizePath(legs: RoutableOracleOption[], transferWalkMeters: number[], transferSlacks: number[], input: OracleInput): OraclePath {
   const last = legs.at(-1)!;
   const durationSeconds = Math.max(0, Math.floor((last.arrivalAt.getTime() - input.departureAt.getTime()) / 1000));
   const priceMinor = legs.every((leg) => leg.priceMinor !== null)
@@ -118,7 +127,7 @@ function enumerateOraclePaths(input: OracleInput): OraclePath[] {
   const paths: OraclePath[] = [];
   const maxDeparture = input.departureAt.getTime() + input.maximumWaitSeconds * 1000;
 
-  const extend = (legs: ProviderOption[], walkMeters: number[], slacks: number[], visited: Set<string>): void => {
+  const extend = (legs: RoutableOracleOption[], walkMeters: number[], slacks: number[], visited: Set<string>): void => {
     const previous = legs.at(-1)!;
     if (previous.destinationNodeId === input.destinationNodeId) {
       paths.push(summarizePath(legs, walkMeters, slacks, input));
@@ -250,7 +259,11 @@ function assertMatchesOracle(input: OracleInput, strategy: JourneyStrategy): voi
       const previous = journey.legs[index - 1]!;
       assert.ok(leg.connectionFromPrevious, `leg ${index} of ${journey.id} must carry measured connection evidence`);
       assert.ok(leg.transferBefore?.feasible, `transfer before leg ${index} of ${journey.id} must be feasible`);
-      assert.ok(leg.departureAt.getTime() >= previous.arrivalAt.getTime(), `leg ${index} of ${journey.id} must be temporally connected`);
+      const departureAt = leg.departureAt;
+      const previousArrivalAt = previous.arrivalAt;
+      assert.ok(departureAt instanceof Date, `leg ${index} of ${journey.id} must have a scheduled departure`);
+      assert.ok(previousArrivalAt instanceof Date, `leg ${index - 1} of ${journey.id} must have a scheduled arrival`);
+      assert.ok(departureAt.getTime() >= previousArrivalAt.getTime(), `leg ${index} of ${journey.id} must be temporally connected`);
     }
   }
   if (expected.length > 0) {
@@ -385,8 +398,25 @@ test('oracle: seeded random small graphs agree with exhaustive enumeration on fr
   let graphsThreeLeg = 0;
   const iterations = 80;
   for (let iteration = 0; iteration < iterations; iteration += 1) {
-    const count = 4 + Math.floor(rand() * 5);
+    const grace = rand() < 0.5 ? 0 : 60;
     const options: ProviderOption[] = [];
+    // Every even iteration seeds an O→A→B→D skeleton so 3-leg coverage never depends
+    // on luck; every fourth skeleton is built with provably feasible transfer gaps.
+    const skeletonChain = iteration % 2 === 0;
+    const guaranteedChain = iteration % 4 === 0;
+    if (skeletonChain) {
+      const chainNodes = ['O', 'A', 'B', 'D'];
+      let cursor = Math.floor(rand() * 600);
+      for (let leg = 0; leg < 3; leg += 1) {
+        const ride = 300 + Math.floor(rand() * 600);
+        const uncertainty = guaranteedChain ? 0 : pick([0, 60, 120, 240]);
+        const price = rand() < 0.25 ? null : Math.floor(rand() * 5000);
+        options.push(option(`chain-${leg}`, chainNodes[leg]!, chainNodes[leg + 1]!, cursor, cursor + ride, price, uncertainty));
+        const required = uncertainty + 120 + grace;
+        cursor += ride + (guaranteedChain ? required + Math.floor(rand() * 600) : Math.floor(rand() * 900));
+      }
+    }
+    const count = (skeletonChain ? 2 : 4) + Math.floor(rand() * 5);
     for (let index = 0; index < count; index += 1) {
       const from = pick(nodes);
       let to = pick(nodes);
@@ -404,7 +434,7 @@ test('oracle: seeded random small graphs agree with exhaustive enumeration on fr
     }
     const input: OracleInput = {
       options, originNodeId: 'O', destinationNodeId: 'D', departureAt: at(0), connections,
-      minimumTransferBufferSeconds: 120, boardingGraceSeconds: rand() < 0.5 ? 0 : 60,
+      minimumTransferBufferSeconds: 120, boardingGraceSeconds: grace,
       maximumLegs: rand() < 0.5 ? 3 : 4, maximumWaitSeconds: 3600,
     };
     const paths = enumerateOraclePaths(input);
