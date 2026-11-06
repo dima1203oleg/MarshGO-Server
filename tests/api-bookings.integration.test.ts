@@ -533,6 +533,26 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         [ids.transitCompositionOffer, ids.driver, ids.vehicle, offerOrigin[0], offerOrigin[1], offerDestination[0], offerDestination[1],
           offerRouteGeoJson, compositionDepartureAt, compositionArrivalAt, offerDistanceMeters, compositionDurationSeconds],
       );
+      const untrustedOfferSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
+        body: JSON.stringify({
+          origin: { name: 'API offer origin', coordinates: offerOrigin },
+          destination: { name: 'API offer destination', coordinates: offerDestination },
+          departureAt: compositionDepartureAt.toISOString(), passengers: 1, strategy: 'FASTEST',
+          preferences: { allowCommunity: true, allowedTransportTypes: ['carpool'] },
+        }),
+      });
+      assert.equal(untrustedOfferSearch.status, 200);
+      const untrustedOfferPayload = (await untrustedOfferSearch.json() as { data: { journeys: Array<{
+        offerId: string | null; legs: Array<{ mode: string; routeGeometry?: unknown; metadata?: Record<string, unknown> }>;
+      }> } }).data;
+      const untrustedOfferJourney = untrustedOfferPayload.journeys.find((journey) => journey.offerId === ids.transitCompositionOffer);
+      assert.ok(untrustedOfferJourney, 'an offer with an unknown route source may still be returned as an offer');
+      const untrustedCommunityLeg = untrustedOfferJourney.legs.find((leg) => leg.mode === 'COMMUNITY');
+      assert.ok(untrustedCommunityLeg);
+      assert.equal(untrustedCommunityLeg.routeGeometry, undefined, 'untrusted route_source must omit corridor geometry');
+      assert.equal(untrustedCommunityLeg.metadata?.routeGeometrySource, undefined);
+      await pool.query(`UPDATE offers SET route_source='osrm' WHERE id=$1`, [ids.transitCompositionOffer]);
       const composedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },
         body: JSON.stringify({
@@ -545,7 +565,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.equal(composedSearch.status, 200);
       const composedPayload = (await composedSearch.json() as { data: { candidateCount?: number; returnedCount?: number; partial: boolean; partialReasons: string[]; providerErrors?: string[]; blockedProviders?: string[]; resultsTruncated: boolean; candidateGenerationTruncated: boolean; resultSamplingTruncated: boolean; gtfsTruncation: Record<string, boolean>; journeys: Array<{
         id: string; offerId: string | null; source?: string; state: string;
-        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string; routeGeometry?: Array<[number, number]> }>;
+        legs: Array<{ id: string; mode: string; offerId: string | null; availabilityStatus: string; routeGeometry?: Array<[number, number]>;
+          metadata?: { routeGeometrySource?: string; routeGeometry?: Array<[number, number]>; stops?: unknown[] } }>;
       }> } });
       const composedData = composedPayload.data;
       assert.equal(typeof composedData.partial, 'boolean');
@@ -566,6 +587,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       assert.deepEqual(composedJourney.legs.map((leg) => leg.mode), ['BUS','COMMUNITY','TRAM']);
       assert.equal(composedJourney.legs[1]!.offerId, ids.transitCompositionOffer);
       assert.equal(composedJourney.legs[1]!.availabilityStatus, 'AVAILABLE');
+      assert.equal(composedJourney.legs[1]!.metadata?.routeGeometrySource, 'osrm-car-route',
+        'community route provenance is derived from the persisted OSRM offer source');
 
       const composedJourneyRead = await fetch(`${apiUrl}/api/v1/journeys/${composedJourney.id}`, {
         headers: { 'x-dev-user-id': compositionPassenger },
@@ -574,10 +597,14 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       const persistedComposition = (await composedJourneyRead.json() as { data: { legs: Array<{
         id: string; metadata: { routeGeometrySource?: string; routeGeometry?: Array<[number, number]> };
       }> } }).data;
-      const geometryTransitLegs = composedJourney.legs.filter((leg) => leg.mode !== 'COMMUNITY'
+      const geometryTransitLegs = composedJourney.legs.filter((leg) => leg.mode !== 'COMMUNITY' && leg.mode !== 'WALK'
         && (leg.routeGeometry?.length ?? 0) >= 2);
       assert.ok(geometryTransitLegs.length > 0, 'the GTFS-composed fixture route includes source shape geometry');
       for (const leg of geometryTransitLegs) {
+        assert.equal(leg.metadata?.routeGeometrySource, 'gtfs_shape',
+          'the immediate search response carries the verified geometry source');
+        assert.deepEqual(leg.metadata?.routeGeometry, leg.routeGeometry,
+          'the immediate response geometry matches the persisted provenance metadata');
         const persistedLeg = persistedComposition.legs.find((candidate) => candidate.id === leg.id);
         assert.ok(persistedLeg, `the selected GTFS leg ${leg.id} remains in the persisted journey`);
         assert.deepEqual(persistedLeg.metadata.routeGeometry, leg.routeGeometry,
@@ -585,6 +612,26 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
         assert.equal(persistedLeg.metadata.routeGeometrySource, 'gtfs_shape',
           'journey reload preserves the trusted GTFS provenance required by live route rendering');
       }
+
+      const stopBearingLeg = geometryTransitLegs.find((leg) => (leg.metadata?.stops?.length ?? 0) > 0);
+      assert.ok(stopBearingLeg, 'the fixture includes a shaped transit leg with real stop waypoints');
+      const retainedStops = stopBearingLeg.metadata!.stops!;
+      await pool.query(
+        `UPDATE journey_legs SET metadata=metadata||jsonb_build_object('routeGeometrySource','legacy-schematic-corridor') WHERE id=$1`,
+        [stopBearingLeg.id],
+      );
+      const legacyReadResponse = await fetch(`${apiUrl}/api/v1/journeys/${composedJourney.id}`, {
+        headers: { 'x-dev-user-id': compositionPassenger },
+      });
+      assert.equal(legacyReadResponse.status, 200);
+      const legacyRead = (await legacyReadResponse.json() as { data: { legs: Array<{
+        id: string; routeGeometry?: Array<[number, number]>; metadata: { routeGeometry?: Array<[number, number]>; stops?: unknown[] };
+      }> } }).data;
+      const sanitizedLegacyLeg = legacyRead.legs.find((leg) => leg.id === stopBearingLeg.id);
+      assert.ok(sanitizedLegacyLeg);
+      assert.equal(sanitizedLegacyLeg.routeGeometry, undefined, 'a legacy geometry with an incompatible source is not returned');
+      assert.equal(sanitizedLegacyLeg.metadata.routeGeometry, undefined, 'the stale metadata copy is also removed');
+      assert.deepEqual(sanitizedLegacyLeg.metadata.stops, retainedStops, 'authentic stop waypoints remain visible');
 
       const transferLimitedSearch = await fetch(`${apiUrl}/api/v1/journeys/search`, {
         method: 'POST', headers: { 'content-type': 'application/json', 'x-dev-user-id': compositionPassenger },

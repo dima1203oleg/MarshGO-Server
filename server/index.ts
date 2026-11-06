@@ -28,6 +28,7 @@ import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGR
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, routePedestrianPath, STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
+import { legProvenanceMetadata, sanitizePersistedJourney, trustedRouteGeometry } from './journey/legGeometryProvenance';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
@@ -2846,14 +2847,14 @@ const journeySelect = `SELECT j.id,j.user_id,j.origin_name,j.destination_name,
          'cashFareProductId',l.metadata->>'cashFareProductId','cashFareSource',l.metadata->>'cashFareSource',
          'scheduleSemantics',l.metadata->>'scheduleSemantics',
          'bookingId',l.booking_id,'demandId',l.demand_id,'state',l.state,'dataSource',l.data_source,
-         'lastUpdatedAt',l.last_updated_at,'source',l.data_source,'dataSource',l.data_source,
+         'lastUpdatedAt',l.last_updated_at,'source',l.data_source,
          'metadata',l.metadata,'routeGeometry',l.metadata->'routeGeometry','stops',l.metadata->'stops'
        ) ORDER BY l.ordinal) FILTER (WHERE l.id IS NOT NULL),'[]'::json) AS legs
   FROM journeys j LEFT JOIN journey_legs l ON l.journey_id=j.id`;
 
 app.get('/api/v1/journeys/me', requireAuth, asyncHandler(async (req, res) => {
   const { rows } = await pool.query(`${journeySelect} WHERE j.user_id=$1 GROUP BY j.id ORDER BY j.updated_at DESC LIMIT 50`, [req.userId]);
-  res.json({ data: rows });
+  res.json({ data: rows.map((journey) => sanitizePersistedJourney(journey)) });
 }));
 
 app.get('/api/v1/journeys/:id', requireAuth, asyncHandler(async (req, res) => {
@@ -2862,7 +2863,7 @@ app.get('/api/v1/journeys/:id', requireAuth, asyncHandler(async (req, res) => {
   }
   const { rows } = await pool.query(`${journeySelect} WHERE j.user_id=$1 AND j.id=$2 GROUP BY j.id`, [req.userId, req.params.id]);
   if (!rows[0]) throw new ApiError(404, 'Journey not found');
-  res.json({ data: rows[0] });
+  res.json({ data: sanitizePersistedJourney(rows[0]) });
 }));
 
 app.get('/api/v1/journeys/:id/live', requireAuth, asyncHandler(async (req, res) => {
@@ -3191,6 +3192,26 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const providerMetadata = new Map<string, { name: string; last_sync_at: Date | null; routeGeometrySource?: 'gtfs_shape' | 'official_geojson' }>(
     eligibleGtfsProviders.map((provider) => [provider.id, { name: provider.name, last_sync_at: provider.last_sync_at }]),
   );
+  const makeGtfsLegMetadata = (input: {
+    mode: string;
+    source: string;
+    routeGeometry?: Array<[number, number]>;
+    routeGeometrySource?: 'gtfs_shape' | 'official_geojson';
+    stops?: unknown;
+    metadata: Record<string, unknown>;
+  }) => legProvenanceMetadata({
+    mode: input.mode,
+    source: input.source,
+    routeGeometry: input.routeGeometry,
+    stops: input.stops,
+    metadata: {
+      ...input.metadata,
+      ...(input.routeGeometry ? {
+        routeGeometrySource: input.routeGeometrySource ?? 'gtfs_shape',
+        routeGeometry: input.routeGeometry,
+      } : {}),
+    },
+  });
   const kyivMetroBounds: [number, number, number, number] = [30.1, 50.1, 31.0, 50.8];
   const shouldLoadKyivMetro = allowedTransitModes.includes('METRO')
     && bboxIntersectsRouteCorridor(kyivMetroBounds, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters);
@@ -3751,6 +3772,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       const rating = offer.average_rating === null ? null : Number(offer.average_rating);
       return (search.preferences.minDriverRating === undefined || search.preferences.minDriverRating <= 0
         || (rating !== null && offer.review_count > 0 && rating >= search.preferences.minDriverRating))
+        && offer.route_source === 'osrm'
         && parseOfferGeometry(offer.route_geojson) !== null;
     });
     if (composableOffers.length > MAX_COMMUNITY_COMPOSITION_OFFERS) candidateGenerationTruncated = true;
@@ -3765,7 +3787,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         distanceMeters: Number(offer.distance_m), pricePerSeatMinor: Number(offer.price_per_seat_minor),
         currency: offer.currency.trim().toUpperCase(), availableSeats: Number(offer.available_seats),
         routeGeometry: parseOfferGeometry(offer.route_geojson), snapshotAt: offer.snapshot_at,
-        metadata: { driverName: offer.driver_name, vehicleId: offer.vehicle_id,
+        metadata: { routeGeometrySource: 'osrm-car-route', driverName: offer.driver_name, vehicleId: offer.vehicle_id,
           vehicleMake: offer.vehicle_make, vehicleModel: offer.vehicle_model,
           rating: offer.average_rating === null ? null : Number(offer.average_rating),
           reviewCount: offer.review_count, offerCreatedAt: offer.created_at },
@@ -3929,6 +3951,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         }) => {
           const arrivalAt = new Date(input.departureAt.getTime() + input.durationSeconds * 1000);
           const isWalk = input.mode === 'WALK';
+          const legGeometry = trustedRouteGeometry({ mode: input.mode, source: input.source,
+            routeGeometry: input.routeGeometry, metadata: input.metadata });
+          const legMetadata = legProvenanceMetadata({ mode: input.mode, source: input.source,
+            routeGeometry: input.routeGeometry, metadata: input.metadata });
+          const routeAccuracy = legGeometry ? 'SOURCE_GEOMETRY' : 'STRAIGHT_LINE_ESTIMATE';
+          legMetadata.routeAccuracy = routeAccuracy;
           const inserted = await client.query<{ id: string }>(
             `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_status,availability_status,provider_id,provider_type,state,data_source,data_freshness_seconds,last_updated_at,metadata)
              VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,'UAH','UNKNOWN',$15,
@@ -3940,7 +3968,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               isWalk ? 'AVAILABLE' : 'UNKNOWN', input.providerId ?? null,
               isWalk ? 'walking' : input.mode === 'BICYCLE' ? 'bike' : 'scooter', input.source,
               input.metadata.geofenceSnapshotUpdatedAt ? new Date(String(input.metadata.geofenceSnapshotUpdatedAt)) : null,
-              JSON.stringify({ ...input.metadata, routeGeometry: input.routeGeometry })],
+              JSON.stringify(legMetadata)],
           );
           if (!isWalk) firstServiceLegId ??= inserted.rows[0].id;
           responseLegs.push({ id: inserted.rows[0].id, mode: input.mode,
@@ -3949,10 +3977,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             durationSeconds: input.durationSeconds, distanceMeters: input.distanceMeters,
             priceMinor: null, currency: null, priceStatus: 'UNKNOWN', availabilityStatus: isWalk ? 'AVAILABLE' : 'UNKNOWN',
             source: input.source, ...(input.providerId ? { providerId: input.providerId } : {}),
-            ...(input.providerName ? { providerName: input.providerName } : {}), routeGeometry: input.routeGeometry,
-            routeAccuracy: input.metadata.routeAccuracy ?? 'STRAIGHT_LINE_ESTIMATE', bookingAvailable: false,
+            ...(input.providerName ? { providerName: input.providerName } : {}),
+            routeAccuracy, bookingAvailable: false,
             lastUpdatedAt: input.metadata.geofenceSnapshotUpdatedAt ?? null, dataFreshnessSeconds: null,
-            liveStatus: 'UNVERIFIED', driver: null, vehicle: null, ...input.metadata });
+            liveStatus: 'UNVERIFIED', driver: null, vehicle: null, ...legMetadata,
+            ...(legGeometry ? { routeGeometry: legGeometry } : {}) });
         };
         const insertMicromobility = async () => {
           let departureAt = route.estimate.departureAt;
@@ -3972,10 +4001,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           const first = path.segments[0]; const last = path.segments.at(-1);
           if (!first || !last) return;
           const insertWalk = async (from: { name: string; coordinates: [number, number] }, to: { name: string; coordinates: [number, number] },
-            departureAt: Date, meters: number, seconds: number, geometry?: Array<[number, number]> | null) => {
+            departureAt: Date, meters: number, seconds: number, geometry?: Array<[number, number]> | null, geometrySource?: string) => {
             if (meters <= 0) return;
+            const source = geometrySource ?? (geometry ? 'gtfs-pathway' : 'walking-straight-line-estimate');
             await insertEstimatedLeg({ mode: 'WALK', from, to, departureAt, durationSeconds: seconds || Math.ceil(meters / 1.25),
-              distanceMeters: meters, source: geometry ? 'gtfs-pathway' : 'walking-straight-line-estimate',
+              distanceMeters: meters, source,
               routeGeometry: geometry ?? [from.coordinates, to.coordinates],
               metadata: { routeAccuracy: geometry ? 'SOURCE_GEOMETRY' : 'STRAIGHT_LINE_ESTIMATE', availabilityStatus: 'AVAILABLE' } });
           };
@@ -3984,7 +4014,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               coordinates: route.microPosition === 'before-transit' ? route.estimate.legs.at(-1)?.destination.coordinates ?? first.originStop.coordinates : search.origin.coordinates },
             { name: first.originStop.name, coordinates: first.originStop.coordinates }, path.departureAt,
             path.accessWalk?.distanceMeters ?? first.distanceToOriginStopMeters, path.accessWalk?.durationSeconds ?? Math.ceil(first.distanceToOriginStopMeters / 1.25),
-            path.accessWalk?.geometry ?? null);
+            path.accessWalk?.geometry ?? null, path.accessWalk ? 'osrm-foot-route' : undefined);
           }
           for (const [segmentIndex, segment] of path.segments.entries()) {
             if (segmentIndex > 0) {
@@ -3992,11 +4022,25 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               await insertWalk({ name: previous.destinationStop.name, coordinates: previous.destinationStop.coordinates },
                 { name: segment.originStop.name, coordinates: segment.originStop.coordinates }, previous.arrivalAt,
                 path.transferWalkingMeters[segmentIndex - 1] ?? 0, path.transferWalkingSeconds[segmentIndex - 1] ?? 0,
-                path.transferWalks?.[segmentIndex - 1]?.geometry ?? path.transferWalkingGeometries[segmentIndex - 1] ?? null);
+                path.transferWalks?.[segmentIndex - 1]?.geometry ?? path.transferWalkingGeometries[segmentIndex - 1] ?? null,
+                path.transferWalks?.[segmentIndex - 1] ? 'osrm-foot-route'
+                  : path.transferWalkingGeometries[segmentIndex - 1] ? 'gtfs-pathway' : undefined);
             }
             const allocation = path.fare?.allocations[segmentIndex] ?? null;
             const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
             const provider = providerMetadata.get(segment.providerId);
+            const segmentSource = segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static';
+            const segmentMetadata = makeGtfsLegMetadata({
+              mode: segment.mode, source: segmentSource, routeGeometry: segment.routeGeometry,
+              routeGeometrySource: provider?.routeGeometrySource, stops: segment.stops,
+              metadata: { providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
+                transportType: segment.transportType, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId,
+                serviceDate: segment.serviceDate, scheduleSemantics: segment.scheduleSemantics,
+                fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+                fromStopFeedId: segment.originTransferNodeIds[0] ?? segment.originStop.id,
+                toStopFeedId: segment.destinationTransferNodeIds[0] ?? segment.destinationStop.id,
+                ...(segment.stops ? { stops: segment.stops } : {}) },
+            });
             const inserted = await client.query<{ id: string }>(
               `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata,distance_m)
                VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,NULL,NULL,$12,$13,$13,$13,$14,$15,'UNKNOWN',$16,'public_transit','SUGGESTED',$17,$18,$19::jsonb,$20) RETURNING id`,
@@ -4004,16 +4048,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                 segment.destinationStop.coordinates[0], segment.destinationStop.coordinates[1], segment.destinationStop.name,
                 segment.scheduledDepartureAt, segment.scheduledArrivalAt, durationSeconds, allocation?.priceMinor ?? null,
                 path.fare?.currency ?? 'UAH', priceStatusFor(allocation?.priceMinor), segment.providerId,
-                segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+                segmentSource,
                 segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
-                JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
-                  ...(segment.routeGeometry ? { routeGeometrySource: provider?.routeGeometrySource ?? 'gtfs_shape' } : {}),
-                  transportType: segment.transportType, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId,
-                  serviceDate: segment.serviceDate, scheduleSemantics: segment.scheduleSemantics,
-                  fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
-                  fromStopFeedId: segment.originTransferNodeIds[0] ?? segment.originStop.id,
-                  toStopFeedId: segment.destinationTransferNodeIds[0] ?? segment.destinationStop.id,
-                  ...(segment.stops ? { stops: segment.stops } : {}), ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) }),
+                JSON.stringify(segmentMetadata),
                     segment.shapeDistanceMeters ?? null],
             );
             firstServiceLegId ??= inserted.rows[0].id;
@@ -4025,9 +4062,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               priceMinor: allocation?.priceMinor ?? null, currency: allocation ? path.fare?.currency ?? null : null,
               priceStatus: priceStatusFor(allocation?.priceMinor), availabilityStatus: 'UNKNOWN', source: 'gtfs-static',
               providerName: segment.providerName, routeName: segment.routeName, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс',
-              scheduleSemantics: segment.scheduleSemantics,
-              ...(segment.stops ? { stops: segment.stops } : {}),
-              ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}),
+              scheduleSemantics: segment.scheduleSemantics, metadata: segmentMetadata,
+              ...(segmentMetadata.stops ? { stops: segmentMetadata.stops } : {}),
+              ...(segmentMetadata.routeGeometry ? { routeGeometry: segmentMetadata.routeGeometry } : {}),
               liveStatus: 'SCHEDULED', dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - segment.sourceFreshAt.getTime()) / 1000)),
               lastUpdatedAt: segment.sourceFreshAt, driver: null, vehicle: null });
           }
@@ -4036,7 +4073,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               { name: route.microPosition === 'after-transit' ? route.estimate.legs[0]?.origin.name ?? last.destinationStop.name : search.destination.name,
                 coordinates: route.microPosition === 'after-transit' ? route.estimate.legs[0]?.origin.coordinates ?? last.destinationStop.coordinates : search.destination.coordinates },
               last.arrivalAt, path.egressWalk?.distanceMeters ?? last.distanceFromDestinationStopMeters,
-              path.egressWalk?.durationSeconds ?? Math.ceil(last.distanceFromDestinationStopMeters / 1.25), path.egressWalk?.geometry ?? null);
+              path.egressWalk?.durationSeconds ?? Math.ceil(last.distanceFromDestinationStopMeters / 1.25),
+              path.egressWalk?.geometry ?? null, path.egressWalk ? 'osrm-foot-route' : undefined);
           }
         };
 
@@ -4129,14 +4167,30 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               const geometry = path.transferWalks?.[segmentIndex - 1]?.geometry
                 ?? path.transferWalkingGeometries[segmentIndex - 1] ?? null;
               if (meters > 0 && !path.transferInSeat[segmentIndex - 1]) {
+                const geometrySource = path.transferWalks?.[segmentIndex - 1] ? 'osrm-foot-route'
+                  : geometry ? 'gtfs-pathway' : 'walking-straight-line-estimate';
                 await insertWalk({ name: previous.destinationStop.name, coordinates: previous.destinationStop.coordinates },
                   { name: segment.originStop.name, coordinates: segment.originStop.coordinates },
-                  previous.arrivalAt, meters, seconds, geometry ? 'gtfs-pathway' : 'walking-route', geometry);
+                  previous.arrivalAt, meters, seconds, geometrySource, geometry);
               }
             }
             const allocation = path.fare?.allocations[segmentIndex] ?? null;
             const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
             const provider = providerMetadata.get(segment.providerId);
+            const segmentSource = segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static';
+            const segmentMetadata = makeGtfsLegMetadata({
+              mode: segment.mode, source: segmentSource, routeGeometry: segment.routeGeometry,
+              routeGeometrySource: provider?.routeGeometrySource, stops: segment.stops,
+              metadata: { providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
+                transportType: segment.transportType, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId,
+                serviceDate: segment.serviceDate, scheduleSemantics: segment.scheduleSemantics,
+                fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+                fromStopFeedId: segment.originTransferNodeIds[0] ?? segment.originStop.id,
+                toStopFeedId: segment.destinationTransferNodeIds[0] ?? segment.destinationStop.id,
+                ...(allocation ? { fareProductId: allocation.fareProductId,
+                  fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
+                ...(segment.stops ? { stops: segment.stops } : {}) },
+            });
             const inserted = await client.query<{ id: string }>(
               `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata,distance_m)
                VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb,$22) RETURNING id`,
@@ -4145,21 +4199,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                 segment.scheduledDepartureAt, segment.scheduledArrivalAt,
                 segment.realtimeUpdatedAt ? segment.departureAt : null, segment.realtimeUpdatedAt ? segment.arrivalAt : null,
                 durationSeconds, allocation?.priceMinor ?? null, path.fare?.currency ?? 'UAH', priceStatusFor(allocation?.priceMinor),
-                segment.providerId, segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+                segment.providerId, segmentSource,
                 segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
-                JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
-                  transportType: segment.transportType, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId,
-                  serviceDate: segment.serviceDate, scheduleSemantics: segment.scheduleSemantics,
-                  fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
-                  fromStopFeedId: segment.originTransferNodeIds[0] ?? segment.originStop.id,
-                  toStopFeedId: segment.destinationTransferNodeIds[0] ?? segment.destinationStop.id,
-                  ...(allocation ? { fareProductId: allocation.fareProductId,
-                    fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
-                  ...(segment.stops ? { stops: segment.stops } : {}),
-                  ...(segment.routeGeometry ? {
-                    routeGeometrySource: provider?.routeGeometrySource ?? 'gtfs_shape',
-                    routeGeometry: segment.routeGeometry,
-                  } : {}) }),
+                JSON.stringify(segmentMetadata),
                     segment.shapeDistanceMeters ?? null],
             );
             firstServiceLegId ??= inserted.rows[0].id;
@@ -4175,14 +4217,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               priceStatus: priceStatusFor(allocation?.priceMinor), availabilityStatus: 'UNKNOWN',
               ...(allocation ? { fareProductId: allocation.fareProductId,
                 fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
-              ...(segment.stops ? { stops: segment.stops } : {}),
+              metadata: segmentMetadata,
+              ...(segmentMetadata.stops ? { stops: segmentMetadata.stops } : {}),
               liveStatus: segment.realtimeUpdatedAt ? 'PREDICTED' : 'SCHEDULED',
               dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - (segment.realtimeUpdatedAt ?? segment.sourceFreshAt).getTime()) / 1000)),
               source: segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
               lastUpdatedAt: segment.realtimeUpdatedAt ?? segment.sourceFreshAt, providerName: segment.providerName,
               routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс',
               scheduleSemantics: segment.scheduleSemantics,
-              ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}), driver: null, vehicle: null });
+              ...(segmentMetadata.routeGeometry ? { routeGeometry: segmentMetadata.routeGeometry } : {}), driver: null, vehicle: null });
           }
           const egressWalk = path.egressWalk ?? null;
           if (egressWalk && endAt) {
@@ -4196,6 +4239,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         if (prefix) await insertTransitPath(prefix, search.origin, offer.origin);
         const communityPriceMinor = offer.pricePerSeatMinor * search.passengers;
         const safeCommunityPriceMinor = Number.isSafeInteger(communityPriceMinor) && communityPriceMinor >= 0 ? communityPriceMinor : null;
+        const communityMetadata = legProvenanceMetadata({ mode: 'COMMUNITY', source: 'community-offer',
+          routeGeometry: offer.routeGeometry, metadata: { ...offer.metadata, driverId: offer.driverId,
+            routeGeometry: offer.routeGeometry, pricePerSeatMinor: offer.pricePerSeatMinor,
+            availableSeatsAtSearch: offer.availableSeats } });
         const communityInserted = await client.query<{ id: string }>(
           `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_type,offer_id,state,data_source,data_freshness_seconds,last_updated_at,metadata)
            VALUES($1,$2,'COMMUNITY',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$13,$13,$13,$14,$15,'AVAILABLE','community',$16,'SELECTED','community-offer',0,$17,$18::jsonb) RETURNING id`,
@@ -4204,8 +4251,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             offer.departureAt, offer.arrivalAt, Math.ceil((offer.arrivalAt.getTime() - offer.departureAt.getTime()) / 1000),
             offer.distanceMeters, safeCommunityPriceMinor,
             offer.currency, offer.currency === 'UAH' && safeCommunityPriceMinor !== null ? 'ESTIMATED' : 'UNKNOWN', offer.id, offer.snapshotAt,
-            JSON.stringify({ ...offer.metadata, driverId: offer.driverId, routeGeometry: offer.routeGeometry,
-              pricePerSeatMinor: offer.pricePerSeatMinor, availableSeatsAtSearch: offer.availableSeats })],
+            JSON.stringify(communityMetadata)],
         );
         firstServiceLegId ??= communityInserted.rows[0].id;
         responseLegs.push({ id: communityInserted.rows[0].id, mode: 'COMMUNITY', offerId: offer.id,
@@ -4214,7 +4260,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           distanceMeters: offer.distanceMeters, priceMinor: offer.currency === 'UAH' ? safeCommunityPriceMinor : null,
           pricePerSeatMinor: offer.pricePerSeatMinor, currency: offer.currency,
           priceStatus: offer.currency === 'UAH' && safeCommunityPriceMinor !== null ? 'ESTIMATED' : 'UNKNOWN', availabilityStatus: 'AVAILABLE',
-          source: 'community-offer', routeGeometry: offer.routeGeometry, lastUpdatedAt: offer.snapshotAt,
+          source: 'community-offer', metadata: communityMetadata,
+          ...(communityMetadata.routeGeometry ? { routeGeometry: communityMetadata.routeGeometry } : {}), lastUpdatedAt: offer.snapshotAt,
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshotAt.getTime()) / 1000)),
           liveStatus: 'SCHEDULED', availableSeats: offer.availableSeats, driver: offer.metadata });
         if (suffix) await insertTransitPath(suffix, offer.destination, search.destination);
@@ -4259,7 +4306,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         [journeyId, offer.origin_lon, offer.origin_lat, offer.origin_name, offer.destination_lon, offer.destination_lat,
           offer.destination_name, offer.departure_at, candidate.arrivalAt, offer.duration_s, offer.distance_m,
           candidate.totalPriceMinor, offer.currency, offer.offer_id, offer.snapshot_at,
-          JSON.stringify({ driverId: offer.driver_id, driverName: offer.driver_name, vehicleId: offer.vehicle_id,
+          JSON.stringify({ ...(offer.route_source === 'osrm' ? {
+            routeGeometrySource: 'osrm-car-route', routeGeometry: parseOfferGeometry(offer.route_geojson),
+          } : {}), driverId: offer.driver_id, driverName: offer.driver_name, vehicleId: offer.vehicle_id,
             vehicleMake: offer.vehicle_make, vehicleModel: offer.vehicle_model, rating: offer.average_rating,
             reviewCount: offer.review_count, availableSeatsAtSearch: offer.available_seats, offerCreatedAt: offer.created_at })],
       );
@@ -4278,7 +4327,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           destination: { name: offer.destination_name, coordinates: [offer.destination_lon, offer.destination_lat] },
           departureAt: offer.departure_at, arrivalAt: candidate.arrivalAt, durationSeconds: offer.duration_s,
           distanceMeters: offer.distance_m, priceMinor: candidate.totalPriceMinor, priceStatus: 'ESTIMATED',
-          availabilityStatus: 'AVAILABLE', source: 'community-offer', lastUpdatedAt: offer.snapshot_at,
+          availabilityStatus: 'AVAILABLE', source: 'community-offer',
+          ...(offer.route_source === 'osrm' && parseOfferGeometry(offer.route_geojson)
+            ? { routeGeometry: parseOfferGeometry(offer.route_geojson), metadata: {
+              routeGeometrySource: 'osrm-car-route', routeGeometry: parseOfferGeometry(offer.route_geojson),
+            } } : {}),
+          lastUpdatedAt: offer.snapshot_at,
           transportType: 'carpool', liveStatus: 'SCHEDULED',
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - offer.snapshot_at.getTime()) / 1000)),
           driver: { id: offer.driver_id, name: offer.driver_name,
@@ -4370,6 +4424,23 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const durationSeconds = Math.max(0, Math.round((segment.arrivalAt.getTime() - segment.departureAt.getTime()) / 1000));
         const provider = providerMetadata.get(segment.providerId);
         const cashAllocation = itinerary.cashFare?.allocations[segmentIndex] ?? null;
+        const segmentSource = segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static';
+        const segmentMetadata = makeGtfsLegMetadata({
+          mode: segment.mode, source: segmentSource, routeGeometry: segment.routeGeometry,
+          routeGeometrySource: provider?.routeGeometrySource, stops: segment.stops,
+          metadata: { providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
+            headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId, serviceDate: segment.serviceDate,
+            scheduleSemantics: segment.scheduleSemantics,
+            fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
+            fromStopFeedId: segment.originTransferNodeIds[0] ?? segment.originStop.id,
+            toStopFeedId: segment.destinationTransferNodeIds[0] ?? segment.destinationStop.id,
+            ...(itinerary.fare?.allocations[segmentIndex] ? { fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
+              fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
+              fareSource: itinerary.fare.source } : {}),
+            ...(cashAllocation ? { cashPriceMinor: cashAllocation.priceMinor, cashCurrency: cashAllocation.currency,
+              cashFareProductId: cashAllocation.fareProductId, cashFareSource: itinerary.cashFare?.source } : {}),
+            ...(segment.stops ? { stops: segment.stops } : {}) },
+        });
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,predicted_departure_at,predicted_arrival_at,duration_s,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata,distance_m)
            VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,$15,$15,$15,$16,$17,'UNKNOWN',$18,'public_transit','SUGGESTED',$19,$20,$21::jsonb,$22) RETURNING id`,
@@ -4381,21 +4452,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             durationSeconds,
             itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
             itinerary.fare?.currency ?? 'UAH', priceStatusFor(itinerary.fare?.allocations[segmentIndex]?.priceMinor), segment.providerId,
-            segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
+            segmentSource,
             segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
-          JSON.stringify({ providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
-              headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId, serviceDate: segment.serviceDate,
-              scheduleSemantics: segment.scheduleSemantics,
-              fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
-              fromStopFeedId: segment.originTransferNodeIds[0] ?? segment.originStop.id,
-              toStopFeedId: segment.destinationTransferNodeIds[0] ?? segment.destinationStop.id,
-              ...(itinerary.fare?.allocations[segmentIndex] ? { fareProductId: itinerary.fare.allocations[segmentIndex].fareProductId,
-                fareIncludedByPreviousSegment: itinerary.fare.allocations[segmentIndex].includedByPreviousFare,
-                fareSource: itinerary.fare.source } : {}),
-              ...(cashAllocation ? { cashPriceMinor: cashAllocation.priceMinor, cashCurrency: cashAllocation.currency,
-                cashFareProductId: cashAllocation.fareProductId, cashFareSource: itinerary.cashFare?.source } : {}),
-              ...(segment.stops ? { stops: segment.stops } : {}),
-              ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}) }),
+          JSON.stringify(segmentMetadata),
                 segment.shapeDistanceMeters ?? null],
         );
         firstTransitLegId ??= inserted.rows[0].id;
@@ -4420,14 +4479,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             cashFareProductId: cashAllocation.fareProductId,
             cashFareSource: itinerary.cashFare?.source,
           } : {}),
-          ...(segment.stops ? { stops: segment.stops } : {}),
+          metadata: segmentMetadata,
           liveStatus: segment.realtimeUpdatedAt ? 'PREDICTED' : 'SCHEDULED',
           dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - (segment.realtimeUpdatedAt ?? segment.sourceFreshAt).getTime()) / 1000)),
           source: segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
           lastUpdatedAt: segment.realtimeUpdatedAt ?? segment.sourceFreshAt, providerName: segment.providerName,
           routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс',
           scheduleSemantics: segment.scheduleSemantics,
-          ...(segment.routeGeometry ? { routeGeometry: segment.routeGeometry } : {}), driver: null, vehicle: null });
+          ...(segmentMetadata.stops ? { stops: segmentMetadata.stops } : {}),
+          ...(segmentMetadata.routeGeometry ? { routeGeometry: segmentMetadata.routeGeometry } : {}), driver: null, vehicle: null });
       }
       await saveWalkLeg(
         { name: last.destinationStop.name, coordinates: last.destinationStop.coordinates },
@@ -4516,7 +4576,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     } } : {}),
   });
   res.json({ data: {
-    journeys,
+    journeys: journeys.map((journey) => sanitizePersistedJourney(journey as Record<string, unknown> & { legs?: unknown })),
     requestedStrategy: search.strategy,
     availableStrategies,
     candidateCount: rankedCandidates.length,
