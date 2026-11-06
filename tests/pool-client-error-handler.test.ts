@@ -38,3 +38,10 @@ test('each physical PostgreSQL client gets one error listener when it connects',
   assert.equal(first.listenerCount('error'), 1);
   assert.equal(second.listenerCount('error'), 1);
 });
+
+test('negative control: an unobserved checked-out client error would throw', () => {
+  const client = new EventEmitter();
+  const connectionError = new Error('Connection terminated unexpectedly');
+
+  assert.throws(() => client.emit('error', connectionError), connectionError);
+});
