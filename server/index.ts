@@ -3760,6 +3760,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const effectiveUserId = req.userId ?? '00000000-0000-0000-0000-000000000001';
   const client = await pool.connect();
   const journeys: Array<Record<string, unknown>> = [];
+  let returnedWalkReachExtendedCount = 0;
   try {
     await client.query('BEGIN');
     for (const representative of representatives) {
@@ -4314,6 +4315,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         estimatedPriceMaxMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
         currency: itinerary.fare?.currency ?? null, priceStatus: priceStatusFor(itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null), walkingMeters: itinerary.walkingMeters,
         transfers: itinerary.transfers, reliabilityScore: null, legs: responseLegs });
+      if (itinerary.walkReachExtended || (!walkingRoutingConfigured
+        && (first.distanceToOriginStopMeters > transitAccessWalkingMeters
+          || last.distanceFromDestinationStopMeters > transitEgressWalkingMeters))) {
+        returnedWalkReachExtendedCount += 1;
+      }
     }
     await client.query('COMMIT');
   } catch (error) {
@@ -4337,10 +4343,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   // so the reason must not turn a worker crash into "no stops nearby".
   const walkReachSummary = transitSearchFailed ? null : summarizeGtfsWalkReach(gtfsWorkerSearch.searches);
   const noStopWithinWalkingDistance = walkReachSummary?.blocked === true;
-  // Either signal is enough: the reach summary knows which sides missed the radius, the counter
-  // knows which journeys were actually built on a stop outside it. One without the other happens —
-  // a far stop can win the ranking even when a near one was available.
-  const walkReachExtended = walkReachSummary?.reachExtended === true || walkReachExtendedCandidates > 0;
+  // Disclose only selected GTFS journeys that were actually persisted and returned. The raw
+  // worker summary and routed candidate counter may describe candidates later filtered or unranked.
+  const walkReachExtended = returnedWalkReachExtendedCount > 0;
   const partialReasons = getJourneySearchPartialReasons({
     candidateGenerationTruncated,
     providerErrorCount: providerErrors.length,
@@ -4370,12 +4375,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     resultsReturned: journeys.length,
     searchTruncated: Object.values(truncationState).some(Boolean),
     transitSearchFailed,
-    ...((noStopWithinWalkingDistance || walkReachExtended) && walkReachSummary ? { walkingReach: {
-      nearestOriginStopMeters: walkReachSummary.nearestOriginStopMeters,
-      nearestDestinationStopMeters: walkReachSummary.nearestDestinationStopMeters,
+    ...((noStopWithinWalkingDistance || walkReachExtended) ? { walkingReach: {
+      nearestOriginStopMeters: walkReachSummary?.nearestOriginStopMeters ?? null,
+      nearestDestinationStopMeters: walkReachSummary?.nearestDestinationStopMeters ?? null,
       // The routes are shown even though the walk overshoots the standard reach; the client needs
       // the fact and the distance to say so instead of leaving a long walk unsuspicious.
-      ...(walkReachExtended ? { extended: true, journeysWithExtendedReach: walkReachExtendedCandidates } : {}),
+      ...(walkReachExtended ? { extended: true, journeysWithExtendedReach: returnedWalkReachExtendedCount } : {}),
     } } : {}),
   });
   res.json({ data: {
