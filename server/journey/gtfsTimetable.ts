@@ -1688,17 +1688,9 @@ function routeGeometryForTrip(feed: GtfsTimetableFeed, tripId: string, fromIndex
   append(from);
   for (const coordinate of shape.slice(start, end + 1)) append(coordinate);
   append(to);
-  // Measured on the full shape slice: the decimated drawing polyline would
-  // understate the ride, so the number never comes from the simplified line.
-  let ridingMeters = 0;
-  for (let index = 1; index < coordinates.length; index += 1) ridingMeters += distanceMeters(coordinates[index - 1], coordinates[index]);
-  const shapeMeters = Math.round(ridingMeters);
-  if (coordinates.length <= MAX_ROUTE_GEOMETRY_POINTS) return { coordinates, distanceMeters: shapeMeters };
-  return {
-    coordinates: Array.from({ length: MAX_ROUTE_GEOMETRY_POINTS }, (_, index) =>
-      coordinates[Math.round(index * (coordinates.length - 1) / (MAX_ROUTE_GEOMETRY_POINTS - 1))]),
-    distanceMeters: shapeMeters,
-  };
+  if (coordinates.length <= MAX_ROUTE_GEOMETRY_POINTS) return coordinates;
+  return Array.from({ length: MAX_ROUTE_GEOMETRY_POINTS }, (_, index) =>
+    coordinates[Math.round(index * (coordinates.length - 1) / (MAX_ROUTE_GEOMETRY_POINTS - 1))]);
 }
 
 /**
