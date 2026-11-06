@@ -4063,6 +4063,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               priceStatus: priceStatusFor(allocation?.priceMinor), availabilityStatus: 'UNKNOWN', source: 'gtfs-static',
               providerName: segment.providerName, routeName: segment.routeName, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс',
               scheduleSemantics: segment.scheduleSemantics, metadata: segmentMetadata,
+              ...(segmentMetadata.stops ? { stops: segmentMetadata.stops } : {}),
               ...(segmentMetadata.routeGeometry ? { routeGeometry: segmentMetadata.routeGeometry } : {}),
               liveStatus: 'SCHEDULED', dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - segment.sourceFreshAt.getTime()) / 1000)),
               lastUpdatedAt: segment.sourceFreshAt, driver: null, vehicle: null });
@@ -4217,6 +4218,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               ...(allocation ? { fareProductId: allocation.fareProductId,
                 fareIncludedByPreviousSegment: allocation.includedByPreviousFare, fareSource: path.fare?.source } : {}),
               metadata: segmentMetadata,
+              ...(segmentMetadata.stops ? { stops: segmentMetadata.stops } : {}),
               liveStatus: segment.realtimeUpdatedAt ? 'PREDICTED' : 'SCHEDULED',
               dataFreshnessSeconds: Math.max(0, Math.floor((Date.now() - (segment.realtimeUpdatedAt ?? segment.sourceFreshAt).getTime()) / 1000)),
               source: segment.realtimeUpdatedAt ? 'gtfs-realtime-trip-updates' : 'gtfs-static',
@@ -4484,6 +4486,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           lastUpdatedAt: segment.realtimeUpdatedAt ?? segment.sourceFreshAt, providerName: segment.providerName,
           routeName: segment.routeName, transportType: segment.transportType, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс',
           scheduleSemantics: segment.scheduleSemantics,
+          ...(segmentMetadata.stops ? { stops: segmentMetadata.stops } : {}),
           ...(segmentMetadata.routeGeometry ? { routeGeometry: segmentMetadata.routeGeometry } : {}), driver: null, vehicle: null });
       }
       await saveWalkLeg(
