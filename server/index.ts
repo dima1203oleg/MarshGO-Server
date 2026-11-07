@@ -14,7 +14,7 @@ import { getBuildInfo } from './buildInfo';
 import { smartCache } from './cache/cacheService';
 import { routingMetricsPrometheus } from './routing/osrmGateway';
 import { parseBearerToken } from './auth/bearer';
-import { validateEmail, validatePassword, hashPassword, verifyPassword, generateResetToken } from './auth/passwords';
+import { validateEmail, validatePassword, hashPassword, verifyPassword } from './auth/passwords';
 import type { Duplex } from 'node:stream';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, getWalkingRoute, RoutingUnavailableError } from './routing';
@@ -2023,49 +2023,17 @@ app.post('/api/v1/auth/guest', (_req, res) => {
   res.status(410).json({ error: { code: 'guest_auth_disabled', message: 'Гостьовий вхід вимкнено. Створіть обліковий запис або увійдіть за email і паролем.' } });
 });
 
-app.post('/api/v1/auth/password-reset/request', asyncHandler(async (req, res) => {
+app.post('/api/v1/auth/password-reset/request', asyncHandler(async (req) => {
   const { email } = req.body ?? {};
   const emailResult = validateEmail(email);
   if (!emailResult.valid || !emailResult.normalized) {
     throw new ApiError(400, 'Вкажіть дійсну електронну пошту', 'invalid_email');
   }
-  const normalizedEmail = emailResult.normalized;
-
-  const { rows } = await pool.query<{ id: string; account_status: string }>(
-    `SELECT id, account_status FROM users WHERE lower(email) = $1`,
-    [normalizedEmail],
+  throw new ApiError(
+    503,
+    'Відновлення пароля тимчасово недоступне. Сервіс надсилання електронної пошти не налаштований.',
+    'password_recovery_unavailable',
   );
-
-  let resetTokenStr: string | undefined;
-
-  if (rows[0] && rows[0].account_status === 'active') {
-    const userId = rows[0].id;
-    const { token: genToken, tokenHash } = generateResetToken();
-    resetTokenStr = genToken;
-
-    const rateCheck = await pool.query<{ count: number }>(
-      `SELECT count(*)::int as count FROM password_reset_tokens WHERE user_id = $1 AND created_at > now() - interval '1 hour'`,
-      [userId],
-    );
-    if ((rateCheck.rows[0]?.count ?? 0) < 5) {
-      await pool.query(
-        `INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
-         VALUES ($1, $2, now() + interval '1 hour')`,
-        [userId, tokenHash],
-      );
-    }
-  }
-
-  const responseData: Record<string, unknown> = {
-    sent: true,
-    message: 'Якщо такий акаунт існує, посилання для скидання пароля надіслано на вашу пошту.',
-  };
-  if (process.env.NODE_ENV === 'test' && process.env.AUTH_EXPOSE_RESET_TOKEN === 'true' && resetTokenStr) {
-    responseData.resetToken = resetTokenStr;
-    responseData.resetUrl = `/auth/reset-password?token=${resetTokenStr}`;
-  }
-
-  res.json({ data: responseData });
 }));
 
 app.post('/api/v1/auth/password-reset/confirm', asyncHandler(async (req, res) => {

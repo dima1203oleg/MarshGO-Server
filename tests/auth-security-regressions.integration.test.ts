@@ -150,7 +150,7 @@ describe('P0 — Auth Security Regressions & Verification Integrity (opt-in loca
     }
   });
 
-  it('implements secure password reset without token leakage in responses or logs', async () => {
+  it('fails closed for password reset until email delivery is configured without revealing account existence', async () => {
     const pool = new pg.Pool({ connectionString: databaseUrl });
     const runId = crypto.randomUUID().slice(0, 8);
     const userEmail = `reset.test.${runId}@marshgo.ua`;
@@ -170,40 +170,35 @@ describe('P0 — Auth Security Regressions & Verification Integrity (opt-in loca
       assert.equal(regRes.status, 201);
       userId = (await regRes.json()).data.user.id;
 
-      // 2. Request password reset (simulating staging/production by omitting AUTH_EXPOSE_RESET_TOKEN)
+      const tokenCountBefore = await pool.query<{ count: number }>(
+        'SELECT count(*)::int AS count FROM password_reset_tokens WHERE user_id = $1', [userId],
+      );
+
+      // No email provider is implemented/configured. Do not create an unusable token or claim delivery.
       const resetReqRes = await fetch(`${apiUrl}/api/v1/auth/password-reset/request`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: userEmail }),
       });
-      assert.equal(resetReqRes.status, 200);
-      const reqData = (await resetReqRes.json()).data;
-      assert.equal(reqData.sent, true);
-      assert.ok(reqData.message);
-      // In staging/production, resetToken MUST NEVER be present
-      if (process.env.NODE_ENV !== 'test' || process.env.AUTH_EXPOSE_RESET_TOKEN !== 'true') {
-        assert.equal(reqData.resetToken, undefined, 'resetToken must not leak in response');
-        assert.equal(reqData.resetUrl, undefined, 'resetUrl must not leak in response');
-      }
+      assert.equal(resetReqRes.status, 503);
+      const knownAccountError = (await resetReqRes.json()).error;
+      assert.equal(knownAccountError.code, 'password_recovery_unavailable');
 
-      // Check DB for hashed reset token
-      const tokenRecord = await pool.query<{ id: string; token_hash: string; consumed_at: Date | null }>(
-        'SELECT id, token_hash, consumed_at FROM password_reset_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
-        [userId],
-      );
-      assert.ok(tokenRecord.rows[0], 'Token record must exist in DB');
-      assert.equal(tokenRecord.rows[0].consumed_at, null, 'Token must not be consumed yet');
-
-      // 3. Enumeration protection: requesting reset for unknown email returns same success message
+      // Enumeration protection: an unknown address receives the same unavailable contract.
       const unknownRes = await fetch(`${apiUrl}/api/v1/auth/password-reset/request`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: `nonexistent.${runId}@marshgo.ua` }),
       });
-      assert.equal(unknownRes.status, 200);
-      const unknownData = (await unknownRes.json()).data;
-      assert.equal(unknownData.sent, true);
-      assert.equal(unknownData.message, reqData.message, 'Must return identical message to prevent email enumeration');
+      assert.equal(unknownRes.status, 503);
+      const unknownAccountError = (await unknownRes.json()).error;
+      assert.equal(unknownAccountError.code, knownAccountError.code);
+
+      const tokenCountAfter = await pool.query<{ count: number }>(
+        'SELECT count(*)::int AS count FROM password_reset_tokens WHERE user_id = $1', [userId],
+      );
+      assert.equal(tokenCountAfter.rows[0]?.count, tokenCountBefore.rows[0]?.count,
+        'must not create unusable reset tokens when no email delivery adapter exists');
     } finally {
       if (userId) {
         await pool.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [userId]);
