@@ -205,6 +205,7 @@ export async function suggestPlaces(query: string, bias?: PlaceBias): Promise<Pl
   try { url = new URL(endpoint); }
   catch { throw new GeocodingUnavailableError('Geocoder endpoint is invalid'); }
   const photon = process.env.GEOCODING_PROVIDER === 'photon';
+  const forwardLocationBias = process.env.GEOCODING_FORWARD_LOCATION_BIAS === 'true';
   if (!photon && url.hostname === 'nominatim.openstreetmap.org') {
     throw new GeocodingUnavailableError('Public Nominatim does not support place autocomplete; configure Photon or an approved geocoder');
   }
@@ -222,12 +223,17 @@ export async function suggestPlaces(query: string, bias?: PlaceBias): Promise<Pl
     url.searchParams.set('countrycodes', 'ua');
     url.searchParams.set('accept-language', 'uk');
     url.searchParams.set('limit', '6');
-    if (bias) url.searchParams.set('viewbox', biasViewbox(bias));
   }
-  if (photon && bias) {
-    url.searchParams.set('lat', String(bias.latitude));
-    url.searchParams.set('lon', String(bias.longitude));
-    url.searchParams.set('zoom', '12');
+  // Forwarding a user's location to a third-party autocomplete provider is optional.
+  // Keep it disabled unless the deployment explicitly accepts that data flow.
+  if (bias && forwardLocationBias) {
+    if (photon) {
+      url.searchParams.set('lat', String(bias.latitude));
+      url.searchParams.set('lon', String(bias.longitude));
+      url.searchParams.set('zoom', '12');
+    } else {
+      url.searchParams.set('viewbox', biasViewbox(bias));
+    }
   }
 
   const headers = new Headers({ accept: 'application/json', 'user-agent': 'MARSHGO/1.0 (place search)' });

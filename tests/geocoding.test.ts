@@ -9,9 +9,13 @@ describe('Nominatim-compatible place search adapter', () => {
   const originalReverseUrl = process.env.GEOCODING_REVERSE_URL;
   const originalKey = process.env.GEOCODING_API_KEY;
   const originalProvider = process.env.GEOCODING_PROVIDER;
+  const originalForwardLocationBias = process.env.GEOCODING_FORWARD_LOCATION_BIAS;
   const originalEnvironment = process.env.NODE_ENV;
 
-  beforeEach(() => { process.env.GEOCODING_PROVIDER = 'nominatim'; });
+  beforeEach(() => {
+    process.env.GEOCODING_PROVIDER = 'nominatim';
+    delete process.env.GEOCODING_FORWARD_LOCATION_BIAS;
+  });
 
   after(async () => {
     if (server?.listening) await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
@@ -23,6 +27,8 @@ describe('Nominatim-compatible place search adapter', () => {
     else process.env.GEOCODING_API_KEY = originalKey;
     if (originalProvider === undefined) delete process.env.GEOCODING_PROVIDER;
     else process.env.GEOCODING_PROVIDER = originalProvider;
+    if (originalForwardLocationBias === undefined) delete process.env.GEOCODING_FORWARD_LOCATION_BIAS;
+    else process.env.GEOCODING_FORWARD_LOCATION_BIAS = originalForwardLocationBias;
     if (originalEnvironment === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = originalEnvironment;
   });
@@ -85,10 +91,36 @@ describe('Nominatim-compatible place search adapter', () => {
     assert.ok(address && typeof address !== 'string');
     process.env.NODE_ENV = 'test';
     process.env.GEOCODING_PROVIDER = 'photon';
+    process.env.GEOCODING_FORWARD_LOCATION_BIAS = 'true';
     process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/api`;
     assert.deepEqual(await suggestPlaces('Львів', { latitude: 49.8397, longitude: 24.0297 }), [
       { label: 'Львів, Львівська область', latitude: 49.8397, longitude: 24.0297, providerId: 'r:123' },
     ]);
+    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+    server = undefined;
+  });
+
+  it('does not forward caller coordinates to Photon unless explicitly enabled', async () => {
+    let observed: URL | undefined;
+    server = createServer((request, response) => {
+      observed = new URL(request.url ?? '/', 'http://localhost');
+      response.writeHead(200, { 'content-type': 'application/geo+json' });
+      response.end(JSON.stringify({ type: 'FeatureCollection', features: [] }));
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_PROVIDER = 'photon';
+    process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/api`;
+
+    await suggestPlaces('Львів', { latitude: 49.8397, longitude: 24.0297 });
+
+    assert.ok(observed);
+    assert.equal(observed.searchParams.get('q'), 'Львів');
+    assert.equal(observed.searchParams.has('lat'), false);
+    assert.equal(observed.searchParams.has('lon'), false);
+    assert.equal(observed.searchParams.has('zoom'), false);
     await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
     server = undefined;
   });
@@ -151,11 +183,34 @@ describe('Nominatim-compatible place search adapter', () => {
     const address = server.address();
     assert.ok(address && typeof address !== 'string');
     process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_FORWARD_LOCATION_BIAS = 'true';
     process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/search`;
     await suggestPlaces('залізничний вокзал', { latitude: 49.8397, longitude: 24.0297 });
     assert.equal(seen[0], '23.8997,49.9297,24.1597,49.7497');
     await suggestPlaces('залізничний вокзал');
     assert.equal(seen[1], '');
+    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+    server = undefined;
+  });
+
+  it('does not forward caller locality to Nominatim-compatible providers by default', async () => {
+    let observed: URL | undefined;
+    server = createServer((request, response) => {
+      observed = new URL(request.url ?? '/', 'http://localhost');
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([]));
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/search`;
+
+    await suggestPlaces('вокзал', { latitude: 49.8397, longitude: 24.0297 });
+
+    assert.ok(observed);
+    assert.equal(observed.searchParams.get('q'), 'вокзал');
+    assert.equal(observed.searchParams.has('viewbox'), false);
     await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
     server = undefined;
   });
