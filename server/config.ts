@@ -83,12 +83,14 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
 
   validateProductionOrigins(requireValue(environment, 'CORS_ORIGINS'));
 
-  if (environment.SMS_PROVIDER !== 'twilio') {
-    throw new Error('SMS_PROVIDER=twilio is required in production');
+  const smsProvider = environment.SMS_PROVIDER;
+  if (smsProvider === 'twilio') {
+    requireValue(environment, 'TWILIO_ACCOUNT_SID');
+    requireValue(environment, 'TWILIO_AUTH_TOKEN');
+    requireValue(environment, 'TWILIO_FROM_NUMBER');
+  } else if (smsProvider !== 'disabled') {
+    throw new Error('SMS_PROVIDER must be explicitly set to disabled or twilio in production');
   }
-  requireValue(environment, 'TWILIO_ACCOUNT_SID');
-  requireValue(environment, 'TWILIO_AUTH_TOKEN');
-  requireValue(environment, 'TWILIO_FROM_NUMBER');
 
   if (environment.GEOCODING_PROVIDER !== undefined && !['nominatim', 'photon'].includes(environment.GEOCODING_PROVIDER)) {
     throw new Error('GEOCODING_PROVIDER must be nominatim or photon');

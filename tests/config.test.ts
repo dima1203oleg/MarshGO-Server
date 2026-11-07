@@ -27,6 +27,16 @@ describe('runtime production configuration', () => {
     assert.doesNotThrow(() => validateRuntimeConfig(validProductionConfig));
   });
 
+  it('allows production email/password auth without SMS credentials when SMS is explicitly disabled', () => {
+    assert.doesNotThrow(() => validateRuntimeConfig({
+      ...validProductionConfig,
+      SMS_PROVIDER: 'disabled',
+      TWILIO_ACCOUNT_SID: undefined,
+      TWILIO_AUTH_TOKEN: undefined,
+      TWILIO_FROM_NUMBER: undefined,
+    }));
+  });
+
   it('does not apply production restrictions to development', () => {
     assert.doesNotThrow(() => validateRuntimeConfig({ NODE_ENV: 'development', AUTH_DEV_OTP: 'true' }));
   });
@@ -43,18 +53,18 @@ describe('runtime production configuration', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, AUTH_DEV_OTP: 'true' }), /development authentication/);
   });
 
-  it('rejects non-Twilio SMS providers in production', () => {
+  it('rejects unverified SMS providers in production and requires an explicit SMS mode', () => {
     for (const provider of ['development', 'getotp', '']) {
-      assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, SMS_PROVIDER: provider }), /SMS_PROVIDER=twilio/);
+      assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, SMS_PROVIDER: provider }), /SMS_PROVIDER must be explicitly set/);
     }
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, SMS_PROVIDER: undefined }), /SMS_PROVIDER must be explicitly set/);
   });
 
-  it('requires strong sessions, explicit secure origins, and real SMS credentials', () => {
+  it('requires strong sessions and explicit secure origins, and validates Twilio credentials only when enabled', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, SESSION_SECRET: 'short' }), /32 bytes/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, CORS_ORIGINS: undefined }), /CORS_ORIGINS is required/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, CORS_ORIGINS: 'http://localhost:3000' }), /HTTPS web origins/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, CORS_ORIGINS: '*' }), /explicit production origins/);
-    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, SMS_PROVIDER: undefined }), /SMS_PROVIDER=twilio/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TWILIO_AUTH_TOKEN: undefined }), /TWILIO_AUTH_TOKEN is required/);
   });
 
