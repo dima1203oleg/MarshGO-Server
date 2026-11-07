@@ -28,6 +28,7 @@ import { scaleCashFareForPassengers } from './mobility/transportTariffs';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, effectiveWalkingReachMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS, resolveTransitCandidateBudget, summarizeGtfsWalkReach, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, routePedestrianPath, STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
+import { createDirectWalkingCandidate, directWalkingGeometryConnectsEndpoints, MAX_DIRECT_WALK_CANDIDATE_STRAIGHT_LINE_METERS, type DirectWalkingCandidate } from './journey/directWalkingCandidate';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { legProvenanceMetadata, sanitizePersistedJourney, trustedRouteGeometry } from './journey/legGeometryProvenance';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
@@ -3165,6 +3166,31 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const walkingRoutingConfigured = walkingRoutingEnabled();
   const walkingRouteBudget = createWalkingRouteBudget();
   const providerErrors: string[] = [];
+  // Door-to-door walking is a real route option, not merely a connector between transit stops.
+  // Keep this bounded to local trips and only accept measured geometry from the configured foot graph.
+  let directWalkingCandidate: DirectWalkingCandidate | null = null;
+  const directWalkingEndpoint = routeDistanceMeters > 0 && routeDistanceMeters <= MAX_DIRECT_WALK_CANDIDATE_STRAIGHT_LINE_METERS
+    ? walkingEndpointFor(search.origin.coordinates, search.destination.coordinates) : null;
+  if (walkingRoutingConfigured && routeDistanceMeters > 0 && routeDistanceMeters <= MAX_DIRECT_WALK_CANDIDATE_STRAIGHT_LINE_METERS) {
+    const walkingEndpoint = directWalkingEndpoint;
+    if (walkingEndpoint) {
+      const path = await routePedestrianPath(search.origin.coordinates, search.destination.coordinates,
+        walkingEndpoint, walkingRouteBudget);
+      const geometryConnectsEndpoints = path ? directWalkingGeometryConnectsEndpoints({
+        path, origin: search.origin.coordinates, destination: search.destination.coordinates,
+      }) : false;
+      directWalkingCandidate = path && geometryConnectsEndpoints ? createDirectWalkingCandidate({
+        id: `walking:${search.origin.coordinates.join(',')}>${search.destination.coordinates.join(',')}`,
+        path,
+        origin: search.origin.coordinates,
+        destination: search.destination.coordinates,
+        maximumWalkingMeters: preferenceValues.maxWalkingMeters,
+        maximumDurationSeconds: preferenceValues.maxTotalDurationSeconds,
+      }) : null;
+      if (!path) providerErrors.push('Пішохідний маршрутизатор не підтвердив прямий шлях; показано лише інші перевірені варіанти.');
+      else if (!geometryConnectsEndpoints) providerErrors.push('Пішохідний маршрутизатор прив’язав точки до дороги надто далеко; неповну геометрію не показано як точний маршрут.');
+    } else providerErrors.push('Немає налаштованої пішохідної мережі для цих точок; пішохідний варіант не перевірено.');
+  }
   let gtfsSecondarySearchUnavailable = false;
   const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
     `SELECT id,name,city,feed_url,realtime_url,last_sync_at,last_report FROM mobility_providers
@@ -3858,6 +3884,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     return routes.join('>');
   };
   const rankedCandidates = [
+    ...(directWalkingCandidate ? [{ ...directWalkingCandidate }] : []),
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
     ...micromobilityCandidates.map((candidate) => ({ ...candidate })),
@@ -3907,6 +3934,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...canonicalRouteTypes.filter((type) => !routePlannerTypes.has(type))
       .map((type) => `transportType:${type}:no-routed-provider-in-corridor`),
     ...(!walkingRoutingConfigured ? ['door-to-door-walking:requires-WALKING_ROUTING_URL-or-WALKING_ROUTING_URLS'] : []),
+    ...(walkingRoutingConfigured && routeDistanceMeters > 0
+      && routeDistanceMeters <= MAX_DIRECT_WALK_CANDIDATE_STRAIGHT_LINE_METERS && !directWalkingEndpoint
+      ? ['door-to-door-walking:no-foot-graph-covers-origin-and-destination'] : []),
+    ...(walkingRoutingConfigured && routeDistanceMeters > MAX_DIRECT_WALK_CANDIDATE_STRAIGHT_LINE_METERS
+      ? ['door-to-door-walking:local-distance-cap-exceeded'] : []),
     'walking-transfers-between-unmatched-stops',
     'community-intermediate-pickup:requires-explicit-driver-approved-stop',
   ];
@@ -3918,6 +3950,55 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     await client.query('BEGIN');
     for (const representative of representatives) {
       const candidate = representative.journey;
+      if (candidate.kind === 'walking') {
+        const walking = candidate as DirectWalkingCandidate;
+        const journeyRow = await client.query<{ id: string }>(
+          `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,confirmed_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count)
+           VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,0,0,0,0,$11,$12,0) RETURNING id`,
+          [effectiveUserId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
+            search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
+            search.departureAt, representative.strategy, search.passengers, walking.durationSeconds, walking.walkingMeters],
+        );
+        const journeyId = journeyRow.rows[0]!.id;
+        await client.query(
+          `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
+          [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
+            preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
+            preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
+            preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
+            preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
+            configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
+            preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+            JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
+        );
+        const departureAt = search.departureAt;
+        const arrivalAt = new Date(departureAt.getTime() + walking.durationSeconds * 1000);
+        const geometry = trustedRouteGeometry({ mode: 'WALK', source: 'osrm-foot-route', routeGeometry: walking.path.geometry });
+        if (!geometry) throw new Error('walking router returned invalid route geometry');
+        const metadata = legProvenanceMetadata({ mode: 'WALK', source: 'osrm-foot-route', routeGeometry: geometry,
+          metadata: { routeGeometrySource: 'osrm-foot-route', routeAccuracy: 'SOURCE_GEOMETRY', walkingSpeedMetersPerSecond: walking.walkingMeters / walking.durationSeconds } });
+        const legRow = await client.query<{ id: string }>(
+          `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,price_minor,price_min_minor,price_max_minor,currency,price_status,availability_status,provider_type,state,data_source,last_updated_at,metadata)
+           VALUES($1,0,'WALK',ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,$10,$11,$11,0,0,0,'UAH','LOCKED','AVAILABLE','walking','SUGGESTED','osrm-foot-route',now(),$12::jsonb) RETURNING id`,
+          [journeyId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
+            search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
+            departureAt, arrivalAt, walking.durationSeconds, walking.walkingMeters, JSON.stringify(metadata)],
+        );
+        journeys.push({ id: journeyId, offerId: null, origin: search.origin, destination: search.destination,
+          strategy: representative.strategy, requestedDepartureAt: departureAt.toISOString(), waitingSeconds: 0,
+          recommendedStrategies: representative.recommendedStrategies, strategyRanks: representative.strategyRanks,
+          score: representative.score, state: 'PLANNED', source: 'osrm-foot-route', totalDurationSeconds: walking.durationSeconds,
+          totalPriceMinor: 0, confirmedPriceMinor: 0, estimatedPriceMinMinor: 0, estimatedPriceMaxMinor: 0,
+          currency: 'UAH', priceStatus: 'LOCKED', walkingMeters: walking.walkingMeters, transfers: 0, reliabilityScore: null,
+          legs: [{ id: legRow.rows[0]!.id, mode: 'WALK', transportType: 'walk', origin: search.origin, destination: search.destination,
+            departureAt, arrivalAt, durationSeconds: walking.durationSeconds, distanceMeters: walking.walkingMeters,
+            walkingDistanceMeters: walking.walkingMeters, priceMinor: 0, currency: 'UAH', priceStatus: 'LOCKED',
+            availabilityStatus: 'AVAILABLE', source: 'osrm-foot-route', routeGeometry: geometry, metadata,
+            lastUpdatedAt: new Date().toISOString(), dataFreshnessSeconds: 0, liveStatus: 'UNVERIFIED', driver: null, vehicle: null }],
+        });
+        continue;
+      }
       if (candidate.kind === 'micromobility' || candidate.kind === 'micromobility-transit') {
         const route = candidate as MicromobilityCandidate;
         const stored = await client.query<{ id: string }>(
@@ -4563,7 +4644,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     providersFailed: failedTransitProviderIds.size,
     routeTypesInCorridor: routePlannerTypes,
     requestedRouteTypes: search.preferences.allowedTransportTypes,
-    candidatesGenerated: generatedTransitCandidateCount + candidates.length + communityTransitCandidates.length + micromobilityCandidates.length,
+    candidatesGenerated: generatedTransitCandidateCount + candidates.length + communityTransitCandidates.length + micromobilityCandidates.length
+      + (directWalkingCandidate ? 1 : 0),
     candidatesValidated: rankedCandidates.length,
     candidatesDeduplicated: paretoCandidates.length,
     resultsReturned: journeys.length,
