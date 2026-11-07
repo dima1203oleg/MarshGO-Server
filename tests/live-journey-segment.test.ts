@@ -127,6 +127,19 @@ describe('live journey segment assembly', () => {
     assert.deepEqual(result.vehicles, []);
   });
 
+  it('does not label a scheduled trip LIVE because another fresh vehicle is on the same route', () => {
+    const unrelatedVehicle = vehicle('other-trip', 'trip-near', 2, { startDate: '20261017' });
+    const result = buildLiveJourneySegment(leg, {
+      vehicles: [unrelatedVehicle], network: network(), timetable: feed(),
+    }, now);
+
+    assert.equal(result.status, 'SCHEDULED');
+    assert.equal(result.reason, 'no_fresh_matching_vehicle');
+    assert.equal(result.vehiclePositionStatus, 'UNAVAILABLE');
+    assert.equal(result.vehicle, undefined);
+    assert.equal(result.vehicles.length, 1, 'the real vehicle may remain visible on the route overlay');
+  });
+
   it('uses provenance-marked official route geometry as scheduled context without inventing live vehicles', () => {
     const coordinates: Array<[number, number]> = [[30.598, 50.452], [30.57, 50.455], [30.526, 50.459]];
     const result = buildLiveJourneySegment({
