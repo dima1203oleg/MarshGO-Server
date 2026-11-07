@@ -313,13 +313,18 @@ export function buildLiveJourneySegment(
     }];
   });
 
-  if (!selectedVehicle && fleet.length === 0) {
+  // A fresh vehicle on the same route is not proof that this selected trip is
+  // live. A different trip instance or direction must not promote a scheduled
+  // itinerary when no vehicle matches its exact identity.
+  if (!selectedVehicle) {
     return {
       legId: leg.id,
       status: lineRoutes.length > 0 ? 'SCHEDULED' : 'UNVERIFIED',
       vehiclePositionStatus: 'UNAVAILABLE',
       boardingStopArrival,
-      ...(lineRoutes.length > 0 ? {} : { reason: feed.vehicles ? 'no_fresh_matching_vehicle' : 'provider_unavailable' }),
+      ...(feed.vehicles
+        ? { reason: 'no_fresh_matching_vehicle' as const }
+        : lineRoutes.length === 0 ? { reason: 'provider_unavailable' as const } : {}),
       lineRoutes,
       vehicles,
     };
