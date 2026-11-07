@@ -19,9 +19,12 @@ export function directWalkingGeometryConnectsEndpoints(input: {
   if (path.geometry.length < 2) return false;
   const first = path.geometry[0]!;
   const last = path.geometry.at(-1)!;
-  return haversineDistanceMeters(origin, first) <= MAX_DIRECT_WALK_ENDPOINT_SNAP_METERS
-    && haversineDistanceMeters(destination, last) <= MAX_DIRECT_WALK_ENDPOINT_SNAP_METERS
-    && path.distanceMeters >= haversineDistanceMeters(first, last);
+  if (haversineDistanceMeters(origin, first) > MAX_DIRECT_WALK_ENDPOINT_SNAP_METERS
+    || haversineDistanceMeters(destination, last) > MAX_DIRECT_WALK_ENDPOINT_SNAP_METERS) return false;
+  const geometryLengthMeters = path.geometry.slice(1).reduce((total, point, index) =>
+    total + haversineDistanceMeters(path.geometry[index]!, point), 0);
+  const roundingToleranceMeters = Math.max(2, path.distanceMeters * 0.01);
+  return path.distanceMeters + roundingToleranceMeters >= geometryLengthMeters;
 }
 
 /** Build a ranking candidate only from a measured pedestrian route. */

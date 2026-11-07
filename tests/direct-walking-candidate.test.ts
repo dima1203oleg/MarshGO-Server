@@ -43,6 +43,15 @@ test('rejects an impossible measured distance shorter than the geometry chord', 
   assert.equal(createDirectWalkingCandidate({ id: 'walk:impossible', path: { ...path, distanceMeters: 10 }, origin, destination }), null);
 });
 
+test('rejects a looping geometry whose polyline is longer than the measured distance', () => {
+  const loopingPath = {
+    distanceMeters: 60,
+    durationSeconds: 48,
+    geometry: [origin, [24.0323, 49.8422], destination] as Array<[number, number]>,
+  };
+  assert.equal(createDirectWalkingCandidate({ id: 'walk:loop-distance-mismatch', path: loopingPath, origin, destination }), null);
+});
+
 test('ranks the measured short walk above a longer paid tram detour for balanced, fastest, and cheapest', () => {
   const walking = createDirectWalkingCandidate({ id: 'walk:nearby', path, origin, destination });
   assert.ok(walking);
