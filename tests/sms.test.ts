@@ -38,4 +38,17 @@ describe('SMS verification delivery', () => {
     await assert.rejects(sendVerificationCode('+380671110001', '123456'), SmsProviderUnavailableError);
     assert.equal(fetchCalled, false);
   });
+
+  it('fails closed when production SMS is explicitly disabled without making a network request', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.SMS_PROVIDER = 'disabled';
+    let fetchCalled = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      throw new Error('unexpected network call');
+    }) as typeof fetch;
+
+    await assert.rejects(sendVerificationCode('+380671110001', '123456'), SmsProviderUnavailableError);
+    assert.equal(fetchCalled, false);
+  });
 });
