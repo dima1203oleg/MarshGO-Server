@@ -33,6 +33,9 @@ test('unlimited cgroups do not produce a fake ceiling', () => {
   };
   assert.equal(resolveGtfsWorkerHeapCeiling({}, read({ '/sys/fs/cgroup/memory.max': 'max\n' })), undefined);
   assert.equal(resolveGtfsWorkerHeapCeiling({}, read({ '/sys/fs/cgroup/memory.limit_in_bytes': '9223372036854771712' })), undefined);
+  assert.equal(resolveGtfsWorkerHeapCeiling({}, read({
+    '/sys/fs/cgroup/memory/memory.limit_in_bytes': String(ACCEPTANCE_CONTAINER_BYTES),
+  }))?.maxOldGenerationSizeMb, 1_080, 'cgroup v1 commonly mounts the memory controller in a subdirectory');
   // A 512 MiB container would derive 307 MiB, below the floor: applying it would break legitimate
   // searches, so the operator must opt in explicitly instead.
   assert.equal(resolveGtfsWorkerHeapCeiling({}, read({ '/sys/fs/cgroup/memory.max': String(512 * 1048576) })), undefined);
@@ -99,12 +102,17 @@ test('the applied ceiling reaches the real GTFS worker isolate instead of only t
   }
   if (shadowedByAmbient) return;
 
-  const unlimitedClient = new GtfsSearchWorkerClient();
+  const controlClient = new GtfsSearchWorkerClient();
+  const previousControl = process.env.MARSHGO_GTFS_WORKER_MAX_OLD_SPACE_MB;
   try {
-    const control = await unlimitedClient.diagnostics();
+    // Use an explicit larger control instead of assuming the ambient host/container is unlimited.
+    process.env.MARSHGO_GTFS_WORKER_MAX_OLD_SPACE_MB = '1024';
+    const control = await controlClient.diagnostics();
     assert.ok(control.heapLimitBytes > limited.heapLimitBytes * 2,
-      `negative control: without the operator value the isolate keeps Node's default (${MiB(control.heapLimitBytes)} MiB vs ${MiB(limited.heapLimitBytes)} MiB)`);
+      `larger explicit control should exceed the constrained isolate (${MiB(control.heapLimitBytes)} MiB vs ${MiB(limited.heapLimitBytes)} MiB)`);
   } finally {
-    await unlimitedClient.close();
+    await controlClient.close();
+    if (previousControl === undefined) delete process.env.MARSHGO_GTFS_WORKER_MAX_OLD_SPACE_MB;
+    else process.env.MARSHGO_GTFS_WORKER_MAX_OLD_SPACE_MB = previousControl;
   }
 });

@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
  */
 const CGROUP_V2_LIMIT_FILE = '/sys/fs/cgroup/memory.max';
 const CGROUP_V1_LIMIT_FILE = '/sys/fs/cgroup/memory.limit_in_bytes';
+const CGROUP_V1_MEMORY_CONTROLLER_LIMIT_FILE = '/sys/fs/cgroup/memory/memory.limit_in_bytes';
 
 /** Lowest ceiling worth applying: below this the worker cannot hold one mid-size feed plus its graph. */
 export const MIN_GTFS_WORKER_HEAP_MB = 384;
@@ -40,7 +41,7 @@ function readNodeOptionsPinned(environment: Record<string, string | undefined>):
 }
 
 function readContainerMemoryLimit(readFile: (path: string) => string): number | undefined {
-  for (const path of [CGROUP_V2_LIMIT_FILE, CGROUP_V1_LIMIT_FILE]) {
+  for (const path of [CGROUP_V2_LIMIT_FILE, CGROUP_V1_MEMORY_CONTROLLER_LIMIT_FILE, CGROUP_V1_LIMIT_FILE]) {
     let raw: string;
     try { raw = readFile(path).trim(); } catch { continue; }
     // cgroup v2 reports the string "max" when the memory controller imposes no limit.
