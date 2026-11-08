@@ -49,6 +49,19 @@ function requireHttpsUrl(environment: RuntimeEnvironment, name: string): void {
   }
 }
 
+/** Fail closed on public demo geocoders that cannot sustain production autocomplete traffic. */
+function validateProductionGeocoder(environment: RuntimeEnvironment): void {
+  const engine = new URL(requireValue(environment, 'GEOCODING_ENGINE_URL'));
+  const reverse = new URL(requireValue(environment, 'GEOCODING_REVERSE_URL'));
+  const publicPhotonHosts = [engine.hostname, reverse.hostname].map((hostname) => hostname.toLowerCase());
+  if (publicPhotonHosts.some((hostname) => hostname === 'photon.komoot.io' || hostname.endsWith('.photon.komoot.io'))) {
+    throw new Error('Production geocoder endpoints must not use the public Photon demo');
+  }
+  if (engine.hostname.toLowerCase() === 'nominatim.openstreetmap.org') {
+    throw new Error('Public Nominatim does not support place autocomplete; configure Photon or an approved geocoder');
+  }
+}
+
 /**
  * A pedestrian graph MARSHGO operates itself is reached over the private
  * container network, where routing is the edge proxy's job. Every other
@@ -126,6 +139,7 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   }
   requireHttpsUrl(environment, 'GEOCODING_ENGINE_URL');
   requireHttpsUrl(environment, 'GEOCODING_REVERSE_URL');
+  validateProductionGeocoder(environment);
   requireHttpsUrl(environment, 'MAP_STYLE_MANIFEST_URL');
   requireHttpsUrl(environment, 'MAP_DATA_MANIFEST_URL');
   for (const name of ['HERE_ROUTING_ENABLED', 'HERE_TRAFFIC_ENABLED', 'TOMTOM_ROUTING_ENABLED', 'TOMTOM_TRAFFIC_ENABLED']) {
