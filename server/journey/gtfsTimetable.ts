@@ -2519,7 +2519,14 @@ export function findGtfsItinerariesWithStats(
       if (selected.size >= MAX_STOPS_PER_SIDE) { stopSelectionTruncated = true; break; }
       addSelected(item);
     }
-    if (selected.size < ranked.length) stopSelectionTruncated = true;
+    // Omitting a far stop that adds nothing new is a bound, not a lost route:
+    // the passenger still reaches every line in the walk-shed from a retained
+    // stop. Flag only a route pattern that ended up with no stop at all.
+    if (selected.size < ranked.length
+      && ranked.some((item) => [...routePatternsAtStop(item.stop.id)]
+        .some((pattern) => (selectedByRoutePattern.get(pattern) ?? 0) === 0))) {
+      stopSelectionTruncated = true;
+    }
     return { stops: [...selected.values()], nearestMeters, reachedWithinRadius };
   };
   const originReach = closestStops(input.origin, accessRadius);
@@ -4344,8 +4351,11 @@ export function findGtfsItinerariesWithStats(
       }
       if (!processed) break;
     }
+    // Only a spent step budget is a search-budget truncation. A full candidate
+    // pool also leaves work pending, but it is reported by candidatePoolLimit /
+    // candidateSampling; folding it into searchBudget made a bounded-but-complete
+    // 8.8k-queue search look as if its 10k frontier had overflowed.
     if (searchSteps >= stepLimit && hasQueuedWork(queues)) searchBudgetTruncated = true;
-    if (!canContinueCandidateSearch(maximumLegsForPass) && hasQueuedWork(queues)) searchBudgetTruncated = true;
   }
 
   const allCandidateIds = new Set(results.keys());
