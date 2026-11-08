@@ -4,7 +4,14 @@ import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
 import { pointIsInsideUkraine } from '../mobility/gbfs';
 import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
 import type { JourneyOption } from './types';
-import { calculateGtfsItineraryFare, parseGtfsFares, type GtfsFareProduct, type GtfsFareRule, type ParsedGtfsFares } from './gtfsFares';
+import {
+  calculateGtfsItineraryFare,
+  indexGtfsFareProducts,
+  parseGtfsFares,
+  type GtfsFareProduct,
+  type GtfsFareRule,
+  type ParsedGtfsFares,
+} from './gtfsFares';
 import { calculateCityTariffFare, calculateCashFare } from '../mobility/transportTariffs';
 import { gtfsRealtimeTripUpdateKey, type GtfsRealtimeTripUpdate, type GtfsRealtimeTripUpdates } from './gtfsRealtime';
 import { BoundedBestK, redistributeBoundedCandidates, retainBoundedTripGroup, type BoundedTripGroup } from './boundedTripRetention';
@@ -2360,6 +2367,12 @@ export function findGtfsItinerariesWithStats(
   graphLimits: GtfsGraphBudgetLimits = {},
   observeCandidateGraph?: GtfsCandidateGraphObserver,
 ): GtfsItinerarySearchResult {
+  const fareCalculationContext: ParsedGtfsFares = {
+    products: feed.fareProducts ?? new Map(),
+    rules: feed.fareRules ?? new Map(),
+    faresV2Present: feed.faresV2Present === true,
+  };
+  const fareProductIndex = indexGtfsFareProducts(fareCalculationContext.products, fareCalculationContext.rules);
   const debugStartedAt = Date.now();
   const debugEnabled = process.env.MARSHGO_GTFS_SEARCH_DEBUG === '1';
   const phaseMarkMs = () => Number(process.hrtime.bigint() / 1_000_000n);
@@ -3980,7 +3993,7 @@ export function findGtfsItinerariesWithStats(
       transferInSeat: transferDecisions.map(({ measure }) => measure.inSeat),
       transferMinimumBufferSeconds: transferDecisions.map(({ minimumBufferSeconds }) => minimumBufferSeconds),
       transferRuleMinimumSeconds: transferDecisions.map(({ ruleMinimumSeconds }) => ruleMinimumSeconds),
-      fare: calculateGtfsItineraryFare({ products: feed.fareProducts ?? new Map(), rules: feed.fareRules ?? new Map(), faresV2Present: feed.faresV2Present === true }, path.map((segment) => ({
+      fare: calculateGtfsItineraryFare(fareCalculationContext, path.map((segment) => ({
         providerId: segment.providerId, routeId: segment.routeId,
         ...(feed.routes.get(segment.routeId)?.agencyId ? { agencyId: feed.routes.get(segment.routeId)!.agencyId } : {}),
         departureAt: segment.departureAt, arrivalAt: segment.arrivalAt,
@@ -3993,7 +4006,7 @@ export function findGtfsItinerariesWithStats(
             ? stopTimes.slice(indexes.fromIndex, indexes.toIndex + 1).flatMap((entry) => entry.sourceZoneId ? [entry.sourceZoneId] : [])
             : segment.traveledZoneIds;
         })(),
-      }))) ?? calculateCityTariffFare(tariffLegs),
+      })), fareProductIndex) ?? calculateCityTariffFare(tariffLegs),
       cashFare: calculateCashFare(tariffLegs),
     };
     if ((!isKnownTripChain && !canReplaceRouteChainCandidate
