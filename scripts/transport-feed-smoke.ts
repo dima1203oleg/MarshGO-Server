@@ -12,6 +12,36 @@ import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from '.
 const CONCURRENCY = 2;
 const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
 
+/** Capture the planner's existing bounded-search diagnostics without mixing them into JSON stdout. */
+function findWithSearchDiagnostics<T>(find: () => T): { result: T; diagnostics: unknown[] } {
+  const previousDebug = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const previousInfo = console.info;
+  const diagnostics: unknown[] = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: Parameters<typeof console.info>) => {
+    const message = args[0];
+    if (typeof message === 'string') {
+      try {
+        const value = JSON.parse(message) as { event?: unknown };
+        if (value?.event === 'gtfs.search.debug') {
+          diagnostics.push(value);
+          return;
+        }
+      } catch {
+        // Preserve any non-JSON application diagnostics in the normal log.
+      }
+    }
+    previousInfo(...args);
+  };
+  try {
+    return { result: find(), diagnostics };
+  } finally {
+    console.info = previousInfo;
+    if (previousDebug === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebug;
+  }
+}
+
 async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
   const result = new Array<R>(items.length);
   let next = 0;
@@ -67,7 +97,7 @@ async function main() {
     feed: { stops: lvivFeed.stops.size, routes: lvivFeed.routes.size, trips: lvivFeed.trips.size, timezone: lvivFeed.timezone },
     queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
     cases: lvivRouteCases.map((routeCase) => {
-      const search = findGtfsItinerariesWithStats(lvivFeed, {
+      const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(lvivFeed, {
         providerId: 'live-lviv-route-smoke',
         providerName: 'Львівавтодор GTFS',
         providerCity: 'Львів',
@@ -81,7 +111,7 @@ async function main() {
         maximumStopDistanceMeters: 1800,
         limit: 10,
         allowedTransportTypes: ['bus', 'tram', 'trolleybus'],
-      });
+      }));
       return {
         id: routeCase.id,
         status: search.itineraries.length ? 'ROUTES_FOUND' : 'NO_ROUTE_IN_QUERY_WINDOW',
@@ -89,6 +119,7 @@ async function main() {
         searchTruncated: search.searchTruncated,
         resultLimitReached: search.resultLimitReached,
         truncation: search.truncation,
+        plannerDiagnostics: diagnostics,
         examples: search.itineraries.slice(0, 2).map((journey) => ({
           modes: journey.segments.map((segment) => segment.transportType),
           routes: journey.segments.map((segment) => segment.routeName),
