@@ -1,7 +1,7 @@
 import { after, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, Server } from 'node:http';
-import { parseNominatimSuggestions, parsePhotonSuggestions, probeGeocoder, resetGeocoderReadinessCache, reverseGeocode, suggestPlaces, GeocodingUnavailableError } from '../server/geocoding';
+import { isGeocoderReady, parseNominatimSuggestions, parsePhotonSuggestions, probeGeocoder, resetGeocoderReadinessCache, reverseGeocode, suggestPlaces, GeocodingUnavailableError } from '../server/geocoding';
 
 describe('Nominatim-compatible place search adapter', () => {
   let server: Server | undefined;
@@ -16,6 +16,13 @@ describe('Nominatim-compatible place search adapter', () => {
     process.env.GEOCODING_PROVIDER = 'nominatim';
     delete process.env.GEOCODING_FORWARD_LOCATION_BIAS;
     resetGeocoderReadinessCache();
+  });
+
+  it('keeps API readiness healthy for an optional geocoder outage and fails only when required', () => {
+    for (const state of ['ok', 'unreachable', 'misconfigured', 'unconfigured'] as const) {
+      assert.equal(isGeocoderReady(false, state), true, `optional geocoder state: ${state}`);
+      assert.equal(isGeocoderReady(true, state), state === 'ok', `required geocoder state: ${state}`);
+    }
   });
 
   after(async () => {

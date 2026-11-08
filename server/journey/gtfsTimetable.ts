@@ -2519,14 +2519,10 @@ export function findGtfsItinerariesWithStats(
       if (selected.size >= MAX_STOPS_PER_SIDE) { stopSelectionTruncated = true; break; }
       addSelected(item);
     }
-    // Omitting a far stop that adds nothing new is a bound, not a lost route:
-    // the passenger still reaches every line in the walk-shed from a retained
-    // stop. Flag only a route pattern that ended up with no stop at all.
-    if (selected.size < ranked.length
-      && ranked.some((item) => [...routePatternsAtStop(item.stop.id)]
-        .some((pattern) => (selectedByRoutePattern.get(pattern) ?? 0) === 0))) {
-      stopSelectionTruncated = true;
-    }
+    // An omitted stop can change access time, departure choice, or transfer
+    // connectivity even when its route pattern is represented elsewhere.
+    // Without proving graph equivalence, report the capped stop set as partial.
+    if (selected.size < ranked.length) stopSelectionTruncated = true;
     return { stops: [...selected.values()], nearestMeters, reachedWithinRadius };
   };
   const originReach = closestStops(input.origin, accessRadius);

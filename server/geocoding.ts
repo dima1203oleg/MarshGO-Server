@@ -255,6 +255,11 @@ export type GeocoderReadiness =
   | { state: 'misconfigured'; checkedAt: string; reason: string }
   | { state: 'unconfigured'; checkedAt: string };
 
+/** A geocoder outage blocks API readiness only when the deployment requires autocomplete. */
+export function isGeocoderReady(required: boolean, state: GeocoderReadiness['state']): boolean {
+  return !required || state === 'ok';
+}
+
 const GEOCODER_READINESS_TTL_MS = 60_000;
 let geocoderReadinessCache: { at: number; value: GeocoderReadiness } | undefined;
 

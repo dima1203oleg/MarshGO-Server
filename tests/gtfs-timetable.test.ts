@@ -3303,8 +3303,8 @@ test('keeps nearest stops, represents distinct routes, and reports the bounded s
     && itinerary.segments[0].providerId === 'rail'));
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.length === 1
     && itinerary.segments[0].routeId.endsWith(':r2')), 'the distinct bus route at the 21st-nearest stop must remain searchable');
-  assert.equal(result.truncation.stopSelection, false,
-    'dropping far stops whose routes are already represented is a bound, not lost coverage');
+  assert.equal(result.truncation.stopSelection, true,
+    'omitting candidate stops can alter access/departure/transfer paths even when the line is otherwise represented');
 
   const denseTexts: Record<string, string> = {
     'agency.txt': 'agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv',

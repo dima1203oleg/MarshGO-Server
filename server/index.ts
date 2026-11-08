@@ -59,7 +59,7 @@ import { shouldGrantAdmin } from './adminPhones';
 import { testProviderConnection } from './mobility/connection';
 import { refreshProviderHealth } from './mobility/healthMonitor';
 import { assertPublicHttpsUrl, UnsafeUrlError } from './mobility/safeFetch';
-import { GeocodingUnavailableError, probeGeocoder, reverseGeocode, suggestPlaces } from './geocoding';
+import { GeocodingUnavailableError, isGeocoderReady, probeGeocoder, reverseGeocode, suggestPlaces } from './geocoding';
 import { retainNavigationSessions } from './navigation/sessionRetention';
 import { expireDueProposals } from './proposals/expiry';
 import {
@@ -1196,8 +1196,7 @@ app.get('/readyz', asyncHandler(async (_req, res) => {
   // the geocoder required (otherwise a provider incident would restart the API).
   const geocoder = await probeGeocoder();
   const geocoderRequired = process.env.GEOCODER_READY_REQUIRED === 'true';
-  const geocoderReady = geocoder.state === 'ok'
-    || (!geocoderRequired && geocoder.state === 'unconfigured');
+  const geocoderReady = isGeocoderReady(geocoderRequired, geocoder.state);
   const ready = redisReady && geocoderReady;
   res.status(ready ? 200 : 503).json({
     status: ready ? 'ready' : 'degraded',
