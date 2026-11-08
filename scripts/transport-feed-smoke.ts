@@ -3,6 +3,7 @@ import { testProviderConnection } from '../server/mobility/connection';
 import { testGbfsConnection } from '../server/mobility/gbfs';
 import { fetchJson } from '../server/mobility/safeFetch';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
+import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
 
 /**
  * Read-only acceptance probe for all Ukrainian transport sources recorded in
@@ -43,9 +44,18 @@ async function probe(entry: typeof catalog[number]) {
 }
 
 async function main() {
-  const results = await mapLimit(catalog, CONCURRENCY, probe);
+  const scope = parseTransportFeedSmokeScope(process.argv.slice(2));
+  const selectedEntries = selectTransportFeedSmokeEntries(catalog, scope);
+  // The static feed is parsed below by the planner. In the focused Lviv scope, only
+  // probe the realtime endpoint here to avoid downloading/parsing the static archive twice.
+  const providerProbeEntries = scope === 'lviv-route'
+    ? selectedEntries.filter((entry) => entry.sourceType === 'gtfs_rt')
+    : selectedEntries;
+  const results = await mapLimit(providerProbeEntries, scope === 'lviv-route' ? 1 : CONCURRENCY, probe);
 
-  const lvivFeed = await cachedGtfsTimetable('live-lviv-route-smoke', 'https://track.ua-gis.com/gtfs/lviv/static.zip');
+  const lvivStaticFeed = selectTransportFeedSmokeEntries(catalog, 'lviv-route')[0];
+  if (!lvivStaticFeed) throw new Error('Lviv static GTFS source is missing from the catalog');
+  const lvivFeed = await cachedGtfsTimetable('live-lviv-route-smoke', lvivStaticFeed.feedUrl);
   const earliestDeparture = new Date(Date.now() + 60 * 60_000);
   const latestDeparture = new Date(earliestDeparture.getTime() + 90 * 60_000);
   const lvivRouteCases = [
@@ -89,7 +99,7 @@ async function main() {
     }),
   };
 
-  const supplementary = await Promise.all([
+  const supplementary = scope === 'lviv-route' ? [] : await Promise.all([
     (async () => {
       try {
         const { data } = await fetchJson('https://api.citybik.es/v2/networks');
@@ -123,7 +133,10 @@ async function main() {
   ]);
 
   const summary = {
+    scope,
     catalogRows: catalog.length,
+    selectedSources: selectedEntries.length,
+    providerSourcesProbed: providerProbeEntries.length,
     checked: results.filter((row) => row.state !== 'SKIPPED').length,
     skipped: results.filter((row) => row.state === 'SKIPPED').length,
     healthy: results.filter((row) => row.state === 'HEALTHY').length,
@@ -132,6 +145,10 @@ async function main() {
     note: 'Read-only probe; HEALTHY means feed health only, not commercial permission, route-search integration, price, availability or booking.',
   };
   console.log(JSON.stringify({ checkedAt: new Date().toISOString(), summary, catalog: results, routePlanner, supplementary }, null, 2));
+  if (scope === 'lviv-route' && !routePlanner.cases.some((routeCase) =>
+    routeCase.count > 0 && !routeCase.searchTruncated)) {
+    process.exitCode = 1;
+  }
 }
 
 main().catch((error: unknown) => {

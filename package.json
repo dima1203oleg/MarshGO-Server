@@ -37,6 +37,7 @@
     "benchmark:routing-cache": "tsx scripts/benchmark-routing-cache.ts",
     "test:load:routing": "k6 run tests/load/routing.k6.js",
     "mobility:seed": "tsx server/mobility/seedUkraine.ts",
+    "acceptance:lviv-route-feed": "tsx scripts/transport-feed-smoke.ts --scope=lviv-route",
     "mobility:audit-osm-bikes": "tsx scripts/audit-osm-bike-rentals.ts",
     "mobility:extract-osm-bikes": "bash scripts/extract-osm-bike-rentals.sh",
     "mobility:import-osm-bikes": "tsx scripts/import-osm-bike-rentals.ts"
