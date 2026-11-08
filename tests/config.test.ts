@@ -77,6 +77,29 @@ describe('runtime production configuration', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, GEOCODING_PROVIDER: 'unknown' }), /GEOCODING_PROVIDER must be nominatim or photon/);
   });
 
+  it('fails closed on public demo geocoders in production while allowing an approved Photon endpoint', () => {
+    assert.throws(() => validateRuntimeConfig({
+      ...validProductionConfig,
+      GEOCODING_ENGINE_URL: 'https://nominatim.openstreetmap.org/search',
+    }), /Public Nominatim does not support place autocomplete/);
+    assert.throws(() => validateRuntimeConfig({
+      ...validProductionConfig,
+      GEOCODING_PROVIDER: 'photon',
+      GEOCODING_ENGINE_URL: 'https://photon.komoot.io/api/',
+    }), /must not use the public Photon demo/);
+    assert.throws(() => validateRuntimeConfig({
+      ...validProductionConfig,
+      GEOCODING_PROVIDER: 'photon',
+      GEOCODING_REVERSE_URL: 'https://photon.komoot.io/reverse/',
+    }), /must not use the public Photon demo/);
+    assert.doesNotThrow(() => validateRuntimeConfig({
+      ...validProductionConfig,
+      GEOCODING_PROVIDER: 'photon',
+      GEOCODING_ENGINE_URL: 'https://geocoder.marshgo.example/api/',
+      GEOCODING_REVERSE_URL: 'https://geocoder.marshgo.example/reverse/',
+    }));
+  });
+
   it('accepts a self-operated pedestrian graph on the private network but never a public plain-HTTP router', () => {
     for (const url of ['http://marshgo-walk-router:5000/route/v1/foot', 'http://127.0.0.1:5000/route/v1/foot',
       'http://10.0.5.9:5000/route/v1/foot', 'https://walking.example.com/route/v1/foot']) {
