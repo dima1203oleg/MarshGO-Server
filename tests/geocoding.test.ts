@@ -1,7 +1,7 @@
 import { after, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, Server } from 'node:http';
-import { parseNominatimSuggestions, parsePhotonSuggestions, reverseGeocode, suggestPlaces, GeocodingUnavailableError } from '../server/geocoding';
+import { parseNominatimSuggestions, parsePhotonSuggestions, probeGeocoder, resetGeocoderReadinessCache, reverseGeocode, suggestPlaces, GeocodingUnavailableError } from '../server/geocoding';
 
 describe('Nominatim-compatible place search adapter', () => {
   let server: Server | undefined;
@@ -15,6 +15,7 @@ describe('Nominatim-compatible place search adapter', () => {
   beforeEach(() => {
     process.env.GEOCODING_PROVIDER = 'nominatim';
     delete process.env.GEOCODING_FORWARD_LOCATION_BIAS;
+    resetGeocoderReadinessCache();
   });
 
   after(async () => {
@@ -268,6 +269,94 @@ describe('Nominatim-compatible place search adapter', () => {
     assert.equal(askedForDetails, '1');
     await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
     server = undefined;
+  });
+
+  it('reports a provider outage as an unavailable geocoder, not a crash', async () => {
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_ENGINE_URL = 'http://127.0.0.1:1/search';
+    await assert.rejects(() => suggestPlaces('Львів'), GeocodingUnavailableError);
+  });
+
+  it('maps a non-OK provider response to a geocoder outage', async () => {
+    server = createServer((_request, response) => {
+      response.writeHead(502, { 'content-type': 'text/plain' });
+      response.end('bad gateway');
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/search`;
+    await assert.rejects(() => suggestPlaces('Львів'), /Geocoder request failed/);
+    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+    server = undefined;
+  });
+
+  it('maps a malformed provider body to a geocoder outage instead of a 500', async () => {
+    server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"truncated":');
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/search`;
+    await assert.rejects(() => suggestPlaces('Львів'), /Geocoder returned invalid JSON/);
+    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+    server = undefined;
+  });
+
+  it('keeps an empty provider answer as an empty list', async () => {
+    server = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('[]');
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/search`;
+    assert.deepEqual(await suggestPlaces('Зззз'), []);
+    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+    server = undefined;
+  });
+
+  it('reports readiness from configuration and a cached live probe', async () => {
+    delete process.env.GEOCODING_ENGINE_URL;
+    resetGeocoderReadinessCache();
+    assert.equal((await probeGeocoder()).state, 'unconfigured');
+
+    let requests = 0;
+    server = createServer((_request, response) => {
+      requests++;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify([{ place_id: 7, display_name: 'Львів, Україна', lat: '49.8397', lon: '24.0297' }]));
+    });
+    await new Promise<void>((resolve) => server?.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_ENGINE_URL = `http://127.0.0.1:${address.port}/search`;
+    resetGeocoderReadinessCache();
+    const first = await probeGeocoder();
+    assert.equal(first.state, 'ok');
+    assert.equal(first.state === 'ok' ? first.results : -1, 1);
+    await probeGeocoder();
+    assert.equal(requests, 1, 'readiness probe is cached between health checks');
+    await new Promise<void>((resolve, reject) => server?.close((error) => error ? reject(error) : resolve()));
+    server = undefined;
+  });
+
+  it('distinguishes an unreachable geocoder from a misconfigured one', async () => {
+    process.env.NODE_ENV = 'test';
+    process.env.GEOCODING_ENGINE_URL = 'http://127.0.0.1:1/search';
+    resetGeocoderReadinessCache();
+    assert.equal((await probeGeocoder()).state, 'unreachable');
+
+    process.env.GEOCODING_ENGINE_URL = 'https://nominatim.openstreetmap.org/search';
+    resetGeocoderReadinessCache();
+    assert.equal((await probeGeocoder()).state, 'misconfigured');
   });
 });
 

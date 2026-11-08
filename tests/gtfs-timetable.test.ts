@@ -2006,6 +2006,9 @@ test('keeps a globally cheapest direct route discovered after the bounded candid
   assert.equal(result.candidateGraphTruncated, false, 'the test exhausts a complete route graph but exceeds the retained candidate sample');
   assert.equal(result.truncation.candidateGraph, false);
   assert.equal(result.truncation.responsePage, true, 'the response page is distinguished from graph loss');
+  assert.equal(result.truncation.searchBudget, false,
+    'a full candidate pool is candidatePoolLimit, not a spent search budget');
+  assert.equal(result.truncation.searchStepLimit, false);
 
   const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
   const originalInfo = console.info;
@@ -3300,7 +3303,37 @@ test('keeps nearest stops, represents distinct routes, and reports the bounded s
     && itinerary.segments[0].providerId === 'rail'));
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.length === 1
     && itinerary.segments[0].routeId.endsWith(':r2')), 'the distinct bus route at the 21st-nearest stop must remain searchable');
-  assert.equal(result.searchTruncated, true);
+  assert.equal(result.truncation.stopSelection, false,
+    'dropping far stops whose routes are already represented is a bound, not lost coverage');
+
+  const denseTexts: Record<string, string> = {
+    'agency.txt': 'agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv',
+    'routes.txt': ['route_id,agency_id,route_short_name,route_long_name,route_type',
+      ...Array.from({ length: 60 }, (_, index) => `r${index},a,${index},Route ${index},3`)].join('\n'),
+    'trips.txt': ['route_id,service_id,trip_id,trip_headsign',
+      ...Array.from({ length: 60 }, (_, index) => `r${index},weekday,t${index},Headsign ${index}`)].join('\n'),
+    'stops.txt': ['stop_id,stop_name,stop_lat,stop_lon',
+      ...Array.from({ length: 60 }, (_, index) => `o${index},Origin ${index},49.8401,${(24.0201 + index * 0.000001).toFixed(7)}`),
+      ...Array.from({ length: 60 }, (_, index) => `d${index},Destination ${index},49.8501,${(24.0301 + index * 0.000001).toFixed(7)}`)].join('\n'),
+    'stop_times.txt': ['trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
+      ...Array.from({ length: 60 }, (_, index) => [
+        `t${index},08:00:00,08:00:00,o${index},1,0,0`,
+        `t${index},08:40:00,08:40:00,d${index},2,0,0`,
+      ]).flat()].join('\n'),
+    'calendar.txt': 'service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,0,0,0,0,0,0,20261001,20261031',
+  };
+  const denseRoutes = parseGtfsTimetable(Object.fromEntries(
+    Object.entries(denseTexts).map(([name, text]) => [name, new TextEncoder().encode(text)]),
+  ))!;
+  const dense = findGtfsItinerariesWithStats(mergeGtfsTimetables([
+    { providerId: 'dense-city', providerName: 'Dense city routes', providerCity: 'Львів', feed: denseRoutes },
+  ])!, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    maximumStopDistanceMeters: 1000,
+    maximumTransfers: 0,
+  });
+  assert.equal(dense.truncation.stopSelection, true,
+    'when the per-side cap stops before 60 distinct route patterns are represented, the omission is a real coverage loss');
 });
 
 test('composes across provider feeds using equivalent Kyiv timezone names and closely matched stops', () => {
