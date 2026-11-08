@@ -89,6 +89,11 @@ describe('local API stack compose isolation', () => {
     assert.match(compose, /GEOCODING_ENGINE_URL: \$\{LOCAL_API_GEOCODING_ENGINE_URL:-\}/);
   });
 
+  it('passes bbox-selected foot graph configuration through to the API container', () => {
+    assert.match(compose, /WALKING_ROUTING_URLS: \$\{LOCAL_API_WALKING_ROUTING_URLS:-\}/);
+    assert.match(envExample, /^LOCAL_API_WALKING_ROUTING_URLS=$/m);
+  });
+
   it('sequences the api behind healthy db and redis', () => {
     assert.match(compose, /pg_isready/);
     assert.match(compose, /redis-cli/, 'redis healthcheck missing');

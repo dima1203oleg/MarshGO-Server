@@ -84,7 +84,7 @@ Every failure path exits nonzero. On readiness timeout, `start` dumps the last
 * `MARSHGO_API_TEST_FIXTURE_MODE=0` — GTFS test fixtures and fake route
   estimates are disabled; routing results come only from configured real
   upstreams.
-* `OSRM_URL` / `WALKING_ROUTING_URL` / geocoding URLs are **empty by default**.
+* `OSRM_URL` / `WALKING_ROUTING_URL` / `WALKING_ROUTING_URLS` / geocoding URLs are **empty by default**. For city-specific pedestrian graphs, set `LOCAL_API_WALKING_ROUTING_URLS` to a compact JSON array of `{ "bbox": [minLon, minLat, maxLon, maxLat], "url": "https://..." }` entries; those endpoints must be reachable from inside the API container. The server chooses a graph only when its bbox covers both ends of the walk.
   Without them the API degrades honestly (labelled estimates or
   `RoutingUnavailableError`), never inventing data. Point them at real
   engines you operate via `.env.local-api` if needed.
