@@ -88,6 +88,7 @@ async function main() {
         count: search.itineraries.length,
         searchTruncated: search.searchTruncated,
         resultLimitReached: search.resultLimitReached,
+        truncation: search.truncation,
         examples: search.itineraries.slice(0, 2).map((journey) => ({
           modes: journey.segments.map((segment) => segment.transportType),
           routes: journey.segments.map((segment) => segment.routeName),
