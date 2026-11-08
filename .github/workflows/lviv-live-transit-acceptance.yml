@@ -1,0 +1,55 @@
+name: Lviv live transit acceptance
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/lviv-live-transit-acceptance.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: lviv-live-transit-acceptance
+  cancel-in-progress: false
+jobs:
+  validate-workflow:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse workflow YAML
+        run: ruby -e 'require "yaml"; YAML.load_file(".github/workflows/lviv-live-transit-acceptance.yml")'
+
+  lviv-route:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Run focused Lviv GTFS and realtime acceptance
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          npm run --silent acceptance:lviv-route-feed | tee artifacts/lviv-route-acceptance.json
+      - name: Write run provenance
+        if: always()
+        run: |
+          {
+            echo '# Lviv live transit acceptance'
+            echo "- Server SHA: \`${GITHUB_SHA}\`"
+            echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
+            echo '- Probe scope: Lviv static GTFS timetable and GTFS-RT vehicle positions only'
+            echo '- Database writes: none'
+            echo '- User-origin/destination data: none'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve JSON evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lviv-live-transit-${{ github.sha }}
+          path: artifacts/lviv-route-acceptance.json
+          if-no-files-found: warn
+          retention-days: 14
