@@ -26,6 +26,65 @@ export interface ParsedGtfsFares {
   faresV2Present: boolean;
 }
 
+interface IndexedFareProduct {
+  order: number;
+  product: GtfsFareProduct;
+}
+
+export interface GtfsFareProductIndex {
+  /** Products without route constraints, kept in source order. */
+  unrestricted: readonly IndexedFareProduct[];
+  /** Route-constrained products keyed by every route accepted by their fare rules. */
+  byRouteId: ReadonlyMap<string, readonly IndexedFareProduct[]>;
+}
+
+/** Build once per timetable search so each candidate only checks fares that can cover its first route. */
+export function indexGtfsFareProducts(
+  products: ReadonlyMap<string, GtfsFareProduct>,
+  rules: ReadonlyMap<string, readonly GtfsFareRule[]>,
+): GtfsFareProductIndex {
+  const unrestricted: IndexedFareProduct[] = [];
+  const byRouteId = new Map<string, IndexedFareProduct[]>();
+  let order = 0;
+
+  for (const product of products.values()) {
+    const entry = { order: order++, product };
+    const routeIds = new Set((rules.get(product.id) ?? [])
+      .flatMap(({ routeId }) => routeId ? [routeId] : []));
+    if (routeIds.size === 0) {
+      unrestricted.push(entry);
+      continue;
+    }
+    for (const routeId of routeIds) {
+      const candidates = byRouteId.get(routeId) ?? [];
+      candidates.push(entry);
+      byRouteId.set(routeId, candidates);
+    }
+  }
+
+  return { unrestricted, byRouteId };
+}
+
+function fareProductsForRoute(index: GtfsFareProductIndex, routeId: string): readonly IndexedFareProduct[] {
+  const routed = index.byRouteId.get(routeId) ?? [];
+  const unrestricted = index.unrestricted;
+  if (routed.length === 0) return unrestricted;
+  if (unrestricted.length === 0) return routed;
+
+  const merged: IndexedFareProduct[] = [];
+  let routedIndex = 0;
+  let unrestrictedIndex = 0;
+  while (routedIndex < routed.length && unrestrictedIndex < unrestricted.length) {
+    if (routed[routedIndex].order < unrestricted[unrestrictedIndex].order) {
+      merged.push(routed[routedIndex++]);
+    } else {
+      merged.push(unrestricted[unrestrictedIndex++]);
+    }
+  }
+  merged.push(...routed.slice(routedIndex), ...unrestricted.slice(unrestrictedIndex));
+  return merged;
+}
+
 export interface GtfsFareLeg {
   providerId: string;
   routeId: string;
@@ -200,12 +259,13 @@ function fareRulesMatch(rules: readonly GtfsFareRule[], legs: readonly GtfsFareL
 export function calculateGtfsItineraryFare(
   fares: ParsedGtfsFares,
   legs: readonly GtfsFareLeg[],
+  productIndex?: GtfsFareProductIndex,
 ): GtfsItineraryFare | null {
   if (!legs.length || fares.faresV2Present || fares.products.size === 0) return null;
   if (legs.some((leg, index) => !Number.isFinite(leg.departureAt.getTime())
     || !Number.isFinite(leg.arrivalAt.getTime()) || leg.arrivalAt < leg.departureAt
     || index > 0 && leg.departureAt < legs[index - 1].arrivalAt)) return null;
-  const productList = [...fares.products.values()];
+  const indexedProducts = productIndex ?? indexGtfsFareProducts(fares.products, fares.rules);
   const memo = new Map<number, Array<{ priceMinor: number; currency: string; allocations: GtfsFareAllocation[] }>>();
 
   const solve = (start: number) => {
@@ -214,7 +274,7 @@ export function calculateGtfsItineraryFare(
     if (start === legs.length) return [{ priceMinor: 0, currency: '', allocations: [] as GtfsFareAllocation[] }];
     const options: Array<{ priceMinor: number; currency: string; allocations: GtfsFareAllocation[] }> = [];
     const firstLeg = legs[start];
-    for (const product of productList) {
+    for (const { product } of fareProductsForRoute(indexedProducts, firstLeg.routeId)) {
       if (product.providerId && product.providerId !== firstLeg.providerId) continue;
       if (product.agencyId && product.agencyId !== firstLeg.agencyId) continue;
       const applicableRules = fares.rules.get(product.id) ?? [];
