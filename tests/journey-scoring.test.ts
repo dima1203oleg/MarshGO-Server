@@ -17,6 +17,41 @@ describe('Journey strategy scoring', () => {
     assert.equal(scoreJourneys(candidates, 'CHEAPEST')[0].journey.id, 'bus');
   });
 
+  it('matches a hand-computed oracle where each strategy has a different winner', () => {
+    // Expected scores are derived by hand from the documented compromise
+    // (time .48, price .22, transfers .08, walking .08, reliability .14) and the
+    // 8-minute transfer penalty; they are deliberately not read from the
+    // production weight table, so a silent weight change fails this oracle.
+    const balancedPick: JourneyOption = {
+      id: 'balanced-pick', durationSeconds: 1_800, priceMinor: 5_000, transfers: 0,
+      walkingMeters: 400, reliability: 0.9, transferRisk: 0.1, comfort: null, legs: [{ mode: 'BUS' }],
+    };
+    const fastestPick: JourneyOption = {
+      id: 'fastest-pick', durationSeconds: 1_500, priceMinor: 8_000, transfers: 1,
+      walkingMeters: 200, reliability: 0.8, transferRisk: 0.2, comfort: null, legs: [{ mode: 'BUS' }, { mode: 'TRAM' }],
+    };
+    const cheapestPick: JourneyOption = {
+      id: 'cheapest-pick', durationSeconds: 2_400, priceMinor: 3_000, transfers: 0,
+      walkingMeters: 900, reliability: 0.95, transferRisk: 0.05, comfort: null, legs: [{ mode: 'TROLLEYBUS' }],
+    };
+    const fleet = [balancedPick, fastestPick, cheapestPick];
+    const expectedBalancedScores = {
+      'balanced-pick': 0.48 * 0 + 0.22 * 0.4 + 0.08 * 0 + 0.08 * (200 / 700) + 0.14 * (0.05 / 0.15),
+      'fastest-pick': 0.48 * 0.3 + 0.22 * 1 + 0.08 * 1 + 0.08 * 0 + 0.14 * 1,
+      'cheapest-pick': 0.48 * 1 + 0.22 * 0 + 0.08 * 0 + 0.08 * 1 + 0.14 * 0,
+    };
+    const balanced = scoreJourneys(fleet, 'BALANCED');
+    for (const candidate of balanced) {
+      assert.ok(Math.abs(candidate.score - expectedBalancedScores[candidate.journey.id as keyof typeof expectedBalancedScores]) < 1e-12,
+        `${candidate.journey.id}: ${candidate.score}`);
+    }
+    assert.deepEqual(balanced.map(({ journey }) => journey.id), ['balanced-pick', 'cheapest-pick', 'fastest-pick']);
+    assert.equal(scoreJourneys(fleet, 'FASTEST')[0].journey.id, 'fastest-pick');
+    assert.equal(scoreJourneys(fleet, 'CHEAPEST')[0].journey.id, 'cheapest-pick');
+    assert.equal(new Set([balanced[0].journey.id, scoreJourneys(fleet, 'FASTEST')[0].journey.id,
+      scoreJourneys(fleet, 'CHEAPEST')[0].journey.id]).size, 3);
+  });
+
   it('uses locale-independent IDs to break equal-score ties regardless of input order', () => {
     const tied = ['Z', 'a', 'Б', 'А', '10', '2'].map((id) => ({ ...candidates[0]!, id }));
     const forward = scoreJourneys(tied, 'BALANCED').map(({ journey }) => journey.id);

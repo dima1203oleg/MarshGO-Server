@@ -59,7 +59,7 @@ import { shouldGrantAdmin } from './adminPhones';
 import { testProviderConnection } from './mobility/connection';
 import { refreshProviderHealth } from './mobility/healthMonitor';
 import { assertPublicHttpsUrl, UnsafeUrlError } from './mobility/safeFetch';
-import { GeocodingUnavailableError, reverseGeocode, suggestPlaces } from './geocoding';
+import { GeocodingUnavailableError, isGeocoderReady, probeGeocoder, reverseGeocode, suggestPlaces } from './geocoding';
 import { retainNavigationSessions } from './navigation/sessionRetention';
 import { expireDueProposals } from './proposals/expiry';
 import {
@@ -1191,8 +1191,21 @@ app.get('/metrics', (req, res) => {
 app.get('/readyz', asyncHandler(async (_req, res) => {
   await pool.query('SELECT 1');
   const redisReady = !process.env.REDIS_URL || realtimeRedis?.isReady === true;
-  const status = redisReady ? 'ready' : 'degraded';
-  res.status(redisReady ? 200 : 503).json({ status, database: 'connected', realtime: redisReady ? 'connected' : 'disconnected' });
+  // A geocoder outage disables place autocomplete, not routing or bookings, so
+  // it is reported always but only fails readiness when the deployment declares
+  // the geocoder required (otherwise a provider incident would restart the API).
+  const geocoder = await probeGeocoder();
+  const geocoderRequired = process.env.GEOCODER_READY_REQUIRED === 'true';
+  const geocoderReady = isGeocoderReady(geocoderRequired, geocoder.state);
+  const ready = redisReady && geocoderReady;
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'ready' : 'degraded',
+    database: 'connected',
+    realtime: redisReady ? 'connected' : 'disconnected',
+    geocoder: geocoder.state,
+    geocoderCheckedAt: geocoder.checkedAt,
+    ...(geocoderRequired ? { geocoderRequired: true } : {}),
+  });
 }));
 
 app.get('/api/v1/admin/ops/realtime', requireAuth, requireStaff, asyncHandler(async (_req, res) => {

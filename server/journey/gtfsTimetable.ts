@@ -2519,6 +2519,9 @@ export function findGtfsItinerariesWithStats(
       if (selected.size >= MAX_STOPS_PER_SIDE) { stopSelectionTruncated = true; break; }
       addSelected(item);
     }
+    // An omitted stop can change access time, departure choice, or transfer
+    // connectivity even when its route pattern is represented elsewhere.
+    // Without proving graph equivalence, report the capped stop set as partial.
     if (selected.size < ranked.length) stopSelectionTruncated = true;
     return { stops: [...selected.values()], nearestMeters, reachedWithinRadius };
   };
@@ -4344,8 +4347,11 @@ export function findGtfsItinerariesWithStats(
       }
       if (!processed) break;
     }
+    // Only a spent step budget is a search-budget truncation. A full candidate
+    // pool also leaves work pending, but it is reported by candidatePoolLimit /
+    // candidateSampling; folding it into searchBudget made a bounded-but-complete
+    // 8.8k-queue search look as if its 10k frontier had overflowed.
     if (searchSteps >= stepLimit && hasQueuedWork(queues)) searchBudgetTruncated = true;
-    if (!canContinueCandidateSearch(maximumLegsForPass) && hasQueuedWork(queues)) searchBudgetTruncated = true;
   }
 
   const allCandidateIds = new Set(results.keys());

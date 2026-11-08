@@ -241,6 +241,65 @@ export async function suggestPlaces(query: string, bias?: PlaceBias): Promise<Pl
   if (apiKey) headers.set('authorization', `Bearer ${apiKey}`);
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(5_000) }).catch(() => null);
   if (!response?.ok) throw new GeocodingUnavailableError('Geocoder request failed');
-  const payload = await response.json();
+  // A truncated/garbage body is a provider failure, not a server bug: an uncaught
+  // SyntaxError here would surface as HTTP 500 and hide the real outage.
+  const payload = await response.json().catch(() => {
+    throw new GeocodingUnavailableError('Geocoder returned invalid JSON');
+  });
   return photon ? parsePhotonSuggestions(payload) : parseNominatimSuggestions(payload);
+}
+
+export type GeocoderReadiness =
+  | { state: 'ok'; checkedAt: string; latencyMs: number; results: number }
+  | { state: 'unreachable'; checkedAt: string; reason: string }
+  | { state: 'misconfigured'; checkedAt: string; reason: string }
+  | { state: 'unconfigured'; checkedAt: string };
+
+/** A geocoder outage blocks API readiness only when the deployment requires autocomplete. */
+export function isGeocoderReady(required: boolean, state: GeocoderReadiness['state']): boolean {
+  return !required || state === 'ok';
+}
+
+const GEOCODER_READINESS_TTL_MS = 60_000;
+let geocoderReadinessCache: { at: number; value: GeocoderReadiness } | undefined;
+
+/** Tests and config reloads need a fresh probe instead of a cached answer. */
+export function resetGeocoderReadinessCache(): void {
+  geocoderReadinessCache = undefined;
+}
+
+/**
+ * Health probe for a geocoder this deployment is expected to operate. It is
+ * cached because container health checks run far more often than the provider
+ * tolerates; a cached answer still turns any prolonged outage into a visible
+ * `unreachable` state within a minute.
+ */
+export async function probeGeocoder(now = Date.now()): Promise<GeocoderReadiness> {
+  if (geocoderReadinessCache && now - geocoderReadinessCache.at < GEOCODER_READINESS_TTL_MS) {
+    return geocoderReadinessCache.value;
+  }
+  const checkedAt = new Date(now).toISOString();
+  if (!process.env.GEOCODING_ENGINE_URL) {
+    return { state: 'unconfigured', checkedAt };
+  }
+  const startedAt = Date.now();
+  let value: GeocoderReadiness;
+  try {
+    // Container health checks allow 3 s; the provider itself may hang for the
+    // full 5 s request timeout, so the readiness answer is bounded separately.
+    const places = await Promise.race([
+      suggestPlaces('Львів'),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new GeocodingUnavailableError('Geocoder probe timed out')), 1_500).unref()),
+    ]);
+    value = { state: 'ok', checkedAt, latencyMs: Date.now() - startedAt, results: places.length };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'geocoder probe failed';
+    const misconfigured = !(error instanceof GeocodingUnavailableError)
+      || /Public Nominatim|must use HTTPS|endpoint is invalid|not configured/i.test(reason);
+    value = misconfigured
+      ? { state: 'misconfigured', checkedAt, reason }
+      : { state: 'unreachable', checkedAt, reason };
+  }
+  geocoderReadinessCache = { at: now, value };
+  return value;
 }
