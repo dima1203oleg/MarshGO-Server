@@ -25,6 +25,30 @@ test('Kyiv metro scope remains restricted to Kyiv metro catalog entries', () => 
   assert.ok(selected.every((entry) => entry.city === 'Київ' && entry.name.toLocaleLowerCase('uk-UA').includes('метро')));
 });
 
+test('Kyiv marshrutka geometry uses the official production HTTPS ArcGIS layer and stays geometry-only', () => {
+  const source = kyivOpenDataCatalog.find((entry) => entry.name.includes('маршрутки'));
+  assert.ok(source);
+  assert.equal(source.sourceType, 'geojson');
+  assert.equal(source.access, 'open');
+  assert.equal(new URL(source.feedUrl).hostname, 'gisserver.kyivcity.gov.ua');
+  assert.match(new URL(source.feedUrl).pathname, /transport_public\/MapServer\/1\/query$/);
+  assert.match(source.coverage, /без realtime, розкладу та бронювання/);
+
+  const scooter = ukraineCatalog.find((entry) => entry.name.includes('Zelectra'));
+  assert.ok(scooter);
+  assert.equal(scooter.sourceType, 'gbfs');
+  assert.equal(scooter.providerType, 'scooter');
+  assert.equal(new URL(scooter.feedUrl).hostname, 'zelectra.rideatom.com');
+});
+
+test('focused Kyiv feed seed selects only the routeTaxi geometry and Zelectra GBFS records', () => {
+  const selected = selectMobilitySeedEntries(catalog, '--kyiv-route-taxi-zelectra');
+  assert.ok(selected);
+  assert.equal(selected.length, 2);
+  assert.ok(selected.some((entry) => entry.sourceType === 'geojson' && entry.name.includes('маршрутки')));
+  assert.ok(selected.some((entry) => entry.sourceType === 'gbfs' && entry.name.includes('Zelectra')));
+});
+
 test('unknown seed scope is rejected before any database or provider work', () => {
   assert.equal(selectMobilitySeedEntries(catalog, '--all-cities-ish'), null);
 });

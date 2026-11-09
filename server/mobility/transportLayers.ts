@@ -29,6 +29,7 @@ export const networkSchema = z.object({
   bbox: z.tuple([z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90), z.number().finite().min(-180).max(180), z.number().finite().min(-90).max(90)]).nullable(),
 });
 export const NETWORK_CACHE_SCHEMA_VERSION = 2;
+export const GEOJSON_NETWORK_NORMALIZER_VERSION = 2;
 
 function rows(text: string | undefined): Array<Record<string, string>> {
   if (!text) return [];
@@ -143,7 +144,7 @@ export function buildGeoJsonNetwork(body: unknown, mode: LineType): TransportNet
   const groups = new Map<string, { name: string; direction: string; order: number; coordinates: Array<[number, number]>; from?: string; to?: string }[]>();
   const stops: NetworkStop[] = [];
   const points: Array<[number, number]> = [];
-  for (const raw of features) {
+  for (const [featureIndex, raw] of features.entries()) {
     if (!raw || typeof raw !== 'object') continue;
     const feature = raw as { geometry?: { type?: string; coordinates?: unknown }; properties?: Record<string, unknown> };
     const props = feature.properties ?? {};
@@ -158,21 +159,32 @@ export function buildGeoJsonNetwork(body: unknown, mode: LineType): TransportNet
       points.push([lon, lat]);
       continue;
     }
-    if (geometry?.type !== 'LineString' || !Array.isArray(geometry.coordinates)) continue;
-    const coordinates = geometry.coordinates.flatMap((point): Array<[number, number]> => {
-      if (!Array.isArray(point) || point.length < 2) return [];
-      const lon = Number(point[0]), lat = Number(point[1]);
-      return Number.isFinite(lon) && Number.isFinite(lat) && Math.abs(lon) <= 180 && Math.abs(lat) <= 90 && (lon !== 0 || lat !== 0) ? [[lon, lat]] : [];
-    });
-    if (coordinates.length < 2) continue;
-    const name = String(props.num_route ?? props.route_short_name ?? props.line ?? props.name ?? '').trim();
+    const lineParts = geometry?.type === 'LineString' && Array.isArray(geometry.coordinates)
+      ? [geometry.coordinates]
+      : geometry?.type === 'MultiLineString' && Array.isArray(geometry.coordinates)
+        ? geometry.coordinates.filter(Array.isArray)
+        : [];
+    if (lineParts.length === 0) continue;
+    const name = String(props.num_route ?? props.route_short_name ?? props.route_name ?? props.route ?? props.line ?? props.name ?? '').trim();
     if (!name) continue;
     const direction = String(props.napryamok ?? props.direction ?? props.to_stop_ ?? '').trim();
-    const key = `${name}|${direction}`;
-    const list = groups.get(key) ?? [];
-    list.push({ name, direction, order: Number(props.order_ ?? props.sequence ?? 0), coordinates,
-      ...(props.from_stop_ ? { from: String(props.from_stop_) } : {}), ...(props.to_stop_ ? { to: String(props.to_stop_) } : {}) });
-    groups.set(key, list);
+    const featureId = String((feature as { id?: unknown }).id ?? props.objectid ?? props.globalid ?? `feature-${featureIndex}`);
+    lineParts.forEach((part, partIndex) => {
+      const coordinates = part.flatMap((point): Array<[number, number]> => {
+        if (!Array.isArray(point) || point.length < 2) return [];
+        const lon = Number(point[0]), lat = Number(point[1]);
+        return Number.isFinite(lon) && Number.isFinite(lat) && Math.abs(lon) <= 180 && Math.abs(lat) <= 90 && (lon !== 0 || lat !== 0) ? [[lon, lat]] : [];
+      });
+      if (coordinates.length < 2) return;
+      // A MultiLineString may contain disjoint alternatives. Keep each path separate
+      // instead of flattening it into a false straight connector on the map.
+      const pathSuffix = lineParts.length > 1 ? `|${featureId}:${partIndex}` : '';
+      const key = `${name}|${direction}${pathSuffix}`;
+      const list = groups.get(key) ?? [];
+      list.push({ name, direction, order: Number(props.order_ ?? props.sequence ?? 0), coordinates,
+        ...(props.from_stop_ ? { from: String(props.from_stop_) } : {}), ...(props.to_stop_ ? { to: String(props.to_stop_) } : {}) });
+      groups.set(key, list);
+    });
   }
   const routes: NetworkRoute[] = [];
   for (const [key, segments] of groups) {
@@ -209,7 +221,7 @@ export function cachedNetwork(providerId: string, url: string, sourceVersion?: s
 
 export function cachedGeoJsonNetwork(providerId: string, url: string, mode: LineType, sourceVersion?: string | null): Promise<TransportNetwork> {
   const version = sourceVersion?.trim() || null;
-  return smartCache.getOrLoad('gtfs_network', { providerId, url, mode, sourceVersion: version, schemaVersion: NETWORK_CACHE_SCHEMA_VERSION }, networkSchema, {
+  return smartCache.getOrLoad('gtfs_network', { providerId, url, mode, sourceVersion: version, schemaVersion: NETWORK_CACHE_SCHEMA_VERSION, geoJsonNormalizerVersion: GEOJSON_NETWORK_NORMALIZER_VERSION }, networkSchema, {
     ttlMs: NETWORK_TTL_MS,
     l1TtlMs: version ? 10 * 60_000 : 60_000,
     maxL2Bytes: 8 * 1024 * 1024,
