@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { Pool } from 'pg';
 import { testProviderConnection } from './connection';
 import { canEnableCommercialProvider, commercialUseFromLicense } from './licensePolicy';
+import { selectMobilitySeedEntries } from './seedScope';
 import { kyivOpenDataCatalog, ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3 } from './ukraineCatalog';
 
 /** Idempotent: registers every catalogue source, tests the open ones and enables those that are healthy. */
@@ -10,10 +11,8 @@ async function main() {
   try {
     const scope = process.argv[2] ?? 'all';
     const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
-    const entries = scope === '--kyiv-metro'
-      ? catalog.filter((entry) => entry.city === 'Київ' && entry.name.toLocaleLowerCase('uk-UA').includes('метро'))
-      : scope === 'all' ? catalog : null;
-    if (!entries) throw new Error('Supported seed scopes: all, --kyiv-metro');
+    const entries = selectMobilitySeedEntries(catalog, scope);
+    if (!entries) throw new Error('Supported seed scopes: all, --kyiv-metro, --lviv');
     for (const entry of entries) {
       const { rows } = await pool.query<{ id: string; status: string }>(
         `INSERT INTO mobility_providers(name,city,provider_type,source_type,feed_url,realtime_url,vehicle_position_url,priority,access,license,update_frequency,coverage,source_ref,country,commercial_use,attribution_required,discovery_status)
