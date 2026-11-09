@@ -4,6 +4,7 @@ import { testGbfsConnection } from '../server/mobility/gbfs';
 import { fetchJson } from '../server/mobility/safeFetch';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
 import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
+import { selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
 
 /**
  * Read-only acceptance probe for all Ukrainian transport sources recorded in
@@ -86,8 +87,7 @@ async function main() {
   const lvivStaticFeed = selectTransportFeedSmokeEntries(catalog, 'lviv-route')[0];
   if (!lvivStaticFeed) throw new Error('Lviv static GTFS source is missing from the catalog');
   const lvivFeed = await cachedGtfsTimetable('live-lviv-route-smoke', lvivStaticFeed.feedUrl);
-  const earliestDeparture = new Date(Date.now() + 60 * 60_000);
-  const latestDeparture = new Date(earliestDeparture.getTime() + 90 * 60_000);
+  const { earliestDeparture, latestDeparture, serviceDate } = selectUpcomingSmokeServiceWindow(lvivFeed);
   const lvivRouteCases = [
     { id: 'center-to-main-station', origin: [24.0297, 49.8397] as [number, number], destination: [23.9893, 49.8397] as [number, number] },
     { id: 'north-to-sykhiv', origin: [24.0029933, 49.8681678] as [number, number], destination: [24.057585, 49.794117] as [number, number] },
@@ -95,6 +95,7 @@ async function main() {
   const routePlanner = {
     provider: 'Львівавтодор GTFS → MARSHGO GTFS timetable planner',
     feed: { stops: lvivFeed.stops.size, routes: lvivFeed.routes.size, trips: lvivFeed.trips.size, timezone: lvivFeed.timezone },
+    serviceDate,
     queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
     cases: lvivRouteCases.map((routeCase) => {
       const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(lvivFeed, {
