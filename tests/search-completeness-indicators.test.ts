@@ -2,7 +2,7 @@
 // returning a silent empty result set. Fixtures are labelled synthetic.
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { CANONICAL_ROUTE_TYPES, buildSearchCompleteness } from '../server/journey/searchCompleteness';
+import { CANONICAL_ROUTE_TYPES, buildSearchCompleteness, routeTypesWithUsableProviderData } from '../server/journey/searchCompleteness';
 
 const LVIV_CORRIDOR = {
   providersQueried: 3,
@@ -17,6 +17,18 @@ const LVIV_CORRIDOR = {
 };
 
 describe('search completeness indicators', () => {
+  it('reports only categories backed by provider data in the searched corridor', () => {
+    const unavailableMicromobility = routeTypesWithUsableProviderData({
+      timetableTypes: ['bus_unspecified', 'tram', 'trolleybus', 'unknown'],
+      communityOffers: 0, bicycleInventory: 0, scooterProviderInventory: 0,
+    });
+    assert.deepEqual([...unavailableMicromobility], ['bus', 'tram', 'trolleybus']);
+    const supplied = routeTypesWithUsableProviderData({
+      timetableTypes: ['bus'], communityOffers: 1, bicycleInventory: 2, scooterProviderInventory: 1,
+    });
+    assert.deepEqual([...supplied], ['bus', 'carpool', 'bike', 'scooter']);
+  });
+
   it('names a requested category with no routed provider instead of hiding it', () => {
     const result = buildSearchCompleteness(LVIV_CORRIDOR);
     assert.deepEqual(result.modesAvailable, ['bus', 'tram', 'carpool']);

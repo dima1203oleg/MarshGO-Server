@@ -1,5 +1,9 @@
 export type GeographicBbox = readonly [west: number, south: number, east: number, north: number];
 
+export type GtfsProviderCoverageRecord = {
+  last_report?: { bbox?: GeographicBbox; counts?: Record<string, number> } | null;
+};
+
 function segmentIntersectsRectangle(
   start: readonly [number, number],
   end: readonly [number, number],
@@ -65,4 +69,21 @@ export function bboxIntersectsRouteCorridor(
     (destination[1] - origin[1]) * metersPerLatitude,
   ] as const;
   return segmentIntersectsRectangle([0, 0], routeEnd, rectangle);
+}
+
+/**
+ * Select source feeds by declared geography only. Cached route counts are a
+ * display/diagnostic snapshot and can lag a changed GTFS feed or classifier;
+ * the timetable parser and request's selected-mode filters are authoritative.
+ */
+export function gtfsProvidersInRouteCorridor<T extends GtfsProviderCoverageRecord>(
+  providers: readonly T[],
+  origin: readonly [longitude: number, latitude: number],
+  destination: readonly [longitude: number, latitude: number],
+  corridorWidthMeters: number,
+): T[] {
+  return providers.filter((provider) => {
+    const box = provider.last_report?.bbox;
+    return Boolean(box && bboxIntersectsRouteCorridor(box, origin, destination, corridorWidthMeters));
+  });
 }

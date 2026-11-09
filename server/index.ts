@@ -32,11 +32,11 @@ import { createDirectWalkingCandidate, directWalkingGeometryConnectsEndpoints, M
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { legProvenanceMetadata, sanitizePersistedJourney, trustedRouteGeometry } from './journey/legGeometryProvenance';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
-import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
+import { bboxIntersectsRouteCorridor, gtfsProvidersInRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePrices } from './journey/scoring';
-import { buildSearchCompleteness } from './journey/searchCompleteness';
+import { buildSearchCompleteness, routeTypesWithUsableProviderData } from './journey/searchCompleteness';
 import { journeyTransportTypeSelected, type JourneyLegMode, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
 import { cachedSnapshot, selectNearby } from './mobility/nearby';
@@ -3182,22 +3182,15 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   if (discoveredGtfsProviders.length > 100) candidateGenerationTruncated = true;
   const gtfsProviders = discoveredGtfsProviders.slice(0, 100);
   const transitAllowed = (mode: TransitJourneyMode) => journeySearchTransitModeAllowed(mode, search.preferences);
-  const spatiallyEligibleGtfsProviders = gtfsProviders.filter((provider) => {
-    const box = provider.last_report?.bbox;
-    return Boolean(box && (bboxContains(box, originLon, originLat) || bboxContains(box, destinationLon, destinationLat)
-      || bboxIntersectsRouteCorridor(box, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters)));
-  });
+  const spatiallyEligibleGtfsProviders = gtfsProvidersInRouteCorridor(
+    gtfsProviders, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters,
+  );
   const allTransitModes = JOURNEY_SEARCH_TRANSIT_MODES;
   const allowedTransitModes = allTransitModes.filter(transitAllowed);
-  const typeKeysByMode: Record<TransitJourneyMode, string[]> = {
-    BUS: ['bus', 'intercity_bus'], MINIBUS: ['marshrutka'], RAIL: ['train', 'suburban', 'city_train'],
-    TRAM: ['tram'], TROLLEYBUS: ['trolleybus'], METRO: ['metro'], FERRY: ['ferry'], FUNICULAR: ['funicular'],
-  };
-  const eligibleGtfsProviders = allowedTransitModes.length === 0 ? [] : spatiallyEligibleGtfsProviders.filter((provider) => {
-    const counts = provider.last_report?.counts;
-    if (!counts) return true;
-    return allowedTransitModes.some((mode) => typeKeysByMode[mode].some((type) => Number(counts[`routes_${type}`] ?? 0) > 0));
-  });
+  // Do not prune a feed by cached `last_report.counts`: a validated report can
+  // predate a feed refresh or route classifier fix. The worker parses the
+  // current feed and applies the selected modes to actual scheduled itineraries.
+  const eligibleGtfsProviders = allowedTransitModes.length === 0 ? [] : spatiallyEligibleGtfsProviders;
   const providerMetadata = new Map<string, { name: string; last_sync_at: Date | null; routeGeometrySource?: 'gtfs_shape' | 'official_geojson' }>(
     eligibleGtfsProviders.map((provider) => [provider.id, { name: provider.name, last_sync_at: provider.last_sync_at }]),
   );
@@ -3547,7 +3540,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       `SELECT mp.id,mo.provider_id,mo.provider_name,mp.feed_url,mp.country,n.network_id,n.provider_ids,n.compatibility_status,n.return_rule
          FROM mobility_providers mp JOIN mobility_operators mo ON mo.provider_id=mp.operator_id
          JOIN mobility_networks n ON mo.provider_id=ANY(n.provider_ids)
-        WHERE mp.provider_type='scooter' AND mp.source_type='gbfs' AND mp.city IN ('Київ','Україна')
+        WHERE mp.provider_type='scooter' AND mp.source_type='gbfs' AND mp.country='UA'
           AND mp.status='enabled' AND mp.health IN ('healthy','degraded')
           AND n.compatibility_status='CONFIRMED' AND n.return_rule='FREE_FLOATING_ZONE'
         ORDER BY mp.priority,mp.name LIMIT 30`,
@@ -3560,11 +3553,25 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         return;
       }
       const snapshot = result.value.snapshot;
+      const snapshotAgeMs = snapshot.lastUpdated == null ? Number.POSITIVE_INFINITY : Date.now() - snapshot.lastUpdated;
+      const hasFreshScooterSnapshot = snapshotAgeMs >= -30_000 && snapshotAgeMs <= (snapshot.staleAfterSeconds ?? 60) * 1000;
+      const localAvailableScooters = hasFreshScooterSnapshot
+        ? snapshot.assets.filter((asset) => asset.type === 'SCOOTER' && asset.available
+          && bboxIntersectsRouteCorridor(
+            [asset.location[0], asset.location[1], asset.location[0], asset.location[1]],
+            search.origin.coordinates, search.destination.coordinates, corridorWidthMeters,
+          ))
+        : [];
+      // A country-level GBFS provider is not proof that it operates in this corridor.
+      // Require a fresh, available scooter in the actual search area before exposing its
+      // zone rules to routing or reporting the mode as locally available.
+      if (localAvailableScooters.length === 0) return;
       scooterRouteProviders.push({ providerId: result.value.provider.provider_id, providerName: result.value.provider.provider_name,
         networkId: result.value.provider.network_id, snapshot: {
           geofences: snapshot.geofences ?? [], globalRules: snapshot.globalRules ?? [],
           lastUpdated: snapshot.lastUpdated ?? null, staleAfterSeconds: snapshot.staleAfterSeconds ?? 60,
-        } });
+        }, assets: localAvailableScooters.map((asset) => ({ location: asset.location, available: asset.available,
+          ...(asset.vehicleTypeId ? { vehicleTypeId: asset.vehicleTypeId } : {}) })) });
     });
   }
   const transitPreferenceAllowed = (itinerary: GtfsItinerary) => itinerary.segments.every((segment) =>
@@ -3621,10 +3628,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     for (const estimate of estimates) pushMicromobilityCandidate(estimate);
   }
 
-  // For a real bike/scooter + metro chain, route the rental leg to/from an actual
-  // timetable station and ask the same metro feed for the connecting service.
-  if (requestedMicromobilityModes.length && allowedTransitModes.includes('METRO')) {
-    const maxMicromobilityTransferStations = 2;
+  // Connect real rental estimates to nearby stops from any selected timetable mode.
+  // The worker bounds each endpoint to two stops within 8 km; the route search
+  if (requestedMicromobilityModes.length && allowedTransitModes.length > 0) {
     const stationPathSearch = (group: GtfsWorkerGroup, providerId: string, providerName: string) => memoizeRequestSearch(
       (origin: [number, number], destination: [number, number], earliestDeparture: Date) => JSON.stringify([
         origin, destination, earliestDeparture.getTime(), providerId, group.id,
@@ -3639,7 +3645,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           maximumSearchDurationSeconds - Math.max(0, Math.ceil((earliestDeparture.getTime() - search.departureAt.getTime()) / 1000)))),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
         maximumAccessWalkingMeters: DEFAULT_MAX_ACCESS_WALKING_METERS, maximumEgressWalkingMeters: DEFAULT_MAX_EGRESS_WALKING_METERS,
-        maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS, allowedModes: ['METRO'],
+        maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS, allowedModes: allowedTransitModes,
         allowedTransportTypes: search.preferences.allowedTransportTypes,
         }); } catch {
           gtfsSecondarySearchUnavailable = true;
@@ -3649,18 +3655,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         }
       },
     );
-    for (const group of mergedFeedGroups.filter(({ hasMetro }) => hasMetro)) {
-      const stations = group.metroStations;
-      const closestStations = (place: { coordinates: [number, number] }) => stations
-        .map((station) => ({ station, distance: Math.hypot((station.coordinates[0] - place.coordinates[0]) * 70_000, (station.coordinates[1] - place.coordinates[1]) * 111_000) }))
-        .filter((item) => item.distance <= 8_000).sort((a, b) => a.distance - b.distance)
-        .slice(0, maxMicromobilityTransferStations).map((item) => item.station);
+    for (const group of mergedFeedGroups.filter(({ routeTypes, transferStops }) => routeTypes.length > 0 && transferStops.length > 0)) {
       const providerId = group.sources[0]?.providerId;
-      const providerName = group.sources[0]?.providerName ?? 'Київ — метро';
+      const providerName = group.sources[0]?.providerName ?? 'Громадський транспорт';
       if (!providerId) continue;
       const searchStationPath = stationPathSearch(group, providerId, providerName);
 
-      const originStations = closestStations(search.origin);
+      const originStations = group.transferStops.filter((stop) => stop.endpoint === 'origin');
       for (const station of originStations) {
         const stationPlace = { name: station.name, coordinates: station.coordinates };
         for (const mode of requestedMicromobilityModes) {
@@ -3673,7 +3674,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             resultSamplingTruncated ||= found.resultLimitReached;
             recordGtfsTruncation(found.truncation);
             for (const itinerary of found.itineraries) {
-              if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
+              if (!itinerary.segments.length || !transitPreferenceAllowed(itinerary)) continue;
               const routed = await routeTransitItinerary(itinerary, station.coordinates, search.destination.coordinates, walkingRouteBudget, false);
               if (routed) pushMicromobilityCandidate(estimate, fareForPassengerCount(routed), 'before-transit');
             }
@@ -3681,7 +3682,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         }
       }
 
-      const destinationStations = closestStations(search.destination);
+      const destinationStations = group.transferStops.filter((stop) => stop.endpoint === 'destination');
       for (const station of destinationStations) {
         const stationPlace = { name: station.name, coordinates: station.coordinates };
         const hasEstimates = requestedMicromobilityModes.some((mode) =>
@@ -3693,7 +3694,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         resultSamplingTruncated ||= found.resultLimitReached;
         recordGtfsTruncation(found.truncation);
         for (const itinerary of found.itineraries) {
-          if (!transitPreferenceAllowed(itinerary) || !itinerary.segments.some((segment) => segment.mode === 'METRO')) continue;
+          if (!itinerary.segments.length || !transitPreferenceAllowed(itinerary)) continue;
           const routed = await routeTransitItinerary(itinerary, search.origin.coordinates, station.coordinates, walkingRouteBudget, false);
           if (!routed) continue;
           for (const mode of requestedMicromobilityModes) {
@@ -3902,14 +3903,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const paretoCandidates = paretoFrontier(rankedCandidates);
   const representatives = selectStrategyAlternatives(rankedCandidates, availableStrategies, alternativeLimitPerStrategy);
   const selectedCandidateIds = new Set(representatives.map(({ journey }) => journey.id));
-  const routePlannerTypes = new Set<string>(['carpool']);
-  // A mode is supported when its adapter has usable provider data in the search
-  // corridor, even if this particular origin/destination pair has no feasible leg.
-  // Do not report “not in route engine” just because no rental pair was found.
-  if (wantsBike && microPoints.length > 0) routePlannerTypes.add('bike');
-  if (wantsScooter && scooterRouteProviders.length > 0) routePlannerTypes.add('scooter');
-  for (const group of mergedFeedGroups) for (const routeType of group.routeTypes) routePlannerTypes.add(routeType);
-  const canonicalRouteTypes = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'];
+  const routePlannerTypes = routeTypesWithUsableProviderData({
+    timetableTypes: mergedFeedGroups.flatMap((group) => group.routeTypes),
+    communityOffers: candidates.length,
+    bicycleInventory: wantsBike ? microPoints.length : 0,
+    scooterProviderInventory: wantsScooter ? scooterRouteProviders.length : 0,
+  });
+  const canonicalRouteTypes = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'] as const;
   // Only an explicit category selection is a passenger preference. An unrestricted search asks
   // for everything, so reporting twelve unmet conditions would be invented noise: categories with
   // no provider in this corridor are already disclosed through completeness.modesUnavailable.
@@ -4104,7 +4104,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               mode: segment.mode, source: segmentSource, routeGeometry: segment.routeGeometry,
               routeGeometrySource: provider?.routeGeometrySource, stops: segment.stops,
               metadata: { providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
-                transportType: segment.transportType, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId,
+                transportType: segment.transportType, sourceRouteType: segment.sourceRouteType,
+                ...(segment.routeClassification ? { routeClassification: segment.routeClassification } : {}),
+                headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId,
                 serviceDate: segment.serviceDate, scheduleSemantics: segment.scheduleSemantics,
                 fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
                 fromStopFeedId: segment.originTransferNodeIds[0] ?? segment.originStop.id,
@@ -4252,7 +4254,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
               mode: segment.mode, source: segmentSource, routeGeometry: segment.routeGeometry,
               routeGeometrySource: provider?.routeGeometrySource, stops: segment.stops,
               metadata: { providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName,
-                transportType: segment.transportType, headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId,
+                transportType: segment.transportType, sourceRouteType: segment.sourceRouteType,
+                ...(segment.routeClassification ? { routeClassification: segment.routeClassification } : {}),
+                headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId,
                 serviceDate: segment.serviceDate, scheduleSemantics: segment.scheduleSemantics,
                 fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,
                 fromStopFeedId: segment.originTransferNodeIds[0] ?? segment.originStop.id,
@@ -4499,6 +4503,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           mode: segment.mode, source: segmentSource, routeGeometry: segment.routeGeometry,
           routeGeometrySource: provider?.routeGeometrySource, stops: segment.stops,
           metadata: { providerName: segment.providerName, routeId: segment.routeId, routeName: segment.routeName, transportType: segment.transportType,
+            sourceRouteType: segment.sourceRouteType,
+            ...(segment.routeClassification ? { routeClassification: segment.routeClassification } : {}),
             headsign: segment.headsign?.trim() || segment.destinationStop?.name || segment.routeName || 'Прямий рейс', tripId: segment.tripId, serviceDate: segment.serviceDate,
             scheduleSemantics: segment.scheduleSemantics,
             fromStopId: segment.originStop.id, toStopId: segment.destinationStop.id,

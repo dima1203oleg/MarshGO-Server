@@ -23,7 +23,7 @@ export interface GtfsWorkerGroup {
   sources: Array<{ providerId: string; providerName: string; providerCity: string }>;
   routeTypes: string[];
   hasMetro: boolean;
-  metroStations: Array<{ name: string; coordinates: [number, number] }>;
+  transferStops: Array<{ name: string; coordinates: [number, number]; endpoint: 'origin' | 'destination' }>;
 }
 
 export interface GtfsWorkerStopArrivals {

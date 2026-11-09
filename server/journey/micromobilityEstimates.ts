@@ -203,6 +203,8 @@ export interface ScooterRouteProvider {
   providerName: string;
   networkId: string;
   snapshot: GeofenceSnapshotForRouting;
+  /** Current GBFS vehicles are required to establish a real pickup location. */
+  assets: Array<{ location: Point; available: boolean; vehicleTypeId?: string }>;
 }
 
 function lineSamples(a: Point, b: Point, spacingMeters = 200): Point[] {
@@ -287,10 +289,18 @@ export function buildScooterRouteEstimates(input: {
     ]);
     if (vehicleTypeIds.size === 0) vehicleTypeIds.add('__provider_wide__');
     for (const vehicleTypeId of vehicleTypeIds) {
-      const pickup = nearestAllowedScooterPoint({ snapshot, target: input.origin.coordinates, vehicleTypeId, operation: 'start', at: input.options.departureAt.getTime() });
+      const pickupVehicle = provider.assets
+        .filter((asset) => asset.available && (vehicleTypeId === '__provider_wide__' || asset.vehicleTypeId === vehicleTypeId))
+        .map((asset) => ({ asset, distance: distanceMeters(input.origin.coordinates, asset.location) }))
+        .filter(({ asset, distance }) => distance <= input.options.maxWalkToRentalMeters
+          && (input.options.maxWalkingMeters === undefined || distance <= input.options.maxWalkingMeters)
+          && geofenceRulesAt(snapshot, asset.location, vehicleTypeId,
+            input.options.departureAt.getTime()).rideStartAllowed === true)
+        .sort((a, b) => a.distance - b.distance)[0];
+      if (!pickupVehicle) continue;
+      const pickup = { coordinates: pickupVehicle.asset.location, distanceMeters: pickupVehicle.distance };
       const dropoff = nearestAllowedScooterPoint({ snapshot, target: input.destination.coordinates, vehicleTypeId, operation: 'end', at: input.options.departureAt.getTime() });
-      if (!pickup || !dropoff || pickup.distanceMeters > input.options.maxWalkToRentalMeters
-        || dropoff.distanceMeters > input.options.maxWalkToRentalMeters) continue;
+      if (!dropoff || dropoff.distanceMeters > input.options.maxWalkToRentalMeters) continue;
       if (lineSamples(pickup.coordinates, dropoff.coordinates, 100).slice(1, -1).some((point) =>
         geofenceRulesAt(snapshot, point, vehicleTypeId, input.options.departureAt.getTime()).rideThroughAllowed === false)) continue;
       const candidate = routeCandidate({

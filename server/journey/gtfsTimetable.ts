@@ -1,6 +1,7 @@
 import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
+import { classifyLvivTransport, type LvivTransportClassification } from '../mobility/lvivTransportClassifier';
 import { pointIsInsideUkraine } from '../mobility/gbfs';
 import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
 import type { JourneyOption } from './types';
@@ -83,7 +84,7 @@ const isNamedRailwayStation = (name: string) => /(?:залізничн\p{L}*|в�
 
 type CsvRow = Record<string, string>;
 export type TransitJourneyMode = 'BUS' | 'MINIBUS' | 'RAIL' | 'TRAM' | 'TROLLEYBUS' | 'METRO' | 'FERRY' | 'FUNICULAR';
-export type GtfsTransportType = 'bus' | 'marshrutka' | 'intercity_bus' | 'train' | 'suburban_train' | 'city_train' | 'tram' | 'trolleybus' | 'metro' | 'ferry' | 'funicular';
+export type GtfsTransportType = 'bus' | 'bus_unspecified' | 'marshrutka' | 'intercity_bus' | 'train' | 'suburban_train' | 'city_train' | 'tram' | 'trolleybus' | 'metro' | 'ferry' | 'funicular';
 
 /** Keep a per-transfer wait bound within the total search horizon accepted by the planner. */
 export function maximumGtfsWaitWithinJourney(maximumJourneySeconds: number,
@@ -98,7 +99,8 @@ export function maximumGtfsWaitWithinJourney(maximumJourneySeconds: number,
 export interface GtfsTimetableFeed {
   fetchedAt: Date;
   timezone: string;
-  routes: Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType; agencyId?: string; scheduleSemantics?: 'published_departures' | 'frequency_estimate' }>;
+  routes: Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType; sourceRouteType?: number;
+    classification?: LvivTransportClassification; agencyId?: string; scheduleSemantics?: 'published_departures' | 'frequency_estimate' }>;
   stops: Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string; parentStation?: string; locationType?: number }>;
   trips: Map<string, { routeId: string; serviceId: string; headsign: string; shapeId?: string; directionId?: string }>;
   /** Actual GTFS shape coordinates, keyed by the feed's shape_id. */
@@ -161,6 +163,9 @@ export interface GtfsDirectJourney {
   originTransferNodeIds: string[];
   destinationTransferNodeIds: string[];
   transportType: GtfsTransportType;
+  /** Preserve source type and classification provenance; vehicle size is never inferred. */
+  sourceRouteType?: number;
+  routeClassification?: LvivTransportClassification;
   /** Distinguishes provider-published trip times from derived interval-based estimates. */
   scheduleSemantics: 'published_departures' | 'frequency_estimate';
   /** GTFS service date (YYYYMMDD) identifies which daily instance of tripId is used. */
@@ -805,7 +810,7 @@ function routeMode(routeType: number, routeName: string): { mode: TransitJourney
   const normalizedName = routeName.normalize('NFKC').toLocaleLowerCase('uk-UA');
   if (normalizedName.includes('міжміськ') || normalizedName.includes('intercity')) return { mode: 'BUS', transportType: 'intercity_bus' };
   const label = routeTypeLabel(routeType, routeName);
-  if (label === 'bus') return { mode: 'BUS', transportType: 'bus' };
+  if (label === 'bus') return { mode: 'BUS', transportType: classifyLvivTransport({ routeType, routeName })?.classifiedType ?? 'bus' };
   if (label === 'marshrutka') return { mode: 'MINIBUS', transportType: 'marshrutka' };
   if (label === 'train') return { mode: 'RAIL', transportType: 'train' };
   if (label === 'suburban') return { mode: 'RAIL', transportType: 'suburban_train' };
@@ -852,12 +857,16 @@ export function parseGtfsTimetable(files: Record<string, Uint8Array>, fetchedAt 
   // participate in one cross-provider itinerary search.
   const timezone = reportedTimezone.toLocaleLowerCase('en-US') === 'europe/kiev' ? 'Europe/Kyiv' : reportedTimezone;
 
-  const routes = new Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType; agencyId?: string }>();
+  const routes: GtfsTimetableFeed['routes'] = new Map();
   for (const row of csvRows(text('routes.txt'))) {
     const name = row.route_short_name?.trim() || row.route_long_name?.trim() || row.route_id;
-    const route = routeMode(integer(row.route_type, -1), `${row.route_short_name ?? ''} ${row.route_long_name ?? ''} ${row.route_desc ?? ''}`);
+    const sourceRouteType = integer(row.route_type, -1);
+    const routeName = `${row.route_short_name ?? ''} ${row.route_long_name ?? ''} ${row.route_desc ?? ''}`;
+    const route = routeMode(sourceRouteType, routeName);
     if (!route || !row.route_id) continue;
-    routes.set(row.route_id, { name, ...route, ...(row.agency_id?.trim() ? { agencyId: row.agency_id.trim() } : {}) });
+    const classification = classifyLvivTransport({ routeType: sourceRouteType, routeName });
+    routes.set(row.route_id, { name, ...route, sourceRouteType,
+      ...(classification ? { classification } : {}), ...(row.agency_id?.trim() ? { agencyId: row.agency_id.trim() } : {}) });
   }
 
   const stops = new Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string; parentStation?: string; locationType?: number }>();
@@ -2323,7 +2332,8 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
             destinationStop: { id: destinationMatch.stop.id, name: to.sourceStopName ?? destinationMatch.stop.name, coordinates: destinationCoordinates },
             originTransferNodeIds: [from.sourceStopId ?? from.stopId, ...(from.sourceParentStationId ? [from.sourceParentStationId] : [])],
             destinationTransferNodeIds: [to.sourceStopId ?? to.stopId, ...(to.sourceParentStationId ? [to.sourceParentStationId] : [])],
-            transportType: route.transportType, serviceDate,
+            transportType: route.transportType, sourceRouteType: route.sourceRouteType,
+            ...(route.classification ? { routeClassification: route.classification } : {}), serviceDate,
             scheduledDepartureAt: departureAt, scheduledArrivalAt: arrivalAt,
             departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, originCoordinates)),
@@ -2619,7 +2629,7 @@ export function findGtfsItinerariesWithStats(
       for (const [tripId, trip] of feed.trips) {
         const route = feed.routes.get(trip.routeId);
         const providerCity = feed.providersByRoute?.get(trip.routeId)?.city ?? input.providerCity;
-        const transportType = route?.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route?.transportType;
+        const transportType = (route?.transportType === 'bus' || route?.transportType === 'bus_unspecified') && providerCity === 'Україна' ? 'intercity_bus' : route?.transportType;
         if (!transportType || !['train', 'suburban_train', 'intercity_bus'].includes(transportType)) continue;
         for (const stopTime of feed.stopTimes.get(tripId) ?? []) {
           if (!corridorStops.has(stopTime.stopId)) continue;
@@ -2780,7 +2790,7 @@ export function findGtfsItinerariesWithStats(
         const route = feed.routes.get(routeId);
         if (!route || (input.allowedModes && !input.allowedModes.includes(route.mode))) continue;
         const providerCity = feed.providersByRoute?.get(routeId)?.city ?? input.providerCity;
-        const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
+        const transportType = (route.transportType === 'bus' || route.transportType === 'bus_unspecified') && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
         if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
         const eligibleStops = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
           ? localCityCatchmentStops : corridorStops;
@@ -3286,7 +3296,7 @@ export function findGtfsItinerariesWithStats(
       if (!route || !stops || stops.length < 2 || (input.allowedModes && !input.allowedModes.includes(route.mode))) continue;
       const provider = feed.providersByRoute?.get(trip.routeId);
       const providerCity = provider?.city ?? input.providerCity;
-      const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
+      const transportType = (route.transportType === 'bus' || route.transportType === 'bus_unspecified') && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
       if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
       const graphSegmentLimitPerRoute = graphSegmentBudgetByRoute.get(trip.routeId) ?? 0;
       if (graphSegmentLimitPerRoute === 0) continue;
@@ -3542,8 +3552,10 @@ export function findGtfsItinerariesWithStats(
         destinationStop: candidate.destinationContext.details,
         originTransferNodeIds: candidate.originContext.transferNodeIds,
         destinationTransferNodeIds: candidate.destinationContext.transferNodeIds,
-        transportType: route.transportType === 'bus' && (provider?.city ?? input.providerCity) === 'Україна'
+        transportType: (route.transportType === 'bus' || route.transportType === 'bus_unspecified') && (provider?.city ?? input.providerCity) === 'Україна'
           ? 'intercity_bus' : route.transportType,
+        sourceRouteType: route.sourceRouteType,
+        ...(route.classification ? { routeClassification: route.classification } : {}),
         scheduleSemantics: route.scheduleSemantics ?? 'published_departures',
         serviceDate: candidate.serviceDate,
         scheduledDepartureAt: candidate.scheduledDepartureAt,

@@ -55,7 +55,7 @@ const debugStage = (stage, details = {}) => {
   }
 };
 
-async function buildGroups(providers, metro) {
+async function buildGroups(providers, metro, searchInput) {
   const loaded = await Promise.allSettled(providers.map(async (provider) => {
     const feed = await loadProviderTimetable(provider);
     let realtime = null;
@@ -89,7 +89,9 @@ async function buildGroups(providers, metro) {
       errors.push({ providerId: metro.routeSource.id, name: 'Київське метро', kind: 'schedule' });
     }
   }
-  const built = buildGtfsSearchGroups(sources, String(activeSearchId));
+  const built = buildGtfsSearchGroups(sources, String(activeSearchId), searchInput ? {
+    origin: searchInput.origin, destination: searchInput.destination,
+  } : undefined);
   debugStage('groups-built', { sources: sources.length, groups: built.groups.length, errors: errors.length });
   for (const [id, group] of built.groups) groups.set(id, group);
   return { descriptors: built.descriptors, errors };
@@ -112,7 +114,7 @@ parentPort.on('message', async (message) => {
     }
     if (type === 'search') {
       activeSearchId = id;
-      const { descriptors, errors } = await buildGroups(message.providers, message.metro);
+      const { descriptors, errors } = await buildGroups(message.providers, message.metro, message.input);
       const result = [];
       for (const descriptor of descriptors) {
         const group = groups.get(descriptor.id);

@@ -67,6 +67,24 @@ export type SearchCompletenessInput = {
 
 const CANONICAL = new Set<string>(CANONICAL_ROUTE_TYPES);
 
+/** Build the locally usable route set from provider data observed in this request's corridor. */
+export function routeTypesWithUsableProviderData(input: {
+  timetableTypes: Iterable<string>;
+  communityOffers: number;
+  bicycleInventory: number;
+  scooterProviderInventory: number;
+}): Set<CanonicalRouteType> {
+  const routeTypes = new Set<CanonicalRouteType>();
+  for (const type of input.timetableTypes) {
+    const canonical = type === 'bus_unspecified' ? 'bus' : type;
+    if (CANONICAL.has(canonical)) routeTypes.add(canonical as CanonicalRouteType);
+  }
+  if (input.communityOffers > 0) routeTypes.add('carpool');
+  if (input.bicycleInventory > 0) routeTypes.add('bike');
+  if (input.scooterProviderInventory > 0) routeTypes.add('scooter');
+  return routeTypes;
+}
+
 /** Categories whose only source is the GTFS provider search, as opposed to carpool or micromobility feeds. */
 const GTFS_ROUTED_ROUTE_TYPES = new Set<string>(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train']);
 

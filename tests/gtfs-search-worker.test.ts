@@ -99,11 +99,17 @@ test('GTFS worker applies a hard bound to active plus queued requests', async ()
 
 test('worker search groups preserve feed-scoped routes and match the direct timetable search result', () => {
   const source = { providerId: 'lviv-provider', providerName: 'Lviv Transit', providerCity: 'Львів', feed: fixtureFeed() };
-  const built = buildGtfsSearchGroups([source], 'unit-search');
+  const built = buildGtfsSearchGroups([source], 'unit-search', {
+    origin: [24.0201, 49.8401], destination: [24.0301, 49.8501],
+  });
   const descriptor = built.descriptors[0];
   assert.ok(descriptor);
   assert.deepEqual(descriptor.routeTypes, ['bus']);
   assert.equal(descriptor.hasMetro, false);
+  assert.ok(descriptor.transferStops.some((stop) => stop.endpoint === 'origin' && stop.name === 'Origin'),
+    'non-metro scheduled feeds expose nearby origin transfer stops');
+  assert.ok(descriptor.transferStops.some((stop) => stop.endpoint === 'destination' && stop.name === 'Destination'),
+    'non-metro scheduled feeds expose nearby destination transfer stops');
   const group = built.groups.get(descriptor.id);
   assert.ok(group);
   const directFeed = mergeGtfsTimetables([source]);
@@ -115,6 +121,36 @@ test('worker search groups preserve feed-scoped routes and match the direct time
   assert.deepEqual(actual, expected);
   assert.equal(actual.itineraries.length, 1);
   assert.equal(actual.itineraries[0]?.segments[0]?.providerId, source.providerId);
+});
+
+test('worker exposes micromobility transfer stops for selected bus, tram, and trolleybus feeds', () => {
+  const anchors = { origin: [24.0201, 49.8401] as [number, number], destination: [24.0301, 49.8501] as [number, number] };
+  for (const route of [
+    { id: 'bus-route', name: 'Bus', mode: 'BUS' as const, transportType: 'bus' as const },
+    { id: 'tram-route', name: 'Tram', mode: 'TRAM' as const, transportType: 'tram' as const },
+    { id: 'trolley-route', name: 'Trolleybus', mode: 'TROLLEYBUS' as const, transportType: 'trolleybus' as const },
+  ]) {
+    const feed = fixtureFeed();
+    feed.routes.clear();
+    feed.routes.set(route.id, { name: route.name, mode: route.mode, transportType: route.transportType });
+    feed.trips.clear();
+    feed.trips.set('selected-trip', { routeId: route.id, serviceId: 'weekday', headsign: 'Destination' });
+    feed.stopTimes.clear();
+    feed.stopTimes.set('selected-trip', [
+      { stopId: 'origin', sequence: 1, arrivalSeconds: 0, departureSeconds: 0, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: 1800, departureSeconds: 1800, pickupType: 0, dropOffType: 0 },
+    ]);
+    const descriptor = buildGtfsSearchGroups([
+      { providerId: 'lviv-provider', providerName: 'Lviv Transit', providerCity: 'Львів', feed },
+    ], `transfer-stops-${route.transportType}`, anchors).descriptors[0];
+    assert.ok(descriptor, `${route.transportType} group exists`);
+    assert.equal(descriptor.hasMetro, false);
+    assert.ok(descriptor.transferStops.some((stop) => stop.endpoint === 'origin' && stop.name === 'Origin'),
+      `${route.transportType} feeds expose nearby origin stops`);
+    assert.ok(descriptor.transferStops.some((stop) => stop.endpoint === 'destination' && stop.name === 'Destination'),
+      `${route.transportType} feeds expose nearby destination stops`);
+    assert.ok(descriptor.transferStops.length <= 4, 'transfer stop hints remain bounded to two per endpoint');
+  }
 });
 
 test('worker search-group cache bounds retained feeds with LRU eviction and TTL expiry', () => {
