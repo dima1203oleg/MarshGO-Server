@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { assetTypeFor, discoverFeeds, normalizeStations, normalizeVehicles } from '../server/mobility/gbfs';
 import { assertPublicHttpsUrl, isPrivateAddress, UnsafeUrlError } from '../server/mobility/safeFetch';
+import { classifyLvivTransport } from '../server/mobility/lvivTransportClassifier';
 
 describe('GBFS normalisation', () => {
   it('finds feeds in 2.x (per language) and 3.x discovery documents', () => {
@@ -110,13 +111,31 @@ describe('GTFS parsing', () => {
     assert.equal(routeTypeLabel(0), 'tram'); assert.equal(routeTypeLabel(1), 'metro'); assert.equal(routeTypeLabel(2), 'train');
     assert.equal(routeTypeLabel(3), 'bus'); assert.equal(routeTypeLabel(11), 'trolleybus'); assert.equal(routeTypeLabel(715), 'bus');
     assert.equal(routeTypeLabel(102), 'train'); assert.equal(routeTypeLabel(106), 'suburban');
+    assert.equal(routeTypeLabel(1501), 'marshrutka');
     assert.equal(routeTypeLabel(3, 'Маршрутка № 5'), 'marshrutka');
+    assert.equal(routeTypeLabel(3, 'Маршрутне таксі № 5'), 'marshrutka');
+    assert.equal(routeTypeLabel(3, 'Маршрутний автобус № 5'), 'bus');
+    assert.equal(routeTypeLabel(3, 'Route 5'), 'bus');
+    assert.equal(routeTypeLabel(3, 'City bus 5'), 'bus');
     assert.equal(routeTypeLabel(3, 'Тр22'), 'trolleybus');
     assert.equal(routeTypeLabel(3, 'Тр. 32'), 'trolleybus');
     assert.equal(routeTypeLabel(3, 'Тролейбус № 33'), 'trolleybus');
     assert.equal(routeTypeLabel(3, 'Маршрут № 5'), 'bus');
     assert.equal(routeTypeLabel(2, 'Київська міська електричка'), 'city_train');
     assert.equal(routeTypeLabel(0, 'Фунікулер'), 'funicular');
+  });
+  it('keeps ambiguous bus-class GTFS routes neutral and records classification evidence', () => {
+    assert.deepEqual(classifyLvivTransport({ routeType: 3, routeName: 'Route 5' }), {
+      classifiedType: 'bus_unspecified', serviceClass: 'UNRESOLVED', vehicleClass: null,
+      evidenceLevel: 'UNRESOLVED', evidenceSource: 'GTFS route_type=3 does not distinguish bus from marshrutka',
+      confidence: 0.4, reviewStatus: 'REVIEW_REQUIRED',
+    });
+    assert.equal(classifyLvivTransport({ routeType: 3, routeName: 'Маршрутка № 5' })?.classifiedType, 'marshrutka');
+    assert.equal(classifyLvivTransport({ routeType: 3, routeName: 'Автобус № 5' })?.classifiedType, 'bus');
+    assert.equal(classifyLvivTransport({ routeType: 3, routeName: 'Тр22' }), null,
+      'trolleybus evidence stays outside the bus/minibus classifier');
+    assert.equal(classifyLvivTransport({ routeType: 3, routeName: 'Bus marshrutka 5' })?.classifiedType, 'bus_unspecified',
+      'conflicting name markers require review');
   });
   it('summarises a feed and flags missing files and bad coordinates', () => {
     const files = {

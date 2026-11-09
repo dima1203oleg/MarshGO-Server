@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { parseJourneySearchRequest, transitProviderAllowed } from '../server/journey/search';
-import { JOURNEY_TRANSPORT_TYPES } from '../server/journey/types';
+import { JOURNEY_TRANSPORT_TYPES, journeyTransportTypeSelected } from '../server/journey/types';
 
 const now = new Date('2026-09-30T08:00:00.000Z');
 const request = {
@@ -26,6 +26,11 @@ describe('Journey search request validation', () => {
   it('accepts all twelve canonical categories from the journey selector in one request', () => {
     const parsed = parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: [...JOURNEY_TRANSPORT_TYPES] } }, now);
     assert.deepEqual(parsed.preferences.allowedTransportTypes, JOURNEY_TRANSPORT_TYPES);
+  });
+
+  it('keeps an unresolved generic GTFS bus selectable as bus without relabeling it a marshrutka', () => {
+    assert.equal(journeyTransportTypeSelected('bus_unspecified', ['bus']), true);
+    assert.equal(journeyTransportTypeSelected('bus_unspecified', ['marshrutka']), false);
   });
 
   it('normalizes a timezone-aware journey request and preserves coordinates', () => {

@@ -16,7 +16,49 @@ export interface GtfsSearchGroupDescriptor {
   sources: Array<{ providerId: string; providerName: string; providerCity: string }>;
   routeTypes: string[];
   hasMetro: boolean;
-  metroStations: Array<{ name: string; coordinates: [number, number] }>;
+  transferStops: Array<{ name: string; coordinates: [number, number]; endpoint: 'origin' | 'destination' }>;
+}
+
+export interface GtfsSearchAnchor {
+  origin: [number, number];
+  destination: [number, number];
+}
+
+const MICROMOBILITY_TRANSFER_STOP_RADIUS_METERS = 8_000;
+const MICROMOBILITY_TRANSFER_STOP_LIMIT_PER_ENDPOINT = 2;
+
+function distanceMeters(a: [number, number], b: [number, number]): number {
+  const radians = (degrees: number) => degrees * Math.PI / 180;
+  const [lonA, latA] = a.map(radians) as [number, number];
+  const [lonB, latB] = b.map(radians) as [number, number];
+  const latDelta = latB - latA;
+  const lonDelta = lonB - lonA;
+  const h = Math.sin(latDelta / 2) ** 2 + Math.cos(latA) * Math.cos(latB) * Math.sin(lonDelta / 2) ** 2;
+  return 6_371_000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(Math.max(0, 1 - h)));
+}
+
+function selectMicromobilityTransferStops(feed: GtfsTimetableFeed, anchors?: GtfsSearchAnchor) {
+  if (!anchors) return [];
+  const servedStopIds = new Set<string>();
+  for (const [tripId, trip] of feed.trips) {
+    const route = feed.routes.get(trip.routeId);
+    if (!route || !JOURNEY_MODES.has(route.mode)) continue;
+    for (const call of feed.stopTimes.get(tripId) ?? []) servedStopIds.add(call.stopId);
+  }
+  const stops = [...servedStopIds].flatMap((id) => {
+    const stop = feed.stops.get(id);
+    return stop ? [{ name: stop.name, coordinates: [stop.lon, stop.lat] as [number, number] }] : [];
+  });
+  const selected: GtfsSearchGroupDescriptor['transferStops'] = [];
+  for (const endpoint of ['origin', 'destination'] as const) {
+    const anchor = anchors[endpoint];
+    selected.push(...stops.map((stop) => ({ stop, distance: distanceMeters(anchor, stop.coordinates) }))
+      .filter(({ distance }) => distance <= MICROMOBILITY_TRANSFER_STOP_RADIUS_METERS)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, MICROMOBILITY_TRANSFER_STOP_LIMIT_PER_ENDPOINT)
+      .map(({ stop }) => ({ ...stop, endpoint })));
+  }
+  return selected;
 }
 
 export interface GtfsSearchGroup {
@@ -57,7 +99,7 @@ export class GtfsSearchGroupCache {
   }
 }
 
-export function buildGtfsSearchGroups(sources: readonly GtfsTimetableSource[], idPrefix: string): {
+export function buildGtfsSearchGroups(sources: readonly GtfsTimetableSource[], idPrefix: string, anchors?: GtfsSearchAnchor): {
   descriptors: GtfsSearchGroupDescriptor[];
   groups: Map<string, GtfsSearchGroup>;
 } {
@@ -82,19 +124,11 @@ export function buildGtfsSearchGroups(sources: readonly GtfsTimetableSource[], i
       if (route.transportType === 'intercity_bus') routeTypes.add('bus');
       if (route.transportType === 'suburban_train' || route.transportType === 'city_train') routeTypes.add('train');
     }
-    const metroStops = new Map<string, { name: string; coordinates: [number, number] }>();
-    for (const [tripId, trip] of feed.trips) {
-      if (feed.routes.get(trip.routeId)?.mode !== 'METRO') continue;
-      for (const call of feed.stopTimes.get(tripId) ?? []) {
-        const stop = feed.stops.get(call.stopId);
-        if (stop) metroStops.set(stop.id, { name: stop.name, coordinates: [stop.lon, stop.lat] });
-      }
-    }
     groups.set(id, { sources: [...groupSources], feed });
     descriptors.push({ id, timezone,
       sources: groupSources.map(({ providerId, providerName, providerCity }) => ({ providerId, providerName, providerCity })),
       routeTypes: [...routeTypes], hasMetro: [...feed.routes.values()].some((route) => route.mode === 'METRO'),
-      metroStations: [...metroStops.values()] });
+      transferStops: selectMicromobilityTransferStops(feed, anchors) });
   }
   return { descriptors, groups };
 }

@@ -2145,19 +2145,21 @@ test('normalizes GTFS rail and ferry journeys into supported journey modes', () 
 test('keeps boarding, intermediate, and alighting calls for every selectable GTFS mode', () => {
   const interval = request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z');
   const cases = [
-    { name: 'City bus', routeType: '3', mode: 'BUS', transportType: 'bus' },
-    { name: 'Маршрутка № 5', routeType: '3', mode: 'MINIBUS', transportType: 'marshrutka' },
-    { name: 'City trolleybus', routeType: '11', mode: 'TROLLEYBUS', transportType: 'trolleybus' },
-    { name: 'City tram', routeType: '0', mode: 'TRAM', transportType: 'tram' },
-    { name: 'City metro', routeType: '1', mode: 'METRO', transportType: 'metro' },
-    { name: 'Regional train', routeType: '2', mode: 'RAIL', transportType: 'train' },
+    { name: 'City bus', routeName: 'Route 5', routeType: '3', mode: 'BUS', transportType: 'bus_unspecified' },
+    { name: 'Extended city bus', routeName: 'Автобус № 715', routeType: '715', mode: 'BUS', transportType: 'bus' },
+    { name: 'Маршрутка № 5', routeName: 'Маршрутка № 5', routeType: '3', mode: 'MINIBUS', transportType: 'marshrutka' },
+    { name: 'City trolleybus', routeName: 'Тролейбус № 11', routeType: '11', mode: 'TROLLEYBUS', transportType: 'trolleybus' },
+    { name: 'City tram', routeName: 'Трамвай № 1', routeType: '0', mode: 'TRAM', transportType: 'tram' },
+    { name: 'City metro', routeName: 'Метро', routeType: '1', mode: 'METRO', transportType: 'metro' },
+    { name: 'Regional train', routeName: 'Regional train', routeType: '2', mode: 'RAIL', transportType: 'train' },
   ] as const;
 
   for (const item of cases) {
-    const journeys = findGtfsItineraries(feed({ routeType: item.routeType, routeName: item.name, withIntermediate: true }), {
+    const journeys = findGtfsItineraries(feed({ routeType: item.routeType, routeName: item.routeName, withIntermediate: true }), {
       ...interval,
       allowedModes: [item.mode],
-      allowedTransportTypes: [item.transportType],
+      // User preferences use public categories; neutral feed types still map to bus.
+      allowedTransportTypes: [item.transportType === 'bus_unspecified' ? 'bus' : item.transportType],
       maximumStopDistanceMeters: 100,
     });
     const segment = journeys[0]?.segments[0];
@@ -2185,10 +2187,14 @@ test('maps city and suburban rail into the canonical train category and excludes
   const intercityBus = findGtfsItineraries(feed({ routeType: '3', routeName: 'Міжміський автобус' }), {
     ...interval, allowedModes: ['BUS'], allowedTransportTypes: ['bus'], maximumStopDistanceMeters: 2000,
   });
+  const extendedMinibus = findGtfsItineraries(feed({ routeType: '1501', routeName: 'Route 5' }), {
+    ...interval, allowedModes: ['MINIBUS'], allowedTransportTypes: ['marshrutka'], maximumStopDistanceMeters: 2000,
+  });
   assert.equal(cityTrain[0]?.segments[0]?.transportType, 'city_train');
   assert.equal(suburbanTrain[0]?.segments[0]?.transportType, 'suburban_train');
   assert.equal(funicular.length, 0, 'funicular has no user-selectable product category');
   assert.equal(minibus[0]?.segments[0]?.mode, 'MINIBUS');
+  assert.equal(extendedMinibus[0]?.segments[0]?.transportType, 'marshrutka');
   assert.equal(intercityBus[0]?.segments[0]?.transportType, 'intercity_bus');
 });
 
@@ -2197,7 +2203,7 @@ test('does not classify bus or trolleybus routes containing “Кільцева�
   const trolleybus = feed({ routeType: '11', routeName: 'Тролейбус Кільцева' });
   const cityRail = feed({ routeType: '2', routeName: 'Міська електричка Кільцева' });
 
-  assert.equal(bus.routes.get('r')?.transportType, 'bus');
+  assert.equal(bus.routes.get('r')?.transportType, 'bus_unspecified');
   assert.equal(trolleybus.routes.get('r')?.transportType, 'trolleybus');
   assert.equal(cityRail.routes.get('r')?.transportType, 'city_train');
 });

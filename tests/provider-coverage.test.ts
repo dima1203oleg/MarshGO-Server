@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { bboxIntersectsRouteCorridor } from '../server/journey/providerCoverage';
+import { bboxIntersectsRouteCorridor, gtfsProvidersInRouteCorridor } from '../server/journey/providerCoverage';
 
 const kyiv: [number, number] = [30.5234, 50.4501];
 const lviv: [number, number] = [24.031, 49.842];
@@ -24,5 +24,18 @@ describe('GTFS provider corridor selection', () => {
   it('rejects invalid provider coverage boxes', () => {
     assert.equal(bboxIntersectsRouteCorridor([24, 50, 23, 49], kyiv, lviv, kyivLvivCorridor), false);
     assert.equal(bboxIntersectsRouteCorridor([24, 49, 25, 91], kyiv, lviv, kyivLvivCorridor), false);
+  });
+
+  it('does not let stale cached route counts hide a spatially valid current GTFS feed', () => {
+    const provider = {
+      id: 'lviv-gtfs',
+      last_report: {
+        bbox: [23.86, 49.77, 24.17, 49.98] as const,
+        // This report predates the current feed/classifier and omits trolleybus.
+        counts: { routes_bus: 55, routes_tram: 8, routes_trolleybus: 0 },
+      },
+    };
+    assert.deepEqual(gtfsProvidersInRouteCorridor([provider], lviv, lviv, 2_000), [provider]);
+    assert.deepEqual(gtfsProvidersInRouteCorridor([provider], kyiv, kyiv, 2_000), []);
   });
 });

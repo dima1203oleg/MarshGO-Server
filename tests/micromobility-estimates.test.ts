@@ -49,7 +49,8 @@ test('rental provider filters stay isolated by mode', () => {
 
   const scooter = buildScooterRouteEstimates({
     origin: { name: 'A', coordinates: [30.50, 50.45] }, destination: { name: 'B', coordinates: [30.52, 50.45] },
-    providers: [{ providerId: 'zelectra', providerName: 'Zelectra', networkId: 'zelectra-66', snapshot: allowedZone() }],
+    providers: [{ providerId: 'zelectra', providerName: 'Zelectra', networkId: 'zelectra-66', snapshot: allowedZone(),
+      assets: [{ location: [30.50, 50.45] as [number, number], available: true, vehicleTypeId: 'scooter' }] }],
     options: { departureAt, maxWalkToRentalMeters: 300, maxCandidates: 6, allowedProviderIds: [], allowedProviderIdsByMode: { BICYCLE: ['nextbike_ua'] } },
     now: Date.parse('2026-10-16T05:00:00Z'),
   });
@@ -71,7 +72,8 @@ test('scooter estimates require fresh same-provider start and end zones', () => 
   const options = { departureAt, maxWalkToRentalMeters: 300, maxCandidates: 6 };
   const estimates = buildScooterRouteEstimates({
     origin: { name: 'A', coordinates: [30.50, 50.45] as [number, number] }, destination: { name: 'B', coordinates: [30.52, 50.45] as [number, number] },
-    providers: [{ providerId: 'zelectra', providerName: 'Zelectra', networkId: 'zelectra-66', snapshot: allowedZone() }],
+    providers: [{ providerId: 'zelectra', providerName: 'Zelectra', networkId: 'zelectra-66', snapshot: allowedZone(),
+      assets: [{ location: [30.50, 50.45] as [number, number], available: true, vehicleTypeId: 'scooter' }] }],
     options, now: Date.parse('2026-10-16T05:00:00Z'),
   });
 
@@ -85,7 +87,8 @@ test('scooter estimates require fresh same-provider start and end zones', () => 
 test('scooter estimates reject stale geofences and routes crossing explicitly forbidden zones', () => {
   const request = {
     origin: { name: 'A', coordinates: [30.50, 50.45] as [number, number] }, destination: { name: 'B', coordinates: [30.52, 50.45] as [number, number] },
-    providers: [{ providerId: 'zelectra', providerName: 'Zelectra', networkId: 'zelectra-66', snapshot: allowedZone(false) }],
+    providers: [{ providerId: 'zelectra', providerName: 'Zelectra', networkId: 'zelectra-66', snapshot: allowedZone(false),
+      assets: [{ location: [30.50, 50.45] as [number, number], available: true, vehicleTypeId: 'scooter' }] }],
     options: { departureAt, maxWalkToRentalMeters: 300, maxCandidates: 6 },
   };
   assert.deepEqual(buildScooterRouteEstimates({ ...request, now: Date.parse('2026-10-16T05:00:00Z') }), []);
@@ -93,4 +96,22 @@ test('scooter estimates reject stale geofences and routes crossing explicitly fo
     ...request, providers: [{ ...request.providers[0]!, snapshot: { ...allowedZone(), lastUpdated: Date.parse('2026-10-16T04:00:00Z') } }],
     now: Date.parse('2026-10-16T05:00:00Z'),
   }), []);
+});
+
+test('scooter estimates require a fresh available vehicle near the selected origin', () => {
+  const request = {
+    origin: { name: 'A', coordinates: [30.50, 50.45] as [number, number] },
+    destination: { name: 'B', coordinates: [30.52, 50.45] as [number, number] },
+    providers: [{ providerId: 'zelectra', providerName: 'Zelectra', networkId: 'zelectra-66', snapshot: allowedZone(),
+      assets: [{ location: [30.50, 50.45] as [number, number], available: true, vehicleTypeId: 'scooter' }] }],
+    options: { departureAt, maxWalkToRentalMeters: 300, maxCandidates: 6 },
+    now: Date.parse('2026-10-16T05:00:00Z'),
+  };
+  assert.equal(buildScooterRouteEstimates(request).length, 1);
+  assert.deepEqual(buildScooterRouteEstimates({
+    ...request, providers: [{ ...request.providers[0]!, assets: [] }],
+  }), [], 'a zone rule without a real available vehicle must not fabricate a pickup');
+  assert.deepEqual(buildScooterRouteEstimates({
+    ...request, providers: [{ ...request.providers[0]!, assets: [{ location: [30.52, 50.45], available: true, vehicleTypeId: 'scooter' }] }],
+  }), [], 'an available scooter outside the walking pickup limit cannot serve as the origin vehicle');
 });

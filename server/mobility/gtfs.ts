@@ -3,6 +3,7 @@ import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from './safeFetch';
 import { pointIsInsideUkraine } from './gbfs';
 import { bboxOf, type ConnectionReport } from './types';
+import { classifyLvivTransport } from './lvivTransportClassifier';
 
 /** GTFS route_type → MARSHGO transport label (basic and extended route types). */
 export function routeTypeLabel(routeType: number, routeName = ''): string {
@@ -10,10 +11,11 @@ export function routeTypeLabel(routeType: number, routeName = ''): string {
   if (name.includes('фунікулер') || name.includes('funicular')) return 'funicular';
   const isRailRoute = routeType === 2 || (routeType >= 100 && routeType < 200);
   if (isRailRoute && (name.includes('міська електричка') || name.includes('city train') || name.includes('city express') || name.includes('кільцева'))) return 'city_train';
-  if (name.includes('маршрутка') || name.includes('маршрутн') || name.includes('minibus')) return 'marshrutka';
   // Some Ukrainian city GTFS feeds encode trolleybuses as route_type=3 (bus).
   // Override that generic type only when the route label explicitly identifies a trolleybus.
   if (name.includes('тролейбус') || name.includes('trolleybus') || /(?:^|\s)тр\.?\s*\d/.test(name)) return 'trolleybus';
+  const serviceClassification = classifyLvivTransport({ routeType, routeName });
+  if (serviceClassification) return serviceClassification.classifiedType === 'marshrutka' ? 'marshrutka' : 'bus';
   if (routeType === 0 || (routeType >= 900 && routeType < 1000)) return 'tram';
   if (routeType === 1 || (routeType >= 400 && routeType < 500)) return 'metro';
   if (routeType === 106 || routeType === 109) return 'suburban';
