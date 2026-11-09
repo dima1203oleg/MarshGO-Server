@@ -36,6 +36,27 @@ test('bike estimates only use one owner-confirmed provider network and keep inve
   assert.deepEqual(estimates[0]?.legs.find((leg) => leg.mode === 'BICYCLE')?.routeGeometry, [[30.5, 50.45], [30.52, 50.45]]);
 });
 
+test('rental provider filters stay isolated by mode', () => {
+  const bicycle = buildBicycleRouteEstimates({
+    origin: { name: 'A', coordinates: [30.50, 50.45] },
+    destination: { name: 'B', coordinates: [30.52, 50.45] },
+    points,
+    networks: new Map([['nextbike-ua', bicycleNetwork]]),
+    options: { departureAt, maxWalkToRentalMeters: 500, maxCandidates: 6, allowedProviderIds: [], allowedProviderIdsByMode: { SCOOTER: ['zelectra'] } },
+  });
+  assert.equal(bicycle.length, 1);
+  assert.equal(bicycle[0]?.providerId, 'nextbike_ua');
+
+  const scooter = buildScooterRouteEstimates({
+    origin: { name: 'A', coordinates: [30.50, 50.45] }, destination: { name: 'B', coordinates: [30.52, 50.45] },
+    providers: [{ providerId: 'zelectra', providerName: 'Zelectra', networkId: 'zelectra-66', snapshot: allowedZone() }],
+    options: { departureAt, maxWalkToRentalMeters: 300, maxCandidates: 6, allowedProviderIds: [], allowedProviderIdsByMode: { BICYCLE: ['nextbike_ua'] } },
+    now: Date.parse('2026-10-16T05:00:00Z'),
+  });
+  assert.equal(scooter.length, 1);
+  assert.equal(scooter[0]?.providerId, 'zelectra');
+});
+
 const allowedZone = (rideThroughAllowed: boolean | null = null): GeofenceSnapshotForRouting => ({
   geofences: [{
     id: 'allowed-area', geometry: { type: 'Polygon', coordinates: [[

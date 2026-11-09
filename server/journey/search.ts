@@ -135,7 +135,7 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
   if (!isRecord(rawPreferences)) throw new TypeError('preferences must be an object');
   const allowedPreferences = new Set([
     ...Object.keys(preferenceBounds), 'minDriverRating','preferredVehicleClass',
-    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowBicycle','allowScooter','requireVerifiedReturn','allowStaticRentalDiscovery','allowedProviderIds','blockedProviderIds','allowedTransportTypes','allowedTransitProviders','allowedTransitProvidersByType',
+    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowBicycle','allowScooter','requireVerifiedReturn','allowStaticRentalDiscovery','allowedProviderIds','allowedProviderIdsByType','blockedProviderIds','allowedTransportTypes','allowedTransitProviders','allowedTransitProvidersByType',
   ]);
   const unknownPreference = Object.keys(rawPreferences).find((key) => !allowedPreferences.has(key));
   if (unknownPreference) throw new TypeError(`unsupported preference: ${unknownPreference}`);
@@ -168,6 +168,22 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
       || raw.some((provider) => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9_-]{1,79}$/.test(provider))
       || new Set(raw).size !== raw.length) throw new TypeError(`${key} is invalid`);
     preferences[key] = raw as string[];
+  }
+  if (rawPreferences.allowedProviderIdsByType !== undefined) {
+    const rawByType = rawPreferences.allowedProviderIdsByType;
+    if (!isRecord(rawByType) || Object.keys(rawByType).some((type) => type !== 'bike' && type !== 'scooter')) {
+      throw new TypeError('allowedProviderIdsByType is invalid');
+    }
+    const normalized: NonNullable<JourneyPreferences['allowedProviderIdsByType']> = {};
+    for (const type of ['bike', 'scooter'] as const) {
+      const providers = rawByType[type];
+      if (providers === undefined) continue;
+      if (!Array.isArray(providers) || providers.length > 100
+        || providers.some((provider) => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9_-]{1,79}$/.test(provider))
+        || new Set(providers).size !== providers.length) throw new TypeError('allowedProviderIdsByType is invalid');
+      normalized[type] = providers as string[];
+    }
+    preferences.allowedProviderIdsByType = normalized;
   }
   if (rawPreferences.allowedTransportTypes !== undefined) {
     const types = rawPreferences.allowedTransportTypes;
