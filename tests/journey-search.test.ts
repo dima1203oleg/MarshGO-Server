@@ -23,6 +23,11 @@ describe('Journey search request validation', () => {
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: ['funicular'] } }, now), /allowedTransportTypes is invalid/);
   });
 
+  it('accepts all twelve canonical categories from the journey selector in one request', () => {
+    const parsed = parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: [...JOURNEY_TRANSPORT_TYPES] } }, now);
+    assert.deepEqual(parsed.preferences.allowedTransportTypes, JOURNEY_TRANSPORT_TYPES);
+  });
+
   it('normalizes a timezone-aware journey request and preserves coordinates', () => {
     const parsed = parseJourneySearchRequest(request, now);
     assert.deepEqual(parsed.origin, request.origin);
