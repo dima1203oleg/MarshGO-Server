@@ -163,7 +163,7 @@
 
 ## 6. Defects found by this audit
 
-1. **Two divergent catalogs.** Canonical `MarshGO-Server/server/mobility/ukraineCatalog.ts` has 52 rows; the legacy root copy has 43 (a strict subset). The read-only probe tool only exists in the root repo, so `npm run acceptance:transport-feeds` certifies 43 rows and silently misses 9 canonical ones (Zelectra GBFS + 8 Kyiv REST tables).
+1. **Two catalog copies remain.** The canonical Server smoke command `npm run acceptance:transport-feeds` probes Base, Wave 2, Wave 3 and Kyiv open-data entries from `server/mobility/ukraineCatalog.ts`. The root repository's legacy probe is a 43-row subset; do not use it as full-catalog acceptance.
 2. **Kyiv city open data is down as a source.** All 15 Kyiv portal rows (7 GeoJSON + 8 REST) returned timeouts / HTTP 522 from `data.kyivcity.gov.ua` and `gisserver.kyivcity.gov.ua` today. Metro, funicular, city express and Kyiv marshrutka geometry therefore have no working provider feed right now.
 3. **No arrival predictions anywhere.** Every GTFS-RT feed measured `tripUpdates=0` and `alerts=0`. The planner can show scheduled times and live positions, but "next tram in 4 min" and service alerts are not provider-backed in any Ukrainian feed in this registry.
 4. **Lviv trip_updates feed is broken upstream.** `https://track.ua-gis.com/gtfs/lviv/trip_updates` returned a payload that failed protobuf validation.

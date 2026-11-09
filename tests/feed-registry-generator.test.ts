@@ -31,4 +31,16 @@ describe('feed registry generator honesty contract', () => {
     assert.ok(scriptContent.includes('probeFromRun(probePath)'));
     assert.ok(scriptContent.includes('probeRun.byName[entry.name]'));
   });
+
+  it('exposes a canonical full-catalog probe and does not describe the legacy subset as acceptance', () => {
+    const packageJson = JSON.parse(readFileSync(resolve(currentDir, '../package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    const smokeScript = readFileSync(resolve(currentDir, '../scripts/transport-feed-smoke.ts'), 'utf8');
+    assert.equal(packageJson.scripts?.['acceptance:transport-feeds'], 'tsx scripts/transport-feed-smoke.ts --scope=all');
+    assert.ok(smokeScript.includes('ukraineCatalogWave3'), 'full-catalog smoke must include the latest provider wave');
+    assert.ok(smokeScript.includes('kyivOpenDataCatalog'), 'full-catalog smoke must include Kyiv open-data feeds');
+    assert.ok(scriptContent.includes('npm run acceptance:transport-feeds'));
+    assert.ok(!scriptContent.includes('silently misses 9 canonical ones'));
+  });
 });
