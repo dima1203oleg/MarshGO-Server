@@ -40,6 +40,9 @@ describe('feed registry generator honesty contract', () => {
     assert.equal(packageJson.scripts?.['acceptance:transport-feeds'], 'tsx scripts/transport-feed-smoke.ts --scope=all');
     assert.ok(smokeScript.includes('ukraineCatalogWave3'), 'full-catalog smoke must include the latest provider wave');
     assert.ok(smokeScript.includes('kyivOpenDataCatalog'), 'full-catalog smoke must include Kyiv open-data feeds');
+    assert.match(smokeScript, /const checkedResults = results\.filter\(\(row\) => row\.state !== 'SKIPPED'\)/);
+    assert.match(smokeScript, /providerSourcesProbed: checkedResults\.length/,
+      'the probe count must exclude policy-skipped sources');
     assert.ok(scriptContent.includes('npm run acceptance:transport-feeds'));
     assert.ok(!scriptContent.includes('silently misses 9 canonical ones'));
   });

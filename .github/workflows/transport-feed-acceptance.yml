@@ -36,6 +36,9 @@ jobs:
             echo '- Scope: all canonical feed catalog entries (Base, Wave 2, Wave 3, Kyiv open data)'
             echo '- Database writes: none'
             echo '- User-origin/destination data: none'
+            if [ -f artifacts/transport-feed-acceptance.json ]; then
+              jq -r '"- Catalog rows: \(.summary.catalogRows)\n- Sources probed: \(.summary.providerSourcesProbed)\n- Healthy / degraded / offline / skipped: \(.summary.healthy) / \(.summary.degraded) / \(.summary.offline) / \(.summary.skipped)"' artifacts/transport-feed-acceptance.json
+            fi
             echo '- HEALTHY means source probe health only; it does not imply route integration, legal/commercial rights, fares, availability or booking.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve JSON evidence
