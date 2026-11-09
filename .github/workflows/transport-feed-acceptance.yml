@@ -1,0 +1,48 @@
+name: Canonical transport feed acceptance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canonical-transport-feed-acceptance
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Probe every canonical feed catalog entry
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          npm run --silent acceptance:transport-feeds | tee artifacts/transport-feed-acceptance.json
+      - name: Write run provenance
+        if: always()
+        run: |
+          {
+            echo '# Canonical transport feed acceptance'
+            echo "- Server SHA: \`${GITHUB_SHA}\`"
+            echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
+            echo '- Scope: all canonical feed catalog entries (Base, Wave 2, Wave 3, Kyiv open data)'
+            echo '- Database writes: none'
+            echo '- User-origin/destination data: none'
+            echo '- HEALTHY means source probe health only; it does not imply route integration, legal/commercial rights, fares, availability or booking.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve JSON evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transport-feed-acceptance-${{ github.sha }}
+          path: artifacts/transport-feed-acceptance.json
+          if-no-files-found: warn
+          retention-days: 14
