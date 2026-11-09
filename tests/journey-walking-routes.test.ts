@@ -121,7 +121,7 @@ test('uses the configured OSRM foot profile and preserves its routed geometry', 
   };
   t.after(() => { globalThis.fetch = originalFetch; });
 
-  const routed = await routePedestrianPath([24, 49], [24.01, 49.01], 'https://walking.example/route/v1/foot');
+  const routed = await routePedestrianPath([24, 49], [24.01, 49.01], 'https://walking.example');
   assert.match(requestedUrl, /\/route\/v1\/foot\//);
   assert.deepEqual(routed, {
     distanceMeters: 1481, durationSeconds: 501, geometry: [[24, 49], [24.01, 49.01]],
@@ -245,6 +245,28 @@ test('selects the foot graph that covers both endpoints and refuses cross-city o
 
   process.env.WALKING_ROUTING_URLS = 'not-json';
   assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://single:5000/route/v1/foot');
+});
+
+test('normalizes OSRM service-root configuration to its pedestrian profile endpoint', (t) => {
+  const originalUrl = process.env.WALKING_ROUTING_URL;
+  const originalUrls = process.env.WALKING_ROUTING_URLS;
+  t.after(() => {
+    if (originalUrl === undefined) delete process.env.WALKING_ROUTING_URL; else process.env.WALKING_ROUTING_URL = originalUrl;
+    if (originalUrls === undefined) delete process.env.WALKING_ROUTING_URLS; else process.env.WALKING_ROUTING_URLS = originalUrls;
+  });
+
+  delete process.env.WALKING_ROUTING_URLS;
+  process.env.WALKING_ROUTING_URL = 'http://walking-router:5000';
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://walking-router:5000/route/v1/foot');
+  process.env.WALKING_ROUTING_URL = 'http://walking-router:5000/route/v1';
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://walking-router:5000/route/v1/foot');
+  process.env.WALKING_ROUTING_URL = 'http://walking-router:5000/route/v1/foot';
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://walking-router:5000/route/v1/foot');
+
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([
+    { bbox: [23.9, 49.75, 24.2, 49.95], url: 'http://lviv-walking:5000' },
+  ]);
+  assert.equal(walkingEndpointFor([24.03, 49.84], [24.02, 49.89]), 'http://lviv-walking:5000/route/v1/foot');
 });
 
 // The pipeline gate has to open for a per-area graph set even when no single WALKING_ROUTING_URL
