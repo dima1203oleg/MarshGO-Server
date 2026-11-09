@@ -153,6 +153,25 @@ const inFlightRouteRequests = new Map<string, Promise<WalkingRoutePath | null>>(
 type WalkingEndpointRule = { bbox: [number, number, number, number]; url: string };
 let walkingEndpointCache: { raw: string; rules: WalkingEndpointRule[] } | null = null;
 
+/**
+ * Accept common service-root forms from local/container configuration and select OSRM's
+ * pedestrian profile. An explicit foot-profile URL stays unchanged.
+ */
+function normalizeWalkingEndpoint(endpoint: string): string {
+  const value = endpoint.trim();
+  try {
+    const url = new URL(value);
+    const path = url.pathname.replace(/\/+$/, '');
+    if (!path) url.pathname = '/route/v1/foot';
+    else if (path.endsWith('/route/v1')) url.pathname = `${path}/foot`;
+    else url.pathname = path;
+    return url.toString();
+  } catch {
+    // Keep invalid input intact so the existing provider failure path remains honest and observable.
+    return value;
+  }
+}
+
 function walkingEndpointRules(): WalkingEndpointRule[] {
   const raw = process.env.WALKING_ROUTING_URLS?.trim();
   if (!raw) return [];
@@ -167,7 +186,7 @@ function walkingEndpointRules(): WalkingEndpointRule[] {
       if (!Array.isArray(bbox) || bbox.length !== 4) return [];
       if (!bbox.every((value) => typeof value === 'number' && Number.isFinite(value))) return [];
       if (typeof url !== 'string' || !url.trim()) return [];
-      return [{ bbox: bbox as [number, number, number, number], url: url.trim() }];
+      return [{ bbox: bbox as [number, number, number, number], url: normalizeWalkingEndpoint(url) }];
     });
   } catch {
     rules = [];
@@ -188,7 +207,10 @@ function bboxContains(bbox: [number, number, number, number], point: [number, nu
  */
 export function walkingEndpointFor(from: [number, number], to?: [number, number]): string | undefined {
   const rules = walkingEndpointRules();
-  if (!rules.length) return process.env.WALKING_ROUTING_URL?.trim() || undefined;
+  if (!rules.length) {
+    const configured = process.env.WALKING_ROUTING_URL?.trim();
+    return configured ? normalizeWalkingEndpoint(configured) : undefined;
+  }
   return rules.find(({ bbox }) => bboxContains(bbox, from) && (!to || bboxContains(bbox, to)))?.url;
 }
 
@@ -235,8 +257,9 @@ export async function routePedestrianPath(
   budget?: WalkingRouteBudget,
 ): Promise<WalkingRoutePath | null> {
   if (!endpoint) return null;
+  const resolvedEndpoint = normalizeWalkingEndpoint(endpoint);
   const graphVersion = process.env.WALKING_GRAPH_VERSION || process.env.OSRM_GRAPH_VERSION;
-  const key = `${endpoint}\u0000${graphVersion ?? 'no-graph-cache-disabled'}\u0000${coordinateKey(from)}\u0000${coordinateKey(to)}`;
+  const key = `${resolvedEndpoint}\u0000${graphVersion ?? 'no-graph-cache-disabled'}\u0000${coordinateKey(from)}\u0000${coordinateKey(to)}`;
   const now = Date.now();
   const cached = graphVersion ? routeCache.get(key) : undefined;
   if (cached && cached.expiresAt > now) { routeCache.delete(key); routeCache.set(key, cached); return cached.value; }
@@ -252,7 +275,7 @@ export async function routePedestrianPath(
     budget.spent += 1;
   }
 
-  const value = requestOsrmRoute([from, to], endpoint, { timeoutMs: WALKING_ROUTE_TIMEOUT_MS, profile: 'FOOT', priority: 'background' })
+  const value = requestOsrmRoute([from, to], resolvedEndpoint, { timeoutMs: WALKING_ROUTE_TIMEOUT_MS, profile: 'FOOT', priority: 'background' })
     .then((route) => ({ distanceMeters: Math.ceil(route.distanceMeters), durationSeconds: Math.ceil(route.durationSeconds), geometry: route.geometry }))
     .catch(() => null);
   inFlightRouteRequests.set(key, value);
