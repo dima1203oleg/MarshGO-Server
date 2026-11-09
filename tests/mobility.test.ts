@@ -111,6 +111,10 @@ describe('GTFS parsing', () => {
     assert.equal(routeTypeLabel(3), 'bus'); assert.equal(routeTypeLabel(11), 'trolleybus'); assert.equal(routeTypeLabel(715), 'bus');
     assert.equal(routeTypeLabel(102), 'train'); assert.equal(routeTypeLabel(106), 'suburban');
     assert.equal(routeTypeLabel(3, 'Маршрутка № 5'), 'marshrutka');
+    assert.equal(routeTypeLabel(3, 'Тр22'), 'trolleybus');
+    assert.equal(routeTypeLabel(3, 'Тр. 32'), 'trolleybus');
+    assert.equal(routeTypeLabel(3, 'Тролейбус № 33'), 'trolleybus');
+    assert.equal(routeTypeLabel(3, 'Маршрут № 5'), 'bus');
     assert.equal(routeTypeLabel(2, 'Київська міська електричка'), 'city_train');
     assert.equal(routeTypeLabel(0, 'Фунікулер'), 'funicular');
   });
