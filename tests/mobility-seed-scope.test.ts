@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { selectMobilitySeedEntries } from '../server/mobility/seedScope';
+import { initialMobilityProviderStatus, selectMobilitySeedEntries } from '../server/mobility/seedScope';
 import { kyivOpenDataCatalog, ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3 } from '../server/mobility/ukraineCatalog';
 
 const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
@@ -27,4 +27,9 @@ test('Kyiv metro scope remains restricted to Kyiv metro catalog entries', () => 
 
 test('unknown seed scope is rejected before any database or provider work', () => {
   assert.equal(selectMobilitySeedEntries(catalog, '--all-cities-ish'), null);
+});
+
+test('only a new source with validated commercial access gets an enabled default', () => {
+  assert.equal(initialMobilityProviderStatus(true), 'enabled');
+  assert.equal(initialMobilityProviderStatus(false), 'disabled');
 });
