@@ -11,6 +11,9 @@ export function routeTypeLabel(routeType: number, routeName = ''): string {
   const isRailRoute = routeType === 2 || (routeType >= 100 && routeType < 200);
   if (isRailRoute && (name.includes('міська електричка') || name.includes('city train') || name.includes('city express') || name.includes('кільцева'))) return 'city_train';
   if (name.includes('маршрутка') || name.includes('маршрутн') || name.includes('minibus')) return 'marshrutka';
+  // Some Ukrainian city GTFS feeds encode trolleybuses as route_type=3 (bus).
+  // Override that generic type only when the route label explicitly identifies a trolleybus.
+  if (name.includes('тролейбус') || name.includes('trolleybus') || /(?:^|\s)тр\.?\s*\d/.test(name)) return 'trolleybus';
   if (routeType === 0 || (routeType >= 900 && routeType < 1000)) return 'tram';
   if (routeType === 1 || (routeType >= 400 && routeType < 500)) return 'metro';
   if (routeType === 106 || routeType === 109) return 'suburban';
