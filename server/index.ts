@@ -3541,10 +3541,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const scooterRouteProviders: ScooterRouteProvider[] = [];
   if (wantsScooter) {
     const { rows: scooterProviders } = await pool.query<{
-      id: string; provider_id: string; provider_name: string; feed_url: string; network_id: string;
+      id: string; provider_id: string; provider_name: string; feed_url: string; country: string; network_id: string;
       provider_ids: string[]; compatibility_status: RentalRouteNetwork['compatibilityStatus']; return_rule: RentalRouteNetwork['returnRule'];
     }>(
-      `SELECT mp.id,mo.provider_id,mo.provider_name,mp.feed_url,n.network_id,n.provider_ids,n.compatibility_status,n.return_rule
+      `SELECT mp.id,mo.provider_id,mo.provider_name,mp.feed_url,mp.country,n.network_id,n.provider_ids,n.compatibility_status,n.return_rule
          FROM mobility_providers mp JOIN mobility_operators mo ON mo.provider_id=mp.operator_id
          JOIN mobility_networks n ON mo.provider_id=ANY(n.provider_ids)
         WHERE mp.provider_type='scooter' AND mp.source_type='gbfs' AND mp.city IN ('Київ','Україна')
@@ -3552,7 +3552,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           AND n.compatibility_status='CONFIRMED' AND n.return_rule='FREE_FLOATING_ZONE'
         ORDER BY mp.priority,mp.name LIMIT 30`,
     );
-    const snapshots = await Promise.allSettled(scooterProviders.map(async (provider) => ({ provider, snapshot: await cachedSnapshot(provider.id, provider.feed_url) })));
+    const snapshots = await Promise.allSettled(scooterProviders.map(async (provider) => ({ provider, snapshot: await cachedSnapshot(provider.id, provider.feed_url, provider.country) })));
     snapshots.forEach((result, index) => {
       const provider = scooterProviders[index];
       if (result.status === 'rejected') {

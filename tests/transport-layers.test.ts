@@ -95,6 +95,26 @@ describe('official GeoJSON network normalization', () => {
     assert.equal(network.stops.length, 0);
     assert.equal(network.routes.length, 1);
   });
+  it('keeps disjoint GeoJSON MultiLineString paths separate for provider-backed route geometry', () => {
+    const network = buildGeoJsonNetwork({ features: [
+      { id: 'route-a', geometry: { type: 'MultiLineString', coordinates: [
+        [[30.1, 50.1], [30.2, 50.2]],
+        [[30.4, 50.4], [30.5, 50.5]],
+      ] }, properties: { num_route: 'M7', napryamok: 'центр' } },
+      { geometry: { type: 'MultiLineString', coordinates: [
+        [[30.6, 50.6], [30.7, 50.7]],
+        [[30.8, 50.8], [30.9, 50.9]],
+      ] }, properties: { num_route: 'M7', napryamok: 'центр' } },
+    ] }, 'marshrutka');
+    assert.equal(network.routes.length, 4);
+    assert.ok(network.routes.every((route) => route.type === 'marshrutka' && route.geometrySource === 'provider_geojson'));
+    assert.deepEqual(network.routes.map((route) => route.coordinates), [
+      [[30.1, 50.1], [30.2, 50.2]],
+      [[30.4, 50.4], [30.5, 50.5]],
+      [[30.6, 50.6], [30.7, 50.7]],
+      [[30.8, 50.8], [30.9, 50.9]],
+    ]);
+  });
 });
 
 describe('realtime vehicle freshness', () => {

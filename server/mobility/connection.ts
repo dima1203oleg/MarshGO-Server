@@ -23,14 +23,15 @@ export async function testProviderConnection(provider: { id: string; name?: stri
       const valid = features.filter((feature) => {
         if (!feature || typeof feature !== 'object') return false;
         const geometry = (feature as { geometry?: { type?: string; coordinates?: unknown } }).geometry;
-        return geometry?.type === 'Point' || geometry?.type === 'LineString';
+        return geometry?.type === 'Point' || geometry?.type === 'LineString' || geometry?.type === 'MultiLineString';
       }).length;
       const mode = geoJsonMode(provider.name ?? '');
       const network = mode ? buildGeoJsonNetwork(data, mode) : null;
-      const ok = valid > 0;
+      const normalized = mode ? (network?.routes.length ?? 0) + (network?.stops.length ?? 0) : valid;
+      const ok = valid > 0 && normalized > 0;
       return { health: ok ? 'healthy' : 'degraded', sourceVersion: createHash('sha256').update(canonicalCacheJson(data)).digest('hex'), checks: [
         { name: 'GeoJSON FeatureCollection', ok: true, detail: `${features.length} features` },
-        { name: 'Supported route/station geometries', ok, detail: `${valid} usable features` },
+        { name: 'Supported route/station geometries', ok, detail: `${valid} usable features; ${normalized} normalized routes/stops` },
       ], counts: { features: features.length, ...(mode && network?.routes.length ? { [`routes_${mode}`]: network.routes.length } : {}), ...(mode && network?.stops.length ? { [`stops_${mode}`]: network.stops.length } : {}) }, responseMs: ms, ...(network?.bbox ? { bbox: network.bbox } : {}), ...(ok ? {} : { error: 'No supported GeoJSON features' }) };
     } catch (error) {
       const message = error instanceof UnsafeUrlError ? error.message : error instanceof Error ? error.message : 'GeoJSON feed is unreachable';
