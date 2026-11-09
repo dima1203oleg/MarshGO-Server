@@ -60,6 +60,7 @@ export interface RouteEstimateOptions {
   maxRentalDurationSeconds?: number;
   maxCandidates?: number;
   allowedProviderIds?: readonly string[];
+  allowedProviderIdsByMode?: Partial<Record<MicromobilityMode, readonly string[]>>;
   blockedProviderIds?: readonly string[];
 }
 
@@ -72,8 +73,12 @@ export function distanceMeters(a: Point, b: Point): number {
   return 2 * EARTH_RADIUS_METERS * Math.asin(Math.sqrt(h));
 }
 
-function allowedProvider(providerId: string, options: RouteEstimateOptions): boolean {
-  return (!options.allowedProviderIds?.length || options.allowedProviderIds.includes(providerId))
+function allowedProvider(providerId: string, mode: MicromobilityMode, options: RouteEstimateOptions): boolean {
+  const scopedProviderIds = options.allowedProviderIdsByMode?.[mode];
+  const providerAllowed = scopedProviderIds !== undefined
+    ? scopedProviderIds.includes(providerId)
+    : (!options.allowedProviderIds?.length || options.allowedProviderIds.includes(providerId));
+  return providerAllowed
     && !options.blockedProviderIds?.includes(providerId);
 }
 
@@ -165,7 +170,7 @@ export function buildBicycleRouteEstimates(input: {
     if (point.mode !== 'BICYCLE' || !point.networkId || !rule || rule.networkId !== point.networkId
       || rule.compatibilityStatus !== 'CONFIRMED' || rule.returnRule !== 'ANY_NETWORK_LOCATION'
       || rule.returnRuleSource !== 'OWNER_ATTESTED' || !rule.providerIds.includes(point.providerId)
-      || !allowedProvider(point.providerId, input.options)) continue;
+      || !allowedProvider(point.providerId, 'BICYCLE', input.options)) continue;
     const group = byProvider.get(point.providerId) ?? [];
     group.push(point);
     byProvider.set(point.providerId, group);
@@ -272,7 +277,7 @@ export function buildScooterRouteEstimates(input: {
   const now = input.now ?? Date.now();
   const candidates: MicromobilityRouteEstimate[] = [];
   for (const provider of input.providers) {
-    if (!allowedProvider(provider.providerId, input.options)) continue;
+    if (!allowedProvider(provider.providerId, 'SCOOTER', input.options)) continue;
     const snapshot = provider.snapshot;
     if (snapshot.lastUpdated === null || now - snapshot.lastUpdated < -30_000
       || now - snapshot.lastUpdated > snapshot.staleAfterSeconds * 1000) continue;

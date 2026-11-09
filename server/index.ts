@@ -3495,6 +3495,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   let hasUnpricedMicromobilityCandidates = false;
   const wantsBike = search.preferences.allowBicycle !== false && journeyTransportTypeSelected('bike', search.preferences.allowedTransportTypes);
   const wantsScooter = search.preferences.allowScooter !== false && journeyTransportTypeSelected('scooter', search.preferences.allowedTransportTypes);
+  const rentalProviderFilters = search.preferences.allowedProviderIdsByType;
+  const allowedProviderIdsByMode = rentalProviderFilters ? {
+    ...(rentalProviderFilters.bike !== undefined ? { BICYCLE: rentalProviderFilters.bike } : {}),
+    ...(rentalProviderFilters.scooter !== undefined ? { SCOOTER: rentalProviderFilters.scooter } : {}),
+  } : undefined;
   const micromobilityOptions = {
     departureAt: search.departureAt,
     maxWalkToRentalMeters: search.preferences.maxWalkToRentalMeters ?? 900,
@@ -3502,6 +3507,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     maxRentalDurationSeconds: search.preferences.maxRentalDurationSeconds ?? 2 * 60 * 60,
     maxCandidates: 6,
     ...(search.preferences.allowedProviderIds ? { allowedProviderIds: search.preferences.allowedProviderIds } : {}),
+    ...(allowedProviderIdsByMode ? { allowedProviderIdsByMode } : {}),
     ...(search.preferences.blockedProviderIds ? { blockedProviderIds: search.preferences.blockedProviderIds } : {}),
   };
   const microPoints: RentalRoutePoint[] = [];

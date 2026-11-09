@@ -66,6 +66,8 @@ export interface JourneyPreferences {
   allowScooter?: boolean;
   /** Stable mobility operator IDs; empty/undefined means no provider filter. */
   allowedProviderIds?: string[];
+  /** Per-mode rental provider filters; an absent mode means all verified providers for that mode. */
+  allowedProviderIdsByType?: Partial<Record<'bike' | 'scooter', string[]>>;
   blockedProviderIds?: string[];
   maxWalkToRentalMeters?: number;
   maxRentalDurationSeconds?: number;

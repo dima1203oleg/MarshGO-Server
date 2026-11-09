@@ -23,6 +23,11 @@ describe('Journey search request validation', () => {
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: ['funicular'] } }, now), /allowedTransportTypes is invalid/);
   });
 
+  it('accepts all twelve canonical categories from the journey selector in one request', () => {
+    const parsed = parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: [...JOURNEY_TRANSPORT_TYPES] } }, now);
+    assert.deepEqual(parsed.preferences.allowedTransportTypes, JOURNEY_TRANSPORT_TYPES);
+  });
+
   it('normalizes a timezone-aware journey request and preserves coordinates', () => {
     const parsed = parseJourneySearchRequest(request, now);
     assert.deepEqual(parsed.origin, request.origin);
@@ -41,6 +46,10 @@ describe('Journey search request validation', () => {
     assert.equal(transitProviderAllowed(providersByType.preferences, 'tram', 'Інший провайдер — трамваї'), true);
     const canonicalRailProvider = parseJourneySearchRequest({ ...request, preferences: { allowedTransitProvidersByType: { train: ['УЗ'] } } }, now);
     assert.equal(transitProviderAllowed(canonicalRailProvider.preferences, 'city_train', 'УЗ — міська електричка'), true);
+    const rentalProvidersByType = parseJourneySearchRequest({ ...request, preferences: {
+      allowedProviderIdsByType: { bike: ['nextbike_ua'], scooter: ['zelectra'] },
+    } }, now);
+    assert.deepEqual(rentalProvidersByType.preferences.allowedProviderIdsByType, { bike: ['nextbike_ua'], scooter: ['zelectra'] });
   });
 
   it('rejects invalid points, missing time zone, past departure, and unsupported preferences', () => {
@@ -53,6 +62,8 @@ describe('Journey search request validation', () => {
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransitProviders: [''] } }, now), /allowedTransitProviders is invalid/);
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransitProvidersByType: { ufo: ['Provider'] } } }, now), /allowedTransitProvidersByType is invalid/);
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransitProvidersByType: { plane: ['Provider'] } } }, now), /allowedTransitProvidersByType is invalid/);
+    assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedProviderIdsByType: { taxi: ['provider'] } } }, now), /allowedProviderIdsByType is invalid/);
+    assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedProviderIdsByType: { scooter: ['not valid'] } } }, now), /allowedProviderIdsByType is invalid/);
     assert.throws(() => parseJourneySearchRequest({ ...request, strategy: 'FAKEST' }, now), /not supported/);
   });
 });
