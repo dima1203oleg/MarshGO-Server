@@ -165,16 +165,18 @@ async function main() {
     })(),
   ]);
 
+  const checkedResults = results.filter((row) => row.state !== 'SKIPPED');
+  const skippedResults = results.filter((row) => row.state === 'SKIPPED');
   const summary = {
     scope,
     catalogRows: catalog.length,
     selectedSources: selectedEntries.length,
-    providerSourcesProbed: providerProbeEntries.length,
-    checked: results.filter((row) => row.state !== 'SKIPPED').length,
-    skipped: results.filter((row) => row.state === 'SKIPPED').length,
-    healthy: results.filter((row) => row.state === 'HEALTHY').length,
-    degraded: results.filter((row) => row.state === 'DEGRADED').length,
-    offline: results.filter((row) => row.state === 'OFFLINE').length,
+    providerSourcesProbed: checkedResults.length,
+    checked: checkedResults.length,
+    skipped: skippedResults.length,
+    healthy: checkedResults.filter((row) => row.state === 'HEALTHY').length,
+    degraded: checkedResults.filter((row) => row.state === 'DEGRADED').length,
+    offline: checkedResults.filter((row) => row.state === 'OFFLINE').length,
     note: 'Read-only probe; HEALTHY means feed health only, not commercial permission, route-search integration, price, availability or booking.',
   };
   console.log(JSON.stringify({ checkedAt: new Date().toISOString(), summary, catalog: results, routePlanner, supplementary }, null, 2));
