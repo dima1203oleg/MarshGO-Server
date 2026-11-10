@@ -69,13 +69,11 @@ export async function routeBicyclePath(
 ): Promise<BicycleRoutePath | null> {
   if (!endpoint?.trim()) return null;
   const resolvedEndpoint = normalizeBikeEndpoint(endpoint);
-  const graphVersion = process.env.BIKING_GRAPH_VERSION || process.env.OSRM_GRAPH_VERSION;
   try {
     const route = await requestOsrmRoute([from, to], resolvedEndpoint, {
       timeoutMs: BICYCLE_ROUTE_TIMEOUT_MS,
       profile: 'BIKE',
       priority: 'background',
-      ...(graphVersion?.trim() ? { cacheParameters: { graph: 'bike' } } : {}),
     });
     if (!anchorsRoute(route.geometry, from, to)) return null;
     return {
