@@ -1,19 +1,23 @@
-# Lviv bus and marshrutka classification — candidate status
+# Lviv bus and marshrutka feed separation
 
-Updated: 2026-11-10 00:00 EET
-Server candidate: `codex/lviv-feed-chain-20261109`, based on `449bc79a6ebfbc1eae2591ac5dd1353de8b98952`
+Updated: 2026-11-10
+Candidate base: `f61993013e5abf6fbf6afca96bc6eda3d0ff1c27` (`origin/main` at start of work)
 
-## Evidence snapshot
+## Registered source
 
-The prior isolated import report for `https://track.ua-gis.com/gtfs/lviv/static.zip` reported 72 routes: 55 routes in the generic GTFS bus class, 9 trolleybus routes, and 8 tram routes. The supplied audit attributes CC BY 4.0 to the feed. These counts and license are historical audit evidence, not a fresh import or exact runtime identity. None of the 55 generic routes is thereby proven to be a conventional bus or a marshrutka.
+- Lviv has one open shared static GTFS source at `https://track.ua-gis.com/gtfs/lviv/static.zip`, plus GTFS-Realtime trip-update and vehicle-position endpoints.
+- The catalog does not configure a distinct marshrutka URL. Bus and marshrutka records in this shared feed must be separated using route metadata; never create a fake second provider by duplicating the same URL.
+- A route-only download was checked on 2026-11-10 from the registered static URL: HTTP 200, 3,568,789 bytes, `Last-Modified: 2026-11-02 08:06:59 GMT`, SHA-256 `45b8c8613b0ae40ae22f703c5e29011413a6baeabeaea6d0dc5b676a18f6bc64`. `routes.txt` contained 72 rows: 55 route_type=3 records with no explicit bus/minibus name marker, 9 explicitly named trolleybuses, and 8 trams. No route_type=1501 or explicitly named marshrutka was present in this snapshot. This is current schedule metadata evidence, not proof that no marshrutkas operate in Lviv.
+- An additional EasyWay route/GPS integration requires approved partner access. No EasyWay endpoint or credentials are enabled here.
 
-## Candidate semantics
+## Classification contract
 
-- Generic `route_type=3` without an explicit unambiguous service marker is emitted by journey search as `bus_unspecified`. It remains selectable through the canonical `bus` preference and is not selected by `marshrutka`.
-- Extended GTFS `route_type=1501` maps to `marshrutka` in fixture tests. Exact type-1501 usage in the Lviv source has not been confirmed.
-- Explicit terms `маршрутка`, `маршрутне таксі`, or `minibus` are retained as name evidence. The prior generic stem match for `маршрутн` was narrowed to avoid matching unrelated wording such as “маршрутний автобус”.
-- Explicit Lviv trolleybus labels and `Тр` route identifiers remain separate from buses.
+- Base GTFS `route_type=3` is a bus class and does not by itself distinguish a city bus from a marshrutka. See the [GTFS route reference](https://gtfs.org/documentation/schedule/reference/).
+- `route_type=1501` is the extended Communal Taxi Service type; Google lists marshrutka as an example. It is a valid marshrutka marker for a route that also has usable GTFS schedule data. See [Google's extended route types](https://developers.google.com/transit/gtfs/reference/extended-route-types).
+- For generic `route_type=3`, only explicit route-name markers such as `маршрутка`, `маршрутне таксі`, or `minibus` select the marshrutka category. Explicit bus names select bus; ambiguous names remain `bus_unspecified` in journey results and are never selected by a marshrutka-only preference.
+- Explicit trolleybus labels and `Тр` route identifiers remain trolleybuses.
+- A GeoJSON provider is assigned to the marshrutka layer only when its provider name explicitly identifies `routeTaxi`, `minibus`, or a marshrutka phrase. Generic wording such as “автобусні маршрути” and “маршрутний автобус” must not classify the whole feed as minibuses.
 
-## Unfinished controls
+## Verification status
 
-No persistent `route_classification` table, provenance/review workflow, route-level evidence export, migration, or reimport has been implemented in this candidate. No route has been newly certified as a marshrutka. Classification, public-bus filtering, and GTFS mode regression fixtures passed in the 136-test targeted run; this is not live-feed verification. Status: `PARTIAL / FIXTURE_VERIFIED`.
+Code-level separation is implemented and covered by fixtures; a fresh route-only snapshot was inspected as recorded above. The official open-data portal lists a city-wide static GTFS and realtime resources, while this app catalog has no distinct open marshrutka URL. The 55 unmarked `route_type=3` routes must remain bus-class/unresolved for the narrower bus-vs-marshrutka distinction and must not leak into marshrutka-only results. No live marshrutka itinerary or route-by-route operational vehicle-class verification was performed. Do not claim that a separate marshrutka feed is connected or that every bus-class route is a conventional full-size bus.

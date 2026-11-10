@@ -233,8 +233,9 @@ export function cachedGeoJsonNetwork(providerId: string, url: string, mode: Line
 }
 
 export function geoJsonMode(name: string): LineType | null {
-  const normalized = name.toLocaleLowerCase('uk');
-  if (normalized.includes('routeTaxi'.toLocaleLowerCase('uk')) || normalized.includes('маршрут')) return 'marshrutka';
+  const normalized = name.normalize('NFKC').toLocaleLowerCase('uk').replace(/\s+/g, ' ').trim();
+  const explicitMarshrutka = /(?:^|[^а-яіїєґa-z0-9])(?:route[\s_-]?taxi|minibus|маршрут(?:ка|ки|ку|ці|ок)|маршрутне\s+таксі|маршрутні\s+таксі)(?:$|[^а-яіїєґa-z0-9])/u;
+  if (explicitMarshrutka.test(normalized)) return 'marshrutka';
   if (normalized.includes('метро') || normalized.includes('underground')) return 'metro';
   if (normalized.includes('фунікулер') || normalized.includes('funicular')) return 'funicular';
   if (normalized.includes('електричк') || normalized.includes('city express') || normalized.includes('кільцев')) return 'city_train';
