@@ -670,16 +670,20 @@ export function selectGtfsCandidatesForCrossProviderSearch(
   const byCheapest = rankGtfsItinerariesForStrategySampling(itineraries, 'CHEAPEST', rankingContext);
   const byBalanced = rankGtfsItinerariesForStrategySampling(itineraries, 'BALANCED', rankingContext);
 
-  // Reserve the factual winners before the bounded type-diversity sample.
-  for (const winner of [byFastest[0], byCheapest[0], byBalanced[0]]) {
-    if (selected.size >= maximum) break;
-    if (winner && !selected.has(winner.id)) selected.set(winner.id, winner);
+  // Reserve witnesses scored against the full mixed-provider pool. A transit-only
+  // BALANCED winner is only provisional: adding community/taxi/etc. options can
+  // change the shared normalization ranges and the actual winner.
+  if (rankingContext.length > 0) {
+    for (const winner of [byFastest[0], byCheapest[0], byBalanced[0]]) {
+      if (selected.size >= maximum) break;
+      if (winner && !selected.has(winner.id)) selected.set(winner.id, winner);
+    }
   }
 
   // A dense bus feed can fill every objective/arrival slot and erase the only tram,
   // trolleybus, or marshrutka itinerary before the cross-provider scorer sees it.
-  // Keep one balanced representative for each canonical category that is actually
-  // present, then use the remaining diversity reserve for distinct mixed-mode chains.
+  // Keep an arrival-ordered representative for each canonical category that is
+  // actually present, then use the remaining reserve for distinct mixed-mode chains.
   // If categories or distinct combinations exceed the bounded reserve, the caller's
   // candidate-truncation flag still discloses that the sample is incomplete.
   const chainKey = (itinerary: GtfsItinerary): string => {
@@ -702,7 +706,7 @@ export function selectGtfsCandidatesForCrossProviderSearch(
     }
   };
   for (const winner of selected.values()) markTypes(winner);
-  for (const candidate of byBalanced) {
+  for (const candidate of byArrival) {
     if (selected.size >= modeDiversityLimit) break;
     const addsCategory = candidate.segments.some((segment) => {
       const type = canonicalJourneyTransportType(segment.transportType);
