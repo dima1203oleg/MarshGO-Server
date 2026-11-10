@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sampleGtfsRouteChainCandidates } from '../server/journey/gtfsTimetable';
+import { sampleGtfsRouteChainCandidates, selectGtfsCandidatesForCrossProviderSearch } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
-import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
+import type { GtfsDirectJourney, GtfsItinerary, GtfsTransportType } from '../server/journey/gtfsTimetable';
 
 function makeCandidate(
   id: string,
@@ -158,4 +158,53 @@ test('adversarial route-chain candidate sampling preserves objective witnesses a
       );
     }
   }
+});
+
+test('cross-provider sampling keeps canonical mode coverage and mixed-mode chain witnesses beside the three strategy winners', () => {
+  const typed = (id: string, duration: number, price: number, types: GtfsTransportType[], transfers = 0, walking = 0) => {
+    const itinerary = makeCandidate(id, duration, transfers, walking, price);
+    // This sampler only reads transportType; a focused cast keeps the fixture small
+    // without manufacturing irrelevant timetable stop/shape data.
+    itinerary.segments = types.map((transportType) => ({ transportType } as GtfsDirectJourney));
+    return itinerary;
+  };
+  const modeWitnesses: GtfsItinerary[] = [
+    typed('mode-marshrutka', 5_000, 21_400, ['marshrutka'], 1, 500),
+    typed('mode-trolleybus', 5_100, 21_500, ['trolleybus'], 1, 520),
+    typed('mode-tram', 5_200, 21_600, ['tram'], 1, 540),
+    typed('mode-metro', 5_300, 21_700, ['metro'], 1, 560),
+    typed('mode-train', 5_400, 21_800, ['train'], 1, 580),
+    typed('mode-mixed-bus-tram', 4_900, 21_300, ['bus', 'tram'], 1, 450),
+    typed('mode-mixed-tram-trolley', 4_850, 21_250, ['tram', 'trolleybus'], 1, 440),
+  ];
+  const busCrowd = Array.from({ length: 45 }, (_, index) =>
+    typed(`bus-crowd-${String(index).padStart(2, '0')}`, 1_000 + index * 80, 2_000 + index * 30,
+      ['bus'], index % 3, (index % 7) * 100));
+  const all = [...modeWitnesses, ...busCrowd];
+  const toJourneyOption = (itinerary: GtfsItinerary) => ({
+    id: itinerary.id,
+    durationSeconds: itinerary.durationSeconds,
+    priceMinor: itinerary.fare?.currency === 'UAH' ? itinerary.fare.priceMinor : null,
+    transfers: itinerary.transfers,
+    walkingMeters: itinerary.walkingMeters,
+    reliability: null,
+    transferRisk: itinerary.transfers > 0 ? 0.3 : 0,
+    comfort: null,
+    legs: [],
+  });
+  const scored = all.map(toJourneyOption);
+  const winners = new Set((['FASTEST', 'CHEAPEST', 'BALANCED'] as const)
+    .map((strategy) => scoreJourneys(scored, strategy)[0]!.journey.id));
+
+  const sampled = selectGtfsCandidatesForCrossProviderSearch(all, 30).map((item) => item.id);
+  assert.equal(sampled.length, 30, 'the sampler must stay within the configured request budget');
+  for (const winner of winners) {
+    assert.ok(sampled.includes(winner), `${winner} must survive the bounded pool for its strategy`);
+  }
+  for (const category of ['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train'] as const) {
+    assert.ok(all.some((item) => item.segments.some((segment) => segment.transportType === category)
+      && sampled.includes(item.id)), `${category} must retain a candidate when its source supplied one`);
+  }
+  assert.ok(sampled.includes('mode-mixed-bus-tram') || sampled.includes('mode-mixed-tram-trolley'),
+    'a distinct multimodal category chain must survive when the bounded sample has capacity');
 });
