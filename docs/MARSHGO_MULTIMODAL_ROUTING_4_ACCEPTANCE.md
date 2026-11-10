@@ -1,8 +1,8 @@
 # MARSHGO Multimodal Routing 4.0 — acceptance checkpoint
 
 **Status:** `PARTIAL` — bounded implementation and static-feed replay evidence; no release or live-realtime claim.  
-**Baseline:** MarshGO-Server `c7d434d5c32e44970357cc9103fb6f8f1abca4ed` (`origin/main`, 2026-11-10).  
-**Candidate:** `codex/multimodal-routing-4-20261110` at the same base SHA with uncommitted isolated changes.  
+**Baseline:** MarshGO-Server `c7d434d5c32e44970357cc9103fb6f8f1abca4ed` (`main`, 2026-11-10).
+**Implementation commit:** `ebe8c0cb0b00fc8c478c7e33338f3cd6026e04de`, branch `codex/multimodal-routing-4-20261110`, PR [#135](https://github.com/dima1203oleg/MarshGO-Server/pull/135) (draft). The report-only update is not included in that implementation commit.
 **Release:** `NOT_RELEASED`; `production_ready=false`.
 
 ## Baseline execution path
@@ -38,7 +38,7 @@ No separate search is introduced for the three tabs. The router still reports bo
 
 ## Lviv source and mode evidence
 
-A frozen static schedule archive was downloaded from the publisher URL on 2026-11-10 and replayed against the candidate working tree. Archive SHA-256: `45b8c8613b0ae40ae22f703c5e29011413a6baeabeaea6d0dc5b676a18f6bc64` (3,568,789 bytes; `Last-Modified: 2026-11-02 08:06:59 GMT`). This is static-schedule evidence, not live/realtime availability, fare evidence, or exact-commit acceptance: the candidate source changes were uncommitted at replay time.
+A frozen static schedule archive was downloaded from the publisher URL on 2026-11-10 and replayed against the implementation source now recorded in commit `ebe8c0cb0b00fc8c478c7e33338f3cd6026e04de`. Archive SHA-256: `45b8c8613b0ae40ae22f703c5e29011413a6baeabeaea6d0dc5b676a18f6bc64` (3,568,789 bytes; `Last-Modified: 2026-11-02 08:06:59 GMT`). The replay preceded the later opt-in replay-harness environment-control edit, which is not yet typechecked. This is static-schedule evidence, not live/realtime availability, fare evidence, or exact-commit acceptance of the harness.
 
 Replay: Малий Голоско `[24.008217,49.864885]` → Сихів `[24.0175835,49.8013165]`, 2026-11-11 06:00–06:30 UTC, `maximumTransfers=2`, six-hour horizon, result limit 100, Node `24.21.0`. It returned 100 itineraries, 40 unique trip chains and 26 unique route chains. The retained `BALANCED` and `FASTEST` candidates were different; `CHEAPEST` had no candidate with a known UAH fare (this does not mean no fare exists). Search was truncated: `candidateGraphTruncated=true`, `resultLimitReached=true`, with candidate graph, candidate sampling and response-page truncation flags set. One run took 2,349.87 ms and reached 543,309,824 bytes RSS; this is a diagnostic sample, not a latency or memory target claim. The replay did not validate street geometry, exact transfer feasibility after pedestrian routing, no-transfer adaptive reach, realtime, or all three strategy optima.
 
@@ -87,6 +87,6 @@ The API-level retry after all normal-radius candidates fail real foot-route vali
 2. Compare no-transfer behavior against the pinned Lviv GTFS snapshot above, including nearby-but-unusable stops, missed departures, long egress, truncation, and a feasible normal-radius direct route; capture a separate replay with `maxTransfers=0` after the resource gate allows.
 3. Recheck one common candidate set for all three strategy winners and their fare/walking constraints.
 4. Resolve scoped ESLint from an existing approved dependency source or leave lint blocked; do not install or modify lockfiles just to turn the check green.
-5. Record exact-SHA CI and PR status. Do not merge or deploy until checks pass.
+5. Complete exact-head CI on PR #135 and record its final status. Do not merge or deploy until all remaining acceptance gates pass.
 
 No production deployment, database write, API restart, provider request, or live journey search was performed for this checkpoint.
