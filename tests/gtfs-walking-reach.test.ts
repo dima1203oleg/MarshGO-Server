@@ -36,6 +36,37 @@ function feed() {
   return parseGtfsTimetable(files);
 }
 
+function transferFeed() {
+  const files: Record<string, Uint8Array> = {
+    'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv'),
+    'routes.txt': new TextEncoder().encode([
+      'route_id,agency_id,route_short_name,route_long_name,route_type',
+      'bus,a,7,Test bus,3',
+      'tram,a,8,Test tram,0',
+    ].join('\n')),
+    'stops.txt': new TextEncoder().encode([
+      'stop_id,stop_name,stop_lat,stop_lon',
+      'origin,Origin stop,49.8400,24.0200',
+      'transfer,Transfer stop,49.8450,24.0250',
+      'destination,Destination stop,49.8500,24.0300',
+    ].join('\n')),
+    'trips.txt': new TextEncoder().encode([
+      'route_id,service_id,trip_id,trip_headsign',
+      'bus,weekday,bus-trip,Transfer stop',
+      'tram,weekday,tram-trip,Destination stop',
+    ].join('\n')),
+    'stop_times.txt': new TextEncoder().encode([
+      'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
+      'bus-trip,08:00:00,08:00:00,origin,1,0,0',
+      'bus-trip,08:10:00,08:10:00,transfer,2,0,0',
+      'tram-trip,08:20:00,08:20:00,transfer,1,0,0',
+      'tram-trip,08:40:00,08:40:00,destination,2,0,0',
+    ].join('\n')),
+    'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,0,0,0,0,0,0,20261001,20261031'),
+  };
+  return parseGtfsTimetable(files);
+}
+
 const ORIGIN_POINT: [number, number] = [24.0201, 49.8401];
 // 0.012° of latitude is ~1335 m of the destination stop: outside the 1000 m egress default.
 const MISSED_DESTINATION_POINT: [number, number] = [24.0300, 49.8620];
@@ -43,10 +74,10 @@ const MISSED_DESTINATION_POINT: [number, number] = [24.0300, 49.8620];
 const UNREACHABLE_DESTINATION_POINT: [number, number] = [24.0300, 49.8720];
 
 /** Mirrors how server/index.ts threads the preference into the worker search arguments. */
-const searchInput = (destination: [number, number], maxWalkingMeters?: number) => ({
+const searchInput = (destination: [number, number], maxWalkingMeters?: number, maximumTransfers = 0) => ({
   providerId: 'p1', providerName: 'Test Transit', origin: ORIGIN_POINT, destination,
   earliestDeparture: new Date('2026-10-12T04:55:00Z'), latestDeparture: new Date('2026-10-12T05:30:00Z'),
-  now: new Date('2026-10-08T00:00:00Z'), maximumTransfers: 0,
+  now: new Date('2026-10-08T00:00:00Z'), maximumTransfers,
   maximumAccessWalkingMeters: effectiveWalkingReachMeters(DEFAULT_MAX_ACCESS_WALKING_METERS, maxWalkingMeters),
   maximumEgressWalkingMeters: effectiveWalkingReachMeters(DEFAULT_MAX_EGRESS_WALKING_METERS, maxWalkingMeters),
 });
@@ -55,6 +86,8 @@ test('a stop outside the default radius is still planned from, because the alter
   const baseline = findGtfsItinerariesWithStats(feed(), searchInput(MISSED_DESTINATION_POINT));
   assert.ok(baseline.itineraries.length >= 1,
     'the nearest stop 1.3 km away must be planned from; the old answer was zero routes for a real Lviv trip');
+  assert.ok(baseline.itineraries.every((itinerary) => itinerary.segments.length === 1 && itinerary.transfers === 0),
+    'maxTransfers=0 must keep the long-walk alternative direct');
   assert.equal(baseline.walkReach?.destinationStopsFound, true);
   assert.equal(baseline.walkReach?.destinationReachedWithinWalkingRadius, false,
     'it is still outside the radius, and the search has to say so');
@@ -65,6 +98,18 @@ test('a stop outside the default radius is still planned from, because the alter
   assert.equal(effectiveWalkingReachMeters(DEFAULT_MAX_EGRESS_WALKING_METERS, 1500), 1500);
   assert.equal(effectiveWalkingReachMeters(DEFAULT_MAX_EGRESS_WALKING_METERS, undefined), DEFAULT_MAX_EGRESS_WALKING_METERS,
     'without the preference the configured radii stay untouched');
+});
+
+test('maxTransfers=0 rejects a feasible bus-to-tram chain while allowing it with one transfer', () => {
+  const timetable = transferFeed();
+  const directOnly = findGtfsItinerariesWithStats(timetable, searchInput([24.0301, 49.8501]));
+  const oneTransfer = findGtfsItinerariesWithStats(timetable, searchInput([24.0301, 49.8501], undefined, 1));
+
+  assert.ok(directOnly.itineraries.length > 0, 'walking access/egress may accompany a direct ride');
+  assert.ok(directOnly.itineraries.every((itinerary) => itinerary.segments.length === 1 && itinerary.transfers === 0),
+    'Direct-Only must not return a different vehicle after the first leg');
+  assert.ok(oneTransfer.itineraries.some((itinerary) => itinerary.segments.length === 2 && itinerary.transfers === 1),
+    'the same fixture should prove the bus-to-tram transfer is otherwise feasible');
 });
 
 test('a stop beyond every allowed walk is not planned from, and names the distance instead', () => {
