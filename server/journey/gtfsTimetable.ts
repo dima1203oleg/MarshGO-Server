@@ -4557,7 +4557,7 @@ export function findGtfsItinerariesWithStats(
     }
   }
 
-  let result = findGtfsItinerariesAtWalkingReachWithStats(feed, input, graphLimits, observeCandidateGraph);
+  const result = findGtfsItinerariesAtWalkingReachWithStats(feed, input, graphLimits, observeCandidateGraph);
   if (result.itineraries.length > 0 || !tiers?.length || input.maximumTransfers !== 0) return result;
 
   let accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
