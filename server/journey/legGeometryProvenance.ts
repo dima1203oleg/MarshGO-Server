@@ -3,6 +3,7 @@ export type RouteCoordinate = [number, number];
 /** Geometry provenance is accepted only for the transport modes that produce that shape. */
 const TRUSTED_GEOMETRY_MODES: Readonly<Record<string, ReadonlySet<string>>> = {
   'osrm-foot-route': new Set(['WALK']),
+  'osrm-bike-route': new Set(['BICYCLE']),
   'gtfs-pathway': new Set(['WALK']),
   'gtfs-pathways': new Set(['WALK']),
   'osrm-car-route': new Set(['TAXI', 'COMMUNITY']),

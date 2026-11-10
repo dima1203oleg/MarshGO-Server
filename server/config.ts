@@ -115,6 +115,9 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   if ((environment.TRAFFIC_PROVIDER ?? 'none') !== 'none') throw new Error('TRAFFIC_PROVIDER=none is the only configured traffic provider');
   requireHttpsUrl({ ...environment, OSRM_URL: environment.OSRM_URL || environment.ROUTING_ENGINE_URL }, 'OSRM_URL');
   if (environment.WALKING_ROUTING_URL?.trim()) requireWalkingRoutingUrl(environment, 'WALKING_ROUTING_URL');
+  // A cycling graph is operated the same way as a foot graph: private network or HTTPS, never a
+  // public demo router, and no default is invented when the operator leaves it unset.
+  if (environment.BIKING_ROUTING_URL?.trim()) requireWalkingRoutingUrl(environment, 'BIKING_ROUTING_URL');
   if (environment.WALKING_ROUTING_URLS?.trim()) {
     let rules: unknown;
     try {

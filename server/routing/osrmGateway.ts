@@ -74,7 +74,9 @@ export async function requestOsrmRoute(
   const cache = options.cacheService ?? smartCache;
   const graphVersion = options.profile === 'FOOT'
     ? process.env.WALKING_GRAPH_VERSION || process.env.OSRM_GRAPH_VERSION
-    : process.env.OSRM_GRAPH_VERSION;
+    : options.profile === 'BIKE'
+      ? process.env.BIKING_GRAPH_VERSION || process.env.OSRM_GRAPH_VERSION
+      : process.env.OSRM_GRAPH_VERSION;
   const ttlMs = options.profile === 'FOOT' ? footTtlMs() : roadTtlMs();
   const routeInput = {
     provider: 'osrm', endpoint: endpoint ?? '', profile: options.profile,
