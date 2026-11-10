@@ -1,22 +1,45 @@
-# Lviv transport coverage — evidence snapshot
+# Львів: докази транспортного покриття
 
-Updated: 2026-11-09 22:43 EET. Candidate Server base: `449bc79a6ebfbc1eae2591ac5dd1353de8b98952`.
+Перевірка джерел: 2026-11-10. Кодова гілка: `qoder/lviv-all-feeds-20261110`, база `c7d434d5c32e44970357cc9103fb6f8f1abca4ed` (`origin/main`). Це інвентаризація провайдерів і джерел, не підтвердження повного live-пошуку або запуску на `:7777`.
 
-“Feed reported” means a source or earlier isolated import indicated data. It does not prove a feasible itinerary, live availability, booking, or rendered geometry.
+## Підтверджені львівські джерела
 
-| Canonical category | Current evidence | Candidate/runtime status |
+Єдиний знайдений відкритий громадський транспортний набір — [GTFS Львівавтодору](https://track.ua-gis.com/gtfs/lviv/static.zip), ліцензія CC BY 4.0 з атрибуцією. Свіжий архів перевірений як HTTP 200, 3,568,789 байтів, `Last-Modified: 2026-11-02 08:06:59 GMT`, SHA-256 `45b8c8613b0ae40ae22f703c5e29011413a6baeabeaea6d0dc5b676a18f6bc64`. Прямий знімок позначений v6.507 і чинний з 2026-11-02 до 2027-11-02. На 2026-11-10 каталог Mobility Database ще показував попередній архів від 2026-10-13 із коротшим service date range; для цього висновку використано новіше джерело виробника, а не кешований каталог.
+
+Архів містив 72 маршрути: 8 трамвайних `route_type=0`, 9 тролейбусів із явним префіксом `Тр` у назві та 55 інших `route_type=3` маршрутів. Стандартний тип `3` не розрізняє автобус від маршрутки; ці 55 записів тому лишаються неоднозначним автобусним класом. Окремого маршруточного провайдера, `route_type=1501` або явної позначки маршрутки в цьому знімку не знайдено. Це не доводить, що маршрутки не працюють у місті; потрібні точніші дані від оператора.
+
+У 15,139 із 15,141 рейсів архіву є `shapes`. Це наявність геометрії у джерелі, а не доказ того, що кожна побудована поїздка повертає правильну геометрію або що Site її малює.
+
+Для того самого джерела каталог містить два GTFS-Realtime endpoint-и: позиції транспорту та оновлення рейсів. Обидва були доступні під час перевірки 2026-11-10. Окремий `service_alerts` endpoint повернув HTTP 404. Доступність фідів не підтверджує їхню прив’язку до поточного запущеного Server чи свіжість кожного окремого повідомлення.
+
+Публічний сторонній сервіс `api.lad.lviv.ua` також описує доступ до львівських прибуттів і позицій, однак це незалежний агрегатор тих самих міських GTFS-даних. Його комерційні умови, квоти та гарантії доступності тут не підтверджені, тому як production-провайдера його не підключено.
+
+## Матриця 12 категорій для Львова
+
+| Категорія | Джерело / наявність | Статус доказу |
 |---|---|---|
-| Carpool | MARSHGO offer search exists; no matching live offer verified in this check. | Candidate only reports the category when matching offers exist; no journey proven. |
-| Marshrutka | No separate permitted Lviv feed verified. Generic type 3 is not enough to classify it. | `route_type=1501` and explicit name markers recognized; Lviv route not proven. |
-| Bus | Earlier Lviv GTFS import reported 55 generic bus-class routes. | Journey type can remain `bus_unspecified`; exact trip not replayed. |
-| Taxi | No connected Lviv quote/booking API verified. | No Lviv journey leg proven. |
-| Tram | Earlier import reported 8 routes; shared registry has a tram entry. | Parser supports timetable legs; exact feasible itinerary/geometry not proven. |
-| Trolleybus | Earlier import reported 9 routes; shared registry snapshot omitted trolleybus. | Existing classifier plus candidate stale-count fix; current runtime reimport not proven. |
-| Metro | No metro in Lviv. | Not applicable in Lviv; retain category globally. |
-| Train | Unofficial national GTFS schedule candidate exists; freshness and exact Lviv usefulness unverified. | No current Lviv route acceptance. |
-| Bicycle | Static rental/network estimates may exist; live stock was not verified. | No live rental availability or accurate bicycle-road geometry proven. |
-| Scooter | Zelectra snapshot checked earlier had no Lviv vehicles; Kyiv-only data is not local availability. | Candidate requires fresh local GBFS inventory/rules; unavailable in current evidence. |
-| Carsharing | No connected Lviv fleet/booking API verified. | No Lviv journey leg proven. |
-| Transfer | No connected Lviv quote/booking API verified; a catalog is not availability. | No Lviv journey leg proven. |
+| Попутка | Власний marketplace MARSHGO; це не зовнішній фід. У цій перевірці live-пропозицію на конкретний маршрут не підтверджено. | `IMPLEMENTED`; локальна доступність пропозицій не перевірена |
+| Маршрутка | Окремого дозволеного фіда не знайдено. Спільний GTFS не має відповідного типу чи явної мітки. | `NO_LVIV_FEED_VERIFIED` |
+| Автобус | Спільний GTFS містить 55 `route_type=3` записів, які код відносить до неоднозначного автобусного класу. Відрізнити звичайний автобус від маршрутки за цим файлом неможливо. | `STATIC_FEED_VERIFIED`; класифікація уточнена лише до `bus_unspecified` |
+| Таксі | Підключеного львівського тарифного/бронювального API не підтверджено. | `NO_PROVIDER_VERIFIED` |
+| Трамвай | 8 маршрутів `route_type=0` у спільному GTFS. | `STATIC_FEED_VERIFIED`; live-поїздку не перевірено |
+| Тролейбус | 9 маршрутів із міткою `Тр` у тому самому GTFS; сирий `route_type=3` потребує розпізнавання за назвою. | `STATIC_FEED_VERIFIED`; live-поїздку не перевірено |
+| Метро | У Львові метро немає. | `NOT_APPLICABLE` |
+| Поїзд / електричка | Є національний GTFS-кандидат, але його актуальність і придатність для львівського маршруту в цій перевірці не підтверджені. | `NOT_LVIV_VERIFIED` |
+| Самокат | Каталогований Zelectra GBFS під час перевірки містив 978 транспортних засобів, жодного в межі Львова; правила повернення для Львова не підтверджені. | `NO_LVIV_INVENTORY` |
+| Велосипед | Дозволеного львівського live-фіда прокату та реального інвентарю не підтверджено. Код маршрутизації сам по собі не означає наявність велосипедів. | `NO_LVIV_INVENTORY` |
+| Каршеринг | Локального фіда, договору оператора чи підтвердженої наявності авто не знайдено. | `NO_PROVIDER_VERIFIED` |
+| Трансфер | Підключеного львівського оператора, тарифу й доступної пропозиції не підтверджено. | `NO_PROVIDER_VERIFIED` |
 
-Current shared zrok provider snapshot is not build-pinned and listed Lviv bus/tram only. No feed or category is marked `LIVE_VERIFIED` by this document.
+## Що саме змінено в кандидатові
+
+- Каталог стисло описує реальні можливості львівського GTFS, не змішуючи його з окремим неіснуючим фідом маршруток.
+- Службова перевірка GBFS у `/api/v1/mobility/nearby` передає заявлену країну провайдера до нормалізатора. Це відсікає транспорт з інших країн до відбору поруч із користувачем; сама по собі країнова межа не доводить міське покриття.
+- Додані фікстурні перевірки класифікації автобусного класу, маршрутки, трамвая, тролейбуса й країнової фільтрації GBFS. Вони не замінюють replay живого API.
+
+## Невиконані перевірки
+
+- Цільові тести та typecheck цього кандидата ще не підтверджені: на момент роботи вільно 29% пам'яті — нижче безпечного порогу 35% для тестового запуску.
+- Не перевірено exact-SHA відповідь API, живу львівську поїздку, усі три стратегії, реальну пішохідну геометрію, рендер карти в Site або активний сервіс на `:7777`.
+- Країновий GBFS-фільтр та Zelectra inventory не створюють львівський сервіс прокату: для самокатів потрібен провайдер із реальними львівськими точками й підтвердженими правилами оренди.
+- Production залишається `NOT_RELEASED`.
