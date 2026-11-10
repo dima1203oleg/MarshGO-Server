@@ -40,6 +40,20 @@ const resultLimit = Number(process.env.GTFS_REPLAY_RESULT_LIMIT ?? 100);
 if (!Number.isSafeInteger(resultLimit) || resultLimit < 1 || resultLimit > 100) {
   throw new Error('GTFS_REPLAY_RESULT_LIMIT must be an integer from 1 to 100.');
 }
+const maximumTransfers = Number(process.env.GTFS_REPLAY_MAX_TRANSFERS ?? 2);
+if (!Number.isSafeInteger(maximumTransfers) || maximumTransfers < 0 || maximumTransfers > 4) {
+  throw new Error('GTFS_REPLAY_MAX_TRANSFERS must be an integer from 0 to 4.');
+}
+const adaptiveDirectOnly = process.env.GTFS_REPLAY_ADAPTIVE_WALKING === '1';
+if (adaptiveDirectOnly && maximumTransfers !== 0) {
+  throw new Error('GTFS_REPLAY_ADAPTIVE_WALKING=1 requires GTFS_REPLAY_MAX_TRANSFERS=0.');
+}
+const maximumWalkingMeters = process.env.GTFS_REPLAY_MAX_WALKING_METERS === undefined
+  ? undefined : Number(process.env.GTFS_REPLAY_MAX_WALKING_METERS);
+if (maximumWalkingMeters !== undefined
+  && (!Number.isSafeInteger(maximumWalkingMeters) || maximumWalkingMeters < 0 || maximumWalkingMeters > 100_000)) {
+  throw new Error('GTFS_REPLAY_MAX_WALKING_METERS must be an integer from 0 to 100000.');
+}
 const targetTripIds = (process.env.GTFS_REPLAY_TARGET_TRIP_CHAIN ?? '').split('>').filter(Boolean);
 const traceTargetGraph = process.env.GTFS_REPLAY_TRACE_TARGET_GRAPH === '1' && targetTripIds.length >= 2;
 let targetGraphTrace: Record<string, unknown> | null = null;
@@ -113,10 +127,12 @@ const result = findGtfsItinerariesWithStats(feed, {
   origin, destination,
   earliestDeparture,
   latestDeparture,
-  maximumJourneySeconds: 6 * 60 * 60, maximumTransfers: 2,
+  maximumJourneySeconds: 6 * 60 * 60, maximumTransfers,
   maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1000,
   maximumTransferWalkingMeters: 400, minimumTransferBufferSeconds: 180,
   maximumWaitSeconds: 4 * 60 * 60, limit: resultLimit,
+  ...(maximumWalkingMeters !== undefined ? { maximumTotalWalkingMeters: maximumWalkingMeters } : {}),
+  ...(adaptiveDirectOnly ? { directOnlyWalkingReachTiersMeters: [1_500, 2_500, 4_000] } : {}),
   now: new Date('2026-10-22T08:00:00.000Z'),
 }, {}, observeTargetGraph);
 const fastest = [...result.itineraries].sort((a, b) => a.durationSeconds - b.durationSeconds || a.id.localeCompare(b.id))[0];
@@ -132,6 +148,9 @@ console.log(JSON.stringify({
   earliestDeparture: earliestDeparture.toISOString(),
   latestDeparture: latestDeparture.toISOString(),
   resultLimit,
+  maximumTransfers,
+  maximumWalkingMeters: maximumWalkingMeters ?? null,
+  adaptiveDirectOnly,
   archiveSha256,
   runtime: process.version,
   searchMs: Number((performance.now() - startedAt).toFixed(2)),

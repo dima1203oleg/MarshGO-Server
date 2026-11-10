@@ -20,6 +20,7 @@ import { compareStableId } from './stableOrdering';
 import { paretoFrontier, scoreJourneys } from './scoring';
 import { allocateBoundedGraphBudgets } from './boundedGraphBudget';
 import { BoundedPromiseCache } from './boundedPromiseCache';
+import { MAX_DIRECT_ONLY_WALKING_METERS, MAX_DIRECT_ONLY_WALKING_TIERS } from './directOnlyWalkingPolicy';
 
 const MAX_FEED_BYTES = 60 * 1024 * 1024;
 const CACHE_TTL_MS = 6 * 60 * 60_000;
@@ -408,6 +409,11 @@ export interface GtfsItinerarySearchInput extends SearchInput {
   maximumAccessWalkingMeters?: number;
   maximumEgressWalkingMeters?: number;
   maximumTransferWalkingMeters?: number;
+  /** Lower-bound total walk filter used during route composition; final street distance is rechecked later. */
+  maximumTotalWalkingMeters?: number;
+  /** Optional staged endpoint radii for direct-only transit. Expanded stages run only when the
+   * previous stage found no scheduled itinerary; this is an internal bounded-search control. */
+  directOnlyWalkingReachTiersMeters?: readonly number[];
   allowedModes?: readonly TransitJourneyMode[];
   allowedTransportTypes?: readonly JourneyTransportType[];
   providerCity?: string;
@@ -2431,7 +2437,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
  * feeds. Walking to and from the first/last stop uses a conservative straight-
  * line estimate and is surfaced separately in the result.
  */
-export function findGtfsItinerariesWithStats(
+function findGtfsItinerariesAtWalkingReachWithStats(
   feed: GtfsTimetableFeed,
   input: GtfsItinerarySearchInput,
   graphLimits: GtfsGraphBudgetLimits = {},
@@ -2489,6 +2495,8 @@ export function findGtfsItinerariesWithStats(
     || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > 10_000
     || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > 10_000
     || !Number.isFinite(transferRadius) || transferRadius < 0 || transferRadius > 10_000
+    || (input.maximumTotalWalkingMeters !== undefined
+      && (!Number.isInteger(input.maximumTotalWalkingMeters) || input.maximumTotalWalkingMeters < 0 || input.maximumTotalWalkingMeters > 100_000))
     || !Number.isInteger(limit) || limit < 1 || limit > HARD_MAX_GTFS_SEARCH_LIMIT
     || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > MAX_GTFS_GRAPH_SEGMENTS
     || !Number.isSafeInteger(maximumGraphSegmentsPerRoute) || maximumGraphSegmentsPerRoute < 1
@@ -2518,7 +2526,8 @@ export function findGtfsItinerariesWithStats(
     // stop is admitted instead, bounded by the same ceiling a passenger may explicitly ask for.
     // Journeys built on it are disclosed as needing a longer walk; they are never presented as if
     // the stop had been close.
-    if (!reachedWithinRadius && nearestMeters !== null && nearestMeters <= MAX_PREFERENCE_WALKING_RADIUS_METERS) {
+    if (input.directOnlyWalkingReachTiersMeters === undefined && !reachedWithinRadius
+      && nearestMeters !== null && nearestMeters <= MAX_PREFERENCE_WALKING_RADIUS_METERS) {
       const nearest = measured.reduce((best, item) => (item.distance < best.distance ? item : best));
       ranked.push(nearest);
     }
@@ -4023,6 +4032,10 @@ export function findGtfsItinerariesWithStats(
     const transferWalkingMeters = transferDecisions.map(({ measure }) => measure.walkingMeters);
     const transferWalkingSeconds = transferDecisions.map(({ measure }) => measure.walkingSeconds);
     const transferWalkingGeometries = transferDecisions.map(({ measure }) => measure.geometry);
+    const totalWalkingMeters = accessMeters + egressMeters + transferWalkingMeters.reduce((sum, meters) => sum + meters, 0);
+    // Straight-line GTFS access/egress is a lower bound for the eventual street path.
+    // It is safe to reject over-budget candidates here; routed distance is checked again in Site API composition.
+    if (input.maximumTotalWalkingMeters !== undefined && totalWalkingMeters > input.maximumTotalWalkingMeters) return;
     // Search time means when the passenger is ready to start, so initial access
     // walking and waiting for the first service are part of the door-to-door
     // duration. Ranking only the interval between the first and last vehicle
@@ -4063,7 +4076,7 @@ export function findGtfsItinerariesWithStats(
       segments: path, departureAt, arrivalAt, durationSeconds,
       waitingSeconds: initialWaitSeconds + transferWaitingSeconds,
       transfers: transferDecisions.filter(({ measure }) => !measure.inSeat).length,
-      walkingMeters: accessMeters + egressMeters + transferWalkingMeters.reduce((sum, meters) => sum + meters, 0),
+      walkingMeters: totalWalkingMeters,
       transferWalkingMeters, transferWalkingSeconds, transferWalkingGeometries,
       transferInSeat: transferDecisions.map(({ measure }) => measure.inSeat),
       transferMinimumBufferSeconds: transferDecisions.map(({ minimumBufferSeconds }) => minimumBufferSeconds),
@@ -4518,6 +4531,68 @@ export function findGtfsItinerariesWithStats(
       responsePage: rankedResults.length > itineraries.length,
     },
   };
+}
+
+/**
+ * Run the regular stop-reach search first. A zero-transfer query may then widen
+ * its endpoint search through caller-supplied, measured-walk tiers if no direct
+ * scheduled itinerary exists. The timetable/feed stays in the existing worker
+ * cache; this does not import or fetch the feed again.
+ */
+export function findGtfsItinerariesWithStats(
+  feed: GtfsTimetableFeed,
+  input: GtfsItinerarySearchInput,
+  graphLimits: GtfsGraphBudgetLimits = {},
+  observeCandidateGraph?: GtfsCandidateGraphObserver,
+): GtfsItinerarySearchResult {
+  const tiers = input.directOnlyWalkingReachTiersMeters;
+  if (tiers !== undefined) {
+    if (!Array.isArray(tiers) || tiers.length > MAX_DIRECT_ONLY_WALKING_TIERS
+      || tiers.some((tier, index) => !Number.isInteger(tier) || tier < 100 || tier > MAX_DIRECT_ONLY_WALKING_METERS
+        || (index > 0 && tier <= tiers[index - 1]!))) {
+      throw new TypeError('direct-only walking reach tiers are invalid');
+    }
+    if (tiers.length > 0 && input.maximumTransfers !== 0) {
+      throw new TypeError('adaptive walking reach is only valid when maxTransfers is zero');
+    }
+  }
+
+  let result = findGtfsItinerariesAtWalkingReachWithStats(feed, input, graphLimits, observeCandidateGraph);
+  if (result.itineraries.length > 0 || !tiers?.length || input.maximumTransfers !== 0) return result;
+
+  let accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
+  let egressRadius = input.maximumEgressWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_EGRESS_WALKING_METERS;
+  let aggregate = result;
+  for (const tier of tiers) {
+    const nextAccessRadius = Math.max(accessRadius, tier);
+    const nextEgressRadius = Math.max(egressRadius, tier);
+    if (nextAccessRadius === accessRadius && nextEgressRadius === egressRadius) continue;
+    accessRadius = nextAccessRadius;
+    egressRadius = nextEgressRadius;
+    const expanded = findGtfsItinerariesAtWalkingReachWithStats(feed, {
+      ...input,
+      maximumAccessWalkingMeters: accessRadius,
+      maximumEgressWalkingMeters: egressRadius,
+    }, graphLimits, observeCandidateGraph);
+    const truncation: GtfsItinerarySearchTruncation = {
+      stopSelection: aggregate.truncation.stopSelection || expanded.truncation.stopSelection,
+      candidateGraph: aggregate.truncation.candidateGraph || expanded.truncation.candidateGraph,
+      searchBudget: aggregate.truncation.searchBudget || expanded.truncation.searchBudget,
+      searchStepLimit: aggregate.truncation.searchStepLimit || expanded.truncation.searchStepLimit,
+      candidatePoolLimit: aggregate.truncation.candidatePoolLimit || expanded.truncation.candidatePoolLimit,
+      candidateSampling: aggregate.truncation.candidateSampling || expanded.truncation.candidateSampling,
+      responsePage: aggregate.truncation.responsePage || expanded.truncation.responsePage,
+    };
+    aggregate = {
+      ...expanded,
+      searchTruncated: aggregate.searchTruncated || expanded.searchTruncated,
+      resultLimitReached: aggregate.resultLimitReached || expanded.resultLimitReached,
+      candidateGraphTruncated: aggregate.candidateGraphTruncated || expanded.candidateGraphTruncated,
+      truncation,
+    };
+    if (expanded.itineraries.length > 0) break;
+  }
+  return aggregate;
 }
 
 export function findGtfsItineraries(feed: GtfsTimetableFeed, input: GtfsItinerarySearchInput): GtfsItinerary[] {
