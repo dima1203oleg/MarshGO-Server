@@ -88,6 +88,17 @@ describe('nearby assets', () => {
 import { strToU8 } from 'fflate';
 import { parseCsvLine, routeTypeLabel, summarizeGtfs } from '../server/mobility/gtfs';
 import { buildTransportCities } from '../server/mobility/cities';
+import { ukraineCatalog } from '../server/mobility/ukraineCatalog';
+
+it('does not publish the shared Lviv GTFS source as a separately verified marshrutka feed', () => {
+  const lvivSources = ukraineCatalog.filter((source) => source.city === 'Львів');
+  const staticFeed = lvivSources.find((source) => source.sourceType === 'gtfs');
+  assert.ok(staticFeed);
+  assert.equal(staticFeed.feedUrl, 'https://track.ua-gis.com/gtfs/lviv/static.zip');
+  assert.match(staticFeed.coverage, /маршрутки — route_type=1501 або явна мітка маршруту/);
+  assert.match(staticFeed.coverage, /окремий відкритий URL фіда маршруток не підтверджений/i);
+  assert.equal(lvivSources.some((source) => /маршрут(?:ка|ки|minibus)/iu.test(source.name) && source.sourceType === 'gtfs'), false);
+});
 
 it('derives transport cities from healthy provider coverage with mode counts and source attribution', () => {
   const cities = buildTransportCities([
@@ -111,7 +122,7 @@ describe('GTFS parsing', () => {
     assert.equal(routeTypeLabel(0), 'tram'); assert.equal(routeTypeLabel(1), 'metro'); assert.equal(routeTypeLabel(2), 'train');
     assert.equal(routeTypeLabel(3), 'bus'); assert.equal(routeTypeLabel(11), 'trolleybus'); assert.equal(routeTypeLabel(715), 'bus');
     assert.equal(routeTypeLabel(102), 'train'); assert.equal(routeTypeLabel(106), 'suburban');
-    assert.equal(routeTypeLabel(1501), 'marshrutka');
+    assert.equal(routeTypeLabel(1501), 'marshrutka', 'GTFS HVT 1501 is communal taxi; the extension lists marshrutka as an example');
     assert.equal(routeTypeLabel(3, 'Маршрутка № 5'), 'marshrutka');
     assert.equal(routeTypeLabel(3, 'Маршрутне таксі № 5'), 'marshrutka');
     assert.equal(routeTypeLabel(3, 'Маршрутний автобус № 5'), 'bus');
@@ -132,6 +143,7 @@ describe('GTFS parsing', () => {
     });
     assert.equal(classifyLvivTransport({ routeType: 3, routeName: 'Маршрутка № 5' })?.classifiedType, 'marshrutka');
     assert.equal(classifyLvivTransport({ routeType: 3, routeName: 'Автобус № 5' })?.classifiedType, 'bus');
+    assert.equal(classifyLvivTransport({ routeType: 1501, routeName: 'Communal taxi 5' })?.classifiedType, 'marshrutka');
     assert.equal(classifyLvivTransport({ routeType: 3, routeName: 'Тр22' }), null,
       'trolleybus evidence stays outside the bus/minibus classifier');
     assert.equal(classifyLvivTransport({ routeType: 3, routeName: 'Bus marshrutka 5' })?.classifiedType, 'bus_unspecified',
