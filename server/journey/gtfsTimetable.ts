@@ -3,7 +3,7 @@ import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
 import { classifyLvivTransport, type LvivTransportClassification } from '../mobility/lvivTransportClassifier';
 import { pointIsInsideUkraine } from '../mobility/gbfs';
-import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
+import { canonicalJourneyTransportType, journeyTransportTypeSelected, type JourneyTransportType } from './types';
 import type { JourneyOption } from './types';
 import {
   calculateGtfsItineraryFare,
@@ -666,16 +666,76 @@ export function selectGtfsCandidatesForCrossProviderSearch(
     || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
   const byWalking = [...itineraries].sort((a, b) => a.walkingMeters - b.walkingMeters
     || a.durationSeconds - b.durationSeconds || compareStableId(a.id, b.id));
-  const perObjective = Math.max(1, Math.floor(maximum / 5));
+  const byFastest = rankGtfsItinerariesForStrategySampling(itineraries, 'FASTEST', rankingContext);
+  const byCheapest = rankGtfsItinerariesForStrategySampling(itineraries, 'CHEAPEST', rankingContext);
+  const byBalanced = rankGtfsItinerariesForStrategySampling(itineraries, 'BALANCED', rankingContext);
+
+  // Reserve witnesses scored against the full mixed-provider pool. A transit-only
+  // BALANCED winner is only provisional: adding community/taxi/etc. options can
+  // change the shared normalization ranges and the actual winner.
+  if (rankingContext.length > 0) {
+    for (const winner of [byFastest[0], byCheapest[0], byBalanced[0]]) {
+      if (selected.size >= maximum) break;
+      if (winner && !selected.has(winner.id)) selected.set(winner.id, winner);
+    }
+  }
+
+  // A dense bus feed can fill every objective/arrival slot and erase the only tram,
+  // trolleybus, or marshrutka itinerary before the cross-provider scorer sees it.
+  // Keep an arrival-ordered representative for each canonical category that is
+  // actually present, then use the remaining reserve for distinct mixed-mode chains.
+  // If categories or distinct combinations exceed the bounded reserve, the caller's
+  // candidate-truncation flag still discloses that the sample is incomplete.
+  const chainKey = (itinerary: GtfsItinerary): string => {
+    const chain: string[] = [];
+    for (const segment of itinerary.segments) {
+      const type = canonicalJourneyTransportType(segment.transportType) ?? segment.transportType;
+      if (chain.at(-1) !== type) chain.push(type);
+    }
+    return chain.join('>') || 'unknown-transit-chain';
+  };
+  const availableTypes = new Set(itineraries.flatMap((itinerary) => itinerary.segments
+    .map((segment) => canonicalJourneyTransportType(segment.transportType))
+    .filter((type): type is JourneyTransportType => type !== null)));
+  const modeDiversityLimit = Math.min(maximum, selected.size + Math.max(1, availableTypes.size) * 2);
+  const coveredTypes = new Set<string>();
+  const markTypes = (itinerary: GtfsItinerary) => {
+    for (const segment of itinerary.segments) {
+      const type = canonicalJourneyTransportType(segment.transportType);
+      if (type) coveredTypes.add(type);
+    }
+  };
+  for (const winner of selected.values()) markTypes(winner);
+  for (const candidate of byArrival) {
+    if (selected.size >= modeDiversityLimit) break;
+    const addsCategory = candidate.segments.some((segment) => {
+      const type = canonicalJourneyTransportType(segment.transportType);
+      return type !== null && !coveredTypes.has(type);
+    });
+    if (!addsCategory || selected.has(candidate.id)) continue;
+    selected.set(candidate.id, candidate);
+    markTypes(candidate);
+  }
+
+  const representedChains = new Set([...selected.values()].map(chainKey));
+  for (const candidate of byBalanced) {
+    if (selected.size >= modeDiversityLimit) break;
+    const key = chainKey(candidate);
+    if (selected.has(candidate.id) || representedChains.has(key)) continue;
+    selected.set(candidate.id, candidate);
+    representedChains.add(key);
+  }
+
+  const perObjective = Math.max(1, Math.floor((maximum - selected.size) / 5));
   // Preserve top candidates under the same objective scorers used by the
   // final mixed-provider ranking. Duration/fare-only proxy sorting can omit a
   // strategy winner when equal fares or durations are broken by transfers,
   // walking, reliability, or the shared normalization ranges.
-  take(rankGtfsItinerariesForStrategySampling(itineraries, 'FASTEST', rankingContext), perObjective);
-  take(rankGtfsItinerariesForStrategySampling(itineraries, 'CHEAPEST', rankingContext), perObjective);
+  take(byFastest, perObjective);
+  take(byCheapest, perObjective);
   take(byTransfers, perObjective);
   take(byWalking, perObjective);
-  take(rankGtfsItinerariesForStrategySampling(itineraries, 'BALANCED', rankingContext), perObjective);
+  take(byBalanced, perObjective);
   take(byArrival, maximum - selected.size);
   return [...selected.values()].sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime()
     || a.departureAt.getTime() - b.departureAt.getTime() || compareStableId(a.id, b.id));
