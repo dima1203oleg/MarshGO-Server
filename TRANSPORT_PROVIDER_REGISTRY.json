@@ -1,29 +1,29 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-11-04T15:58:40.253Z",
+  "generatedAt": "2026-11-11T19:44:06.703Z",
   "generator": "scripts/build-transport-registry.ts",
   "productStatus": "NOT_RELEASED",
   "evidenceRule": "VERIFIED/VERIFIED_LIVE only when this run measured it; NOT_MEASURED means no evidence was collected, never \"none exists\"",
   "sources": {
-    "catalog": "server/mobility/ukraineCatalog.ts (canonical, 52 rows); legacy root copy holds the same first 43 rows",
-    "probe": "/tmp/feed-probe-wave3.json",
+    "catalog": "server/mobility/ukraineCatalog.ts (canonical, 88 rows: Base + Wave 2 + Wave 3 + Kyiv open data); legacy root copy holds a 43-row subset",
+    "probe": "/tmp/feed-probe-ukraine-20261111.json",
     "operators": "server/mobility/providerRegistry.ts",
-    "database": "SELECT-only aggregation over marshgo-acceptance-db-1"
+    "database": "SELECT-only aggregation over marshgo-server-main-7774a81-db-1"
   },
   "inventory": {
     "catalogRows": 88,
     "probedToday": 88,
     "byState": {
-      "HEALTHY": 48,
-      "DEGRADED": 14,
-      "OFFLINE": 21,
-      "SKIPPED": 5
+      "HEALTHY": 12,
+      "DEGRADED": 9,
+      "SKIPPED": 52,
+      "OFFLINE": 15
     },
     "blockedOnAccess": 5,
-    "routableToday": 62,
-    "feedsWithLivePositions": 46,
+    "routableToday": 21,
+    "feedsWithLivePositions": 8,
     "feedsWithArrivalPredictions": 1,
-    "feedsWithServiceAlerts": 0,
+    "feedsWithServiceAlerts": 2,
     "feedsWithVerifiedPricing": 0,
     "feedsWithReservation": 0
   },
@@ -95,25 +95,35 @@
     }
   ],
   "databaseSnapshot": {
-    "capturedAt": "2026-11-04T15:12:00Z",
-    "container": "marshgo-acceptance-db-1",
-    "mobilityProviders": 88,
+    "capturedAt": "2026-11-11T19:37:00Z",
+    "container": "marshgo-server-main-7774a81-db-1",
+    "mobilityProviders": 89,
     "byDiscoveryStatus": {
-      "DISCOVERED": 6,
-      "ENABLED": 62,
-      "TEMPORARILY_UNAVAILABLE": 20
+      "DISCOVERED": 52,
+      "ENABLED": 12,
+      "TEMPORARILY_UNAVAILABLE": 25
     },
     "enabledBySourceType": {
-      "gtfs": 13,
-      "gtfs_rt": 12,
-      "json": 36
+      "gtfs": 11,
+      "gtfs_rt": 4,
+      "json": 5,
+      "gbfs": 1,
+      "rest": 8,
+      "geojson": 7
+    },
+    "productActive": 21,
+    "productActiveBySourceType": {
+      "gtfs": 11,
+      "gtfs_rt": 4,
+      "json": 5,
+      "gbfs": 1
     },
     "mobilityOperators": 7,
     "mobilityNetworks": 4,
-    "rentalLocations": 0,
+    "rentalLocations": 317,
     "rentalAvailabilitySnapshots": 0,
     "providerSourceRecords": 0,
-    "vehicles": 19
+    "vehicles": 0
   },
   "operators": [
     {
@@ -224,9 +234,9 @@
       "sourceType": "gtfs",
       "feedUrl": "https://track.ua-gis.com/gtfs/lviv/static.zip",
       "access": "open",
-      "license": "Open data portal of Lviv city (opendata.city-adm.lviv.ua)",
+      "license": "CC BY 4.0 (data.gov.ua: https://data.gov.ua/dataset/lviv-public-transport-gtfs-real-time)",
       "updateFrequency": "статичний розклад + GTFS-Realtime оновлення рейсів і GPS позиції",
-      "coverageClaim": "Громадський транспорт Львова: автобуси, трамваї та realtime-дані",
+      "coverageClaim": "Єдиний спільний GTFS-розклад: автобусний клас route_type=3; маршрутки — route_type=1501 або явна мітка маршруту; трамваї, позначені в GTFS тролейбуси та realtime. Окремий відкритий URL фіда маршруток не підтверджений",
       "sourceRef": "mdb:ua-lviv-lvivavtodor-gtfs-2374",
       "priority": 10,
       "capabilities": {
@@ -242,18 +252,19 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 1888,
+        "responseMs": 2105,
         "measured": {
-          "stops": 1071,
+          "stops": 1064,
+          "trips": 15606,
           "routes": 72,
-          "trips": 15141,
-          "stopTimes": 406422,
-          "routes_bus": 64,
-          "routes_tram": 8
+          "stopTimes": 421884,
+          "routes_bus": 55,
+          "routes_tram": 8,
+          "routes_trolleybus": 9
         },
         "failedChecks": []
       },
@@ -270,7 +281,7 @@
       "sourceType": "gtfs_rt",
       "feedUrl": "https://track.ua-gis.com/gtfs/lviv/vehicle_position",
       "access": "open",
-      "license": "Open data portal of Lviv city (opendata.city-adm.lviv.ua)",
+      "license": "CC BY 4.0 (data.gov.ua: https://data.gov.ua/dataset/lviv-public-transport-gtfs-real-time)",
       "updateFrequency": "реальний час (секунди)",
       "coverageClaim": "Позиції транспорту Львова",
       "sourceRef": "mdb:ua-lviv-lvivavtodor-gtfs-rt-vp-2376",
@@ -280,7 +291,7 @@
         "timetables": "NOT_APPLICABLE",
         "livePositions": "VERIFIED_LIVE",
         "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "serviceAlerts": "VERIFIED_LIVE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -288,25 +299,25 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 434,
+        "responseMs": 48,
         "measured": {
-          "vehicles": 616,
+          "alerts": 15,
+          "vehicles": 391,
+          "ageSeconds": 1,
           "tripUpdates": 0,
-          "alerts": 0,
-          "vehicleEntities": 616,
-          "vehiclePositions": 616,
-          "freshVehiclePositions": 0,
-          "staleVehiclePositions": 616,
-          "missingVehicleTimestamps": 0,
+          "vehicleEntities": 391,
+          "vehiclePositions": 391,
+          "freshVehiclePositions": 351,
+          "staleVehiclePositions": 40,
           "missingVehiclePositions": 0,
-          "ageSeconds": 4
+          "missingVehicleTimestamps": 0
         },
         "failedChecks": [
-          "Individual vehicle positions: 0/616 vehicle entities have valid coordinates and fresh timestamps; 616 stale, 0 without timestamp, 0 without valid coordinates"
+          "Individual vehicle positions: 351/391 vehicle entities have valid coordinates and fresh timestamps; 40 stale, 0 without timestamp, 0 without valid coordinates"
         ]
       },
       "productUse": {
@@ -322,7 +333,7 @@
       "sourceType": "gtfs_rt",
       "feedUrl": "https://track.ua-gis.com/gtfs/lviv/trip_updates",
       "access": "open",
-      "license": "Open data portal of Lviv city (opendata.city-adm.lviv.ua)",
+      "license": "CC BY 4.0 (data.gov.ua: https://data.gov.ua/dataset/lviv-public-transport-gtfs-real-time)",
       "updateFrequency": "реальний час",
       "coverageClaim": "Оновлення рейсів і затримки Львова",
       "sourceRef": "mdb:ua-lviv-lvivavtodor-gtfs-rt-tu-2375",
@@ -332,7 +343,7 @@
         "timetables": "NOT_APPLICABLE",
         "livePositions": "EMPTY",
         "arrivalPredictions": "VERIFIED_LIVE",
-        "serviceAlerts": "NONE_OBSERVED",
+        "serviceAlerts": "VERIFIED_LIVE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -340,22 +351,22 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 47,
+        "responseMs": 152,
         "measured": {
+          "alerts": 15,
           "vehicles": 0,
-          "tripUpdates": 115,
-          "alerts": 0,
+          "ageSeconds": 2,
+          "tripUpdates": 436,
           "vehicleEntities": 0,
           "vehiclePositions": 0,
           "freshVehiclePositions": 0,
           "staleVehiclePositions": 0,
-          "missingVehicleTimestamps": 0,
           "missingVehiclePositions": 0,
-          "ageSeconds": 10
+          "missingVehicleTimestamps": 0
         },
         "failedChecks": []
       },
@@ -372,10 +383,10 @@
       "sourceType": "gtfs",
       "feedUrl": "https://track.ua-gis.com/gtfs/stryi/static.zip",
       "access": "open",
-      "license": "Відкриті дані Стрийської міської ради (data.gov.ua; mdb-2932)",
-      "updateFrequency": "періодично",
-      "coverageClaim": "Міський транспорт Стрия",
-      "sourceRef": "mdb:ua-stryi-gtfs-2932",
+      "license": "CC BY 4.0 (Стрийська міська рада; attribution required; https://data.loda.gov.ua/dataset/7b9ddbc6-df4b-4d2e-9567-af66ede840cc)",
+      "updateFrequency": "щомісяця (портал набору даних)",
+      "coverageClaim": "Міський транспорт Стрия за розкладом; live-позиції, тарифи та бронювання цим GTFS не підтверджуються",
+      "sourceRef": "mdb:ua-stryi-gtfs-2932; https://data.loda.gov.ua/dataset/7b9ddbc6-df4b-4d2e-9567-af66ede840cc",
       "priority": 10,
       "capabilities": {
         "staticNetwork": "VERIFIED",
@@ -390,15 +401,15 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 429,
+        "responseMs": 132,
         "measured": {
-          "stops": 295,
-          "routes": 34,
+          "stops": 292,
           "trips": 1061,
+          "routes": 34,
           "stopTimes": 13874,
           "routes_bus": 34
         },
@@ -417,7 +428,7 @@
       "sourceType": "gtfs",
       "feedUrl": "https://track.ua-gis.com/gtfs/uzhhorod/static.zip",
       "access": "open",
-      "license": "Відкриті дані Ужгородської міської ради (data.gov.ua; mdb-2931)",
+      "license": "CC BY (data.gov.ua license_id=cc-by; dataset 017a084f-6508-421c-a9bb-32a29b6264f4, Відділ транспорту Ужгородської міської ради; GTFS schedule via UA-GIS)",
       "updateFrequency": "періодично",
       "coverageClaim": "Міський транспорт Ужгорода",
       "sourceRef": "mdb:ua-uzhhorod-gtfs-2931",
@@ -435,15 +446,15 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 407,
+        "responseMs": 236,
         "measured": {
-          "stops": 217,
-          "routes": 18,
+          "stops": 215,
           "trips": 2376,
+          "routes": 18,
           "stopTimes": 46460,
           "routes_bus": 18
         },
@@ -463,12 +474,12 @@
       "feedUrl": "https://gtfs.fsn1.your-objectstorage.com/feeds/gtfs.zip",
       "access": "open",
       "license": null,
-      "updateFrequency": "періодично",
-      "coverageClaim": "Міжміські автобуси (inbus.ua), фід невеликий — потребує перевірки покриття",
+      "updateFrequency": "stale: Mobility Database snapshot ends 2025-07-31; revalidate before use",
+      "coverageClaim": "Historical intercity feed; not routable until current service dates, coverage and reuse rights are verified",
       "sourceRef": "mdb:ua-inbusua-gtfs-3044",
       "priority": 50,
       "capabilities": {
-        "staticNetwork": "UNAVAILABLE",
+        "staticNetwork": "NOT_MEASURED",
         "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
@@ -480,21 +491,13 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "OFFLINE",
-        "skipReason": null,
-        "responseMs": 570,
-        "measured": {
-          "stops": 2,
-          "routes": 1,
-          "trips": 45,
-          "stopTimes": 90,
-          "routes_bus": 1
-        },
-        "failedChecks": [
-          "Scheduled service in next 7 days: no active trip service in the next 7 days"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
         "routable": false,
@@ -527,16 +530,17 @@
         "deepLink": "VERIFIED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 747,
+        "responseMs": 874,
         "measured": {
           "feeds": 9,
-          "vehicles": 1048,
           "stations": 0,
-          "ageSeconds": 0
+          "vehicles": 998,
+          "ageSeconds": 0,
+          "pointsInDeclaredCountry": 998
         },
         "failedChecks": []
       },
@@ -571,10 +575,10 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
-        "skipReason": null,
+        "skipReason": "insecure_endpoint",
         "responseMs": null,
         "measured": {},
         "failedChecks": []
@@ -600,9 +604,9 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "EMPTY",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "BLOCKED_EXTERNAL",
+        "arrivalPredictions": "BLOCKED_EXTERNAL",
+        "serviceAlerts": "BLOCKED_EXTERNAL",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -610,10 +614,10 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
-        "skipReason": null,
+        "skipReason": "insecure_endpoint",
         "responseMs": null,
         "measured": {},
         "failedChecks": []
@@ -649,10 +653,10 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
-        "skipReason": null,
+        "skipReason": "requires_credentials",
         "responseMs": null,
         "measured": {},
         "failedChecks": []
@@ -688,10 +692,10 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
-        "skipReason": null,
+        "skipReason": "requires_credentials",
         "responseMs": null,
         "measured": {},
         "failedChecks": []
@@ -709,7 +713,7 @@
       "sourceType": "gtfs",
       "feedUrl": "https://city.dozor.tech/rivne/gtfs/static.zip",
       "access": "open",
-      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "license": "CC BY (data.gov.ua license_id=cc-by; dataset d882a887-ebcd-4fc4-95ea-2dd2850a521f, Рівненська міська рада; live delivery via Dozor)",
       "updateFrequency": "періодично",
       "coverageClaim": "Громадський транспорт Рівного",
       "sourceRef": "data.gov.ua:Рівненська міська рада",
@@ -727,25 +731,25 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "OFFLINE",
+        "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 711,
+        "responseMs": 391,
         "measured": {
-          "stops": 207,
-          "routes": 23,
-          "trips": 2424,
-          "stopTimes": 36283,
-          "routes_trolleybus": 11,
-          "routes_bus": 12
+          "stops": 176,
+          "trips": 1084,
+          "routes": 16,
+          "stopTimes": 17560,
+          "routes_bus": 7,
+          "routes_trolleybus": 9
         },
         "failedChecks": [
           "Scheduled service in next 7 days: no active trip service in the next 7 days"
         ]
       },
       "productUse": {
-        "routable": false,
+        "routable": true,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -765,9 +769,9 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
+        "serviceAlerts": "NOT_MEASURED",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -775,29 +779,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 40,
-        "measured": {
-          "vehicles": 93,
-          "tripUpdates": 0,
-          "alerts": 0,
-          "vehicleEntities": 93,
-          "vehiclePositions": 93,
-          "freshVehiclePositions": 91,
-          "staleVehiclePositions": 2,
-          "missingVehicleTimestamps": 0,
-          "missingVehiclePositions": 0,
-          "ageSeconds": 15
-        },
-        "failedChecks": [
-          "Individual vehicle positions: 91/93 vehicle entities have valid coordinates and fresh timestamps; 2 stale, 0 without timestamp, 0 without valid coordinates"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -809,7 +800,7 @@
       "sourceType": "gtfs",
       "feedUrl": "https://city.dozor.tech/iv-frankivsk/gtfs/static.zip",
       "access": "open",
-      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "license": "CC BY (data.gov.ua license_id=cc-by; dataset ac81e2c1-5ea9-4512-811f-2b3d377fd527, Івано-Франківська міська рада; GTFS schedule via Dozor)",
       "updateFrequency": "періодично",
       "coverageClaim": "Громадський транспорт Івано-Франківська",
       "sourceRef": "data.gov.ua:Управління транспорту Івано-Франківська",
@@ -827,17 +818,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 830,
+        "responseMs": 463,
         "measured": {
-          "stops": 525,
-          "routes": 55,
-          "trips": 3319,
-          "stopTimes": 82455,
-          "routes_bus": 47,
+          "stops": 522,
+          "trips": 2700,
+          "routes": 48,
+          "stopTimes": 65581,
+          "routes_bus": 40,
           "routes_trolleybus": 8
         },
         "failedChecks": []
@@ -855,7 +846,7 @@
       "sourceType": "gtfs_rt",
       "feedUrl": "https://city.dozor.tech/iv-frankivsk/gtfs/vehicle_position",
       "access": "open",
-      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "license": "CC BY (data.gov.ua license_id=cc-by; dataset 89db154c-f923-4f0d-8d6e-420a2a6d9fef, Управління транспорту та зв’язку Івано-Франківської міської ради; live delivery via Dozor)",
       "updateFrequency": "реальний час",
       "coverageClaim": "Позиції транспорту Івано-Франківська",
       "sourceRef": "data.gov.ua:Управління транспорту Івано-Франківська",
@@ -873,25 +864,25 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 162,
+        "responseMs": 22,
         "measured": {
-          "vehicles": 160,
-          "tripUpdates": 0,
           "alerts": 0,
-          "vehicleEntities": 160,
-          "vehiclePositions": 160,
-          "freshVehiclePositions": 143,
-          "staleVehiclePositions": 17,
-          "missingVehicleTimestamps": 0,
+          "vehicles": 65,
+          "ageSeconds": 18,
+          "tripUpdates": 0,
+          "vehicleEntities": 65,
+          "vehiclePositions": 65,
+          "freshVehiclePositions": 58,
+          "staleVehiclePositions": 7,
           "missingVehiclePositions": 0,
-          "ageSeconds": 14
+          "missingVehicleTimestamps": 0
         },
         "failedChecks": [
-          "Individual vehicle positions: 143/160 vehicle entities have valid coordinates and fresh timestamps; 17 stale, 0 without timestamp, 0 without valid coordinates"
+          "Individual vehicle positions: 58/65 vehicle entities have valid coordinates and fresh timestamps; 7 stale, 0 without timestamp, 0 without valid coordinates"
         ]
       },
       "productUse": {
@@ -915,9 +906,9 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
+        "serviceAlerts": "NOT_MEASURED",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -925,29 +916,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 20,
-        "measured": {
-          "vehicles": 63,
-          "tripUpdates": 0,
-          "alerts": 0,
-          "vehicleEntities": 63,
-          "vehiclePositions": 63,
-          "freshVehiclePositions": 26,
-          "staleVehiclePositions": 37,
-          "missingVehicleTimestamps": 0,
-          "missingVehiclePositions": 0,
-          "ageSeconds": 8
-        },
-        "failedChecks": [
-          "Individual vehicle positions: 26/63 vehicle entities have valid coordinates and fresh timestamps; 37 stale, 0 without timestamp, 0 without valid coordinates"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -965,7 +943,7 @@
       "sourceRef": "probe:city.dozor.tech",
       "priority": 30,
       "capabilities": {
-        "staticNetwork": "UNAVAILABLE",
+        "staticNetwork": "NOT_MEASURED",
         "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
@@ -977,22 +955,13 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "OFFLINE",
-        "skipReason": null,
-        "responseMs": 625,
-        "measured": {
-          "stops": 181,
-          "routes": 17,
-          "trips": 1454,
-          "stopTimes": 26089,
-          "routes_bus": 17
-        },
-        "failedChecks": [
-          "Agency timezone: missing or invalid agency_timezone; schedule cannot be evaluated safely",
-          "Scheduled service in next 7 days: no active trip service in the next 7 days"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
         "routable": false,
@@ -1007,17 +976,17 @@
       "sourceType": "gtfs_rt",
       "feedUrl": "https://track.ua-gis.com/gtfs/stryi/vehicle_position",
       "access": "open",
-      "license": "Відкриті дані Стрийської міської ради (data.gov.ua)",
-      "updateFrequency": "реальний час",
-      "coverageClaim": "Позиції транспорту Стрия",
+      "license": null,
+      "updateFrequency": "реальний час; reuse terms not confirmed",
+      "coverageClaim": "Позиції транспорту Стрия; не активувати без підтверджених комерційних умов",
       "sourceRef": "probe:track.ua-gis.com",
       "priority": 10,
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
+        "serviceAlerts": "NOT_MEASURED",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -1025,29 +994,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 125,
-        "measured": {
-          "vehicles": 32,
-          "tripUpdates": 0,
-          "alerts": 0,
-          "vehicleEntities": 32,
-          "vehiclePositions": 32,
-          "freshVehiclePositions": 0,
-          "staleVehiclePositions": 32,
-          "missingVehicleTimestamps": 0,
-          "missingVehiclePositions": 0,
-          "ageSeconds": 7
-        },
-        "failedChecks": [
-          "Individual vehicle positions: 0/32 vehicle entities have valid coordinates and fresh timestamps; 32 stale, 0 without timestamp, 0 without valid coordinates"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1067,9 +1023,9 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "EMPTY",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
+        "serviceAlerts": "NOT_MEASURED",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -1077,29 +1033,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 107,
-        "measured": {
-          "vehicles": 0,
-          "tripUpdates": 0,
-          "alerts": 0,
-          "vehicleEntities": 0,
-          "vehiclePositions": 0,
-          "freshVehiclePositions": 0,
-          "staleVehiclePositions": 0,
-          "missingVehicleTimestamps": 0,
-          "missingVehiclePositions": 0,
-          "ageSeconds": 2
-        },
-        "failedChecks": [
-          "Entities: 0 vehicles, 0 trip updates, 0 alerts"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1117,7 +1060,7 @@
       "sourceRef": "data.gov.ua:Виконавчий комітет Чорноморської міської ради",
       "priority": 90,
       "capabilities": {
-        "staticNetwork": "UNAVAILABLE",
+        "staticNetwork": "NOT_MEASURED",
         "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
@@ -1129,21 +1072,13 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "OFFLINE",
-        "skipReason": null,
-        "responseMs": 239,
-        "measured": {
-          "stops": 152,
-          "routes": 6,
-          "trips": 16,
-          "stopTimes": 406,
-          "routes_bus": 6
-        },
-        "failedChecks": [
-          "Scheduled service in next 7 days: no active trip service in the next 7 days"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
         "routable": false,
@@ -1158,7 +1093,7 @@
       "sourceType": "json",
       "feedUrl": "https://public.easyway.info/gps/chervonograd.json",
       "access": "open",
-      "license": "EasyWay (public.easyway.info); дані з відкритого порталу data.gov.ua",
+      "license": "CC BY (data.gov.ua license_id=cc-by; dataset 26ecf16b-f823-4e11-94f5-5e2dbb49b1a7, Шептицька міська рада; live delivery via EasyWay)",
       "updateFrequency": "реальний час",
       "coverageClaim": "Автобуси й маршрутки Червонограда",
       "sourceRef": "data.gov.ua:Шептицька міська рада",
@@ -1176,17 +1111,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 304,
+        "responseMs": 276,
         "measured": {
-          "vehicles": 16,
-          "timestamped": 16,
-          "vehicles_bus": 7,
-          "vehicles_marshrutka": 9,
-          "ageSeconds": 29
+          "vehicles": 12,
+          "ageSeconds": 21,
+          "timestamped": 12,
+          "vehicles_bus": 5,
+          "vehicles_marshrutka": 7
         },
         "failedChecks": []
       },
@@ -1211,8 +1146,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "EMPTY",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -1221,18 +1156,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 104,
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
         "measured": {},
-        "failedChecks": [
-          "Vehicle list found: 0 entries"
-        ]
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1244,7 +1177,7 @@
       "sourceType": "json",
       "feedUrl": "https://city.dozor.tech/uzhgorod/devices.json",
       "access": "open",
-      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "license": "CC BY 4.0 (data.gov.ua license_id=CC-BY-4.0; dataset 00d2939e-fe96-4099-9b0d-b8f6f9ce1399, Ужгородська міська рада; live delivery via Dozor)",
       "updateFrequency": "реальний час",
       "coverageClaim": "Позиції й типи транспорту Ужгорода",
       "sourceRef": "data.gov.ua:Ужгородська міська рада",
@@ -1262,18 +1195,20 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 104,
+        "responseMs": 163,
         "measured": {
-          "vehicles": 82,
-          "timestamped": 82,
-          "vehicles_bus": 82,
-          "ageSeconds": 32
+          "vehicles": 51,
+          "ageSeconds": -420312,
+          "timestamped": 51,
+          "vehicles_bus": 51
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Freshness: -420312s old; live threshold is 90s"
+        ]
       },
       "productUse": {
         "routable": true,
@@ -1286,9 +1221,9 @@
       "city": "Івано-Франківськ",
       "providerType": "public_transit",
       "sourceType": "json",
-      "feedUrl": "https://city.dozor.tech/iv-frankivsk/devices.json",
+      "feedUrl": "https://city.dozor.tech/ua/iv-frankivsk/devices.json",
       "access": "open",
-      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "license": "CC BY (data.gov.ua license_id=cc-by; dataset 89db154c-f923-4f0d-8d6e-420a2a6d9fef, Управління транспорту та зв’язку Івано-Франківської міської ради; live delivery via Dozor)",
       "updateFrequency": "реальний час",
       "coverageClaim": "Автобуси й тролейбуси Івано-Франківська",
       "sourceRef": "data.gov.ua:Управління транспорту Івано-Франківська",
@@ -1306,19 +1241,21 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 248,
+        "responseMs": 80,
         "measured": {
-          "vehicles": 174,
-          "timestamped": 174,
-          "vehicles_trolleybus": 39,
-          "vehicles_bus": 135,
-          "ageSeconds": 36
+          "vehicles": 107,
+          "ageSeconds": -6322,
+          "timestamped": 107,
+          "vehicles_bus": 90,
+          "vehicles_trolleybus": 17
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Freshness: -6322s old; live threshold is 90s"
+        ]
       },
       "productUse": {
         "routable": true,
@@ -1351,19 +1288,19 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 1210,
+        "responseMs": 1336,
         "measured": {
-          "vehicles": 6,
-          "timestamped": 6,
-          "vehicles_bus": 6,
-          "ageSeconds": 3
+          "vehicles": 229,
+          "ageSeconds": 1,
+          "timestamped": 229,
+          "vehicles_bus": 229
         },
         "failedChecks": [
-          "Coordinates: 6 valid, 458 invalid"
+          "Coordinates: 229 valid, 160 invalid"
         ]
       },
       "productUse": {
@@ -1387,9 +1324,9 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "EMPTY",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "BLOCKED_EXTERNAL",
+        "arrivalPredictions": "BLOCKED_EXTERNAL",
+        "serviceAlerts": "BLOCKED_EXTERNAL",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -1397,10 +1334,10 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "SKIPPED",
-        "skipReason": null,
+        "skipReason": "insecure_endpoint",
         "responseMs": null,
         "measured": {},
         "failedChecks": []
@@ -1426,8 +1363,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -1436,23 +1373,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 126,
-        "measured": {
-          "vehicles": 188,
-          "timestamped": 188,
-          "vehicles_marshrutka": 131,
-          "vehicles_trolleybus": 27,
-          "vehicles_bus": 30,
-          "ageSeconds": 1
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1470,8 +1400,8 @@
       "sourceRef": "mobilitydatabase.org:VD-Express",
       "priority": 30,
       "capabilities": {
-        "staticNetwork": "VERIFIED",
-        "timetables": "VERIFIED",
+        "staticNetwork": "NOT_MEASURED",
+        "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
         "serviceAlerts": "NOT_APPLICABLE",
@@ -1482,22 +1412,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 779,
-        "measured": {
-          "stops": 37,
-          "routes": 2,
-          "trips": 2,
-          "stopTimes": 72,
-          "routes_bus": 2
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1527,17 +1451,17 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 9104,
+        "responseMs": 5711,
         "measured": {
           "stops": 167,
-          "routes": 118,
-          "trips": 118,
-          "stopTimes": 1246,
-          "routes_train": 115,
+          "trips": 115,
+          "routes": 115,
+          "stopTimes": 1192,
+          "routes_train": 112,
           "routes_suburban": 3
         },
         "failedChecks": []
@@ -1573,19 +1497,19 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 1873,
+        "responseMs": 1153,
         "measured": {
-          "stops": 1528,
-          "routes": 165,
-          "trips": 24401,
-          "stopTimes": 104038,
+          "stops": 1774,
+          "trips": 27206,
+          "routes": 191,
+          "stopTimes": 115443,
+          "routes_bus": 130,
           "routes_tram": 17,
-          "routes_trolleybus": 44,
-          "routes_bus": 104
+          "routes_trolleybus": 44
         },
         "failedChecks": []
       },
@@ -1608,8 +1532,8 @@
       "sourceRef": "github.com/jqueguiner/gtfs (агрегатор GTFS-джерел)",
       "priority": 40,
       "capabilities": {
-        "staticNetwork": "VERIFIED",
-        "timetables": "VERIFIED",
+        "staticNetwork": "NOT_MEASURED",
+        "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
         "serviceAlerts": "NOT_APPLICABLE",
@@ -1620,22 +1544,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 567,
-        "measured": {
-          "stops": 239,
-          "routes": 15,
-          "trips": 2416,
-          "stopTimes": 55620,
-          "routes_bus": 15
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1655,8 +1573,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -1665,21 +1583,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 182,
-        "measured": {
-          "vehicles": 143,
-          "timestamped": 143,
-          "vehicles_bus": 143,
-          "ageSeconds": 16
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1697,8 +1610,8 @@
       "sourceRef": "github.com/jqueguiner/gtfs (агрегатор GTFS-джерел)",
       "priority": 40,
       "capabilities": {
-        "staticNetwork": "VERIFIED",
-        "timetables": "VERIFIED",
+        "staticNetwork": "NOT_MEASURED",
+        "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
         "serviceAlerts": "NOT_APPLICABLE",
@@ -1709,23 +1622,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 49,
-        "measured": {
-          "stops": 345,
-          "routes": 20,
-          "trips": 233,
-          "stopTimes": 6275,
-          "routes_bus": 19,
-          "routes_trolleybus": 1
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1745,8 +1651,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -1755,22 +1661,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 138,
-        "measured": {
-          "vehicles": 130,
-          "timestamped": 130,
-          "vehicles_bus": 129,
-          "vehicles_trolleybus": 1,
-          "ageSeconds": 24
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1788,7 +1688,7 @@
       "sourceRef": "github.com/jqueguiner/gtfs (агрегатор GTFS-джерел)",
       "priority": 40,
       "capabilities": {
-        "staticNetwork": "UNAVAILABLE",
+        "staticNetwork": "NOT_MEASURED",
         "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
@@ -1800,22 +1700,13 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "OFFLINE",
-        "skipReason": null,
-        "responseMs": 220,
-        "measured": {
-          "stops": 356,
-          "routes": 46,
-          "trips": 822,
-          "stopTimes": 20222,
-          "routes_trolleybus": 20,
-          "routes_bus": 26
-        },
-        "failedChecks": [
-          "Scheduled service in next 7 days: no active trip service in the next 7 days"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
         "routable": false,
@@ -1836,7 +1727,7 @@
       "sourceRef": "github.com/jqueguiner/gtfs (агрегатор GTFS-джерел)",
       "priority": 40,
       "capabilities": {
-        "staticNetwork": "UNAVAILABLE",
+        "staticNetwork": "NOT_MEASURED",
         "timetables": "UNAVAILABLE",
         "livePositions": "NOT_APPLICABLE",
         "arrivalPredictions": "NOT_APPLICABLE",
@@ -1848,21 +1739,13 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "OFFLINE",
-        "skipReason": null,
-        "responseMs": 107,
-        "measured": {
-          "stops": 184,
-          "routes": 12,
-          "trips": 169,
-          "stopTimes": 3344,
-          "routes_bus": 12
-        },
-        "failedChecks": [
-          "Scheduled service in next 7 days: no active trip service in the next 7 days"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
         "routable": false,
@@ -1885,8 +1768,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -1895,21 +1778,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 25,
-        "measured": {
-          "vehicles": 15,
-          "timestamped": 15,
-          "vehicles_bus": 15,
-          "ageSeconds": 32
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -1939,15 +1817,15 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 314,
+        "responseMs": 209,
         "measured": {
           "stops": 80,
-          "routes": 7,
           "trips": 560,
+          "routes": 7,
           "stopTimes": 7189,
           "routes_bus": 7
         },
@@ -1984,15 +1862,15 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 887,
+        "responseMs": 575,
         "measured": {
           "stops": 98,
-          "routes": 9,
           "trips": 250,
+          "routes": 9,
           "stopTimes": 4423,
           "routes_bus": 9
         },
@@ -2029,19 +1907,19 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 6567,
+        "responseMs": 4908,
         "measured": {
           "stops": 3719,
+          "trips": 11064,
           "routes": 87,
-          "trips": 11090,
-          "stopTimes": 470314,
+          "stopTimes": 469625,
+          "routes_bus": 62,
           "routes_tram": 18,
-          "routes_trolleybus": 7,
-          "routes_bus": 62
+          "routes_trolleybus": 7
         },
         "failedChecks": []
       },
@@ -2076,15 +1954,15 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "HEALTHY",
         "skipReason": null,
-        "responseMs": 276,
+        "responseMs": 96,
         "measured": {
           "stops": 129,
-          "routes": 4,
           "trips": 27,
+          "routes": 4,
           "stopTimes": 563,
           "routes_bus": 4
         },
@@ -2111,7 +1989,7 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
+        "livePositions": "EMPTY",
         "arrivalPredictions": "NONE_OBSERVED",
         "serviceAlerts": "NONE_OBSERVED",
         "pricing": "NOT_MEASURED",
@@ -2121,25 +1999,25 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 227,
+        "responseMs": 119,
         "measured": {
-          "vehicles": 4,
-          "tripUpdates": 0,
           "alerts": 0,
-          "vehicleEntities": 4,
-          "vehiclePositions": 4,
+          "vehicles": 0,
+          "ageSeconds": 0,
+          "tripUpdates": 0,
+          "vehicleEntities": 0,
+          "vehiclePositions": 0,
           "freshVehiclePositions": 0,
-          "staleVehiclePositions": 4,
-          "missingVehicleTimestamps": 0,
+          "staleVehiclePositions": 0,
           "missingVehiclePositions": 0,
-          "ageSeconds": 2
+          "missingVehicleTimestamps": 0
         },
         "failedChecks": [
-          "Individual vehicle positions: 0/4 vehicle entities have valid coordinates and fresh timestamps; 4 stale, 0 without timestamp, 0 without valid coordinates"
+          "Entities: 0 vehicles, 0 trip updates, 0 alerts"
         ]
       },
       "productUse": {
@@ -2163,9 +2041,9 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
+        "serviceAlerts": "NOT_MEASURED",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -2173,29 +2051,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 93,
-        "measured": {
-          "vehicles": 70,
-          "tripUpdates": 0,
-          "alerts": 0,
-          "vehicleEntities": 70,
-          "vehiclePositions": 70,
-          "freshVehiclePositions": 0,
-          "staleVehiclePositions": 70,
-          "missingVehicleTimestamps": 0,
-          "missingVehiclePositions": 0,
-          "ageSeconds": 7
-        },
-        "failedChecks": [
-          "Individual vehicle positions: 0/70 vehicle entities have valid coordinates and fresh timestamps; 70 stale, 0 without timestamp, 0 without valid coordinates"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2215,9 +2080,9 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
+        "serviceAlerts": "NOT_MEASURED",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -2225,29 +2090,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 23,
-        "measured": {
-          "vehicles": 59,
-          "tripUpdates": 0,
-          "alerts": 0,
-          "vehicleEntities": 59,
-          "vehiclePositions": 59,
-          "freshVehiclePositions": 47,
-          "staleVehiclePositions": 12,
-          "missingVehicleTimestamps": 0,
-          "missingVehiclePositions": 0,
-          "ageSeconds": 20
-        },
-        "failedChecks": [
-          "Individual vehicle positions: 47/59 vehicle entities have valid coordinates and fresh timestamps; 12 stale, 0 without timestamp, 0 without valid coordinates"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2267,9 +2119,9 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
+        "serviceAlerts": "NOT_MEASURED",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -2277,29 +2129,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 20,
-        "measured": {
-          "vehicles": 133,
-          "tripUpdates": 0,
-          "alerts": 0,
-          "vehicleEntities": 133,
-          "vehiclePositions": 133,
-          "freshVehiclePositions": 121,
-          "staleVehiclePositions": 12,
-          "missingVehicleTimestamps": 0,
-          "missingVehiclePositions": 0,
-          "ageSeconds": 15
-        },
-        "failedChecks": [
-          "Individual vehicle positions: 121/133 vehicle entities have valid coordinates and fresh timestamps; 12 stale, 0 without timestamp, 0 without valid coordinates"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2319,9 +2158,9 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
-        "serviceAlerts": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
+        "serviceAlerts": "NOT_MEASURED",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
         "reservation": "NOT_MEASURED",
@@ -2329,29 +2168,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 23,
-        "measured": {
-          "vehicles": 10,
-          "tripUpdates": 0,
-          "alerts": 0,
-          "vehicleEntities": 10,
-          "vehiclePositions": 10,
-          "freshVehiclePositions": 9,
-          "staleVehiclePositions": 1,
-          "missingVehicleTimestamps": 0,
-          "missingVehiclePositions": 0,
-          "ageSeconds": 6
-        },
-        "failedChecks": [
-          "Individual vehicle positions: 9/10 vehicle entities have valid coordinates and fresh timestamps; 1 stale, 0 without timestamp, 0 without valid coordinates"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2371,8 +2197,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2381,21 +2207,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 65,
-        "measured": {
-          "vehicles": 59,
-          "timestamped": 59,
-          "vehicles_bus": 59,
-          "ageSeconds": 4
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2415,8 +2236,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2425,23 +2246,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 128,
-        "measured": {
-          "vehicles": 196,
-          "timestamped": 196,
-          "vehicles_trolleybus": 39,
-          "vehicles_bus": 121,
-          "vehicles_tram": 36,
-          "ageSeconds": 34
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2461,8 +2275,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2471,23 +2285,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 110,
-        "measured": {
-          "vehicles": 56,
-          "timestamped": 56,
-          "vehicles_tram": 13,
-          "vehicles_trolleybus": 8,
-          "vehicles_bus": 35,
-          "ageSeconds": 21
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2507,8 +2314,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2517,22 +2324,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 45,
-        "measured": {
-          "vehicles": 90,
-          "timestamped": 90,
-          "vehicles_trolleybus": 21,
-          "vehicles_bus": 69,
-          "ageSeconds": 25
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2552,8 +2353,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2562,21 +2363,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 23,
-        "measured": {
-          "vehicles": 11,
-          "timestamped": 11,
-          "vehicles_bus": 11,
-          "ageSeconds": 24
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2596,8 +2392,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2606,22 +2402,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 122,
-        "measured": {
-          "vehicles": 76,
-          "timestamped": 76,
-          "vehicles_bus": 33,
-          "vehicles_trolleybus": 43,
-          "ageSeconds": 44
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2641,8 +2431,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2651,22 +2441,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 312,
-        "measured": {
-          "vehicles": 87,
-          "timestamped": 87,
-          "vehicles_bus": 37,
-          "vehicles_trolleybus": 50,
-          "ageSeconds": 21
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2686,8 +2470,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2696,24 +2480,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "DEGRADED",
-        "skipReason": null,
-        "responseMs": 20,
-        "measured": {
-          "vehicles": 7,
-          "timestamped": 7,
-          "vehicles_bus": 2,
-          "vehicles_trolleybus": 5,
-          "ageSeconds": 203
-        },
-        "failedChecks": [
-          "Freshness: 203s old; live threshold is 90s"
-        ]
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
+        "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2733,8 +2509,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2743,23 +2519,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 473,
-        "measured": {
-          "vehicles": 49,
-          "timestamped": 49,
-          "vehicles_trolleybus": 16,
-          "vehicles_tram": 20,
-          "vehicles_bus": 13,
-          "ageSeconds": 12
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2779,8 +2548,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2789,22 +2558,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 290,
-        "measured": {
-          "vehicles": 140,
-          "timestamped": 140,
-          "vehicles_bus": 95,
-          "vehicles_trolleybus": 45,
-          "ageSeconds": 17
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2824,8 +2587,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2834,21 +2597,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 68,
-        "measured": {
-          "vehicles": 35,
-          "timestamped": 35,
-          "vehicles_bus": 35,
-          "ageSeconds": 33
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2868,8 +2626,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2878,21 +2636,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 22,
-        "measured": {
-          "vehicles": 18,
-          "timestamped": 18,
-          "vehicles_bus": 18,
-          "ageSeconds": 22
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2912,8 +2665,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2922,21 +2675,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 21,
-        "measured": {
-          "vehicles": 15,
-          "timestamped": 15,
-          "vehicles_bus": 15,
-          "ageSeconds": 33
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -2956,8 +2704,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -2966,21 +2714,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 117,
-        "measured": {
-          "vehicles": 55,
-          "timestamped": 55,
-          "vehicles_bus": 55,
-          "ageSeconds": 16
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3000,8 +2743,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3010,21 +2753,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 23,
-        "measured": {
-          "vehicles": 11,
-          "timestamped": 11,
-          "vehicles_bus": 11,
-          "ageSeconds": 34
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3044,8 +2782,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3054,21 +2792,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 36,
-        "measured": {
-          "vehicles": 9,
-          "timestamped": 9,
-          "vehicles_bus": 9,
-          "ageSeconds": 18
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3088,8 +2821,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3098,21 +2831,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 22,
-        "measured": {
-          "vehicles": 5,
-          "timestamped": 5,
-          "vehicles_bus": 5,
-          "ageSeconds": 29
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3132,8 +2860,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3142,21 +2870,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 22,
-        "measured": {
-          "vehicles": 13,
-          "timestamped": 13,
-          "vehicles_bus": 13,
-          "ageSeconds": 35
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3176,8 +2899,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3186,21 +2909,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 82,
-        "measured": {
-          "vehicles": 13,
-          "timestamped": 13,
-          "vehicles_marshrutka": 13,
-          "ageSeconds": 35
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3220,8 +2938,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3230,21 +2948,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 20,
-        "measured": {
-          "vehicles": 7,
-          "timestamped": 7,
-          "vehicles_bus": 7,
-          "ageSeconds": 35
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3264,8 +2977,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3274,21 +2987,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 19,
-        "measured": {
-          "vehicles": 3,
-          "timestamped": 3,
-          "vehicles_bus": 3,
-          "ageSeconds": 22
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3308,8 +3016,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3318,21 +3026,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 21,
-        "measured": {
-          "vehicles": 4,
-          "timestamped": 4,
-          "vehicles_bus": 4,
-          "ageSeconds": 44
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3352,8 +3055,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3362,21 +3065,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 25,
-        "measured": {
-          "vehicles": 4,
-          "timestamped": 4,
-          "vehicles_bus": 4,
-          "ageSeconds": 44
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3388,7 +3086,7 @@
       "sourceType": "json",
       "feedUrl": "https://city.dozor.tech/rivne/devices.json",
       "access": "open",
-      "license": "Платформа Dozor (city.dozor.tech); дані з відкритого порталу data.gov.ua",
+      "license": "CC BY (data.gov.ua license_id=cc-by; dataset d882a887-ebcd-4fc4-95ea-2dd2850a521f, Рівненська міська рада; live delivery via Dozor)",
       "updateFrequency": "реальний час",
       "coverageClaim": "Тролейбуси й автобуси Рівного (Dozor)",
       "sourceRef": "probe:city.dozor.tech",
@@ -3406,19 +3104,21 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
+        "state": "DEGRADED",
         "skipReason": null,
-        "responseMs": 206,
+        "responseMs": 211,
         "measured": {
-          "vehicles": 155,
-          "timestamped": 155,
-          "vehicles_bus": 114,
-          "vehicles_trolleybus": 41,
-          "ageSeconds": 28
+          "vehicles": 73,
+          "ageSeconds": -1756,
+          "timestamped": 73,
+          "vehicles_bus": 66,
+          "vehicles_trolleybus": 7
         },
-        "failedChecks": []
+        "failedChecks": [
+          "Freshness: -1756s old; live threshold is 90s"
+        ]
       },
       "productUse": {
         "routable": true,
@@ -3441,8 +3141,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3451,22 +3151,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 147,
-        "measured": {
-          "vehicles": 142,
-          "timestamped": 142,
-          "vehicles_bus": 100,
-          "vehicles_trolleybus": 42,
-          "ageSeconds": 50
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3486,8 +3180,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3496,21 +3190,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 90,
-        "measured": {
-          "vehicles": 199,
-          "timestamped": 199,
-          "vehicles_bus": 199,
-          "ageSeconds": 45
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3530,8 +3219,8 @@
       "capabilities": {
         "staticNetwork": "NOT_APPLICABLE",
         "timetables": "NOT_APPLICABLE",
-        "livePositions": "VERIFIED_LIVE",
-        "arrivalPredictions": "NONE_OBSERVED",
+        "livePositions": "NOT_MEASURED",
+        "arrivalPredictions": "NOT_MEASURED",
         "serviceAlerts": "NOT_APPLICABLE",
         "pricing": "NOT_MEASURED",
         "seatAvailability": "NOT_APPLICABLE",
@@ -3540,22 +3229,16 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
-        "state": "HEALTHY",
-        "skipReason": null,
-        "responseMs": 178,
-        "measured": {
-          "vehicles": 172,
-          "timestamped": 172,
-          "vehicles_trolleybus": 27,
-          "vehicles_bus": 145,
-          "ageSeconds": 42
-        },
+        "state": "SKIPPED",
+        "skipReason": "license_unverified",
+        "responseMs": null,
+        "measured": {},
         "failedChecks": []
       },
       "productUse": {
-        "routable": true,
+        "routable": false,
         "evidenceNote": "routable means the feed parses and is reachable today; it is not a commercial permission or booking guarantee"
       }
     },
@@ -3585,14 +3268,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 502,
+        "responseMs": 376,
         "measured": {},
         "failedChecks": [
-          "Kyiv Open Data schedule API: Host cannot be resolved"
+          "Feed accessible: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -3626,14 +3309,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 57,
+        "responseMs": 1,
         "measured": {},
         "failedChecks": [
-          "Kyiv Open Data schedule API: Host cannot be resolved"
+          "Feed accessible: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -3667,14 +3350,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
         "responseMs": 2,
         "measured": {},
         "failedChecks": [
-          "Kyiv Open Data schedule API: Host cannot be resolved"
+          "Feed accessible: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -3708,14 +3391,14 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 2,
+        "responseMs": 1,
         "measured": {},
         "failedChecks": [
-          "Kyiv Open Data schedule API: Host cannot be resolved"
+          "Feed accessible: Host cannot be resolved"
         ]
       },
       "productUse": {
@@ -3749,11 +3432,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 4,
+        "responseMs": 1,
         "measured": {},
         "failedChecks": [
           "Kyiv Open Data schedule API: Host cannot be resolved"
@@ -3790,11 +3473,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 293,
+        "responseMs": 185,
         "measured": {},
         "failedChecks": [
           "Kyiv Open Data schedule API: Host cannot be resolved"
@@ -3831,11 +3514,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 139,
+        "responseMs": 209,
         "measured": {},
         "failedChecks": [
           "Kyiv Open Data schedule API: Host cannot be resolved"
@@ -3872,11 +3555,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 127,
+        "responseMs": 120,
         "measured": {},
         "failedChecks": [
           "Kyiv Open Data schedule API: Host cannot be resolved"
@@ -3893,11 +3576,11 @@
       "city": "Київ",
       "providerType": "public_transit",
       "sourceType": "geojson",
-      "feedUrl": "https://data.kyivcity.gov.ua/dataset/rozklad-rukhu-miskoho-elektrychnoho-ta-avtomobilnoho-transportu-dep-transport/resource/77325f5c-57d0-4f79-844a-cc73675f9743/data/download",
+      "feedUrl": "https://gisserver.kyivcity.gov.ua/mayno/rest/services/KYIV_API/transport_public/MapServer/1/query?where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&f=geojson",
       "access": "open",
       "license": "Kyiv Open Data Licence (commercial use permitted; attribution to data.kyivcity.gov.ua)",
       "updateFrequency": "портал оновлює набір кілька разів на день",
-      "coverageClaim": "Геометрія сегментів регулярних автобусних маршрутів у режимі маршрутного таксі; без realtime",
+      "coverageClaim": "Геометрія сегментів регулярних автобусних маршрутів у режимі маршрутного таксі; без realtime, розкладу та бронювання",
       "sourceRef": "https://data.kyivcity.gov.ua/dataset/rozklad-rukhu-miskoho-elektrychnoho-ta-avtomobilnoho-transportu-dep-transport#routeTaxi",
       "priority": 10,
       "capabilities": {
@@ -3913,11 +3596,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 154,
+        "responseMs": 1,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -3954,11 +3637,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 0,
+        "responseMs": 1,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -3995,11 +3678,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 1,
+        "responseMs": 0,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -4036,11 +3719,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 133,
+        "responseMs": 182,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -4077,11 +3760,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 185,
+        "responseMs": 195,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -4118,11 +3801,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 177,
+        "responseMs": 91,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
@@ -4159,11 +3842,11 @@
         "deepLink": "NOT_MEASURED"
       },
       "probe": {
-        "checkedAt": "2026-11-04T15:11:12.378Z",
+        "checkedAt": "2026-11-11T19:36:30.325Z",
         "tool": "npm run acceptance:transport-feeds",
         "state": "OFFLINE",
         "skipReason": null,
-        "responseMs": 104,
+        "responseMs": 124,
         "measured": {},
         "failedChecks": [
           "GeoJSON feed: Host cannot be resolved"
