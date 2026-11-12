@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { canEnableCommercialProvider } from '../server/mobility/licensePolicy';
 import { initialMobilityProviderStatus, selectMobilitySeedEntries } from '../server/mobility/seedScope';
 import { kyivOpenDataCatalog, ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3 } from '../server/mobility/ukraineCatalog';
 
@@ -57,3 +60,46 @@ test('only a new source with validated commercial access gets an enabled default
   assert.equal(initialMobilityProviderStatus(true), 'enabled');
   assert.equal(initialMobilityProviderStatus(false), 'disabled');
 });
+
+for (const feedUrl of [
+  'https://track.ua-gis.com/gtfs/uzhhorod/static.zip',
+  'https://city.dozor.tech/iv-frankivsk/gtfs/static.zip',
+]) {
+  test(`schedule dataset metadata alone cannot activate an unverified archive: ${feedUrl}`, () => {
+    const entry = catalog.find((row) => row.feedUrl === feedUrl);
+    assert.ok(entry);
+    assert.equal(canEnableCommercialProvider(entry.access, entry.license), false);
+    assert.equal(initialMobilityProviderStatus(canEnableCommercialProvider(entry.access, entry.license)), 'disabled');
+  });
+}
+
+for (const status of ['enabled', 'disabled', 'paused']) {
+  test(`catalog upsert preserves an existing ${status} decision in an in-memory SQL fixture`, () => {
+    const source = readFileSync(new URL('../server/mobility/seedUkraine.ts', import.meta.url), 'utf8');
+    const statements = [...source.matchAll(/`(INSERT INTO mobility_providers[\s\S]*?RETURNING id,status)`/g)];
+    assert.equal(statements.length, 1);
+    const db = new DatabaseSync(':memory:');
+    try {
+      db.function('now', () => '2026-11-12T00:00:00Z');
+      db.exec(`CREATE TABLE mobility_providers (
+        id TEXT DEFAULT 'fixture-provider', name TEXT, city TEXT, provider_type TEXT,
+        source_type TEXT, feed_url TEXT, realtime_url TEXT, vehicle_position_url TEXT,
+        priority INTEGER, access TEXT, license TEXT, update_frequency TEXT, coverage TEXT,
+        source_ref TEXT, country TEXT, commercial_use INTEGER, attribution_required INTEGER,
+        discovery_status TEXT, status TEXT, updated_at TEXT, UNIQUE(name, city)
+      )`);
+      const upsert = db.prepare(statements[0][1]);
+      const values = ['fixture', 'fixture-city', 'public_transit', 'gtfs', 'https://example.test/old.zip', null,
+        null, 10, 'open', null, null, 'fixture', 'fixture', 0, 0, 'DISCOVERED', status];
+      const parameters = Object.fromEntries(values.map((value, index) => [String(index + 1), value]));
+      upsert.get(parameters);
+      const refreshed = upsert.get({ ...parameters, '5': 'https://example.test/new.zip', '10': 'CC BY 4.0',
+        '14': 1, '15': 1, '16': 'VALIDATED', '17': initialMobilityProviderStatus(true) });
+      assert.equal(refreshed?.status, status);
+      assert.equal(db.prepare('SELECT feed_url FROM mobility_providers').get()?.feed_url, 'https://example.test/new.zip');
+      assert.equal(db.prepare('SELECT count(*) AS total FROM mobility_providers').get()?.total, 1);
+    } finally {
+      db.close();
+    }
+  });
+}
