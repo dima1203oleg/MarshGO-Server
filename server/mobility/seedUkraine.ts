@@ -5,7 +5,7 @@ import { canEnableCommercialProvider, commercialUseFromLicense } from './license
 import { initialMobilityProviderStatus, selectMobilitySeedEntries } from './seedScope';
 import { kyivOpenDataCatalog, ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3 } from './ukraineCatalog';
 
-/** Registers catalogue sources and refreshes health. A feed whose commercial access is newly validated is (re)connected; an admin/monitor pause is preserved. */
+// Revalidating a license must not override an existing admin disable or pause.
 async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {
@@ -18,7 +18,7 @@ async function main() {
       const { rows } = await pool.query<{ id: string; status: 'enabled' | 'disabled' | 'paused' }>(
         `INSERT INTO mobility_providers(name,city,provider_type,source_type,feed_url,realtime_url,vehicle_position_url,priority,access,license,update_frequency,coverage,source_ref,country,commercial_use,attribution_required,discovery_status,status)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'UA',$14,$15,$16,$17)
-         ON CONFLICT (name,city) DO UPDATE SET feed_url=EXCLUDED.feed_url,realtime_url=COALESCE(EXCLUDED.realtime_url,mobility_providers.realtime_url),vehicle_position_url=COALESCE(EXCLUDED.vehicle_position_url,mobility_providers.vehicle_position_url),access=EXCLUDED.access,license=EXCLUDED.license,update_frequency=EXCLUDED.update_frequency,coverage=EXCLUDED.coverage,source_ref=EXCLUDED.source_ref,commercial_use=EXCLUDED.commercial_use,attribution_required=EXCLUDED.attribution_required,discovery_status=EXCLUDED.discovery_status,status=CASE WHEN EXCLUDED.status='enabled' AND mobility_providers.status='disabled' THEN 'enabled' ELSE mobility_providers.status END,updated_at=now()
+         ON CONFLICT (name,city) DO UPDATE SET feed_url=EXCLUDED.feed_url,realtime_url=COALESCE(EXCLUDED.realtime_url,mobility_providers.realtime_url),vehicle_position_url=COALESCE(EXCLUDED.vehicle_position_url,mobility_providers.vehicle_position_url),access=EXCLUDED.access,license=EXCLUDED.license,update_frequency=EXCLUDED.update_frequency,coverage=EXCLUDED.coverage,source_ref=EXCLUDED.source_ref,commercial_use=EXCLUDED.commercial_use,attribution_required=EXCLUDED.attribution_required,discovery_status=EXCLUDED.discovery_status,updated_at=now()
          RETURNING id,status`,
         [entry.name, entry.city, entry.providerType, entry.sourceType, entry.feedUrl, entry.realtimeUrl ?? null, entry.vehiclePositionUrl ?? null, entry.priority ?? 100, entry.access, entry.license ?? null, entry.updateFrequency ?? null, entry.coverage, entry.sourceRef,
           entry.access === 'open' ? commercialUseFromLicense(entry.license) : null,
