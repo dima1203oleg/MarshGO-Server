@@ -1526,7 +1526,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     });
     assert.equal(counter.status, 200);
     const prematureAccept = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/accept`, {
-      method: 'POST', headers: headers(passengerA),
+      method: 'POST', headers: headers(passengerA), body: JSON.stringify({ expectedRevision: 2 }),
     });
     assert.equal(prematureAccept.status, 409);
     const agreedByDriver = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/agree`, {
@@ -1541,8 +1541,30 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(proposalHistory.data[2].actor_role, 'driver');
     assert.equal(proposalHistory.data[2].price_minor, 15000);
 
+    const acceptanceSnapshot = async () => (await pool.query(
+      `SELECT p.status,p.revision_number,p.price_minor,d.status AS demand_status,
+        (SELECT count(*)::int FROM offers WHERE driver_id=$2) AS offers,
+        (SELECT count(*)::int FROM bookings WHERE passenger_id=$3) AS bookings,
+        (SELECT count(*)::int FROM conversations c JOIN bookings b ON b.id=c.booking_id WHERE b.passenger_id=$3) AS conversations,
+        (SELECT count(*)::int FROM audit_events WHERE entity_id=$1) AS audit_events,
+        (SELECT count(*)::int FROM realtime_outbox WHERE payload->>'proposal_id'=$1::text) AS events
+       FROM proposals p JOIN passenger_demands d ON d.id=p.demand_id WHERE p.id=$1`,
+      [proposal.data.id, ids.driver, passengerA],
+    )).rows[0];
+    const beforeAcceptance = await acceptanceSnapshot();
+    assert.ok(beforeAcceptance);
+    assert.equal(beforeAcceptance.revision_number, 3);
+    assert.equal(beforeAcceptance.price_minor, 15000);
+    assert.equal(beforeAcceptance.status, 'pending');
+    for (const [input, expectedStatus] of [[{}, 400], [{ expectedRevision: '3' }, 400], [{ expectedRevision: 1 }, 409], [{ expectedRevision: 2 }, 409]] as const) {
+      const rejectedAcceptance = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/accept`, {
+        method: 'POST', headers: headers(passengerA), body: JSON.stringify(input),
+      });
+      assert.equal(rejectedAcceptance.status, expectedStatus);
+      assert.deepEqual(await acceptanceSnapshot(), beforeAcceptance, 'rejected acceptance must not alter price, inventory, booking, chat or events');
+    }
     const accepted = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/accept`, {
-      method: 'POST', headers: headers(passengerA),
+      method: 'POST', headers: headers(passengerA), body: JSON.stringify({ expectedRevision: 3 }),
     });
     assert.equal(accepted.status, 201);
     const booking = await accepted.json() as { data: { id: string; total_price_minor: number; seat_count: number; platform_fee_minor: number; fee_class: string; fee_rule_version: string }; agreedTotalMinor: number };
@@ -1579,7 +1601,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
       competingProposalIds.push((await competingProposalResponse.json() as { data: { id: string } }).data.id);
     }
     const simultaneousAccepts = await Promise.all(competingProposalIds.map(proposalId => fetch(`${apiUrl}/api/v1/proposals/${proposalId}/accept`, {
-      method: 'POST', headers: headers(passengerA),
+      method: 'POST', headers: headers(passengerA), body: JSON.stringify({ expectedRevision: 1 }),
     })));
     assert.deepEqual(simultaneousAccepts.map(response => response.status).sort(), [201, 409]);
     const raceState = await pool.query<{ demand_status: string; accepted_count: string; rejected_count: string; booking_count: string }>(
@@ -1686,7 +1708,7 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     ]);
 
     const duplicateAccept = await fetch(`${apiUrl}/api/v1/proposals/${proposal.data.id}/accept`, {
-      method: 'POST', headers: headers(passengerA),
+      method: 'POST', headers: headers(passengerA), body: JSON.stringify({ expectedRevision: 3 }),
     });
     assert.equal(duplicateAccept.status, 409);
     const matchedDemandReload = await fetch(`${apiUrl}/api/v1/demands/${proposal.data.demand_id}`, { headers: headers(ids.driver) });

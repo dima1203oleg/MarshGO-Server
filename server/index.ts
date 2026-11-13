@@ -6507,6 +6507,8 @@ app.post('/api/v1/proposals/:id/agree', requireAuth, requireRole('driver'), asyn
 }));
 
 app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, res) => {
+  const { expectedRevision } = req.body ?? {};
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) throw new ApiError(400, 'invalid proposal revision');
   let navigationPlan: {
     candidateId: string; sessionId: string; routeVersion: number; currentLocation: [number, number]; originalDestination: [number, number];
     origin: [number, number]; destination: [number, number]; originName: string; destinationName: string;
@@ -6601,11 +6603,12 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     if (!demand || demand.passenger_id !== req.userId) throw new ApiError(404, 'demand unavailable');
     if (demand.status !== 'open') throw new ApiError(409, 'demand has already been resolved');
     const { rows: proposalRows } = await client.query<{
-      id: string; driver_id: string; vehicle_id: string; price_minor: number; departure_at: Date; status: string; expires_at: Date; navigation_candidate_id: string | null;
-    }>('SELECT id,driver_id,vehicle_id,price_minor,departure_at,status,expires_at,navigation_candidate_id FROM proposals WHERE id=$1 AND demand_id=$2 FOR UPDATE', [req.params.id, demand.id]);
+      id: string; driver_id: string; vehicle_id: string; price_minor: number; departure_at: Date; status: string; expires_at: Date; navigation_candidate_id: string | null; revision_number: number;
+    }>('SELECT id,driver_id,vehicle_id,price_minor,departure_at,status,expires_at,navigation_candidate_id,revision_number FROM proposals WHERE id=$1 AND demand_id=$2 FOR UPDATE', [req.params.id, demand.id]);
     const proposal = proposalRows[0];
     if (!proposal || proposal.status !== 'pending' || new Date(proposal.expires_at) <= new Date()) throw new ApiError(409, 'proposal is no longer available');
     if (await usersBlockEachOther(proposal.driver_id, demand.passenger_id, client)) throw new ApiError(404, 'proposal unavailable');
+    if (proposal.revision_number !== expectedRevision) throw new ApiError(409, 'Proposal changed; refresh its terms before confirming', 'proposal_revision_changed');
     if (proposal.navigation_candidate_id) {
       if (!navigationPlan || navigationPlan.candidateId !== proposal.navigation_candidate_id) {
         throw new ApiError(409, 'navigation route could not be prepared', 'navigation_candidate_unavailable');

@@ -195,7 +195,7 @@ describe('foreground navigation session API (opt-in local integration test)', { 
       body: JSON.stringify({ vehicleId: vehicle, priceMinor: 30000, departureAt: departureStart.toISOString(), navigationCandidateId: candidate.id }),
     });
     assert.equal(duplicateProposal.status, 409, 'one candidate can produce only one proposal');
-    const acceptedNavigationProposal = await fetch(`${apiUrl}/api/v1/proposals/${linkedProposal.id}/accept`, { method: 'POST', headers: headers(passenger) });
+    const acceptedNavigationProposal = await fetch(`${apiUrl}/api/v1/proposals/${linkedProposal.id}/accept`, { method: 'POST', headers: headers(passenger), body: JSON.stringify({ expectedRevision: 1 }) });
     assert.equal(acceptedNavigationProposal.status, 201, 'passenger confirmation of the price creates the single booking and updates the route');
     const acceptedBody = await acceptedNavigationProposal.json() as { data: { id: string; offer_id: string; status: string; total_price_minor: number } };
     bookingIds.push(acceptedBody.data.id); acceptedOfferIds.push(acceptedBody.data.offer_id);
@@ -242,7 +242,7 @@ describe('foreground navigation session API (opt-in local integration test)', { 
     });
     assert.equal(secondProposalResponse.status, 201);
     const secondProposal = (await secondProposalResponse.json() as { data: { id: string } }).data;
-    const secondAccepted = await fetch(`${apiUrl}/api/v1/proposals/${secondProposal.id}/accept`, { method: 'POST', headers: headers(passengerTwo) });
+    const secondAccepted = await fetch(`${apiUrl}/api/v1/proposals/${secondProposal.id}/accept`, { method: 'POST', headers: headers(passengerTwo), body: JSON.stringify({ expectedRevision: 1 }) });
     assert.equal(secondAccepted.status, 201, 'both passengers are attached to the navigation route after explicit mutual agreement');
     const secondAcceptedData = (await secondAccepted.json() as { data: { id: string; offer_id: string } }).data;
     bookingIds.push(secondAcceptedData.id); acceptedOfferIds.push(secondAcceptedData.offer_id);
@@ -264,7 +264,7 @@ describe('foreground navigation session API (opt-in local integration test)', { 
       method: 'PATCH', headers: headers(driver), body: JSON.stringify({ enabled: false }),
     });
     assert.equal(optOut.status, 200);
-    const staleProposalAccept = await fetch(`${apiUrl}/api/v1/proposals/${linkedProposal.id}/accept`, { method: 'POST', headers: headers(passenger) });
+    const staleProposalAccept = await fetch(`${apiUrl}/api/v1/proposals/${linkedProposal.id}/accept`, { method: 'POST', headers: headers(passenger), body: JSON.stringify({ expectedRevision: 1 }) });
     assert.equal(staleProposalAccept.status, 409, 'a navigation proposal cannot be accepted a second time');
     const withdrawnMatches = await fetch(`${apiUrl}/api/v1/demands/mine/navigation-matches`, { headers: headers(passenger) });
     assert.equal((await withdrawnMatches.json() as { data: Array<{ candidate_id: string }> }).data.some((item) => item.candidate_id === candidate.id), false);
