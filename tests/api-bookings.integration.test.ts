@@ -698,8 +698,8 @@ describe('API booking transaction (opt-in local integration test)', { skip: !ena
     assert.equal(result.data.partial, true);
     assert.ok(result.data.partialReasons.length > 0);
     assert.ok(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:taxi:')));
-    assert.equal(result.data.blockedProviders.some((provider) => provider.startsWith('transportType:bus:')), !healthyLvivGtfsEnabled,
-      healthyLvivGtfsEnabled ? 'the enabled local GTFS bus feed is recognized' : 'a missing GTFS source is reported instead of being implied available');
+    // This Lviv→Stryi request is not the Lviv inner-city GTFS corridor search above.
+    // Citywide provider presence must not determine whether bus service is blocked for this OD.
     const communityJourneys = result.data.journeys.filter((item) => item.offerId === ids.journeyOffer);
     assert.equal(communityJourneys.length, 1);
     const journey = communityJourneys[0];

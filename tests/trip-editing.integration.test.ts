@@ -13,7 +13,11 @@ describe('editing and cancelling a published trip (opt-in local integration test
   const pool = new Pool({ connectionString: databaseUrl });
   const driver = crypto.randomUUID(), passengerA = crypto.randomUUID(), passengerB = crypto.randomUUID(), stranger = crypto.randomUUID();
   const vehicle = crypto.randomUUID(), vehicleTwo = crypto.randomUUID(), smallVehicle = crypto.randomUUID(), offer = crypto.randomUUID();
-  const testPlates = Array.from({ length: 3 }, () => `EDIT${crypto.randomBytes(3).toString('hex').slice(0, 3).toUpperCase()}`);
+  const testPlates = (() => {
+    const plates = new Set<string>();
+    while (plates.size < 3) plates.add(`EDIT${crypto.randomInt(36 ** 4).toString(36).toUpperCase().padStart(4, '0')}`);
+    return [...plates];
+  })();
   const headers = (userId: string, extra: Record<string, string> = {}) => ({ 'content-type': 'application/json', 'x-dev-user-id': userId, ...extra });
   const call = (path: string, userId: string, method = 'GET', body?: unknown) => fetch(`${apiUrl}/api/v1${path}`, { method, headers: headers(userId), body: body === undefined ? undefined : JSON.stringify(body) });
   const departure = new Date(Date.now() + 3 * 86_400_000);
