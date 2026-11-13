@@ -89,6 +89,8 @@ API_TEST_GTFS_FIXTURE=1 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE
 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:interval
 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:live-drivers
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:partners
 stop_api
 

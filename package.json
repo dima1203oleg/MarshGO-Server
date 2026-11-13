@@ -15,6 +15,7 @@
     "test": "tsx --test tests/*.test.ts",
     "test:integration:bookings": "tsx --test tests/api-bookings.integration.test.ts tests/trip-editing.integration.test.ts",
     "test:integration:interval": "tsx --test tests/carpool-interval-inventory.integration.test.ts",
+    "test:integration:live-drivers": "tsx --test tests/carpool-live-driver-discovery.integration.test.ts",
     "test:integration:navigation": "tsx --test tests/navigation.integration.test.ts",
     "test:integration:realtime": "tsx --test tests/realtime-cluster.integration.test.ts",
     "test:integration:partners": "tsx --test tests/partner-platform.integration.test.ts",

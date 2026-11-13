@@ -1727,6 +1727,68 @@ app.get('/api/v1/demands/mine/navigation-matches', requireAuth, requireRole('pas
   res.json({ data: rows });
 }));
 
+// S1 corridor prefilter (inverse of refreshNavigationMatches): privacy-safe cards, no GPS/route geometry; S2 stop/walking/capacity feasibility runs later at interest/accept.
+app.get('/api/v1/demands/:id/live-drivers', requireAuth, requireRole('passenger'), asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid demand ID', 'invalid_demand_id');
+  }
+  const { rows: demandRows } = await pool.query<{ id: string; passenger_id: string; status: string }>(
+    'SELECT id,passenger_id,status FROM passenger_demands WHERE id=$1', [req.params.id],
+  );
+  const demand = demandRows[0];
+  if (!demand || demand.passenger_id !== req.userId) throw new ApiError(404, 'demand unavailable');
+  if (demand.status !== 'open') throw new ApiError(409, 'Only an open demand can search for live drivers', 'demand_not_open');
+  const corridorMeters = Math.max(500, Math.min(10_000, Number(process.env.NAVIGATION_MATCH_CORRIDOR_METERS) || 3_000));
+  const { rows } = await pool.query<{
+    session_id: string; route_version: number; driver_name: string;
+    vehicle_make: string | null; vehicle_model: string | null;
+    available_seats: number; origin_corridor_m: number; destination_corridor_m: number;
+  }>(
+    `WITH d AS (
+       SELECT id,passenger_id,origin,destination,passenger_count,latest_departure
+       FROM passenger_demands WHERE id=$1
+     ), remaining AS (
+       SELECT s.id,s.driver_id,s.vehicle_id,s.vehicle_seat_count,s.route_version,
+         s.route AS full_route,s.current_location,
+         ST_LineSubstring(s.route,
+           LEAST(1,GREATEST(0,ST_LineLocatePoint(s.route,s.current_location::geometry))),1) AS route
+       FROM navigation_sessions s
+       WHERE s.state='active' AND s.opt_in=true AND s.route IS NOT NULL AND s.destination IS NOT NULL
+         AND s.current_location IS NOT NULL AND s.vehicle_seat_count IS NOT NULL AND s.vehicle_seat_count>0
+         AND s.current_location_at>now()-interval '60 seconds'
+     ), occupancy AS (
+       SELECT w.navigation_session_id,COALESCE(SUM(b.seat_count),0)::int AS onboard_seats
+       FROM navigation_waypoints w JOIN bookings b ON b.id=w.booking_id
+       WHERE w.kind='pickup' AND w.state='visited' AND b.status IN ('confirmed','boarding','in_progress')
+         AND EXISTS(SELECT 1 FROM navigation_waypoints d2
+           WHERE d2.navigation_session_id=w.navigation_session_id AND d2.booking_id=w.booking_id
+             AND d2.kind='dropoff' AND d2.state<>'visited')
+       GROUP BY w.navigation_session_id
+     )
+     SELECT r.id AS session_id,r.route_version,u.display_name AS driver_name,
+       v.make AS vehicle_make,v.model AS vehicle_model,
+       (r.vehicle_seat_count-COALESCE(o.onboard_seats,0))::int AS available_seats,
+       ROUND(ST_Distance(r.route::geography,d.origin))::int AS origin_corridor_m,
+       ROUND(ST_Distance(r.route::geography,d.destination))::int AS destination_corridor_m
+     FROM d JOIN remaining r ON r.driver_id<>d.passenger_id
+     JOIN users u ON u.id=r.driver_id
+     LEFT JOIN vehicles v ON v.id=r.vehicle_id
+     LEFT JOIN occupancy o ON o.navigation_session_id=r.id
+     WHERE d.latest_departure>now()
+       AND NOT EXISTS(SELECT 1 FROM user_blocks b
+         WHERE (b.blocker_id=d.passenger_id AND b.blocked_id=r.driver_id) OR (b.blocker_id=r.driver_id AND b.blocked_id=d.passenger_id))
+       AND ST_DWithin(r.full_route::geography,d.origin,$2)
+       AND ST_DWithin(r.full_route::geography,d.destination,$2)
+       AND ST_DWithin(r.route::geography,d.origin,$2)
+       AND ST_DWithin(r.route::geography,d.destination,$2)
+       AND ST_LineLocatePoint(r.full_route,d.origin::geometry)>ST_LineLocatePoint(r.full_route,r.current_location::geometry)
+       AND ST_LineLocatePoint(r.full_route,d.destination::geometry)>ST_LineLocatePoint(r.full_route,d.origin::geometry)
+       AND (r.vehicle_seat_count-COALESCE(o.onboard_seats,0))>=d.passenger_count
+     ORDER BY origin_corridor_m ASC LIMIT 20`, [req.params.id, corridorMeters],
+  );
+  res.json({ data: rows.map((row) => ({ ...row, match_kind: 'LIVE', confidence: 'GIS_PREFILTER', requires_confirmation: true })) });
+}));
+
 app.post('/api/v1/navigation/matches/:candidateId/passenger-confirm', requireAuth, requireRole('passenger'), asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
