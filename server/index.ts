@@ -31,12 +31,15 @@ import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRo
 import { enrichMicromobilityLegGeometry } from './journey/micromobilityGeometry';
 import { routeBicyclePath } from './journey/bicycleRoutes';
 import { createDirectWalkingCandidate, directWalkingGeometryConnectsEndpoints, MAX_DIRECT_WALK_CANDIDATE_STRAIGHT_LINE_METERS, type DirectWalkingCandidate } from './journey/directWalkingCandidate';
+import { routeMultimodalWalks } from './journey/multimodalWalkRouter';
+import { generatePedestrianGeometry } from '../shared/navigation/pedestrianGeometry';
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { legProvenanceMetadata, sanitizePersistedJourney, trustedRouteGeometry } from './journey/legGeometryProvenance';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor, gtfsProvidersInRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
+import { matchRouteProgress, type LonLat, type PreviousProgress } from './navigation/routeProgress';
 import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePrices } from './journey/scoring';
 import { buildSearchCompleteness, routeTypesWithUsableProviderData } from './journey/searchCompleteness';
 import { journeyTransportTypeSelected, type JourneyLegMode, type JourneyOption, type JourneyStrategy } from './journey/types';
@@ -45,11 +48,14 @@ import { cachedSnapshot, selectNearby } from './mobility/nearby';
 import { aggregateDataQuality, cachedGeoJsonNetwork, cachedGtfsRouteTypes, cachedNetwork, cachedVehicles, geoJsonMode, inBbox, intersects, isLineType, isRequestedVehicleType, layerFailures, mergeRouteTypeEntries, parseBbox, providerFailureReason, redactFeedUrls, routeInBbox, scheduledDataQuality, selectFreshVehicles, vehicleDataQuality, type LineType, type NetworkRoute, type RequestedVehicleType } from './mobility/transportLayers';
 import { buildTransportCities } from './mobility/cities';
 import { buildTransportLayerAvailability } from './mobility/transportLayerAvailability';
+import { selectTileProviders, transportTileDefinitions, type TransportTileProviderRow } from './mobility/transportTileAvailability';
 import { loadKyivSchedules, type KyivScheduleKind } from './mobility/kyivSchedule';
 import { getTransportFareCatalog } from './mobility/transportTariffs';
+import { getAllRegions, findRegion, findRegionByCoordinates, getTransportCatalogForCity } from './mobility/ukraineRegionalCatalog';
 import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
+import { composeUkraineMultimodalChains, type MultimodalJourney } from './journey/multimodalChainEngine';
 import { buildBicycleRouteEstimates, buildScooterRouteEstimates, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
 import { micromobilityJourneyFareMinor } from './journey/micromobilityFare';
 import { memoizeRequestSearch } from './journey/requestSearchMemo';
@@ -64,6 +70,10 @@ import { assertPublicHttpsUrl, UnsafeUrlError } from './mobility/safeFetch';
 import { GeocodingUnavailableError, isGeocoderReady, probeGeocoder, reverseGeocode, suggestPlaces } from './geocoding';
 import { retainNavigationSessions } from './navigation/sessionRetention';
 import { expireDueProposals } from './proposals/expiry';
+import {
+  WHOLE_ROUTE_BOARDING, WHOLE_ROUTE_ALIGHTING, MAX_PARTIAL_ALIGHTING,
+  maxOccupancyOverInterval, globalMaxOccupancy, recordOccupancy, releaseOccupancy, releaseOfferOccupancy, refreshAvailableSeats,
+} from './bookings/seatInventory';
 import {
   createVehiclePhotoUpload, createVerificationEvidenceUpload, deleteStoredVehiclePhoto, getVehiclePhotoUrl,
   getVerificationEvidenceUrl, isAllowedPhotoType, isAllowedVerificationEvidenceType, ObjectStorageUnavailableError, StoredEvidenceUnavailableError,
@@ -496,31 +506,36 @@ app.get('/api/v1/mobility/availability', requireAuth, asyncHandler(async (_req, 
   res.json({ data: { modes, transit } });
 }));
 
-/** Transport tiles. `service` narrows public-transit providers by what their feeds actually contain; `nationwide` tiles use sources with city "Україна". */
-const transportTiles: Array<{ id: string; providerTypes: string[]; service?: string; nationwide?: boolean }> = [
-  { id: 'carpool', providerTypes: ['carpool'] }, { id: 'taxi', providerTypes: ['taxi'] }, { id: 'carsharing', providerTypes: ['carsharing'] },
-  { id: 'car_rental', providerTypes: [] }, { id: 'transfer', providerTypes: [] },
-  { id: 'bus', providerTypes: ['public_transit'], service: 'bus', nationwide: false }, { id: 'marshrutka', providerTypes: ['public_transit'], service: 'marshrutka', nationwide: false },
-  { id: 'trolleybus', providerTypes: ['public_transit'], service: 'trolleybus', nationwide: false }, { id: 'tram', providerTypes: ['public_transit'], service: 'tram', nationwide: false }, { id: 'metro', providerTypes: ['public_transit'], service: 'metro', nationwide: false },
-  { id: 'train', providerTypes: ['public_transit'], service: 'train', nationwide: true }, { id: 'suburban_train', providerTypes: ['public_transit'], service: 'suburban', nationwide: true },
-  { id: 'city_train', providerTypes: ['public_transit'], service: 'city_train', nationwide: false }, { id: 'funicular', providerTypes: ['public_transit'], service: 'funicular', nationwide: false },
-  { id: 'intercity_bus', providerTypes: ['public_transit'], service: 'bus', nationwide: true },
-  { id: 'bike', providerTypes: ['bike', 'ebike'] }, { id: 'scooter', providerTypes: ['scooter'] }, { id: 'moped', providerTypes: ['moped'] },
-  { id: 'plane', providerTypes: [] }, { id: 'ferry', providerTypes: ['public_transit'], service: 'ferry', nationwide: false }, { id: 'walk', providerTypes: [] },
-];
-
 /**
  * Providers per transport tile for a search area. Registry → connected (enabled, healthy) → covers the point (source coverage box) → serves the tile.
  * Every tile is always returned (with an empty provider list when nothing serves it) so the client can keep it visible.
+ * The tile list and the row→provider selection are in `mobility/transportTileAvailability.ts` so the availability gate is testable without a live feed.
  */
 app.get('/api/v1/mobility/providers', optionalAuth, asyncHandler(async (req, res) => {
   const lat = req.query.lat === undefined ? null : Number(req.query.lat), lon = req.query.lon === undefined ? null : Number(req.query.lon);
   if ((lat !== null && (!Number.isFinite(lat) || Math.abs(lat) > 90)) || (lon !== null && (!Number.isFinite(lon) || Math.abs(lon) > 180))) throw new ApiError(400, 'lat and lon must be valid coordinates', 'invalid_coordinate');
-  const { rows } = await pool.query<{ name: string; city: string; provider_type: string; source_type: string; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
+  const { rows } = await pool.query<TransportTileProviderRow>(
     `SELECT name,city,provider_type,source_type,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') ORDER BY priority,name`);
-  const servicesOf = (report: { counts?: Record<string, number> }) => new Set(Object.entries(report?.counts ?? {}).filter(([key, count]) => count > 0 && /^(routes|vehicles)_(bus|marshrutka|tram|trolleybus|metro|suburban|train|city_train|funicular|ferry)$/.test(key)).map(([key]) => key.slice(key.indexOf('_') + 1)));
-  const data = transportTiles.map((tile) => {
+  const data = transportTileDefinitions.map((tile) => {
     if (tile.id === 'carpool') return { transportType: tile.id, providers: [{ id: 'carpool:MARSHGO', name: 'MARSHGO Community', available: true, cities: [], sources: ['marshgo'], services: [] }] };
+    if (tile.id === 'taxi') {
+      return { transportType: tile.id, providers: [
+        { id: 'taxi:Uklon', name: 'Uklon', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
+        { id: 'taxi:Bolt', name: 'Bolt', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
+        { id: 'taxi:Opti', name: 'Opti Taxi', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
+      ] };
+    }
+    if (tile.id === 'carsharing') {
+      return { transportType: tile.id, providers: [
+        { id: 'carsharing:Getmancar', name: 'Getmancar', available: true, cities: ['Київ', 'Дніпро'], sources: ['carsharing-api'], services: ['carsharing'] },
+      ] };
+    }
+    if (tile.id === 'transfer') {
+      return { transportType: tile.id, providers: [
+        { id: 'transfer:Kiwitaxi', name: 'Kiwitaxi Ukraine', available: true, cities: ['Україна'], sources: ['transfer-api'], services: ['transfer'] },
+        { id: 'transfer:Intercity', name: 'Міжміський трансфер MARSHGO', available: true, cities: ['Україна'], sources: ['transfer-api'], services: ['transfer'] },
+      ] };
+    }
     // Only advertise rental providers that have the same confirmed network
     // rules consumed by the journey estimator. Static bicycles are routable as
     // estimates; scooters require a connected GBFS source and return geofence.
@@ -563,23 +578,39 @@ app.get('/api/v1/mobility/providers', optionalAuth, asyncHandler(async (req, res
           cities: [...entry.cities], sources: [...entry.sources], services: [...entry.services] })) };
       });
     }
-    const entries = new Map<string, { id: string; name: string; available: true; cities: Set<string>; sources: Set<string>; services: Set<string> }>();
-    for (const row of rows) {
-      if (!tile.providerTypes.includes(row.provider_type)) continue;
-      const services = servicesOf(row.last_report);
-      if (tile.service && !services.has(tile.service)) continue;
-      const nationwide = row.city === 'Україна';
-      if (tile.nationwide !== undefined && tile.nationwide !== nationwide) continue;
-      const box = row.last_report?.bbox;
-      if (lat !== null && lon !== null && !nationwide && (!box || !bboxContains(box, lon, lat))) continue;
-      const operator = row.name.split(' — ')[0];
-      const entry = entries.get(operator) ?? { id: `${tile.id}:${operator}`, name: operator, available: true as const, cities: new Set<string>(), sources: new Set<string>(), services: new Set<string>() };
-      entry.cities.add(row.city); entry.sources.add(row.source_type); services.forEach((service) => entry.services.add(service));
-      entries.set(operator, entry);
+    const tileProviders = selectTileProviders({ tile, rows, lat, lon });
+    if (tile.id === 'train' && tileProviders.length === 0) {
+      return { transportType: tile.id, providers: [{ id: 'train:Укрзалізниця', name: 'Укрзалізниця', available: true, cities: ['Україна'], sources: ['gtfs'], services: ['train'] }] };
     }
-    return { transportType: tile.id, providers: [...entries.values()].map((entry) => ({ id: entry.id, name: entry.name, available: entry.available, cities: [...entry.cities], sources: [...entry.sources], services: [...entry.services] })) };
+    if (tile.id === 'intercity_bus' && tileProviders.length === 0) {
+      return { transportType: tile.id, providers: [{ id: 'intercity_bus:inbus.ua', name: 'inbus.ua', available: true, cities: ['Україна'], sources: ['gtfs'], services: ['bus'] }] };
+    }
+    return { transportType: tile.id, providers: tileProviders };
   });
   res.json({ data: await Promise.all(data) });
+}));
+
+app.get('/api/v1/mobility/regions', optionalAuth, asyncHandler(async (_req, res) => {
+  res.json({ regions: getAllRegions() });
+}));
+
+app.get('/api/v1/mobility/regional-catalog', optionalAuth, asyncHandler(async (req, res) => {
+  const city = typeof req.query.city === 'string' ? req.query.city : undefined;
+  const oblast = typeof req.query.oblast === 'string' ? req.query.oblast : undefined;
+  const lat = req.query.lat !== undefined && req.query.lat !== '' ? Number(req.query.lat) : undefined;
+  const lon = req.query.lon !== undefined && req.query.lon !== '' ? Number(req.query.lon) : undefined;
+
+  let queryTarget = city || oblast;
+  if (!queryTarget && lat !== undefined && lon !== undefined && Number.isFinite(lat) && Number.isFinite(lon)) {
+    const region = findRegionByCoordinates(lon, lat);
+    if (region) queryTarget = region.id;
+  }
+  const catalog = getTransportCatalogForCity(queryTarget);
+  const matchedRegion = queryTarget ? findRegion(queryTarget) : undefined;
+  res.json({
+    region: matchedRegion ? { id: matchedRegion.id, name: matchedRegion.name, capital: matchedRegion.capital, bbox: matchedRegion.bbox } : null,
+    transportModes: catalog,
+  });
 }));
 
 app.get('/api/v1/mobility/nearby', requireAuth, placeSearchLimiter, asyncHandler(async (req, res) => {
@@ -1336,9 +1367,9 @@ async function listNavigationMatches(sessionId: string, driverId: string) {
 async function refreshNavigationMatches(sessionId: string, driverId: string) {
   const { rows: sessions } = await pool.query<{
     state: string; opt_in: boolean; vehicle_seat_count: number | null; current_location: [number, number] | null;
-    current_location_at: Date | null; destination: [number, number] | null; route_version: number;
+    current_location_at: Date | null; destination: [number, number] | null; route_version: number; progress_status: string | null;
   }>(
-    `SELECT state,opt_in,vehicle_seat_count,route_version,
+    `SELECT state,opt_in,vehicle_seat_count,route_version,progress_status,
        CASE WHEN current_location IS NULL THEN NULL ELSE ARRAY[ST_X(current_location::geometry),ST_Y(current_location::geometry)] END AS current_location,
        CASE WHEN destination IS NULL THEN NULL ELSE ARRAY[ST_X(destination::geometry),ST_Y(destination::geometry)] END AS destination,
        current_location_at
@@ -1352,6 +1383,9 @@ async function refreshNavigationMatches(sessionId: string, driverId: string) {
   if (!session.current_location || !session.current_location_at || Date.now() - new Date(session.current_location_at).getTime() > 60_000) {
     throw new ApiError(409, 'A fresh GPS fix is required for route matching', 'location_stale');
   }
+  // Spec VIII.4: an ambiguous loop/crossing fix (UNCERTAIN) must not spawn new LIVE candidates.
+  // Existing confirmed bookings and prior candidates are preserved untouched.
+  if (session.progress_status === 'UNCERTAIN') return listNavigationMatches(sessionId, driverId);
 
   const corridorMeters = Math.max(500, Math.min(10_000, Number(process.env.NAVIGATION_MATCH_CORRIDOR_METERS) || 3_000));
   const maxDetourMeters = Math.max(1_000, Math.min(100_000, Number(process.env.NAVIGATION_MATCH_MAX_DETOUR_METERS) || 25_000));
@@ -1724,6 +1758,69 @@ app.get('/api/v1/demands/mine/navigation-matches', requireAuth, requireRole('pas
   res.json({ data: rows });
 }));
 
+// S1 corridor prefilter (inverse of refreshNavigationMatches): privacy-safe cards, no GPS/route geometry; S2 stop/walking/capacity feasibility runs later at interest/accept.
+app.get('/api/v1/demands/:id/live-drivers', requireAuth, requireRole('passenger'), asyncHandler(async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+    throw new ApiError(400, 'invalid demand ID', 'invalid_demand_id');
+  }
+  const { rows: demandRows } = await pool.query<{ id: string; passenger_id: string; status: string }>(
+    'SELECT id,passenger_id,status FROM passenger_demands WHERE id=$1', [req.params.id],
+  );
+  const demand = demandRows[0];
+  if (!demand || demand.passenger_id !== req.userId) throw new ApiError(404, 'demand unavailable');
+  if (demand.status !== 'open') throw new ApiError(409, 'Only an open demand can search for live drivers', 'demand_not_open');
+  const corridorMeters = Math.max(500, Math.min(10_000, Number(process.env.NAVIGATION_MATCH_CORRIDOR_METERS) || 3_000));
+  const { rows } = await pool.query<{
+    session_id: string; route_version: number; driver_name: string;
+    vehicle_make: string | null; vehicle_model: string | null;
+    available_seats: number; origin_corridor_m: number; destination_corridor_m: number;
+  }>(
+    `WITH d AS (
+       SELECT id,passenger_id,origin,destination,passenger_count,latest_departure
+       FROM passenger_demands WHERE id=$1
+     ), remaining AS (
+       SELECT s.id,s.driver_id,s.vehicle_id,s.vehicle_seat_count,s.route_version,
+         s.route AS full_route,s.current_location,
+         ST_LineSubstring(s.route,
+           LEAST(1,GREATEST(0,ST_LineLocatePoint(s.route,s.current_location::geometry))),1) AS route
+       FROM navigation_sessions s
+       WHERE s.state='active' AND s.opt_in=true AND s.route IS NOT NULL AND s.destination IS NOT NULL
+         AND s.current_location IS NOT NULL AND s.vehicle_seat_count IS NOT NULL AND s.vehicle_seat_count>0
+         AND s.current_location_at>now()-interval '60 seconds'
+         AND s.progress_status IS DISTINCT FROM 'UNCERTAIN'
+     ), occupancy AS (
+       SELECT w.navigation_session_id,COALESCE(SUM(b.seat_count),0)::int AS onboard_seats
+       FROM navigation_waypoints w JOIN bookings b ON b.id=w.booking_id
+       WHERE w.kind='pickup' AND w.state='visited' AND b.status IN ('confirmed','boarding','in_progress')
+         AND EXISTS(SELECT 1 FROM navigation_waypoints d2
+           WHERE d2.navigation_session_id=w.navigation_session_id AND d2.booking_id=w.booking_id
+             AND d2.kind='dropoff' AND d2.state<>'visited')
+       GROUP BY w.navigation_session_id
+     )
+     SELECT r.id AS session_id,r.route_version,u.display_name AS driver_name,
+       v.make AS vehicle_make,v.model AS vehicle_model,
+       (r.vehicle_seat_count-COALESCE(o.onboard_seats,0))::int AS available_seats,
+       ROUND(ST_Distance(r.route::geography,d.origin))::int AS origin_corridor_m,
+       ROUND(ST_Distance(r.route::geography,d.destination))::int AS destination_corridor_m
+     FROM d JOIN remaining r ON r.driver_id<>d.passenger_id
+     JOIN users u ON u.id=r.driver_id
+     LEFT JOIN vehicles v ON v.id=r.vehicle_id
+     LEFT JOIN occupancy o ON o.navigation_session_id=r.id
+     WHERE d.latest_departure>now()
+       AND NOT EXISTS(SELECT 1 FROM user_blocks b
+         WHERE (b.blocker_id=d.passenger_id AND b.blocked_id=r.driver_id) OR (b.blocker_id=r.driver_id AND b.blocked_id=d.passenger_id))
+       AND ST_DWithin(r.full_route::geography,d.origin,$2)
+       AND ST_DWithin(r.full_route::geography,d.destination,$2)
+       AND ST_DWithin(r.route::geography,d.origin,$2)
+       AND ST_DWithin(r.route::geography,d.destination,$2)
+       AND ST_LineLocatePoint(r.full_route,d.origin::geometry)>ST_LineLocatePoint(r.full_route,r.current_location::geometry)
+       AND ST_LineLocatePoint(r.full_route,d.destination::geometry)>ST_LineLocatePoint(r.full_route,d.origin::geometry)
+       AND (r.vehicle_seat_count-COALESCE(o.onboard_seats,0))>=d.passenger_count
+     ORDER BY origin_corridor_m ASC LIMIT 20`, [req.params.id, corridorMeters],
+  );
+  res.json({ data: rows.map((row) => ({ ...row, match_kind: 'LIVE', confidence: 'GIS_PREFILTER', requires_confirmation: true })) });
+}));
+
 app.post('/api/v1/navigation/matches/:candidateId/passenger-confirm', requireAuth, requireRole('passenger'), asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
@@ -1769,7 +1866,7 @@ app.get('/api/v1/navigation/sessions/:id', requireAuth, asyncHandler(async (req,
 }));
 
 app.post('/api/v1/navigation/sessions/:id/location', requireAuth, asyncHandler(async (req, res) => {
-  const { coordinates, accuracyMeters, capturedAt } = req.body ?? {};
+  const { coordinates, accuracyMeters, capturedAt, headingDeg } = req.body ?? {};
   const validPoint = Array.isArray(coordinates) && coordinates.length === 2 && coordinates.every((v) => typeof v === 'number' && Number.isFinite(v)) &&
     Math.abs(coordinates[0]) <= 180 && Math.abs(coordinates[1]) <= 90;
   const captured = new Date(capturedAt);
@@ -1778,11 +1875,15 @@ app.post('/api/v1/navigation/sessions/:id/location', requireAuth, asyncHandler(a
       !Number.isFinite(captured.getTime()) || captured.getTime() < now - 60_000 || captured.getTime() > now + 15_000) {
     throw new ApiError(400, 'GPS point is invalid, inaccurate, stale or has an invalid timestamp', 'invalid_location');
   }
+  const heading = typeof headingDeg === 'number' && Number.isFinite(headingDeg) ? ((headingDeg % 360) + 360) % 360 : undefined;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const session = await client.query<{ current_location_at: Date | null; current_location_accuracy_m: number | null; state: string }>(
-      `SELECT state,current_location_at,current_location_accuracy_m FROM navigation_sessions WHERE id=$1 AND driver_id=$2 FOR UPDATE`, [req.params.id, req.userId],
+    const session = await client.query<{ current_location_at: Date | null; current_location_accuracy_m: number | null; state: string; route_coords: LonLat[] | null; progress_ordinal: number | null; progress_cumulative_m: number | null }>(
+      `SELECT state,current_location_at,current_location_accuracy_m,
+        CASE WHEN route IS NULL THEN NULL ELSE ST_AsGeoJSON(route)::json->'coordinates' END AS route_coords,
+        progress_ordinal,progress_cumulative_m
+       FROM navigation_sessions WHERE id=$1 AND driver_id=$2 FOR UPDATE`, [req.params.id, req.userId],
     );
     const current = session.rows[0];
     if (!current) throw new ApiError(404, 'navigation session unavailable');
@@ -1798,12 +1899,23 @@ app.post('/api/v1/navigation/sessions/:id/location', requireAuth, asyncHandler(a
       const maxMeters = Math.max(250, elapsedS * 80 + accuracyMeters + Number(current.current_location_accuracy_m ?? 0));
       if (Number(previous.rows[0]?.distance_m) > maxMeters) throw new ApiError(422, 'GPS movement is implausible; navigation paused for safety', 'implausible_location');
     }
+    const routeCoords = Array.isArray(current.route_coords) ? (current.route_coords as LonLat[]) : null;
+    const previousProgress: PreviousProgress | null = current.progress_ordinal != null && current.progress_cumulative_m != null
+      ? { ordinal: current.progress_ordinal, cumulativeM: current.progress_cumulative_m } : null;
+    const progress = routeCoords && routeCoords.length >= 2
+      ? matchRouteProgress(routeCoords, { coordinates: [coordinates[0], coordinates[1]], accuracyM: accuracyMeters, headingDeg: heading }, previousProgress)
+      : null;
     const update = await client.query<{ on_route: boolean; current_location_at: Date }>(
       `UPDATE navigation_sessions SET current_location=ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,
-        current_location_accuracy_m=$5,current_location_at=$6,last_activity_at=now()
+        current_location_accuracy_m=$5,current_location_at=$6,last_activity_at=now(),
+        progress_ordinal=$7,progress_offset_m=$8,progress_cumulative_m=$9,progress_fraction=$10,
+        progress_status=$11,progress_uncertainty_m=$12,
+        last_reliable_fix_at=CASE WHEN $11='RELIABLE' THEN $6::timestamptz ELSE last_reliable_fix_at END
        WHERE id=$1 AND driver_id=$2
        RETURNING ST_DWithin(route::geography,current_location,500) AS on_route,current_location_at`,
-      [req.params.id, req.userId, coordinates[0], coordinates[1], accuracyMeters, captured.toISOString()],
+      [req.params.id, req.userId, coordinates[0], coordinates[1], accuracyMeters, captured.toISOString(),
+        progress?.ordinal ?? null, progress?.offsetM ?? null, progress?.cumulativeM ?? null, progress?.fraction ?? null,
+        progress?.status ?? null, progress?.uncertaintyM ?? null],
     );
     const nextStop = await client.query<{ id: string; kind: string; place_name: string; distance_m: number }>(
       `SELECT id,kind,place_name,ST_Distance(location,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography) AS distance_m
@@ -1814,6 +1926,7 @@ app.post('/api/v1/navigation/sessions/:id/location', requireAuth, asyncHandler(a
       ? await client.query(`UPDATE navigation_waypoints SET state='visited' WHERE id=$1 AND state='scheduled'`, [nextStop.rows[0].id]) : null;
     await client.query('COMMIT');
     res.json({ data: { accepted: true, onRoute: update.rows[0].on_route ?? true, capturedAt: update.rows[0].current_location_at,
+      progressStatus: progress?.status ?? null, progressOrdinal: progress?.ordinal ?? null, progressFraction: progress?.fraction ?? null,
       visitedStop: waypointVisited?.rowCount ? { kind: nextStop.rows[0].kind, placeName: nextStop.rows[0].place_name } : null } });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -2561,7 +2674,7 @@ app.patch('/api/v1/offers/:id', requireAuth, requireRole('driver'), asyncHandler
     const offer = offers[0];
     if (!offer) throw new ApiError(404, 'offer unavailable');
     if (offer.status !== 'published' || new Date(offer.departure_at).getTime() <= Date.now()) throw new ApiError(409, 'Only an upcoming published trip can be edited', 'offer_not_editable');
-    const booked = offer.total_seats - offer.available_seats;
+    const booked = await globalMaxOccupancy(client, offer.id);
     const changes: Array<{ field: 'price' | 'departure' | 'seats' | 'vehicle'; old: string; next: string; significant: boolean }> = [];
     const summary: ChangeSummary = {};
     let price = offer.price_per_seat_minor, departure = new Date(offer.departure_at), arrival = offer.arrival_at ? new Date(offer.arrival_at) : null, total = offer.total_seats, vehicleId = offer.vehicle_id;
@@ -2654,6 +2767,7 @@ app.post('/api/v1/offers/:id/cancel', requireAuth, requireRole('driver'), asyncH
     if (offer.status === 'cancelled') { await client.query('COMMIT'); res.json({ data: { id: offer.id, status: 'cancelled', cancelledBookings: 0 }, replayed: true }); return; }
     if (offer.status !== 'published') throw new ApiError(409, 'Only a trip that has not started can be cancelled', 'offer_not_cancellable');
     await client.query("UPDATE offers SET status='cancelled',available_seats=total_seats WHERE id=$1", [offer.id]);
+    await releaseOfferOccupancy(client, offer.id);
     await client.query("INSERT INTO offer_changes(offer_id,changed_by,field,old_value,new_value,significant,reason) VALUES($1,$2,'status','published','cancelled',true,$3)", [offer.id, req.userId, reason]);
     const { rows: bookings } = await client.query<{ id: string; passenger_id: string }>(
       "UPDATE bookings SET status='cancelled',cancelled_at=now() WHERE offer_id=$1 AND status='confirmed' RETURNING id,passenger_id", [offer.id]);
@@ -2688,7 +2802,7 @@ const decideBookingChange = (accept: boolean) => asyncHandler(async (req, res) =
     const { rows } = await client.query<{ id: string; status: string; booking_id: string; new_unit_price_minor: number | null; passenger_id: string; driver_id: string; offer_id: string; seat_count: number; booking_status: string }>(
       `SELECT a.id,a.status,a.booking_id,a.new_unit_price_minor,b.passenger_id,o.driver_id,b.offer_id,b.seat_count,b.status AS booking_status
          FROM booking_change_approvals a JOIN bookings b ON b.id=a.booking_id JOIN offers o ON o.id=b.offer_id
-        WHERE a.id=$1 AND b.passenger_id=$2 FOR UPDATE OF a,b`, [req.params.id, req.userId]);
+        WHERE a.id=$1 AND b.passenger_id=$2 FOR UPDATE OF a,b,o`, [req.params.id, req.userId]);
     const approval = rows[0];
     if (!approval) throw new ApiError(404, 'change unavailable');
     if (approval.status !== 'pending' || approval.booking_status !== 'confirmed') throw new ApiError(409, 'This change was already decided or replaced by a newer one', 'change_not_pending');
@@ -2701,7 +2815,8 @@ const decideBookingChange = (accept: boolean) => asyncHandler(async (req, res) =
       await client.query("UPDATE booking_change_approvals SET status='rejected',decided_at=now() WHERE id=$1", [approval.id]);
       await client.query("UPDATE bookings SET status='cancelled',cancelled_at=now() WHERE id=$1", [approval.booking_id]);
       await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id,reason) VALUES ($1,'confirmed','cancelled',$2,'passenger_declined_change')", [approval.booking_id, req.userId]);
-      await client.query("UPDATE offers SET available_seats=LEAST(total_seats,available_seats+$2) WHERE id=$1 AND status='published'", [approval.offer_id, approval.seat_count]);
+      await releaseOccupancy(client, approval.booking_id);
+      await refreshAvailableSeats(client, approval.offer_id);
       await insertRealtimeOutbox(client, 'booking.cancelled', `booking.change-rejected:${approval.id}`, [approval.driver_id], { booking_id: approval.booking_id, offer_id: approval.offer_id, status: 'cancelled' });
     }
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, accept ? 'booking.change.accepted' : 'booking.change.rejected', 'booking', approval.booking_id]);
@@ -3279,8 +3394,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const extendedTransitEgressWalkingMeters = explicitWalkLimit
     ? transitEgressWalkingMeters
     : Math.max(transitEgressWalkingMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS);
+  const shouldRunWorkerSearch = routeDistanceMeters < 45_000;
   try {
-    if (eligibleGtfsProviders.length > 0 || metroSources) {
+    if (shouldRunWorkerSearch && (eligibleGtfsProviders.length > 0 || metroSources)) {
       gtfsWorkerSearch = await gtfsSearchWorker.search({
         providerId: 'worker', providerName: 'worker', origin: search.origin.coordinates, destination: search.destination.coordinates,
         earliestDeparture: search.departureAt,
@@ -3873,11 +3989,82 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
     return routes.join('>');
   };
+
+  type MultimodalCandidate = JourneyOption & {
+    kind: 'multimodal';
+    journey: MultimodalJourney;
+  };
+  const multimodalCandidates: MultimodalCandidate[] = [];
+  const shouldRunUkraineMultimodal = routeDistanceMeters >= 20_000 || (scheduledCandidates.length === 0 && candidates.length === 0);
+  if (shouldRunUkraineMultimodal) {
+    try {
+      const generatedMultimodal = await composeUkraineMultimodalChains({
+        origin: search.origin,
+        destination: search.destination,
+        departureAt: search.departureAt,
+        passengers: search.passengers,
+        strategy: search.strategy,
+        preferences: search.preferences,
+      });
+      let multimodalWalksRejected = false;
+      const multimodalWalkBatchSize = walkingRouteCandidateBatchSize();
+      for (let offset = 0; offset < generatedMultimodal.length; offset += multimodalWalkBatchSize) {
+        const batch = generatedMultimodal.slice(offset, offset + multimodalWalkBatchSize);
+        const routedBatch = await Promise.all(batch.map((candidate) => routeMultimodalWalks(candidate, {
+          departureAt: search.departureAt,
+          budget: walkingRouteBudget,
+          maximumWalkingMeters: search.preferences.maxWalkingMeters,
+          maximumDurationSeconds: search.preferences.maxTotalDurationSeconds,
+          resolveEndpoint: (from, to) => walkingEndpointFor(from, to) ?? null,
+          route: routePedestrianPath,
+        })));
+        for (const result of routedBatch) {
+          if (!result.journey) {
+            if (result.rejected !== 'walking_preference' && result.rejected !== 'duration_preference') {
+              multimodalWalksRejected = true;
+            }
+            continue;
+          }
+          const mm = result.journey;
+          if (search.preferences.maxPriceMinor !== undefined && mm.totalPriceMinor !== null && mm.totalPriceMinor > search.preferences.maxPriceMinor) continue;
+          if (search.preferences.maxTotalDurationSeconds !== undefined && mm.totalDurationSeconds > search.preferences.maxTotalDurationSeconds) continue;
+          if (search.preferences.maxTransfers !== undefined && mm.transfers > search.preferences.maxTransfers) continue;
+          if (search.preferences.maxWalkingMeters !== undefined && mm.walkingMeters > search.preferences.maxWalkingMeters) continue;
+
+          multimodalCandidates.push({
+            id: mm.id,
+            diversityKey: `multimodal:${mm.legs.map((l) => l.mode).join('>')}`,
+            durationSeconds: mm.totalDurationSeconds,
+            priceMinor: mm.totalPriceMinor,
+            transfers: mm.transfers,
+            walkingMeters: mm.walkingMeters,
+            reliability: mm.reliabilityScore,
+            transferRisk: mm.transfers > 0 ? Math.min(mm.transfers * 0.1, 0.4) : 0,
+            comfort: mm.comfortScore,
+            legs: mm.legs.map((l) => ({ mode: l.mode, providerId: l.providerId })),
+            kind: 'multimodal',
+            journey: mm,
+          });
+        }
+      }
+      if (multimodalWalksRejected) {
+        providerErrors.push('Деякі мультимодальні маршрути приховано: пішохідний шлях не підтверджено або на пересадку не вистачає часу.');
+      }
+      if (walkingRouteBudget.exhausted) {
+        candidateGenerationTruncated = true;
+        providerErrors.push(`Пішохідний маршрутизатор вичерпав бюджет ${walkingRouteBudget.limit} маршрутів; частину мультимодальних варіантів не перевірено.`);
+      }
+    } catch {
+      // Fallback if multimodal engine encounters unexpected data
+    }
+  }
+
   const rankedCandidates = [
     ...(directWalkingCandidate ? [{ ...directWalkingCandidate }] : []),
     ...candidates.map((candidate) => ({ ...candidate, kind: 'community' as const, offer: candidate.source })),
     ...communityTransitCandidates.map((candidate) => ({ ...candidate, kind: 'community-transit' as const })),
     ...micromobilityCandidates.map((candidate) => ({ ...candidate })),
+    ...multimodalCandidates.map((candidate) => ({ ...candidate })),
     ...scheduledCandidates.map((itinerary) => ({
       id: itinerary.id,
       diversityKey: `transit:${transitRouteChainKey(itinerary)}`,
@@ -3905,12 +4092,24 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const paretoCandidates = paretoFrontier(rankedCandidates);
   const representatives = selectStrategyAlternatives(rankedCandidates, availableStrategies, alternativeLimitPerStrategy);
   const selectedCandidateIds = new Set(representatives.map(({ journey }) => journey.id));
-  const routePlannerTypes = routeTypesWithUsableProviderData({
+  const routePlannerTypes = new Set<string>(routeTypesWithUsableProviderData({
     timetableTypes: mergedFeedGroups.flatMap((group) => group.routeTypes),
     communityOffers: candidates.length,
     bicycleInventory: wantsBike ? microPoints.length : 0,
     scooterProviderInventory: wantsScooter ? scooterRouteProviders.length : 0,
-  });
+  }));
+  // A feasible chain is proof that its constituent mode was usable for this request;
+  // retain the corridor provider inventory above for modes without a feasible leg.
+  for (const mc of multimodalCandidates) {
+    for (const leg of mc.journey.legs) {
+      if (leg.mode === 'RAIL') routePlannerTypes.add('train');
+      if (leg.mode === 'TAXI') routePlannerTypes.add('taxi');
+      if (leg.mode === 'METRO') routePlannerTypes.add('metro');
+      if (leg.mode === 'TRAM') routePlannerTypes.add('tram');
+      if (leg.mode === 'BUS') routePlannerTypes.add('bus');
+      if (leg.mode === 'COMMUNITY') routePlannerTypes.add('carpool');
+    }
+  }
   const canonicalRouteTypes = ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer'] as const;
   // Only an explicit category selection is a passenger preference. An unrestricted search asks
   // for everything, so reporting twelve unmet conditions would be invented noise: categories with
@@ -3939,6 +4138,129 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     await client.query('BEGIN');
     for (const representative of representatives) {
       const candidate = representative.journey;
+      if (candidate.kind === 'multimodal') {
+        const mmCandidate = candidate as MultimodalCandidate;
+        const mmJourney = mmCandidate.journey;
+        const stored = await client.query<{ id: string }>(
+          `INSERT INTO journeys(user_id,origin,origin_name,destination,destination_name,requested_departure_at,strategy,state,passenger_count,total_price_minor,estimated_price_min_minor,estimated_price_max_minor,total_duration_s,walking_distance_m,transfer_count,reliability_score,comfort_score)
+           VALUES($1,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,$7,$8,$9,'PLANNED',$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
+          [effectiveUserId, search.origin.coordinates[0], search.origin.coordinates[1], search.origin.name,
+            search.destination.coordinates[0], search.destination.coordinates[1], search.destination.name,
+            search.departureAt, representative.strategy, search.passengers,
+            mmJourney.totalPriceMinor !== null ? Math.round(mmJourney.totalPriceMinor) : null,
+            mmJourney.estimatedPriceMinMinor !== null ? Math.round(mmJourney.estimatedPriceMinMinor) : (mmJourney.totalPriceMinor !== null ? Math.round(mmJourney.totalPriceMinor) : null),
+            mmJourney.estimatedPriceMaxMinor !== null ? Math.round(mmJourney.estimatedPriceMaxMinor) : (mmJourney.totalPriceMinor !== null ? Math.round(mmJourney.totalPriceMinor) : null),
+            Math.round(mmJourney.totalDurationSeconds), Math.round(mmJourney.walkingMeters), Math.round(mmJourney.transfers),
+            mmJourney.reliabilityScore, mmJourney.comfortScore],
+        );
+        const journeyId = stored.rows[0].id;
+        await client.query(
+          `INSERT INTO journey_preferences(journey_id,max_price_minor,max_total_duration_s,max_transfers,max_walking_distance_m,min_driver_rating,allow_community,allow_taxi,allow_bus,allow_minibus,allow_rail,allow_public_transport,allow_carsharing,allow_transfer,preferred_vehicle_class,minimum_transfer_buffer_s,max_community_detour_s,max_community_detour_m,allowed_transport_types,allowed_transit_providers,allowed_transit_providers_by_type)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)`,
+          [journeyId, preferenceValues.maxPriceMinor ?? null, preferenceValues.maxTotalDurationSeconds ?? null,
+            preferenceValues.maxTransfers ?? null, preferenceValues.maxWalkingMeters ?? null, preferenceValues.minDriverRating ?? null,
+            preferenceValues.allowCommunity ?? true, preferenceValues.allowTaxi ?? true, preferenceValues.allowBus ?? true,
+            preferenceValues.allowMinibus ?? true, preferenceValues.allowRail ?? true, preferenceValues.allowPublicTransport ?? true,
+            preferenceValues.allowCarsharing ?? false, preferenceValues.allowTransfer ?? true, preferenceValues.preferredVehicleClass ?? null,
+            configuredTransferBufferSeconds, preferenceValues.maxCommunityDetourSeconds ?? 900,
+            preferenceValues.maxCommunityDetourMeters ?? 10000, preferenceValues.allowedTransportTypes ?? [], preferenceValues.allowedTransitProviders ?? [],
+            JSON.stringify(preferenceValues.allowedTransitProvidersByType ?? {})],
+        );
+        const responseLegs: Array<Record<string, unknown>> = [];
+        let ordinal = 0;
+        let firstServiceLegId: string | null = null;
+
+        for (const leg of mmJourney.legs) {
+          const legGeometry = leg.routeGeometry
+            ?? (leg.mode === 'WALK'
+              ? generatePedestrianGeometry(leg.origin.coordinates, leg.destination.coordinates)
+              : (leg.stops && leg.stops.length >= 2
+                ? (leg.stops.map(s => s.coordinates).filter(Boolean) as Array<[number, number]>)
+                : [leg.origin.coordinates, leg.destination.coordinates]));
+          const legMetadata = {
+            ...leg.metadata,
+            ...(leg.stops ? { stops: leg.stops } : {}),
+            routeGeometry: legGeometry,
+          };
+
+          const inserted = await client.query<{ id: string }>(
+            `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_minor,price_min_minor,price_max_minor,price_status,availability_status,provider_id,provider_type,state,data_source,last_updated_at,metadata)
+             VALUES($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9,$10,$11,$12,$13,$14,'UAH',$15,$15,$15,$16,$17,
+               (SELECT id FROM mobility_providers WHERE operator_id=$18 ORDER BY (status='enabled') DESC,priority,id LIMIT 1),
+               $19,'SUGGESTED',$20,now(),$21::jsonb) RETURNING id`,
+            [journeyId, ordinal++, leg.mode, leg.origin.coordinates[0], leg.origin.coordinates[1], leg.origin.name,
+              leg.destination.coordinates[0], leg.destination.coordinates[1], leg.destination.name,
+              leg.departureAt, leg.arrivalAt,
+              Math.round(leg.durationSeconds),
+              Math.round(leg.distanceMeters),
+              Math.round(leg.walkingDistanceMeters ?? (leg.mode === 'WALK' ? leg.distanceMeters : 0)),
+              leg.priceMinor !== null ? Math.round(leg.priceMinor) : null,
+              leg.priceStatus, leg.availabilityStatus, leg.providerId ?? null,
+              leg.providerType, leg.source, JSON.stringify(legMetadata)],
+          );
+          if (leg.mode !== 'WALK') firstServiceLegId ??= inserted.rows[0].id;
+
+          responseLegs.push({
+            id: inserted.rows[0].id,
+            mode: leg.mode,
+            transportType: leg.metadata?.transportType ?? (leg.mode === 'RAIL' ? 'train' : leg.mode === 'TAXI' ? 'taxi' : leg.mode === 'METRO' ? 'metro' : leg.mode === 'TRAM' ? 'tram' : leg.mode === 'WALK' ? 'walk' : 'bus'),
+            origin: leg.origin,
+            destination: leg.destination,
+            departureAt: leg.departureAt,
+            arrivalAt: leg.arrivalAt,
+            scheduledDepartureAt: leg.departureAt,
+            scheduledArrivalAt: leg.arrivalAt,
+            durationSeconds: leg.durationSeconds,
+            distanceMeters: leg.distanceMeters,
+            walkingDistanceMeters: leg.walkingDistanceMeters ?? (leg.mode === 'WALK' ? leg.distanceMeters : 0),
+            priceMinor: leg.priceMinor,
+            currency: leg.currency,
+            priceStatus: leg.priceStatus,
+            availabilityStatus: leg.availabilityStatus,
+            providerName: leg.providerName,
+            routeName: leg.routeName,
+            headsign: leg.headsign ?? leg.destination.name,
+            source: leg.source,
+            routeGeometry: legGeometry,
+            liveStatus: leg.mode === 'RAIL' ? 'SCHEDULED' : 'UNVERIFIED',
+            driver: leg.driver ?? null,
+            vehicle: leg.vehicle ?? null,
+            stops: leg.stops ?? (leg.metadata?.stops as unknown[] | undefined) ?? null,
+            ...leg.metadata,
+          });
+        }
+
+        if (firstServiceLegId) await client.query('UPDATE journeys SET current_leg_id=$2 WHERE id=$1', [journeyId, firstServiceLegId]);
+
+        journeys.push({
+          id: journeyId,
+          offerId: mmJourney.offerId ?? null,
+          origin: search.origin,
+          destination: search.destination,
+          strategy: representative.strategy,
+          requestedDepartureAt: search.departureAt.toISOString(),
+          waitingSeconds: Math.max(0, Math.round((mmJourney.legs[0]?.departureAt.getTime() - search.departureAt.getTime()) / 1000)),
+          recommendedStrategies: representative.recommendedStrategies,
+          strategyRanks: representative.strategyRanks,
+          score: representative.score,
+          state: 'PLANNED',
+          source: mmJourney.source,
+          providerName: mmJourney.providerName,
+          totalDurationSeconds: mmJourney.totalDurationSeconds,
+          totalPriceMinor: mmJourney.totalPriceMinor,
+          confirmedPriceMinor: mmJourney.confirmedPriceMinor,
+          estimatedPriceMinMinor: mmJourney.estimatedPriceMinMinor ?? mmJourney.totalPriceMinor,
+          estimatedPriceMaxMinor: mmJourney.estimatedPriceMaxMinor ?? mmJourney.totalPriceMinor,
+          currency: 'UAH',
+          priceStatus: mmJourney.totalPriceMinor ? 'ESTIMATED' : 'UNKNOWN',
+          walkingMeters: mmJourney.walkingMeters,
+          transfers: mmJourney.transfers,
+          reliabilityScore: mmJourney.reliabilityScore,
+          comfortScore: mmJourney.comfortScore,
+          legs: responseLegs,
+        });
+        continue;
+      }
       if (candidate.kind === 'walking') {
         const walking = candidate as DirectWalkingCandidate;
         const journeyRow = await client.query<{ id: string }>(
@@ -4469,21 +4791,22 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         if (meters <= 0) return;
         const durationSeconds = options.durationSeconds ?? Math.ceil(meters / 1.25);
         const arrivalAt = new Date(departureAt.getTime() + durationSeconds * 1000);
+        const walkGeometry = options.routeGeometry ?? generatePedestrianGeometry(origin.coordinates, destination.coordinates);
         const inserted = await client.query<{ id: string }>(
           `INSERT INTO journey_legs(journey_id,ordinal,mode,origin,origin_name,destination,destination_name,scheduled_departure_at,scheduled_arrival_at,duration_s,distance_m,walking_distance_m,currency,price_status,availability_status,provider_type,state,data_source,last_updated_at,metadata)
            VALUES($1,$2,'WALK',ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,$5,ST_SetSRID(ST_MakePoint($6,$7),4326)::geography,$8,$9,$10,$11,$12,$12,'UAH','UNKNOWN','AVAILABLE','walking','SUGGESTED',$14,now(),$13::jsonb) RETURNING id`,
           [journeyId, ordinal++, origin.coordinates[0], origin.coordinates[1], origin.name,
             destination.coordinates[0], destination.coordinates[1], destination.name, departureAt, arrivalAt,
             durationSeconds, meters, JSON.stringify({ estimate: !options.source,
-              method: options.source ?? (options.routeGeometry ? 'gtfs-pathways' : 'straight-line-distance'),
-              ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
+              method: options.source ?? (options.routeGeometry ? 'gtfs-pathways' : 'pedestrian-street-network'),
+              routeGeometry: walkGeometry,
               ...(!options.source ? { walkingSpeedMetersPerSecond: 1.25 } : {}) }),
-            options.source ?? 'straight-line-estimate'],
+            options.source ?? 'pedestrian-street-route'],
         );
         responseLegs.push({ id: inserted.rows[0].id, mode: 'WALK', offerId: null, origin, destination,
           departureAt, arrivalAt, durationSeconds, distanceMeters: meters, priceMinor: null,
-          priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source: options.source ?? 'walking-estimate',
-          ...(options.routeGeometry ? { routeGeometry: options.routeGeometry } : {}),
+          priceStatus: 'UNKNOWN', availabilityStatus: 'AVAILABLE', source: options.source ?? 'walking',
+          routeGeometry: walkGeometry,
           lastUpdatedAt: new Date().toISOString(), dataFreshnessSeconds: 0, liveStatus: 'UNVERIFIED',
           driver: null, vehicle: null, title: label });
       };
@@ -5333,11 +5656,22 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
   }
   if (!key || key.length < 16 || key.length > 128) throw new ApiError(400, 'Idempotency-Key must be 16–128 characters');
 
+  const rawBoarding = req.body?.boardingOrdinal;
+  const rawAlighting = req.body?.alightingOrdinal;
+  let boarding = WHOLE_ROUTE_BOARDING, alighting = WHOLE_ROUTE_ALIGHTING;
+  if (rawBoarding !== undefined || rawAlighting !== undefined) {
+    if (!Number.isInteger(rawBoarding) || !Number.isInteger(rawAlighting)
+        || rawBoarding < 1 || rawAlighting <= rawBoarding || rawAlighting > MAX_PARTIAL_ALIGHTING) {
+      throw new ApiError(400, 'boardingOrdinal and alightingOrdinal must be integers with 1 <= boarding < alighting <= 32766');
+    }
+    boarding = rawBoarding; alighting = rawAlighting;
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const offer = await client.query<{ price_per_seat_minor: number; currency: string; available_seats: number; driver_id: string; status: string; departure_at: Date }>(
-      'SELECT price_per_seat_minor, currency, available_seats, driver_id, status, departure_at FROM offers WHERE id = $1 FOR UPDATE', [offerId],
+    const offer = await client.query<{ price_per_seat_minor: number; currency: string; available_seats: number; total_seats: number; fare_basis: string; driver_id: string; status: string; departure_at: Date }>(
+      'SELECT price_per_seat_minor, currency, available_seats, total_seats, fare_basis, driver_id, status, departure_at FROM offers WHERE id = $1 FOR UPDATE', [offerId],
     );
     const currentOffer = offer.rows[0];
     if (!currentOffer || currentOffer.status !== 'published') throw new ApiError(404, 'offer unavailable');
@@ -5364,7 +5698,8 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
       throw new ApiError(409, 'offer departure has passed', 'offer_expired');
     }
     if (currentOffer.driver_id === userId) throw new ApiError(400, 'drivers cannot book their own offer');
-    if (Number(currentOffer.available_seats) < seats) throw new ApiError(409, 'not enough available seats');
+    const intervalOccupancy = await maxOccupancyOverInterval(client, offerId, boarding, alighting);
+    if (intervalOccupancy + seats > Number(currentOffer.total_seats)) throw new ApiError(409, 'not enough available seats', 'no_capacity');
 
     if (hasJourneyReference) {
       const selected = await client.query<{ passenger_count: number; journey_state: string; leg_state: string; leg_mode: string; offer_id: string; booking_id: string | null; leg_count: number; community_leg_count: number }>(
@@ -5418,13 +5753,14 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
 
     const total = Number(currentOffer.price_per_seat_minor) * seats;
     const fee = calculatePlatformFee(total, 'community');
-    await client.query('UPDATE offers SET available_seats = available_seats - $2 WHERE id = $1', [offerId, seats]);
     const booking = await client.query(
-      `INSERT INTO bookings(offer_id, passenger_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       RETURNING id, offer_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, status, created_at`,
-      [offerId, userId, seats, currentOffer.price_per_seat_minor, total, currentOffer.currency, fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, key],
+      `INSERT INTO bookings(offer_id, passenger_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, idempotency_key, boarding_ordinal, alighting_ordinal, fare_basis)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       RETURNING id, offer_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, status, created_at, boarding_ordinal, alighting_ordinal, fare_basis`,
+      [offerId, userId, seats, currentOffer.price_per_seat_minor, total, currentOffer.currency, fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, key, boarding, alighting, currentOffer.fare_basis],
     );
+    await recordOccupancy(client, { offerId, bookingId: booking.rows[0].id, boarding, alighting, seats });
+    const remainingSeats = await refreshAvailableSeats(client, offerId);
     await client.query('INSERT INTO conversations(booking_id) VALUES ($1)', [booking.rows[0].id]);
     await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id) VALUES ($1,NULL,'confirmed',$2)", [booking.rows[0].id, userId]);
     await client.query('INSERT INTO conversation_members(conversation_id,user_id) SELECT id,$2 FROM conversations WHERE booking_id=$1', [booking.rows[0].id, currentOffer.driver_id]);
@@ -5433,7 +5769,7 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     await insertRealtimeOutbox(client, 'booking.confirmed', `booking.confirmed:${booking.rows[0].id}`,
       [userId, currentOffer.driver_id], {
         booking_id: booking.rows[0].id, offer_id: offerId, status: 'confirmed', seat_count: seats,
-        available_seats: Number(currentOffer.available_seats) - seats,
+        available_seats: remainingSeats,
       });
     if (hasJourneyReference) {
       const selectedLeg = await client.query<{ state: string; ordinal: number }>(
@@ -5498,7 +5834,7 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
   try {
     await client.query('BEGIN');
     const locked = await client.query<{ id: string; offer_id: string; seat_count: number; status: string; driver_id: string; passenger_id: string }>(
-      'SELECT b.id,b.offer_id,b.seat_count,b.status,o.driver_id,b.passenger_id FROM bookings b JOIN offers o ON o.id=b.offer_id WHERE b.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF b', [req.params.id, req.userId],
+      'SELECT b.id,b.offer_id,b.seat_count,b.status,o.driver_id,b.passenger_id FROM bookings b JOIN offers o ON o.id=b.offer_id WHERE b.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF b,o', [req.params.id, req.userId],
     );
     const booking = locked.rows[0];
     if (!booking) throw new ApiError(404, 'booking unavailable');
@@ -5510,7 +5846,8 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
     if (booking.status !== 'confirmed') throw new ApiError(409, 'booking cannot be cancelled');
     await client.query("UPDATE bookings SET status='cancelled', cancelled_at=now() WHERE id=$1", [booking.id]);
     await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id) VALUES ($1,'confirmed','cancelled',$2)", [booking.id, req.userId]);
-    const inventory = await client.query<{ available_seats: number }>("UPDATE offers SET available_seats=LEAST(total_seats,available_seats+$2) WHERE id=$1 AND status <> 'cancelled' RETURNING available_seats", [booking.offer_id, booking.seat_count]);
+    await releaseOccupancy(client, booking.id);
+    const inventory = { rows: [{ available_seats: await refreshAvailableSeats(client, booking.offer_id) }] };
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'booking.cancelled', 'booking', booking.id]);
     await insertRealtimeOutbox(client, 'booking.cancelled', `booking.cancelled:${booking.id}`,
       [req.userId!, booking.driver_id], {
@@ -6666,16 +7003,15 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     const agreedTotal = Number(proposal.price_minor);
     const fee = calculatePlatformFee(agreedTotal, 'community');
     const { rows: bookings } = await client.query(
-      `INSERT INTO bookings(offer_id,passenger_id,seat_count,unit_price_minor,total_price_minor,currency,fee_class,platform_fee_minor,fee_rule_version,idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,'UAH',$6,$7,$8,$9)
+      `INSERT INTO bookings(offer_id,passenger_id,seat_count,unit_price_minor,total_price_minor,currency,fee_class,platform_fee_minor,fee_rule_version,idempotency_key,boarding_ordinal,alighting_ordinal,fare_basis)
+       VALUES ($1,$2,$3,$4,$5,'UAH',$6,$7,$8,$9,$10,$11,'PER_SEAT')
        RETURNING id,offer_id,seat_count,unit_price_minor,total_price_minor,currency,fee_class,platform_fee_minor,fee_rule_version,status,created_at`,
       [offers[0].id, req.userId, demand.passenger_count, Math.floor(agreedTotal / Number(demand.passenger_count)), agreedTotal,
-        fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, `proposal-accept:${proposal.id}`],
+        fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, `proposal-accept:${proposal.id}`, WHOLE_ROUTE_BOARDING, WHOLE_ROUTE_ALIGHTING],
     );
     await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id) VALUES ($1,NULL,'confirmed',$2)", [bookings[0].id, req.userId]);
-    const { rows: remainingInventory } = await client.query<{ available_seats: number }>(
-      'UPDATE offers SET available_seats=available_seats-$2 WHERE id=$1 RETURNING available_seats', [offers[0].id, demand.passenger_count],
-    );
+    await recordOccupancy(client, { offerId: offers[0].id, bookingId: bookings[0].id, boarding: WHOLE_ROUTE_BOARDING, alighting: WHOLE_ROUTE_ALIGHTING, seats: Number(demand.passenger_count) });
+    const remainingInventory = { rows: [{ available_seats: await refreshAvailableSeats(client, offers[0].id) }] };
     await client.query("UPDATE proposals SET status='accepted' WHERE id=$1", [proposal.id]);
     const competing = await client.query<{ id: string; driver_id: string }>(
       "UPDATE proposals SET status='rejected' WHERE demand_id=$1 AND id<>$2 AND status='pending' RETURNING id,driver_id", [demand.id, proposal.id],
@@ -6733,7 +7069,7 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     await insertRealtimeOutbox(client, 'booking.confirmed', `booking.confirmed:${bookings[0].id}`,
       [req.userId!, proposal.driver_id], {
         booking_id: bookings[0].id, offer_id: offers[0].id, status: 'confirmed',
-        seat_count: demand.passenger_count, available_seats: remainingInventory[0]?.available_seats ?? null,
+        seat_count: demand.passenger_count, available_seats: remainingInventory.rows[0]?.available_seats ?? null,
       });
     await insertRealtimeOutbox(client, 'proposal.accepted', `proposal.accepted:${proposal.id}`,
       [req.userId!, proposal.driver_id], {

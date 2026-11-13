@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { WHOLE_ROUTE_ALIGHTING, WHOLE_ROUTE_BOARDING } from '../server/bookings/seatInventory';
 
 const source = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
 const start = source.indexOf("app.post('/api/v1/proposals/:id/accept'");
@@ -49,6 +50,8 @@ function fixture(options: { revision?: number; actor?: string; blocked?: boolean
   runInNewContext(code, {
     app: { post(_path: string, _auth: unknown, registered: Handler) { handler = registered; } },
     requireAuth: () => {}, asyncHandler: (registered: Handler) => registered,
+    WHOLE_ROUTE_BOARDING, WHOLE_ROUTE_ALIGHTING,
+    recordOccupancy: async () => {}, refreshAvailableSeats: async () => 0,
     pool: { query, connect: async () => client },
     usersBlockEachOther: async () => options.blocked ?? false,
     calculatePlatformFee: () => ({ feeClass: 'community', platformFeeMinor: 0, ruleVersion: 'community-0pct-v1' }),

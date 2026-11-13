@@ -106,9 +106,16 @@ const kyivOpenData = 'https://data.kyivcity.gov.ua/dataset/rozklad-rukhu-miskoho
 const kyivStops = 'https://data.kyivcity.gov.ua/dataset/dani-pro-mistse-rozmishchennia-zupynok-miskoho-elektrychnoho-ta-avtomobilnoho-transpor-dep-transport';
 const kyivLicense = 'Kyiv Open Data Licence (commercial use permitted; attribution to data.kyivcity.gov.ua)';
 const resourceUrl = (id: string, dataset: string) => `https://data.kyivcity.gov.ua/dataset/${dataset}/resource/${id}/data/download`;
-// The data portal currently redirects these official resources to a stage GIS
-// host. Read the same published production layers directly from Kyiv's HTTPS
-// ArcGIS endpoint so availability does not depend on the portal redirect.
+// The data portal publishes these official Kyiv layers as redirects to a city GIS host.
+// Measured 2026-11-04 19:41 UTC: BOTH hostnames are NXDOMAIN on public resolvers
+// (`gisserver.kyivcity.gov.ua` below and the portal's own `gisserver-stage.kyivcity.gov.ua`;
+// Cloudflare DoH returns Status 3 with the authoritative kyivcity.gov.ua SOA), while
+// data.kyivcity.gov.ua itself resolves and answers. Consequence: the six Київ — метро sources stay
+// `enabled` + `health='offline'` with empty counts, so /mobility/providers reports metro=0 and the
+// journey planner's metro-source query returns no rows either. Treat this as an external data gap,
+// not a registry bug: do not point these at another host until a probe of that host succeeds —
+// availability comes from a validated feed, never from a URL. Re-read the dataset resource list
+// (CKAN: /api/3/action/package_show?id=rozklad-rukhu-...-dep-transport) before changing this constant.
 const kyivTransportApi = 'https://gisserver.kyivcity.gov.ua/mayno/rest/services/KYIV_API/transport_public/MapServer';
 const kyivTransportTable = (layerId: number) => `${kyivTransportApi}/${layerId}/query?where=1%3D1&outFields=*&returnGeometry=false&f=json`;
 const kyivTransportGeoJson = (layerId: number) => `${kyivTransportApi}/${layerId}/query?where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&f=geojson`;
