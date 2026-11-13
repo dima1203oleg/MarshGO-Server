@@ -7,7 +7,7 @@ import { Pool } from 'pg';
 import ts from 'typescript';
 import { calculatePlatformFee } from '../server/fees';
 
-const databaseUrl = process.env.API_TEST_DATABASE_URL;
+const databaseUrl = process.env.PROPOSAL_ACCEPTANCE_TEST_DATABASE_URL;
 if (databaseUrl) {
   const database = new URL(databaseUrl);
   const loopback = database.hostname === '127.0.0.1';
@@ -61,7 +61,8 @@ test('real PostgreSQL shadow transaction rejects stale terms without writes and 
       release() {},
     };
     const code = ts.transpile([
-      extract('class ApiError extends Error', '\nconst asyncHandler ='),
+      extract('class ApiError extends Error', '\nasync function usersBlockEachOther('),
+      extract('async function usersBlockEachOther(', '\nconst asyncHandler ='),
       extract('async function insertRealtimeOutbox(', '\nasync function broadcastRealtime('),
       extract("app.post('/api/v1/proposals/:id/accept'", "\napp.get('/api/v1/proposals/:id/revisions'"),
     ].join('\n'), { target: ts.ScriptTarget.ES2022 });

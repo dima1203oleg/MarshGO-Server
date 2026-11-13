@@ -40,6 +40,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: DATABASE_URL="$API_TEST_DATABASE_URL" npm run db:migrate
+      - name: Verify proposal acceptance revision transaction
+        run: npm exec -- tsx --test tests/proposal-accept-revision-postgres.integration.test.ts
+        env:
+          PROPOSAL_ACCEPTANCE_TEST_DATABASE_URL: ${{ env.API_TEST_DATABASE_URL }}
       - run: npm run test:integration
       - name: Build production API image
         run: docker build --tag marshgo-server:ci .
