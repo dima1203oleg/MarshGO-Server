@@ -62,6 +62,10 @@ import { GeocodingUnavailableError, reverseGeocode, suggestPlaces } from './geoc
 import { retainNavigationSessions } from './navigation/sessionRetention';
 import { expireDueProposals } from './proposals/expiry';
 import {
+  WHOLE_ROUTE_BOARDING, WHOLE_ROUTE_ALIGHTING, MAX_PARTIAL_ALIGHTING,
+  maxOccupancyOverInterval, globalMaxOccupancy, recordOccupancy, releaseOccupancy, releaseOfferOccupancy, refreshAvailableSeats,
+} from './bookings/seatInventory';
+import {
   createVehiclePhotoUpload, createVerificationEvidenceUpload, deleteStoredVehiclePhoto, getVehiclePhotoUrl,
   getVerificationEvidenceUrl, isAllowedPhotoType, isAllowedVerificationEvidenceType, ObjectStorageUnavailableError, StoredEvidenceUnavailableError,
   verifyVehiclePhotoObject, verifyVerificationEvidenceObject, putPhotoObject, readPhotoObject, verifyMediaRequest,
@@ -2578,7 +2582,7 @@ app.patch('/api/v1/offers/:id', requireAuth, requireRole('driver'), asyncHandler
     const offer = offers[0];
     if (!offer) throw new ApiError(404, 'offer unavailable');
     if (offer.status !== 'published' || new Date(offer.departure_at).getTime() <= Date.now()) throw new ApiError(409, 'Only an upcoming published trip can be edited', 'offer_not_editable');
-    const booked = offer.total_seats - offer.available_seats;
+    const booked = await globalMaxOccupancy(client, offer.id);
     const changes: Array<{ field: 'price' | 'departure' | 'seats' | 'vehicle'; old: string; next: string; significant: boolean }> = [];
     const summary: ChangeSummary = {};
     let price = offer.price_per_seat_minor, departure = new Date(offer.departure_at), arrival = offer.arrival_at ? new Date(offer.arrival_at) : null, total = offer.total_seats, vehicleId = offer.vehicle_id;
@@ -2671,6 +2675,7 @@ app.post('/api/v1/offers/:id/cancel', requireAuth, requireRole('driver'), asyncH
     if (offer.status === 'cancelled') { await client.query('COMMIT'); res.json({ data: { id: offer.id, status: 'cancelled', cancelledBookings: 0 }, replayed: true }); return; }
     if (offer.status !== 'published') throw new ApiError(409, 'Only a trip that has not started can be cancelled', 'offer_not_cancellable');
     await client.query("UPDATE offers SET status='cancelled',available_seats=total_seats WHERE id=$1", [offer.id]);
+    await releaseOfferOccupancy(client, offer.id);
     await client.query("INSERT INTO offer_changes(offer_id,changed_by,field,old_value,new_value,significant,reason) VALUES($1,$2,'status','published','cancelled',true,$3)", [offer.id, req.userId, reason]);
     const { rows: bookings } = await client.query<{ id: string; passenger_id: string }>(
       "UPDATE bookings SET status='cancelled',cancelled_at=now() WHERE offer_id=$1 AND status='confirmed' RETURNING id,passenger_id", [offer.id]);
@@ -2705,7 +2710,7 @@ const decideBookingChange = (accept: boolean) => asyncHandler(async (req, res) =
     const { rows } = await client.query<{ id: string; status: string; booking_id: string; new_unit_price_minor: number | null; passenger_id: string; driver_id: string; offer_id: string; seat_count: number; booking_status: string }>(
       `SELECT a.id,a.status,a.booking_id,a.new_unit_price_minor,b.passenger_id,o.driver_id,b.offer_id,b.seat_count,b.status AS booking_status
          FROM booking_change_approvals a JOIN bookings b ON b.id=a.booking_id JOIN offers o ON o.id=b.offer_id
-        WHERE a.id=$1 AND b.passenger_id=$2 FOR UPDATE OF a,b`, [req.params.id, req.userId]);
+        WHERE a.id=$1 AND b.passenger_id=$2 FOR UPDATE OF a,b,o`, [req.params.id, req.userId]);
     const approval = rows[0];
     if (!approval) throw new ApiError(404, 'change unavailable');
     if (approval.status !== 'pending' || approval.booking_status !== 'confirmed') throw new ApiError(409, 'This change was already decided or replaced by a newer one', 'change_not_pending');
@@ -2718,7 +2723,8 @@ const decideBookingChange = (accept: boolean) => asyncHandler(async (req, res) =
       await client.query("UPDATE booking_change_approvals SET status='rejected',decided_at=now() WHERE id=$1", [approval.id]);
       await client.query("UPDATE bookings SET status='cancelled',cancelled_at=now() WHERE id=$1", [approval.booking_id]);
       await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id,reason) VALUES ($1,'confirmed','cancelled',$2,'passenger_declined_change')", [approval.booking_id, req.userId]);
-      await client.query("UPDATE offers SET available_seats=LEAST(total_seats,available_seats+$2) WHERE id=$1 AND status='published'", [approval.offer_id, approval.seat_count]);
+      await releaseOccupancy(client, approval.booking_id);
+      await refreshAvailableSeats(client, approval.offer_id);
       await insertRealtimeOutbox(client, 'booking.cancelled', `booking.change-rejected:${approval.id}`, [approval.driver_id], { booking_id: approval.booking_id, offer_id: approval.offer_id, status: 'cancelled' });
     }
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, accept ? 'booking.change.accepted' : 'booking.change.rejected', 'booking', approval.booking_id]);
@@ -5073,11 +5079,22 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
   }
   if (!key || key.length < 16 || key.length > 128) throw new ApiError(400, 'Idempotency-Key must be 16–128 characters');
 
+  const rawBoarding = req.body?.boardingOrdinal;
+  const rawAlighting = req.body?.alightingOrdinal;
+  let boarding = WHOLE_ROUTE_BOARDING, alighting = WHOLE_ROUTE_ALIGHTING;
+  if (rawBoarding !== undefined || rawAlighting !== undefined) {
+    if (!Number.isInteger(rawBoarding) || !Number.isInteger(rawAlighting)
+        || rawBoarding < 1 || rawAlighting <= rawBoarding || rawAlighting > MAX_PARTIAL_ALIGHTING) {
+      throw new ApiError(400, 'boardingOrdinal and alightingOrdinal must be integers with 1 <= boarding < alighting <= 32766');
+    }
+    boarding = rawBoarding; alighting = rawAlighting;
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const offer = await client.query<{ price_per_seat_minor: number; currency: string; available_seats: number; driver_id: string; status: string; departure_at: Date }>(
-      'SELECT price_per_seat_minor, currency, available_seats, driver_id, status, departure_at FROM offers WHERE id = $1 FOR UPDATE', [offerId],
+    const offer = await client.query<{ price_per_seat_minor: number; currency: string; available_seats: number; total_seats: number; fare_basis: string; driver_id: string; status: string; departure_at: Date }>(
+      'SELECT price_per_seat_minor, currency, available_seats, total_seats, fare_basis, driver_id, status, departure_at FROM offers WHERE id = $1 FOR UPDATE', [offerId],
     );
     const currentOffer = offer.rows[0];
     if (!currentOffer || currentOffer.status !== 'published') throw new ApiError(404, 'offer unavailable');
@@ -5104,7 +5121,8 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
       throw new ApiError(409, 'offer departure has passed', 'offer_expired');
     }
     if (currentOffer.driver_id === userId) throw new ApiError(400, 'drivers cannot book their own offer');
-    if (Number(currentOffer.available_seats) < seats) throw new ApiError(409, 'not enough available seats');
+    const intervalOccupancy = await maxOccupancyOverInterval(client, offerId, boarding, alighting);
+    if (intervalOccupancy + seats > Number(currentOffer.total_seats)) throw new ApiError(409, 'not enough available seats', 'no_capacity');
 
     if (hasJourneyReference) {
       const selected = await client.query<{ passenger_count: number; journey_state: string; leg_state: string; leg_mode: string; offer_id: string; booking_id: string | null; leg_count: number; community_leg_count: number }>(
@@ -5158,13 +5176,14 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
 
     const total = Number(currentOffer.price_per_seat_minor) * seats;
     const fee = calculatePlatformFee(total, 'community');
-    await client.query('UPDATE offers SET available_seats = available_seats - $2 WHERE id = $1', [offerId, seats]);
     const booking = await client.query(
-      `INSERT INTO bookings(offer_id, passenger_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-       RETURNING id, offer_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, status, created_at`,
-      [offerId, userId, seats, currentOffer.price_per_seat_minor, total, currentOffer.currency, fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, key],
+      `INSERT INTO bookings(offer_id, passenger_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, idempotency_key, boarding_ordinal, alighting_ordinal, fare_basis)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       RETURNING id, offer_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, status, created_at, boarding_ordinal, alighting_ordinal, fare_basis`,
+      [offerId, userId, seats, currentOffer.price_per_seat_minor, total, currentOffer.currency, fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, key, boarding, alighting, currentOffer.fare_basis],
     );
+    await recordOccupancy(client, { offerId, bookingId: booking.rows[0].id, boarding, alighting, seats });
+    const remainingSeats = await refreshAvailableSeats(client, offerId);
     await client.query('INSERT INTO conversations(booking_id) VALUES ($1)', [booking.rows[0].id]);
     await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id) VALUES ($1,NULL,'confirmed',$2)", [booking.rows[0].id, userId]);
     await client.query('INSERT INTO conversation_members(conversation_id,user_id) SELECT id,$2 FROM conversations WHERE booking_id=$1', [booking.rows[0].id, currentOffer.driver_id]);
@@ -5173,7 +5192,7 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     await insertRealtimeOutbox(client, 'booking.confirmed', `booking.confirmed:${booking.rows[0].id}`,
       [userId, currentOffer.driver_id], {
         booking_id: booking.rows[0].id, offer_id: offerId, status: 'confirmed', seat_count: seats,
-        available_seats: Number(currentOffer.available_seats) - seats,
+        available_seats: remainingSeats,
       });
     if (hasJourneyReference) {
       const selectedLeg = await client.query<{ state: string; ordinal: number }>(
@@ -5237,7 +5256,7 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
   try {
     await client.query('BEGIN');
     const locked = await client.query<{ id: string; offer_id: string; seat_count: number; status: string; driver_id: string; passenger_id: string }>(
-      'SELECT b.id,b.offer_id,b.seat_count,b.status,o.driver_id,b.passenger_id FROM bookings b JOIN offers o ON o.id=b.offer_id WHERE b.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF b', [req.params.id, req.userId],
+      'SELECT b.id,b.offer_id,b.seat_count,b.status,o.driver_id,b.passenger_id FROM bookings b JOIN offers o ON o.id=b.offer_id WHERE b.id=$1 AND (b.passenger_id=$2 OR o.driver_id=$2) FOR UPDATE OF b,o', [req.params.id, req.userId],
     );
     const booking = locked.rows[0];
     if (!booking) throw new ApiError(404, 'booking unavailable');
@@ -5249,7 +5268,8 @@ app.post('/api/v1/bookings/:id/cancel', requireAuth, asyncHandler(async (req, re
     if (booking.status !== 'confirmed') throw new ApiError(409, 'booking cannot be cancelled');
     await client.query("UPDATE bookings SET status='cancelled', cancelled_at=now() WHERE id=$1", [booking.id]);
     await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id) VALUES ($1,'confirmed','cancelled',$2)", [booking.id, req.userId]);
-    const inventory = await client.query<{ available_seats: number }>("UPDATE offers SET available_seats=LEAST(total_seats,available_seats+$2) WHERE id=$1 AND status <> 'cancelled' RETURNING available_seats", [booking.offer_id, booking.seat_count]);
+    await releaseOccupancy(client, booking.id);
+    const inventory = { rows: [{ available_seats: await refreshAvailableSeats(client, booking.offer_id) }] };
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'booking.cancelled', 'booking', booking.id]);
     await insertRealtimeOutbox(client, 'booking.cancelled', `booking.cancelled:${booking.id}`,
       [req.userId!, booking.driver_id], {
@@ -6399,16 +6419,15 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     const agreedTotal = Number(proposal.price_minor);
     const fee = calculatePlatformFee(agreedTotal, 'community');
     const { rows: bookings } = await client.query(
-      `INSERT INTO bookings(offer_id,passenger_id,seat_count,unit_price_minor,total_price_minor,currency,fee_class,platform_fee_minor,fee_rule_version,idempotency_key)
-       VALUES ($1,$2,$3,$4,$5,'UAH',$6,$7,$8,$9)
+      `INSERT INTO bookings(offer_id,passenger_id,seat_count,unit_price_minor,total_price_minor,currency,fee_class,platform_fee_minor,fee_rule_version,idempotency_key,boarding_ordinal,alighting_ordinal,fare_basis)
+       VALUES ($1,$2,$3,$4,$5,'UAH',$6,$7,$8,$9,$10,$11,'PER_SEAT')
        RETURNING id,offer_id,seat_count,unit_price_minor,total_price_minor,currency,fee_class,platform_fee_minor,fee_rule_version,status,created_at`,
       [offers[0].id, req.userId, demand.passenger_count, Math.floor(agreedTotal / Number(demand.passenger_count)), agreedTotal,
-        fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, `proposal-accept:${proposal.id}`],
+        fee.feeClass, fee.platformFeeMinor, fee.ruleVersion, `proposal-accept:${proposal.id}`, WHOLE_ROUTE_BOARDING, WHOLE_ROUTE_ALIGHTING],
     );
     await client.query("INSERT INTO booking_events(booking_id,from_status,to_status,actor_id) VALUES ($1,NULL,'confirmed',$2)", [bookings[0].id, req.userId]);
-    const { rows: remainingInventory } = await client.query<{ available_seats: number }>(
-      'UPDATE offers SET available_seats=available_seats-$2 WHERE id=$1 RETURNING available_seats', [offers[0].id, demand.passenger_count],
-    );
+    await recordOccupancy(client, { offerId: offers[0].id, bookingId: bookings[0].id, boarding: WHOLE_ROUTE_BOARDING, alighting: WHOLE_ROUTE_ALIGHTING, seats: Number(demand.passenger_count) });
+    const remainingInventory = { rows: [{ available_seats: await refreshAvailableSeats(client, offers[0].id) }] };
     await client.query("UPDATE proposals SET status='accepted' WHERE id=$1", [proposal.id]);
     const competing = await client.query<{ id: string; driver_id: string }>(
       "UPDATE proposals SET status='rejected' WHERE demand_id=$1 AND id<>$2 AND status='pending' RETURNING id,driver_id", [demand.id, proposal.id],
@@ -6466,7 +6485,7 @@ app.post('/api/v1/proposals/:id/accept', requireAuth, asyncHandler(async (req, r
     await insertRealtimeOutbox(client, 'booking.confirmed', `booking.confirmed:${bookings[0].id}`,
       [req.userId!, proposal.driver_id], {
         booking_id: bookings[0].id, offer_id: offers[0].id, status: 'confirmed',
-        seat_count: demand.passenger_count, available_seats: remainingInventory[0]?.available_seats ?? null,
+        seat_count: demand.passenger_count, available_seats: remainingInventory.rows[0]?.available_seats ?? null,
       });
     await insertRealtimeOutbox(client, 'proposal.accepted', `proposal.accepted:${proposal.id}`,
       [req.userId!, proposal.driver_id], {
