@@ -6,12 +6,17 @@ import { runInNewContext } from 'node:vm';
 import { Pool } from 'pg';
 import ts from 'typescript';
 import { calculatePlatformFee } from '../server/fees';
+import {
+  WHOLE_ROUTE_ALIGHTING, WHOLE_ROUTE_BOARDING, recordOccupancy, refreshAvailableSeats,
+} from '../server/bookings/seatInventory';
 
 const databaseUrl = process.env.PROPOSAL_ACCEPTANCE_TEST_DATABASE_URL;
 if (databaseUrl) {
   const database = new URL(databaseUrl);
   const loopback = database.hostname === '127.0.0.1';
-  const localFixture = loopback && database.pathname === '/marshgo_e2e_carpool5';
+  const localFixture = loopback && (
+    database.pathname === '/marshgo_e2e_carpool5' || /^\/marshgo_e2e_codex_[a-z0-9_]+$/.test(database.pathname)
+  );
   const ciFixture = process.env.CI === 'true' && loopback && database.pathname === '/marshgo_e2e';
   if (!localFixture && !ciFixture) {
     throw new Error('Only the isolated loopback carpool fixture database or its CI shadow-table database is allowed');
@@ -28,7 +33,7 @@ test('real PostgreSQL shadow transaction rejects stale terms without writes and 
   const vehicle = randomUUID();
   try {
     await client.query('BEGIN');
-    for (const table of ['passenger_demands', 'proposals', 'proposal_revisions', 'vehicles', 'offers', 'bookings',
+    for (const table of ['passenger_demands', 'proposals', 'proposal_revisions', 'vehicles', 'offers', 'bookings', 'seat_occupancy_intervals',
       'booking_events', 'conversations', 'conversation_members', 'audit_events', 'realtime_outbox', 'user_blocks']) {
       await client.query(`CREATE TEMP TABLE ${table} (LIKE public.${table} INCLUDING DEFAULTS) ON COMMIT DROP`);
     }
@@ -69,6 +74,7 @@ test('real PostgreSQL shadow transaction rejects stale terms without writes and 
     runInNewContext(code, {
       app: { post(_path: string, _auth: unknown, registered: typeof handler) { handler = registered; } },
       requireAuth: () => {}, asyncHandler: (registered: typeof handler) => registered,
+      WHOLE_ROUTE_BOARDING, WHOLE_ROUTE_ALIGHTING, recordOccupancy, refreshAvailableSeats,
       pool: { query: executor.query, connect: async () => executor }, calculatePlatformFee,
       supportedOutboxEvents: new Set(['booking.confirmed', 'proposal.accepted', 'proposal.closed']),
     });
@@ -76,10 +82,11 @@ test('real PostgreSQL shadow transaction rejects stale terms without writes and 
     const snapshot = async () => (await client.query(`SELECT
       (SELECT count(*)::int FROM offers) AS offers,(SELECT count(*)::int FROM bookings) AS bookings,
       (SELECT count(*)::int FROM conversations) AS conversations,(SELECT count(*)::int FROM realtime_outbox) AS events,
+      (SELECT count(*)::int FROM seat_occupancy_intervals) AS intervals,
       (SELECT status FROM proposals WHERE id=$1) AS proposal_status,
       (SELECT status FROM passenger_demands WHERE id=$2) AS demand_status`, [proposal, demand])).rows[0];
     const before = await snapshot();
-    assert.deepEqual(before, { offers: 0, bookings: 0, conversations: 0, events: 0, proposal_status: 'pending', demand_status: 'open' });
+    assert.deepEqual(before, { offers: 0, bookings: 0, conversations: 0, events: 0, intervals: 0, proposal_status: 'pending', demand_status: 'open' });
     let status = 0;
     let response: { agreedTotalMinor?: number } | undefined;
     const invoke = (body: unknown) => handler!({ params: { id: proposal }, userId: passenger, body }, {
@@ -97,7 +104,7 @@ test('real PostgreSQL shadow transaction rejects stale terms without writes and 
     await invoke({ expectedRevision: 3 });
     assert.equal(status, 201);
     assert.equal(response?.agreedTotalMinor, 45000);
-    assert.deepEqual(await snapshot(), { offers: 1, bookings: 1, conversations: 1, events: 2, proposal_status: 'accepted', demand_status: 'matched' });
+    assert.deepEqual(await snapshot(), { offers: 1, bookings: 1, conversations: 1, events: 2, intervals: 1, proposal_status: 'accepted', demand_status: 'matched' });
     const booking = (await client.query('SELECT total_price_minor,seat_count FROM bookings')).rows[0];
     assert.deepEqual(booking, { total_price_minor: 45000, seat_count: 2 });
   } finally {
