@@ -1,6 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { providerServices, selectTileProviders, transportTileDefinitions, type TransportTileDefinition, type TransportTileProviderRow } from '../server/mobility/transportTileAvailability';
+
+const serverSource = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
 
 /**
  * These rows are test inputs, not production evidence. They mirror the exact shapes the registry
@@ -57,11 +60,17 @@ describe('transport tile availability is decided by validated feed counts', () =
     const rows = [
       row({ name: 'Київпастранс — розклад (GTFS)', source_type: 'gtfs', last_report: { counts: { routes: 165, routes_bus: 104, routes_tram: 17, routes_trolleybus: 44 }, bbox: kyivBox } }),
     ];
-    for (const empty of ['carsharing', 'taxi', 'ferry', 'moped', 'plane', 'city_train', 'funicular', 'transfer', 'walk']) {
+    for (const empty of ['carsharing', 'taxi', 'ferry', 'moped', 'plane', 'city_train', 'funicular', 'transfer', 'walk', 'train', 'intercity_bus']) {
       assert.deepEqual(selectTileProviders({ tile: tileOf(empty), rows, ...kyiv }), [], `${empty} must not be advertised without a source that evidences it`);
     }
     assert.equal(selectTileProviders({ tile: tileOf('bus'), rows, ...kyiv }).length, 1);
     assert.equal(selectTileProviders({ tile: tileOf('tram'), rows, ...kyiv }).length, 1);
+  });
+
+  it('does not replace empty nationwide tiles with unverified hard-coded providers', () => {
+    assert.deepEqual(selectTileProviders({ tile: tileOf('train'), rows: [], ...kyiv }), []);
+    assert.deepEqual(selectTileProviders({ tile: tileOf('intercity_bus'), rows: [], ...kyiv }), []);
+    assert.doesNotMatch(serverSource, /tile\.id === '(?:train|intercity_bus)' && tileProviders\.length === 0/);
   });
 
   it('scopes a city tile to the search point and keeps nationwide sources out of city tiles', () => {

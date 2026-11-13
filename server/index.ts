@@ -579,12 +579,6 @@ app.get('/api/v1/mobility/providers', optionalAuth, asyncHandler(async (req, res
       });
     }
     const tileProviders = selectTileProviders({ tile, rows, lat, lon });
-    if (tile.id === 'train' && tileProviders.length === 0) {
-      return { transportType: tile.id, providers: [{ id: 'train:Укрзалізниця', name: 'Укрзалізниця', available: true, cities: ['Україна'], sources: ['gtfs'], services: ['train'] }] };
-    }
-    if (tile.id === 'intercity_bus' && tileProviders.length === 0) {
-      return { transportType: tile.id, providers: [{ id: 'intercity_bus:inbus.ua', name: 'inbus.ua', available: true, cities: ['Україна'], sources: ['gtfs'], services: ['bus'] }] };
-    }
     return { transportType: tile.id, providers: tileProviders };
   });
   res.json({ data: await Promise.all(data) });
