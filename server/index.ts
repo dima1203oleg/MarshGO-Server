@@ -32,6 +32,7 @@ import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
 import { bboxIntersectsRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
+import { matchRouteProgress, type LonLat, type PreviousProgress } from './navigation/routeProgress';
 import { paretoFrontier, selectStrategyAlternatives, strategiesWithComparablePrices } from './journey/scoring';
 import { journeyTransportTypeSelected, type JourneyLegMode, type JourneyOption, type JourneyStrategy } from './journey/types';
 import { getRendezvousSettings, isWithinPickupGeofence, resolveRendezvousAction, type RendezvousAction, type RendezvousState } from './rendezvous';
@@ -1339,9 +1340,9 @@ async function listNavigationMatches(sessionId: string, driverId: string) {
 async function refreshNavigationMatches(sessionId: string, driverId: string) {
   const { rows: sessions } = await pool.query<{
     state: string; opt_in: boolean; vehicle_seat_count: number | null; current_location: [number, number] | null;
-    current_location_at: Date | null; destination: [number, number] | null; route_version: number;
+    current_location_at: Date | null; destination: [number, number] | null; route_version: number; progress_status: string | null;
   }>(
-    `SELECT state,opt_in,vehicle_seat_count,route_version,
+    `SELECT state,opt_in,vehicle_seat_count,route_version,progress_status,
        CASE WHEN current_location IS NULL THEN NULL ELSE ARRAY[ST_X(current_location::geometry),ST_Y(current_location::geometry)] END AS current_location,
        CASE WHEN destination IS NULL THEN NULL ELSE ARRAY[ST_X(destination::geometry),ST_Y(destination::geometry)] END AS destination,
        current_location_at
@@ -1355,6 +1356,9 @@ async function refreshNavigationMatches(sessionId: string, driverId: string) {
   if (!session.current_location || !session.current_location_at || Date.now() - new Date(session.current_location_at).getTime() > 60_000) {
     throw new ApiError(409, 'A fresh GPS fix is required for route matching', 'location_stale');
   }
+  // Spec VIII.4: an ambiguous loop/crossing fix (UNCERTAIN) must not spawn new LIVE candidates.
+  // Existing confirmed bookings and prior candidates are preserved untouched.
+  if (session.progress_status === 'UNCERTAIN') return listNavigationMatches(sessionId, driverId);
 
   const corridorMeters = Math.max(500, Math.min(10_000, Number(process.env.NAVIGATION_MATCH_CORRIDOR_METERS) || 3_000));
   const maxDetourMeters = Math.max(1_000, Math.min(100_000, Number(process.env.NAVIGATION_MATCH_MAX_DETOUR_METERS) || 25_000));
@@ -1756,6 +1760,7 @@ app.get('/api/v1/demands/:id/live-drivers', requireAuth, requireRole('passenger'
        WHERE s.state='active' AND s.opt_in=true AND s.route IS NOT NULL AND s.destination IS NOT NULL
          AND s.current_location IS NOT NULL AND s.vehicle_seat_count IS NOT NULL AND s.vehicle_seat_count>0
          AND s.current_location_at>now()-interval '60 seconds'
+         AND s.progress_status IS DISTINCT FROM 'UNCERTAIN'
      ), occupancy AS (
        SELECT w.navigation_session_id,COALESCE(SUM(b.seat_count),0)::int AS onboard_seats
        FROM navigation_waypoints w JOIN bookings b ON b.id=w.booking_id
@@ -1834,7 +1839,7 @@ app.get('/api/v1/navigation/sessions/:id', requireAuth, asyncHandler(async (req,
 }));
 
 app.post('/api/v1/navigation/sessions/:id/location', requireAuth, asyncHandler(async (req, res) => {
-  const { coordinates, accuracyMeters, capturedAt } = req.body ?? {};
+  const { coordinates, accuracyMeters, capturedAt, headingDeg } = req.body ?? {};
   const validPoint = Array.isArray(coordinates) && coordinates.length === 2 && coordinates.every((v) => typeof v === 'number' && Number.isFinite(v)) &&
     Math.abs(coordinates[0]) <= 180 && Math.abs(coordinates[1]) <= 90;
   const captured = new Date(capturedAt);
@@ -1843,11 +1848,15 @@ app.post('/api/v1/navigation/sessions/:id/location', requireAuth, asyncHandler(a
       !Number.isFinite(captured.getTime()) || captured.getTime() < now - 60_000 || captured.getTime() > now + 15_000) {
     throw new ApiError(400, 'GPS point is invalid, inaccurate, stale or has an invalid timestamp', 'invalid_location');
   }
+  const heading = typeof headingDeg === 'number' && Number.isFinite(headingDeg) ? ((headingDeg % 360) + 360) % 360 : undefined;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const session = await client.query<{ current_location_at: Date | null; current_location_accuracy_m: number | null; state: string }>(
-      `SELECT state,current_location_at,current_location_accuracy_m FROM navigation_sessions WHERE id=$1 AND driver_id=$2 FOR UPDATE`, [req.params.id, req.userId],
+    const session = await client.query<{ current_location_at: Date | null; current_location_accuracy_m: number | null; state: string; route_coords: LonLat[] | null; progress_ordinal: number | null; progress_cumulative_m: number | null }>(
+      `SELECT state,current_location_at,current_location_accuracy_m,
+        CASE WHEN route IS NULL THEN NULL ELSE ST_AsGeoJSON(route)::json->'coordinates' END AS route_coords,
+        progress_ordinal,progress_cumulative_m
+       FROM navigation_sessions WHERE id=$1 AND driver_id=$2 FOR UPDATE`, [req.params.id, req.userId],
     );
     const current = session.rows[0];
     if (!current) throw new ApiError(404, 'navigation session unavailable');
@@ -1863,12 +1872,23 @@ app.post('/api/v1/navigation/sessions/:id/location', requireAuth, asyncHandler(a
       const maxMeters = Math.max(250, elapsedS * 80 + accuracyMeters + Number(current.current_location_accuracy_m ?? 0));
       if (Number(previous.rows[0]?.distance_m) > maxMeters) throw new ApiError(422, 'GPS movement is implausible; navigation paused for safety', 'implausible_location');
     }
+    const routeCoords = Array.isArray(current.route_coords) ? (current.route_coords as LonLat[]) : null;
+    const previousProgress: PreviousProgress | null = current.progress_ordinal != null && current.progress_cumulative_m != null
+      ? { ordinal: current.progress_ordinal, cumulativeM: current.progress_cumulative_m } : null;
+    const progress = routeCoords && routeCoords.length >= 2
+      ? matchRouteProgress(routeCoords, { coordinates: [coordinates[0], coordinates[1]], accuracyM: accuracyMeters, headingDeg: heading }, previousProgress)
+      : null;
     const update = await client.query<{ on_route: boolean; current_location_at: Date }>(
       `UPDATE navigation_sessions SET current_location=ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,
-        current_location_accuracy_m=$5,current_location_at=$6,last_activity_at=now()
+        current_location_accuracy_m=$5,current_location_at=$6,last_activity_at=now(),
+        progress_ordinal=$7,progress_offset_m=$8,progress_cumulative_m=$9,progress_fraction=$10,
+        progress_status=$11,progress_uncertainty_m=$12,
+        last_reliable_fix_at=CASE WHEN $11='RELIABLE' THEN $6::timestamptz ELSE last_reliable_fix_at END
        WHERE id=$1 AND driver_id=$2
        RETURNING ST_DWithin(route::geography,current_location,500) AS on_route,current_location_at`,
-      [req.params.id, req.userId, coordinates[0], coordinates[1], accuracyMeters, captured.toISOString()],
+      [req.params.id, req.userId, coordinates[0], coordinates[1], accuracyMeters, captured.toISOString(),
+        progress?.ordinal ?? null, progress?.offsetM ?? null, progress?.cumulativeM ?? null, progress?.fraction ?? null,
+        progress?.status ?? null, progress?.uncertaintyM ?? null],
     );
     const nextStop = await client.query<{ id: string; kind: string; place_name: string; distance_m: number }>(
       `SELECT id,kind,place_name,ST_Distance(location,ST_SetSRID(ST_MakePoint($2,$3),4326)::geography) AS distance_m
@@ -1879,6 +1899,7 @@ app.post('/api/v1/navigation/sessions/:id/location', requireAuth, asyncHandler(a
       ? await client.query(`UPDATE navigation_waypoints SET state='visited' WHERE id=$1 AND state='scheduled'`, [nextStop.rows[0].id]) : null;
     await client.query('COMMIT');
     res.json({ data: { accepted: true, onRoute: update.rows[0].on_route ?? true, capturedAt: update.rows[0].current_location_at,
+      progressStatus: progress?.status ?? null, progressOrdinal: progress?.ordinal ?? null, progressFraction: progress?.fraction ?? null,
       visitedStop: waypointVisited?.rowCount ? { kind: nextStop.rows[0].kind, placeName: nextStop.rows[0].place_name } : null } });
   } catch (error) {
     await client.query('ROLLBACK');

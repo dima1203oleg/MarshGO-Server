@@ -91,6 +91,8 @@ API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:live-drivers
 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  npm run test:integration:route-progress
+API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
   npm run test:integration:partners
 stop_api
 
