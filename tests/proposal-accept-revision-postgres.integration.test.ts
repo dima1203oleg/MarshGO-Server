@@ -10,8 +10,11 @@ import { calculatePlatformFee } from '../server/fees';
 const databaseUrl = process.env.API_TEST_DATABASE_URL;
 if (databaseUrl) {
   const database = new URL(databaseUrl);
-  if (database.hostname !== '127.0.0.1' || database.pathname !== '/marshgo_e2e_carpool5') {
-    throw new Error('Only the isolated loopback carpool fixture database is allowed');
+  const loopback = database.hostname === '127.0.0.1';
+  const localFixture = loopback && database.pathname === '/marshgo_e2e_carpool5';
+  const ciFixture = process.env.CI === 'true' && loopback && database.pathname === '/marshgo_e2e';
+  if (!localFixture && !ciFixture) {
+    throw new Error('Only the isolated loopback carpool fixture database or its CI shadow-table database is allowed');
   }
 }
 
