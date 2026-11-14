@@ -224,6 +224,8 @@ describe('live journey segment assembly', () => {
     const noPrediction = buildLiveJourneySegment(leg, {
       vehicles: [vehicle('selected', 'trip-selected', 1, { startDate: undefined, currentStopSequence: undefined })], network: network(), timetable: noPredictionFeed,
     }, now);
+    assert.equal(noPrediction.status, 'SCHEDULED');
+    assert.equal(noPrediction.vehiclePositionStatus, 'UNAVAILABLE');
     assert.equal(noPrediction.vehicles[0]?.approachingBoarding, false);
     assert.equal(noPrediction.vehicles[0]?.emphasized, false);
 

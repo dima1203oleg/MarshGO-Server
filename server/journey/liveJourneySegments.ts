@@ -115,32 +115,35 @@ export function buildLiveJourneySegment(
     scheduledDepartureAt: leg.scheduledDepartureAt,
     scheduledArrivalAt: leg.scheduledArrivalAt,
   };
-  const selectedVehicle = feed.vehicles ? matchLiveVehicleForJourneyLeg(identity, feed.vehicles, now) : null;
   const rawRouteId = unscopeGtfsId(leg.providerId, identity.routeId);
   const rawTripId = unscopeGtfsId(leg.providerId, identity.tripId);
   const rawServiceDate = identity.serviceDate?.replaceAll('-', '') ?? null;
   const rawBoardingStopId = unscopeGtfsId(leg.providerId, typeof leg.metadata.fromStopFeedId === 'string'
     ? leg.metadata.fromStopFeedId : null);
   let boardingStopArrival: LiveJourneySegment['boardingStopArrival'] = unavailableArrival;
+  let tripStopArrival: ReturnType<typeof getGtfsTripStopArrival> | null = null;
   if (feed.timetable && rawTripId && rawServiceDate && rawBoardingStopId) {
-    const arrival = getGtfsTripStopArrival(feed.timetable, rawTripId, rawRouteId ?? '', rawServiceDate, rawBoardingStopId, new Date(now));
-    if (arrival.status === 'SCHEDULED' || arrival.status === 'PREDICTED') {
-      boardingStopArrival = { status: 'SCHEDULED', ...(arrival.scheduledArrivalAt ? { scheduledAt: arrival.scheduledArrivalAt.toISOString() } : {}) };
+    tripStopArrival = getGtfsTripStopArrival(feed.timetable, rawTripId, rawRouteId ?? '', rawServiceDate, rawBoardingStopId, new Date(now));
+    if (tripStopArrival.status === 'SCHEDULED' || tripStopArrival.status === 'PREDICTED') {
+      boardingStopArrival = { status: 'SCHEDULED', ...(tripStopArrival.scheduledArrivalAt ? { scheduledAt: tripStopArrival.scheduledArrivalAt.toISOString() } : {}) };
     }
-    if (arrival.status === 'PREDICTED' && arrival.predictedArrivalAt && arrival.predictedArrivalAt.getTime() > now
-      && selectedVehicle?.tripId === rawTripId
-      && selectedVehicle.routeId === rawRouteId
-      // Some valid VehiclePositions feeds omit TripDescriptor.start_date.
-      // The selected leg already supplies the exact service date, trip and
-      // scheduled time window; bind that position to the date only when the
-      // fresh dated TripUpdate above independently confirms its stop prediction.
-      && (!selectedVehicle.startDate || selectedVehicle.startDate === rawServiceDate)) {
-      if (arrival.scheduledArrivalAt && arrival.predictedArrivalAt) {
-        boardingStopArrival = { status: 'PREDICTED', scheduledAt: arrival.scheduledArrivalAt.toISOString(),
-          predictedAt: arrival.predictedArrivalAt.toISOString(),
-          ...(arrival.realtimeUpdatedAt ? { realtimeUpdatedAt: arrival.realtimeUpdatedAt.toISOString() } : {}) };
-      }
-    }
+  }
+  const exactSelectedVehicle = feed.vehicles ? matchLiveVehicleForJourneyLeg(identity, feed.vehicles, now) : null;
+  const hasFreshDatedStopPrediction = tripStopArrival?.status === 'PREDICTED'
+    && Boolean(tripStopArrival.predictedArrivalAt && tripStopArrival.predictedArrivalAt.getTime() > now
+      && tripStopArrival.realtimeUpdatedAt);
+  // A VehiclePosition without start_date can inherit the selected service date
+  // only when a fresh TripUpdate independently confirms this trip's boarding stop.
+  const selectedVehicle = exactSelectedVehicle ?? (hasFreshDatedStopPrediction && feed.vehicles
+    ? matchLiveVehicleForJourneyLeg(identity, feed.vehicles, now, { allowMissingServiceDate: true }) : null);
+  if (tripStopArrival?.status === 'PREDICTED' && hasFreshDatedStopPrediction
+    && tripStopArrival.scheduledArrivalAt && tripStopArrival.predictedArrivalAt
+    && selectedVehicle?.tripId === rawTripId
+    && selectedVehicle.routeId === rawRouteId
+    && (!selectedVehicle.startDate || selectedVehicle.startDate === rawServiceDate)) {
+    boardingStopArrival = { status: 'PREDICTED', scheduledAt: tripStopArrival.scheduledArrivalAt.toISOString(),
+      predictedAt: tripStopArrival.predictedArrivalAt.toISOString(),
+      ...(tripStopArrival.realtimeUpdatedAt ? { realtimeUpdatedAt: tripStopArrival.realtimeUpdatedAt.toISOString() } : {}) };
   }
   const fleet = rawRouteId && feed.vehicles
     ? freshVehiclesForRoute(leg.providerId, rawRouteId, feed.vehicles, now)
