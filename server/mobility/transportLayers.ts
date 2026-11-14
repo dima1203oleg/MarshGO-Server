@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { cacheKey, smartCache } from '../cache/cacheService';
 import { fetchBinary, fetchJson, UnsafeUrlError } from './safeFetch';
 import { parseCsvLine, routeTypeLabel } from './gtfs';
-import { extractVehicleList, vehicleTransportLabel } from './jsonVehicles';
+import { extractVehicleList, matchJsonVehicleRoute } from './jsonVehicles';
 import { bboxOf, type Bbox } from './types';
 import { isFreshMobilityTimestamp, LIVE_MOBILITY_MAX_AGE_MS, parseMobilityTimestamp } from './timestamps';
 
@@ -265,6 +265,27 @@ export function parseVehicleTimestamp(value: unknown): Date | null {
   return parseMobilityTimestamp(value);
 }
 
+/** Convert JSON feed records into live-map vehicles, retaining route identity only when it is confirmed. */
+export function parseJsonVehicles(
+  providerId: string,
+  body: unknown,
+  routeNames: ReadonlyMap<string, { name: string; type: LineType }>,
+): LiveVehicle[] {
+  const out: LiveVehicle[] = [];
+  for (const vehicle of extractVehicleList(body)) {
+    const lat = Number(vehicle.latitude ?? vehicle.lat), lon = Number(vehicle.longitude ?? vehicle.lon ?? vehicle.lng);
+    if (!Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) continue;
+    const route = matchJsonVehicleRoute(vehicle, routeNames);
+    const bearing = Number(vehicle.bearing ?? vehicle.course ?? vehicle.azimuth);
+    const speed = Number(vehicle.speed ?? vehicle.speed_mps);
+    out.push({ id: `${providerId}:${String(vehicle.vehicle_id ?? vehicle.id ?? vehicle.license_plate ?? `${lat},${lon}`)}`, lon, lat,
+      type: asLineType(route.type) ?? 'other', route: route.route, ...(route.routeId ? { routeId: route.routeId } : {}),
+      bearing: Number.isFinite(bearing) ? bearing : null, speed: Number.isFinite(speed) && speed >= 0 ? speed : null,
+      timestamp: parseVehicleTimestamp(vehicle.timestamp ?? vehicle.updated_at ?? vehicle.last_update ?? vehicle.time), providerId });
+  }
+  return out;
+}
+
 export function isFreshVehicleTimestamp(timestamp: Date | null, now = Date.now()): boolean {
   return isFreshMobilityTimestamp(timestamp, now);
 }
@@ -359,18 +380,7 @@ async function loadVehicles(providerId: string, sourceType: string, url: string,
     return parseGtfsRealtimeVehicles(providerId, data, routeNames);
   }
   const body = (await fetchJson(url, 12000)).data;
-  const out: LiveVehicle[] = [];
-  for (const vehicle of extractVehicleList(body)) {
-    const lat = Number(vehicle.latitude ?? vehicle.lat), lon = Number(vehicle.longitude ?? vehicle.lon ?? vehicle.lng);
-    if (!Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) continue;
-    const label = vehicleTransportLabel(vehicle);
-    const bearing = Number(vehicle.bearing ?? vehicle.course ?? vehicle.azimuth);
-    const speed = Number(vehicle.speed ?? vehicle.speed_mps);
-    out.push({ id: `${providerId}:${String(vehicle.vehicle_id ?? vehicle.id ?? vehicle.license_plate ?? `${lat},${lon}`)}`, lon, lat, type: asLineType(label) ?? 'other',
-      route: String(vehicle.route_name ?? vehicle.route ?? vehicle.route_short_name ?? ''), bearing: Number.isFinite(bearing) ? bearing : null,
-      speed: Number.isFinite(speed) && speed >= 0 ? speed : null, timestamp: parseVehicleTimestamp(vehicle.timestamp ?? vehicle.updated_at ?? vehicle.last_update ?? vehicle.time), providerId });
-  }
-  return out;
+  return parseJsonVehicles(providerId, body, routeNames);
 }
 
 /** Positions are shared between users for ten seconds so a busy map never multiplies requests to city feeds. */
