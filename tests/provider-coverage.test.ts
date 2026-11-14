@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { bboxIntersectsRouteCorridor, gtfsProvidersInRouteCorridor } from '../server/journey/providerCoverage';
+import { bboxIntersectsRouteCorridor, gtfsProvidersInRouteCorridor, selectGtfsProvidersInRouteCorridor } from '../server/journey/providerCoverage';
 
 const kyiv: [number, number] = [30.5234, 50.4501];
 const lviv: [number, number] = [24.031, 49.842];
@@ -37,5 +37,29 @@ describe('GTFS provider corridor selection', () => {
     };
     assert.deepEqual(gtfsProvidersInRouteCorridor([provider], lviv, lviv, 2_000), [provider]);
     assert.deepEqual(gtfsProvidersInRouteCorridor([provider], kyiv, kyiv, 2_000), []);
+  });
+
+  it('applies the bounded feed budget after corridor filtering', () => {
+    const unrelated = Array.from({ length: 101 }, (_, index) => ({
+      id: `city-feed-${index}`,
+      last_report: { bbox: [26.53, 48.64, 26.63, 48.74] as const },
+    }));
+    const nationalRail = {
+      id: 'national-rail',
+      last_report: { bbox: [22, 44, 41, 53] as const },
+    };
+    const selection = selectGtfsProvidersInRouteCorridor([...unrelated, nationalRail], kyiv, lviv, kyivLvivCorridor);
+    assert.deepEqual(selection.providers, [nationalRail]);
+    assert.equal(selection.truncated, false);
+  });
+
+  it('reports truncation only when relevant feeds exceed the corridor budget', () => {
+    const relevant = Array.from({ length: 101 }, (_, index) => ({
+      id: `corridor-feed-${index}`,
+      last_report: { bbox: [23.86, 49.77, 24.17, 49.98] as const },
+    }));
+    const selection = selectGtfsProvidersInRouteCorridor(relevant, lviv, lviv, 2_000, 100);
+    assert.equal(selection.providers.length, 100);
+    assert.equal(selection.truncated, true);
   });
 });

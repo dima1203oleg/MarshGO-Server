@@ -37,7 +37,7 @@ import { generatePedestrianGeometry } from '../shared/navigation/pedestrianGeome
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { legProvenanceMetadata, sanitizePersistedJourney, trustedRouteGeometry } from './journey/legGeometryProvenance';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
-import { bboxIntersectsRouteCorridor, gtfsProvidersInRouteCorridor } from './journey/providerCoverage';
+import { bboxIntersectsRouteCorridor, selectGtfsProvidersInRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { matchRouteProgress, type LonLat, type PreviousProgress } from './navigation/routeProgress';
@@ -3292,20 +3292,19 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     `SELECT id,name,city,feed_url,realtime_url,last_report FROM mobility_providers
       WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
         AND status='enabled' AND health IN ('healthy','degraded')
-      ORDER BY priority,name LIMIT 101`,
+      ORDER BY priority,name`,
   );
-  if (discoveredGtfsProviders.length > 100) candidateGenerationTruncated = true;
-  const gtfsProviders = discoveredGtfsProviders.slice(0, 100);
   const transitAllowed = (mode: TransitJourneyMode) => journeySearchTransitModeAllowed(mode, search.preferences);
-  const spatiallyEligibleGtfsProviders = gtfsProvidersInRouteCorridor(
-    gtfsProviders, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters,
+  const allowedTransitModes = JOURNEY_SEARCH_TRANSIT_MODES.filter(transitAllowed);
+  const providerSelection = selectGtfsProvidersInRouteCorridor(
+    allowedTransitModes.length > 0 ? discoveredGtfsProviders : [],
+    search.origin.coordinates, search.destination.coordinates, corridorWidthMeters,
   );
-  const allTransitModes = JOURNEY_SEARCH_TRANSIT_MODES;
-  const allowedTransitModes = allTransitModes.filter(transitAllowed);
+  if (providerSelection.truncated) candidateGenerationTruncated = true;
   // Do not prune a feed by cached `last_report.counts`: a validated report can
   // predate a feed refresh or route classifier fix. The worker parses the
   // current feed and applies the selected modes to actual scheduled itineraries.
-  const eligibleGtfsProviders = allowedTransitModes.length === 0 ? [] : spatiallyEligibleGtfsProviders;
+  const eligibleGtfsProviders = providerSelection.providers;
   const providerMetadata = new Map<string, { name: string; routeGeometrySource?: 'gtfs_shape' | 'official_geojson' }>(
     eligibleGtfsProviders.map((provider) => [provider.id, { name: provider.name }]),
   );
