@@ -3893,6 +3893,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   for (const mode of requestedMicromobilityModes) {
     const estimates = await estimateMicromobility(mode, search.origin, search.destination, search.departureAt);
     for (const estimate of estimates) pushMicromobilityCandidate(estimate);
+    const label = mode === 'BICYCLE' ? 'bike' : 'scooter';
+    const corridorHasSupply = mode === 'BICYCLE' ? microPoints.length > 0 : scooterRouteProviders.length > 0;
+    if (estimates.length === 0 && corridorHasSupply && ![...micromobilityRoadRejections].some((reason) => reason.startsWith(`${label}:`))) {
+      micromobilityRoadRejections.add(`${label}:no-eligible-rental-trip`);
+    }
   }
 
   // Connect real rental estimates to nearby stops from any selected timetable mode.
