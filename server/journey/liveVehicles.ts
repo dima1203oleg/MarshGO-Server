@@ -31,6 +31,7 @@ export function matchLiveVehicleForJourneyLeg(
   leg: ScheduledJourneyLegIdentity,
   vehicles: readonly LiveVehicle[],
   now = Date.now(),
+  options: { allowMissingServiceDate?: boolean } = {},
 ): LiveVehicle | null {
   const tripId = unscopeGtfsId(leg.providerId ?? '', leg.tripId);
   const routeId = unscopeGtfsId(leg.providerId ?? '', leg.routeId);
@@ -40,7 +41,7 @@ export function matchLiveVehicleForJourneyLeg(
   const candidates = vehicles.filter((vehicle) => vehicle.providerId === leg.providerId
     && vehicle.tripId === tripId
     && vehicle.routeId === routeId
-    && (!vehicle.startDate || vehicle.startDate === leg.serviceDate)
+    && (vehicle.startDate === leg.serviceDate || (options.allowMissingServiceDate === true && !vehicle.startDate))
     && isFreshVehicleTimestamp(vehicle.timestamp, now));
   if (candidates.length === 0) return null;
 
