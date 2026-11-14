@@ -730,15 +730,25 @@ test('reports the ridden distance of a shaped segment and keeps it absent withou
   assert.equal(bare?.shapeDistanceMeters, undefined, 'a missing source shape must not invent a ridden distance');
 });
 
-test('preserves shape identifiers and geometry when compatible GTFS providers are merged', () => {
-  const merged = mergeGtfsTimetables([{ providerId: 'p1', providerName: 'Test Transit', providerCity: 'Львів', feed: feed({ withShape: true }) }]);
+test('preserves route source hash, shape identifiers and geometry when compatible GTFS providers are merged', () => {
+  const staticFeedSha256 = 'a'.repeat(64);
+  const merged = mergeGtfsTimetables([{ providerId: 'p1', providerName: 'Test Transit', providerCity: 'Львів',
+    feed: { ...feed({ withShape: true }), staticFeedSha256 } }]);
   assert.ok(merged);
   assert.equal(merged.trips.get('p1:t1')?.shapeId, 'p1:shape-1');
   assert.equal(merged.shapes?.get('p1:shape-1')?.length, 3);
+  assert.equal(merged.providersByRoute?.get('p1:r')?.staticFeedSha256, staticFeedSha256);
   const result = findGtfsItinerariesWithStats(merged, {
     ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
   });
   assert.equal(result.itineraries[0]?.segments[0]?.routeGeometry?.length, 3);
+  assert.equal(result.itineraries[0]?.segments[0]?.staticFeedSha256, staticFeedSha256);
+});
+
+test('direct GTFS journeys retain the parsed static archive hash', () => {
+  const staticFeedSha256 = 'b'.repeat(64);
+  const journeys = findDirectGtfsJourneys({ ...feed(), staticFeedSha256 }, request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'));
+  assert.equal(journeys[0]?.staticFeedSha256, staticFeedSha256);
 });
 
 test('reuses a merged timetable briefly and invalidates it when a source snapshot changes', () => {

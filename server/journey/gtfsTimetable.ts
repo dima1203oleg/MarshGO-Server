@@ -100,6 +100,8 @@ export function maximumGtfsWaitWithinJourney(maximumJourneySeconds: number,
 export interface GtfsTimetableFeed {
   fetchedAt: Date;
   timezone: string;
+  /** SHA-256 of the exact static archive bytes parsed by this worker. */
+  staticFeedSha256?: string;
   routes: Map<string, { name: string; mode: TransitJourneyMode; transportType: GtfsTransportType; sourceRouteType?: number;
     classification?: LvivTransportClassification; agencyId?: string; scheduleSemantics?: 'published_departures' | 'frequency_estimate' }>;
   stops: Map<string, { id: string; name: string; lon: number; lat: number; zoneId?: string; parentStation?: string; locationType?: number }>;
@@ -112,7 +114,7 @@ export interface GtfsTimetableFeed {
   pathways?: GtfsPathway[];
   calendars: Map<string, { start: string; end: string; weekdays: boolean[] }>;
   exceptions: Map<string, Map<string, number>>;
-  providersByRoute?: Map<string, { id: string; name: string; city: string; fetchedAt: Date }>;
+  providersByRoute?: Map<string, { id: string; name: string; city: string; fetchedAt: Date; staticFeedSha256?: string }>;
   realtimeTripUpdates?: Map<string, GtfsRealtimeTripUpdate>;
   fareProducts?: Map<string, GtfsFareProduct>;
   fareRules?: Map<string, GtfsFareRule[]>;
@@ -178,6 +180,8 @@ export interface GtfsDirectJourney {
   departureAt: Date;
   arrivalAt: Date;
   sourceFreshAt: Date;
+  /** Content identity of the static schedule used to build this segment. */
+  staticFeedSha256?: string;
   distanceToOriginStopMeters: number;
   distanceFromDestinationStopMeters: number;
   /** Present only when the source supplied a usable GTFS shape for this ride segment. */
@@ -195,6 +199,14 @@ export interface GtfsDirectJourney {
 /** Timestamp the exact data used to build a journey; registry health checks are not feed freshness. */
 export function effectiveGtfsSourceFreshAt(journey: Pick<GtfsDirectJourney, 'realtimeUpdatedAt' | 'sourceFreshAt'>): Date {
   return journey.realtimeUpdatedAt ?? journey.sourceFreshAt;
+}
+
+export function gtfsArchiveSha256(data: Uint8Array): string {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+export function gtfsSourceSha256ForRoute(feed: Pick<GtfsTimetableFeed, 'staticFeedSha256' | 'providersByRoute'>, routeId: string): string | undefined {
+  return feed.providersByRoute?.get(routeId)?.staticFeedSha256 ?? feed.staticFeedSha256;
 }
 
 type GtfsTransferMeasure = { walkingMeters: number; walkingSeconds: number; geometry: Array<[number, number]> | null; inSeat: boolean };
@@ -1094,7 +1106,7 @@ function buildMergedGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gtf
   const fareRules: NonNullable<GtfsTimetableFeed['fareRules']> = new Map();
   const realtimeTripUpdates: NonNullable<GtfsTimetableFeed['realtimeTripUpdates']> = new Map();
   let faresV2Present = false;
-  const providersByRoute = new Map<string, { id: string; name: string; city: string; fetchedAt: Date }>();
+  const providersByRoute = new Map<string, { id: string; name: string; city: string; fetchedAt: Date; staticFeedSha256?: string }>();
   const stopsByName = new Map<string, Array<{ id: string; lon: number; lat: number }>>();
   let canonicalStopIndex = 0;
   const namedCityStations = ordered.flatMap((source) => source.providerCity === 'Україна' ? [] : [...source.feed.stops.values()]
@@ -1155,7 +1167,8 @@ function buildMergedGtfsTimetables(sources: readonly GtfsTimetableSource[]): Gtf
     for (const [routeId, route] of source.feed.routes) {
       const mergedRouteId = `${prefix}${routeId}`;
       routes.set(mergedRouteId, route);
-      providersByRoute.set(mergedRouteId, { id: source.providerId, name: source.providerName, city: source.providerCity, fetchedAt: source.feed.fetchedAt });
+      providersByRoute.set(mergedRouteId, { id: source.providerId, name: source.providerName, city: source.providerCity,
+        fetchedAt: source.feed.fetchedAt, ...(source.feed.staticFeedSha256 ? { staticFeedSha256: source.feed.staticFeedSha256 } : {}) });
     }
     faresV2Present ||= source.feed.faresV2Present === true;
     for (const [fareId, product] of source.feed.fareProducts ?? []) {
@@ -2391,6 +2404,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
           searched.add(resultKey);
           const originCoordinates = from.sourceStopCoordinates ?? [originMatch.stop.lon, originMatch.stop.lat] as [number, number];
           const destinationCoordinates = to.sourceStopCoordinates ?? [destinationMatch.stop.lon, destinationMatch.stop.lat] as [number, number];
+          const staticFeedSha256 = gtfsSourceSha256ForRoute(feed, trip.routeId);
           const result: GtfsDirectJourney = { providerId: input.providerId, providerName: input.providerName,
             ...(feed.providersByRoute?.get(trip.routeId)?.city ? { providerCity: feed.providersByRoute.get(trip.routeId)!.city } : {}), mode: route.mode,
             routeId: trip.routeId, routeName: route.name, headsign: trip.headsign, tripId,
@@ -2402,6 +2416,7 @@ export function findDirectGtfsJourneys(feed: GtfsTimetableFeed, input: SearchInp
             ...(route.classification ? { routeClassification: route.classification } : {}), serviceDate,
             scheduledDepartureAt: departureAt, scheduledArrivalAt: arrivalAt,
             departureAt, arrivalAt, sourceFreshAt: feed.fetchedAt,
+            ...(staticFeedSha256 ? { staticFeedSha256 } : {}),
             distanceToOriginStopMeters: Math.round(distanceMeters(input.origin, originCoordinates)),
             distanceFromDestinationStopMeters: Math.round(distanceMeters(input.destination, destinationCoordinates)),
             ...(from.sourceZoneId ? { originZoneId: from.sourceZoneId } : {}),
@@ -3605,6 +3620,7 @@ export function findGtfsItinerariesWithStats(
       const route = feed.routes.get(candidate.routeId)!;
       const trip = feed.trips.get(candidate.tripId)!;
       const provider = feed.providersByRoute?.get(candidate.routeId);
+      const staticFeedSha256 = provider?.staticFeedSha256 ?? feed.staticFeedSha256;
       const segment: GtfsDirectJourney = {
         providerId: candidate.providerId,
         providerName: provider?.name ?? input.providerName,
@@ -3629,6 +3645,7 @@ export function findGtfsItinerariesWithStats(
         departureAt: candidate.departureAt,
         arrivalAt: candidate.arrivalAt,
         sourceFreshAt: provider?.fetchedAt ?? feed.fetchedAt,
+        ...(staticFeedSha256 ? { staticFeedSha256 } : {}),
         ...(candidate.realtimeUpdatedAt ? { realtimeUpdatedAt: candidate.realtimeUpdatedAt } : {}),
         distanceToOriginStopMeters: candidate.originContext.distanceToOriginStopMeters,
         distanceFromDestinationStopMeters: candidate.destinationContext.distanceFromDestinationStopMeters,
@@ -4573,7 +4590,7 @@ export function cachedGtfsTimetable(providerId: string, url: string, now = Date.
     const { data } = await fetchBinary(url, MAX_FEED_BYTES, 45_000);
     const unzipped = unzipSync(data, { filter: (file) => /(^|\/)(agency|routes|stops|trips|stop_times|calendar|calendar_dates|shapes|transfers|pathways|levels|fare_attributes|fare_rules|fare_media|fare_products|fare_leg_rules|fare_leg_join_rules|fare_transfer_rules|rider_categories|timeframes|networks|route_networks|areas|stop_areas)\.txt$/.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
     const files = Object.fromEntries(Object.entries(unzipped).map(([name, content]) => [name.split('/').pop() as string, content]));
-    return parseGtfsTimetable(files, new Date(now), defaultTimezone);
+    return { ...parseGtfsTimetable(files, new Date(now), defaultTimezone), staticFeedSha256: gtfsArchiveSha256(data) };
   }, estimateGtfsFeedCacheBytes, now);
 }
 
