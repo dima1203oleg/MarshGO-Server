@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { parseJourneySearchRequest, transitProviderAllowed } from '../server/journey/search';
+import { parseJourneySearchRequest, shouldSearchGtfsTimetables, transitProviderAllowed } from '../server/journey/search';
 import { JOURNEY_TRANSPORT_TYPES, journeyTransportTypeSelected } from '../server/journey/types';
 
 const now = new Date('2026-09-30T08:00:00.000Z');
@@ -70,5 +70,17 @@ describe('Journey search request validation', () => {
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedProviderIdsByType: { taxi: ['provider'] } } }, now), /allowedProviderIdsByType is invalid/);
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedProviderIdsByType: { scooter: ['not valid'] } } }, now), /allowedProviderIdsByType is invalid/);
     assert.throws(() => parseJourneySearchRequest({ ...request, strategy: 'FAKEST' }, now), /not supported/);
+  });
+});
+
+describe('shouldSearchGtfsTimetables', () => {
+  it('searches eligible timetables on intercity distances', () => {
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: 270_000, eligibleProviderCount: 1, hasMetroSource: false }), true);
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: 45_000, eligibleProviderCount: 1, hasMetroSource: false }), true);
+  });
+  it('skips when nothing is eligible or the distance is invalid', () => {
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: 5_000, eligibleProviderCount: 0, hasMetroSource: false }), false);
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: 5_000, eligibleProviderCount: 0, hasMetroSource: true }), true);
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: Number.NaN, eligibleProviderCount: 3, hasMetroSource: false }), false);
   });
 });
