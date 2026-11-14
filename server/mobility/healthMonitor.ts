@@ -1,5 +1,29 @@
 import type { Pool } from 'pg';
 import { probeProviderReachability } from './connection';
+import type { ConnectionReport } from './types';
+
+interface StoredProviderReport {
+  counts?: Record<string, number>;
+  checks?: Array<{ name?: string; ok?: boolean; detail?: string }>;
+  error?: string | null;
+  [key: string]: unknown;
+}
+
+/** A recovered probe must not leave the previous outage asserted beside its own success in one report. */
+export function mergeProbeReport(stored: StoredProviderReport | null, probe: ConnectionReport): StoredProviderReport {
+  const next: StoredProviderReport = { ...(stored ?? {}) };
+  if (probe.health === 'offline') {
+    next.checks = probe.checks;
+    next.error = probe.error ?? null;
+  } else {
+    next.health_probe = probe;
+    delete next.error;
+    const staleReachabilityFailure = (stored?.checks ?? []).some((check) => check?.name === 'Feed accessible' && check.ok === false);
+    if (staleReachabilityFailure) next.checks = probe.checks;
+  }
+  if (probe.sourceVersion) next.sourceVersion = probe.sourceVersion;
+  return next;
+}
 
 /**
  * Performs a bounded reachability pass for enabled sources. It never downloads and parses full static feeds in the API
@@ -18,7 +42,7 @@ export async function refreshProviderHealth(
   const concurrency = Math.max(1, Math.min(8, Math.floor(requestedConcurrency)));
   const { rows } = await pool.query<{
     id: string; name: string; source_type: string; feed_url: string; health: string;
-    last_report: { counts?: Record<string, number> } | null;
+    last_report: StoredProviderReport | null;
   }>(
     `SELECT id,name,source_type,feed_url,health,last_report FROM mobility_providers
       WHERE status='enabled' AND access='open' AND ($2::uuid[] IS NULL OR id=ANY($2::uuid[]))
@@ -30,14 +54,12 @@ export async function refreshProviderHealth(
         const report = await probeProviderReachability(provider);
         const hasValidatedReport = Boolean(provider.last_report?.counts && Object.keys(provider.last_report.counts).length > 0);
         const health = report.health === 'offline' ? 'offline' : provider.health === 'healthy' && hasValidatedReport ? 'healthy' : 'degraded';
+        const nextReport = mergeProbeReport(provider.last_report, report);
         await pool.query(
           `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_error=$3,
-             last_report=CASE WHEN $2='offline'
-               THEN COALESCE(last_report,'{}'::jsonb) || jsonb_build_object('checks',$4::jsonb->'checks','error',$3::text,'last_probe_at',now()) || CASE WHEN $5::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('sourceVersion',$5::text) END
-               ELSE COALESCE(last_report,'{}'::jsonb) || jsonb_build_object('health_probe',$4::jsonb,'last_probe_at',now()) || CASE WHEN $5::text IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('sourceVersion',$5::text) END
-             END,
+             last_report=$4::jsonb || jsonb_build_object('last_probe_at',now()),
              updated_at=now() WHERE id=$1`,
-          [provider.id, health, report.error ?? null, JSON.stringify(report), report.sourceVersion ?? null]);
+          [provider.id, health, report.error ?? null, JSON.stringify(nextReport)]);
         if (health === 'healthy') healthy++; else if (health === 'degraded') degraded++; else offline++;
       } catch (error) {
         offline++;
