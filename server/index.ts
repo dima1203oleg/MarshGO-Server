@@ -25,7 +25,7 @@ import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNE
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { priceStatusFor, scaleGtfsFareForPassengers } from './journey/gtfsFares';
 import { scaleCashFareForPassengers } from './mobility/transportTariffs';
-import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, effectiveWalkingReachMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS, resolveTransitCandidateBudget, summarizeGtfsWalkReach, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
+import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, effectiveGtfsSourceFreshAt, effectiveWalkingReachMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS, resolveTransitCandidateBudget, summarizeGtfsWalkReach, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
 import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, routePedestrianPath, STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingConfiguredFor, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { enrichMicromobilityLegGeometry } from './journey/micromobilityGeometry';
@@ -3284,8 +3284,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     } else providerErrors.push('Немає налаштованої пішохідної мережі для цих точок; пішохідний варіант не перевірено.');
   }
   let gtfsSecondarySearchUnavailable = false;
-  const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; last_sync_at: Date | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
-    `SELECT id,name,city,feed_url,realtime_url,last_sync_at,last_report FROM mobility_providers
+  const { rows: discoveredGtfsProviders } = await pool.query<{ id: string; name: string; city: string; feed_url: string; realtime_url: string | null; last_report: { bbox?: [number, number, number, number]; counts?: Record<string, number> } }>(
+    `SELECT id,name,city,feed_url,realtime_url,last_report FROM mobility_providers
       WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
         AND status='enabled' AND health IN ('healthy','degraded')
       ORDER BY priority,name LIMIT 101`,
@@ -3302,8 +3302,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   // predate a feed refresh or route classifier fix. The worker parses the
   // current feed and applies the selected modes to actual scheduled itineraries.
   const eligibleGtfsProviders = allowedTransitModes.length === 0 ? [] : spatiallyEligibleGtfsProviders;
-  const providerMetadata = new Map<string, { name: string; last_sync_at: Date | null; routeGeometrySource?: 'gtfs_shape' | 'official_geojson' }>(
-    eligibleGtfsProviders.map((provider) => [provider.id, { name: provider.name, last_sync_at: provider.last_sync_at }]),
+  const providerMetadata = new Map<string, { name: string; routeGeometrySource?: 'gtfs_shape' | 'official_geojson' }>(
+    eligibleGtfsProviders.map((provider) => [provider.id, { name: provider.name }]),
   );
   const makeGtfsLegMetadata = (input: {
     mode: string;
@@ -3331,8 +3331,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   // Pass the source definitions to the worker so it owns the parsed schedule and
   // keeps CPU-heavy timetable searches away from the API event loop.
   const kyivMetroSourcesTask = shouldLoadKyivMetro ? (async (): Promise<GtfsWorkerMetroSources> => {
-    const { rows } = await pool.query<{ id: string; name: string; city: string; feed_url: string; source_ref: string | null; source_type: string; last_sync_at: Date | null }>(
-      `SELECT id,name,city,feed_url,source_ref,source_type,last_sync_at FROM mobility_providers
+    const { rows } = await pool.query<{ id: string; name: string; city: string; feed_url: string; source_ref: string | null; source_type: string }>(
+      `SELECT id,name,city,feed_url,source_ref,source_type FROM mobility_providers
         WHERE city='Київ' AND provider_type='public_transit' AND source_type IN ('rest','geojson')
           AND status='enabled' AND name ILIKE '%метро%'
         ORDER BY priority,name`);
@@ -3356,7 +3356,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     try {
       metroSources = await kyivMetroSourcesTask;
       providerMetadata.set(metroSources.routeSource.id, { name: 'Київ — метро (офіційний інтервальний розклад)',
-        last_sync_at: metroSources.routeSource.last_sync_at ?? null, routeGeometrySource: 'official_geojson' });
+        routeGeometrySource: 'official_geojson' });
     } catch (error) {
       providerErrors.push(`Київське метро: ${error instanceof Error ? error.message : 'відкриті дані тимчасово недоступні'}`);
     }
@@ -4449,7 +4449,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                 segment.scheduledDepartureAt, segment.scheduledArrivalAt, durationSeconds, allocation?.priceMinor ?? null,
                 path.fare?.currency ?? 'UAH', priceStatusFor(allocation?.priceMinor), segment.providerId,
                 segmentSource,
-                segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
+                effectiveGtfsSourceFreshAt(segment),
                 JSON.stringify(segmentMetadata),
                     segment.shapeDistanceMeters ?? null],
             );
@@ -4602,7 +4602,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
                 segment.realtimeUpdatedAt ? segment.departureAt : null, segment.realtimeUpdatedAt ? segment.arrivalAt : null,
                 durationSeconds, allocation?.priceMinor ?? null, path.fare?.currency ?? 'UAH', priceStatusFor(allocation?.priceMinor),
                 segment.providerId, segmentSource,
-                segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
+                effectiveGtfsSourceFreshAt(segment),
                 JSON.stringify(segmentMetadata),
                     segment.shapeDistanceMeters ?? null],
             );
@@ -4858,7 +4858,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             itinerary.fare?.allocations[segmentIndex]?.priceMinor ?? null,
             itinerary.fare?.currency ?? 'UAH', priceStatusFor(itinerary.fare?.allocations[segmentIndex]?.priceMinor), segment.providerId,
             segmentSource,
-            segment.realtimeUpdatedAt ?? provider?.last_sync_at ?? segment.sourceFreshAt,
+            effectiveGtfsSourceFreshAt(segment),
           JSON.stringify(segmentMetadata),
                 segment.shapeDistanceMeters ?? null],
         );
