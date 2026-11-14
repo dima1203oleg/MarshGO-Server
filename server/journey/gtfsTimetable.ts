@@ -192,6 +192,11 @@ export interface GtfsDirectJourney {
   traveledZoneIds: string[];
 }
 
+/** Timestamp the exact data used to build a journey; registry health checks are not feed freshness. */
+export function effectiveGtfsSourceFreshAt(journey: Pick<GtfsDirectJourney, 'realtimeUpdatedAt' | 'sourceFreshAt'>): Date {
+  return journey.realtimeUpdatedAt ?? journey.sourceFreshAt;
+}
+
 type GtfsTransferMeasure = { walkingMeters: number; walkingSeconds: number; geometry: Array<[number, number]> | null; inSeat: boolean };
 type GtfsTransferDecision = {
   feasible: boolean;
