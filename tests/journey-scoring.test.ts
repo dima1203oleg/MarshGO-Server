@@ -145,6 +145,19 @@ describe('Journey strategy scoring', () => {
     assert.equal(new Set(selected.map((item) => item.journey.diversityKey)).size, 1);
   });
 
+  it('shows one card when feeder departures tie on every metric into the same train', () => {
+    // Measured 2026-11-14, Lviv→Chernivtsi: tram Т01 at 18:16/18:31/19:34 into train 7 at 01:29 —
+    // 44 068 s, 1 532 m walk, one transfer and unknown fare for all three.
+    const tied: JourneyOption[] = ['18:16', '18:31', '19:34'].map((time) => ({
+      id: `t01-${time}`, diversityKey: 'transit:Т01>7', durationSeconds: 44_068, priceMinor: null, transfers: 1,
+      walkingMeters: 1_532, reliability: 0.8, transferRisk: 0.1, comfort: null, legs: [{ mode: 'TRAM' }, { mode: 'RAIL' }],
+    }));
+    const later = { ...tied[0]!, id: 't01-next-train', durationSeconds: 44_068 + MIN_PERCEPTIBLE_ARRIVAL_GAP_SECONDS, walkingMeters: 300 };
+    const ids = selectStrategyAlternatives([...tied, later], ['BALANCED', 'FASTEST'], 12).map((item) => item.journey.id);
+    assert.equal(ids.filter((id) => tied.some((journey) => journey.id === id)).length, 1);
+    assert.ok(ids.includes('t01-next-train'), 'a materially later arrival on the same chain is still a choice');
+  });
+
   it('keeps distinct winners for distinct strategies', () => {
     const recommendations = selectStrategyRecommendations(candidates, ['BALANCED', 'FASTEST', 'CHEAPEST']);
     assert.equal(recommendations.length, 3);
