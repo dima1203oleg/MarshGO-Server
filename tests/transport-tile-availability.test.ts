@@ -4,6 +4,10 @@ import { readFileSync } from 'node:fs';
 import { providerServices, selectTileProviders, transportTileDefinitions, type TransportTileDefinition, type TransportTileProviderRow } from '../server/mobility/transportTileAvailability';
 
 const serverSource = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
+const providerEndpoint = serverSource.slice(
+  serverSource.indexOf("app.get('/api/v1/mobility/providers'"),
+  serverSource.indexOf("app.get('/api/v1/mobility/regions'"),
+);
 
 /**
  * These rows are test inputs, not production evidence. They mirror the exact shapes the registry
@@ -71,6 +75,20 @@ describe('transport tile availability is decided by validated feed counts', () =
     assert.deepEqual(selectTileProviders({ tile: tileOf('train'), rows: [], ...kyiv }), []);
     assert.deepEqual(selectTileProviders({ tile: tileOf('intercity_bus'), rows: [], ...kyiv }), []);
     assert.doesNotMatch(serverSource, /tile\.id === '(?:train|intercity_bus)' && tileProviders\.length === 0/);
+  });
+
+  it('only advertises taxi and carsharing operators that come from the connected provider registry', () => {
+    const registryProviders = [
+      row({ name: 'Uklon', provider_type: 'taxi', source_type: 'rest', last_report: { bbox: kyivBox } }),
+      row({ name: 'Getmancar', provider_type: 'carsharing', source_type: 'gbfs', last_report: { bbox: kyivBox } }),
+    ];
+    assert.deepEqual(selectTileProviders({ tile: tileOf('taxi'), rows: registryProviders, ...kyiv }).map(({ name }) => name), ['Uklon']);
+    assert.deepEqual(selectTileProviders({ tile: tileOf('carsharing'), rows: registryProviders, ...kyiv }).map(({ name }) => name), ['Getmancar']);
+    assert.deepEqual(selectTileProviders({ tile: tileOf('taxi'), rows: registryProviders, lat: 49.8397, lon: 24.0297 }), []);
+
+    assert.match(providerEndpoint, /FROM mobility_providers WHERE status='enabled' AND health IN \('healthy','degraded'\)/);
+    assert.match(providerEndpoint, /selectTileProviders\(\{ tile, rows, lat, lon \}\)/);
+    assert.doesNotMatch(providerEndpoint, /taxi:(?:Uklon|Bolt|Opti)|carsharing:Getmancar|transfer:(?:Kiwitaxi|Intercity)/);
   });
 
   it('scopes a city tile to the search point and keeps nationwide sources out of city tiles', () => {
