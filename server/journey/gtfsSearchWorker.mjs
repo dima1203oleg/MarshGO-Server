@@ -17,10 +17,14 @@ const [{ cachedGtfsTimetable, mergeGtfsTimetables, getCachedGtfsTimetableStats, 
 // An opt-in, exact-URL test seam lets API integration tests exercise the real
 // worker/parser/planner without a public feed or any relaxation of safeFetch.
 // Production never receives the directory, and no other URL can use the seam.
-const GTFS_TEST_FIXTURE_URL = 'https://gtfs-api-fixture.invalid/lviv.zip';
+const GTFS_TEST_FIXTURE_URLS = new Map([
+  ['https://gtfs-api-fixture.invalid/lviv.zip', ''],
+  ['https://gtfs-api-fixture.invalid/direct-only.zip', 'direct-only'],
+]);
 const GTFS_TEST_FILES = ['agency.txt', 'routes.txt', 'stops.txt', 'trips.txt', 'stop_times.txt', 'calendar.txt', 'shapes.txt'];
 const testFixtureDirectory = typeof workerData?.testFixtureDirectory === 'string'
   ? workerData.testFixtureDirectory : undefined;
+const testFixtureFeedCache = new Map();
 
 async function loadProviderTimetable(provider) {
   const startedAt = Date.now();
@@ -30,11 +34,20 @@ async function loadProviderTimetable(provider) {
 }
 
 async function loadProviderTimetableUncached(provider) {
-  if (testFixtureDirectory && provider.feedUrl === GTFS_TEST_FIXTURE_URL) {
-    const entries = await Promise.all(GTFS_TEST_FILES.map(async (name) => [name,
-      new Uint8Array(await readFile(join(testFixtureDirectory, name)))
-    ]));
-    return parseGtfsTimetable(Object.fromEntries(entries));
+  const fixtureSubdirectory = GTFS_TEST_FIXTURE_URLS.get(provider.feedUrl);
+  if (testFixtureDirectory && fixtureSubdirectory !== undefined) {
+    const cacheKey = `${provider.id}\u0000${provider.feedUrl}`;
+    const cached = testFixtureFeedCache.get(cacheKey);
+    if (cached) {
+      debugStage('test-fixture-feed-cache-hit', { provider: provider.id });
+      return cached;
+    }
+    const pending = Promise.all(GTFS_TEST_FILES.map(async (name) => [name,
+      new Uint8Array(await readFile(join(testFixtureDirectory, fixtureSubdirectory, name)))
+    ])).then((entries) => parseGtfsTimetable(Object.fromEntries(entries)));
+    testFixtureFeedCache.set(cacheKey, pending);
+    try { return await pending; }
+    catch (error) { testFixtureFeedCache.delete(cacheKey); throw error; }
   }
   const isUkraineProvider = provider.country === 'UA' || /львів|київ|дніпро|одеса|харків|хмельницький|ужгород|буча|червоноград|україна/i.test(provider.city || provider.name);
   return cachedGtfsTimetable(provider.id, provider.feedUrl, Date.now(), isUkraineProvider ? 'Europe/Kyiv' : undefined);

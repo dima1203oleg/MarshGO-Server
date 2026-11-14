@@ -26,11 +26,13 @@ API_PID=""
 SECONDARY_API_PID=""
 OSRM_PID=""
 WALKING_OSRM_PID=""
+WALKING_ROUTE_STUB_PID=""
 cleanup() {
   if [[ -n "$API_PID" ]]; then kill "$API_PID" 2>/dev/null || true; wait "$API_PID" 2>/dev/null || true; fi
   if [[ -n "$SECONDARY_API_PID" ]]; then kill "$SECONDARY_API_PID" 2>/dev/null || true; wait "$SECONDARY_API_PID" 2>/dev/null || true; fi
   if [[ -n "$OSRM_PID" ]]; then kill "$OSRM_PID" 2>/dev/null || true; wait "$OSRM_PID" 2>/dev/null || true; fi
   if [[ -n "$WALKING_OSRM_PID" ]]; then kill "$WALKING_OSRM_PID" 2>/dev/null || true; wait "$WALKING_OSRM_PID" 2>/dev/null || true; fi
+  if [[ -n "$WALKING_ROUTE_STUB_PID" ]]; then kill "$WALKING_ROUTE_STUB_PID" 2>/dev/null || true; wait "$WALKING_ROUTE_STUB_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
 
@@ -65,6 +67,7 @@ start_api() {
   local routing_url="${1:-}"
   local walking_router_urls="${2:-}"
   env NODE_ENV=development AUTH_DEV_BYPASS=true AUTH_DEV_OTP=true MOBILITY_HEALTH_DISABLED=true \
+    MARSHGO_GTFS_SEARCH_DEBUG="${API_TEST_GTFS_SEARCH_DEBUG:-0}" \
     DATABASE_URL="$DATABASE_URL" API_HOST=127.0.0.1 API_PORT="$API_PORT" \
     MARSHGO_API_TEST_FIXTURE_MODE=1 MARSHGO_GTFS_TEST_FIXTURE_DIR="$PWD/tests/fixtures/gtfs-http" \
     TRUST_PROXY_HOPS="${API_TEST_TRUST_PROXY_HOPS:-0}" \
@@ -181,3 +184,27 @@ stop_api
 kill "$WALKING_OSRM_PID" 2>/dev/null || true
 wait "$WALKING_OSRM_PID" 2>/dev/null || true
 WALKING_OSRM_PID=""
+
+# Exercise the direct-only adaptive endpoint retry using a dedicated scheduled feed and a
+# deterministic foot graph. The baseline trip is close enough to be searched but leaves too soon
+# for the measured access walk; a later direct trip sits beyond standard reach and is feasible.
+WALKING_ROUTE_STUB_PORT=3308 node tests/fixtures/osrm-foot-route-stub.mjs &
+WALKING_ROUTE_STUB_PID=$!
+walking_route_stub_ready=false
+for _ in $(seq 1 30); do
+  if curl --fail --silent "http://127.0.0.1:3308/health" | grep -q '"fixture":true'; then
+    walking_route_stub_ready=true
+    break
+  fi
+  if ! kill -0 "$WALKING_ROUTE_STUB_PID" 2>/dev/null; then wait "$WALKING_ROUTE_STUB_PID"; exit 1; fi
+  sleep 1
+done
+if [[ "$walking_route_stub_ready" != true ]]; then echo "Walking route fixture did not become ready on 3308." >&2; exit 1; fi
+API_TEST_GTFS_SEARCH_DEBUG=1 start_api "" '[{"bbox":[23.9,49.7,24.15,49.95],"url":"http://127.0.0.1:3308/route/v1/foot"}]'
+run_suite direct-only-walking env API_TEST_GTFS_FIXTURE=1 API_TEST_URL="$API_URL" API_TEST_DATABASE_URL="$DATABASE_URL" \
+  API_TEST_GTFS_SEARCH_DEBUG=1 \
+  API_TEST_WALKING_STUB_URL="http://127.0.0.1:3308" npm run test:integration:direct-only-walking
+stop_api
+kill "$WALKING_ROUTE_STUB_PID" 2>/dev/null || true
+wait "$WALKING_ROUTE_STUB_PID" 2>/dev/null || true
+WALKING_ROUTE_STUB_PID=""

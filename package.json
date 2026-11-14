@@ -33,6 +33,7 @@
     "test:integration:journey-activation": "tsx --test tests/journey-activation.integration.test.ts",
     "test:integration:live-journey": "tsx --test tests/live-journey.integration.test.ts",
     "test:integration:direct-walking": "tsx --test tests/direct-walking-api.integration.test.ts",
+    "test:integration:direct-only-walking": "tsx --test tests/direct-only-walking-api.integration.test.ts",
     "test:integration:auth-security": "tsx --test tests/auth-security-regressions.integration.test.ts",
     "test:integration:rendezvous": "tsx --test tests/two-account-rendezvous.integration.test.ts",
     "test:integration:qr-attestation": "tsx --test tests/qr-attestation-characterization.integration.test.ts",

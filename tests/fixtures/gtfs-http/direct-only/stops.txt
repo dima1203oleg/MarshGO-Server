@@ -1,0 +1,5 @@
+stop_id,stop_name,stop_lat,stop_lon
+bad-origin,Standard reach origin,49.8681678,24.0029933
+bad-destination,Standard reach destination,49.7941170,24.0575850
+good-origin,Expanded reach origin,49.8681678,24.0420000
+good-destination,Expanded reach destination,49.7941170,24.0500000

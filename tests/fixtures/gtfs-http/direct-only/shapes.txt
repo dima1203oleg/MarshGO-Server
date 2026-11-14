@@ -1,0 +1,5 @@
+shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence
+bad-direct-shape,49.8681678,24.0029933,1
+bad-direct-shape,49.7941170,24.0575850,2
+good-direct-shape,49.8681678,24.0420000,1
+good-direct-shape,49.7941170,24.0500000,2

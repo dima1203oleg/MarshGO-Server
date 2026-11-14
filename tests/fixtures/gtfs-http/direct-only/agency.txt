@@ -1,0 +1,2 @@
+agency_id,agency_name,agency_url,agency_timezone
+fixture,Test direct walking feed,https://example.test,Europe/Kyiv

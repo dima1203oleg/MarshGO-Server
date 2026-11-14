@@ -1,0 +1,5 @@
+trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type
+bad-direct-trip,08:03:00,08:03:00,bad-origin,1,0,0
+bad-direct-trip,08:25:00,08:25:00,bad-destination,2,0,0
+good-direct-trip,08:30:00,08:30:00,good-origin,1,0,0
+good-direct-trip,08:55:00,08:55:00,good-destination,2,0,0
