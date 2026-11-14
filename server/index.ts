@@ -617,9 +617,11 @@ app.get('/api/v1/mobility/nearby', requireAuth, placeSearchLimiter, asyncHandler
   if (!config || !Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180 || !Number.isFinite(radiusM) || radiusM < 100 || radiusM > 3000) {
     throw new ApiError(400, 'mode, lat, lon and radiusM (100-3000) are required', 'invalid_nearby_query');
   }
-  const { rows: providers } = await pool.query<{ id: string; name: string; feed_url: string }>(
-    `SELECT id,name,feed_url FROM mobility_providers WHERE status='enabled' AND health='healthy' AND source_type='gbfs' AND provider_type = ANY($1) ORDER BY priority`, [config.providerTypes]);
-  const settled = await Promise.allSettled(providers.map(async (provider) => ({ providerId: provider.id, providerName: provider.name, snapshot: await cachedSnapshot(provider.id, provider.feed_url) })));
+  const { rows: providers } = await pool.query<{ id: string; name: string; feed_url: string; country: string }>(
+    `SELECT id,name,feed_url,country FROM mobility_providers WHERE status='enabled' AND health='healthy' AND source_type='gbfs' AND provider_type = ANY($1) ORDER BY priority`, [config.providerTypes]);
+  // Rental inventory is only advertised for the country the provider declared: a
+  // global GBFS feed otherwise reports foreign vehicles as local availability.
+  const settled = await Promise.allSettled(providers.map(async (provider) => ({ providerId: provider.id, providerName: provider.name, snapshot: await cachedSnapshot(provider.id, provider.feed_url, provider.country) })));
   const snapshots = settled.flatMap((item) => item.status === 'fulfilled' ? [item.value] : []);
   // A count alone cannot tell an operator which rental feed broke; each failure is named with a redacted reason code.
   const failures = settled.flatMap((item, index) => item.status === 'fulfilled' ? [] : [{

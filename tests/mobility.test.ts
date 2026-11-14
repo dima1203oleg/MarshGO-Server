@@ -95,8 +95,8 @@ it('does not publish the shared Lviv GTFS source as a separately verified marshr
   const staticFeed = lvivSources.find((source) => source.sourceType === 'gtfs');
   assert.ok(staticFeed);
   assert.equal(staticFeed.feedUrl, 'https://track.ua-gis.com/gtfs/lviv/static.zip');
-  assert.match(staticFeed.coverage, /маршрутки — route_type=1501 або явна мітка маршруту/);
-  assert.match(staticFeed.coverage, /окремий відкритий URL фіда маршруток не підтверджений/i);
+  assert.match(staticFeed.coverage, /дані не розрізняють автобуси й маршрутки/i);
+  assert.match(staticFeed.coverage, /окремий фід маршруток не підтверджений/i);
   assert.equal(lvivSources.some((source) => /маршрут(?:ка|ки|minibus)/iu.test(source.name) && source.sourceType === 'gtfs'), false);
 });
 
