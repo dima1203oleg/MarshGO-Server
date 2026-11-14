@@ -891,7 +891,9 @@ function gtfsTime(value: string | undefined): number | null {
 
 function routeMode(routeType: number, routeName: string): { mode: TransitJourneyMode; transportType: GtfsTransportType } | null {
   const normalizedName = routeName.normalize('NFKC').toLocaleLowerCase('uk-UA');
-  if (normalizedName.includes('міжміськ') || normalizedName.includes('intercity')) return { mode: 'BUS', transportType: 'intercity_bus' };
+  const isGtfsBus = routeType === 3 || (routeType >= 700 && routeType < 800);
+  if (isGtfsBus && (normalizedName.includes('міжміськ') || normalizedName.includes('intercity')))
+    return { mode: 'BUS', transportType: 'intercity_bus' };
   const label = routeTypeLabel(routeType, routeName);
   if (label === 'bus') return { mode: 'BUS', transportType: classifyLvivTransport({ routeType, routeName })?.classifiedType ?? 'bus' };
   if (label === 'marshrutka') return { mode: 'MINIBUS', transportType: 'marshrutka' };

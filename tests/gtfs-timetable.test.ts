@@ -66,6 +66,11 @@ test('GTFS graph budget and materialization share the transfer-window rule', () 
     'a requested destination remains eligible beyond the local transfer window');
 });
 
+test('a rail GTFS route remains a train when its public name contains intercity', () => {
+  assert.equal(feed({ routeType: '2', routeName: 'Intercity train' }).routes.get('r')?.transportType, 'train');
+  assert.equal(feed({ routeType: '3', routeName: 'Intercity bus' }).routes.get('r')?.transportType, 'intercity_bus');
+});
+
 
 function connectingFeed(options: { secondRouteType?: string; secondDeparture?: string; transferType?: string; minimumTransferTime?: string; inSeat?: boolean; withPathway?: boolean; sameRoute?: boolean } = {}) {
   const onwardRouteId = options.sameRoute ? 'bus' : 'rail';
