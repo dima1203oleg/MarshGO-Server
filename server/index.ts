@@ -2632,7 +2632,7 @@ app.post('/api/v1/users/me/deletion-requests/cancel', requireAuth, asyncHandler(
 app.get('/api/v1/offers/mine', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
   const { rows } = await pool.query(
     `SELECT o.id,o.origin_name,o.destination_name,o.departure_at,o.arrival_at,o.distance_m,o.duration_s,o.route_source,
-            o.price_per_seat_minor,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
+            o.price_per_seat_minor,o.fare_basis,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
             ratings.average_rating,ratings.review_count,o.status,o.vehicle_id,photo.object_key AS vehicle_photo_key
        FROM offers o JOIN users u ON u.id=o.driver_id
        LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
@@ -2722,7 +2722,7 @@ app.patch('/api/v1/offers/:id', requireAuth, requireRole('driver'), asyncHandler
     let approvalsRequested = 0;
     for (const booking of bookings) {
       if (summary.price && price < booking.unit_price_minor) {
-        await client.query('UPDATE bookings SET unit_price_minor=$2,total_price_minor=$2*seat_count WHERE id=$1', [booking.id, price]);
+        await client.query("UPDATE bookings SET unit_price_minor=$2,total_price_minor=$2*(CASE WHEN fare_basis='TOTAL_ALL' THEN 1 ELSE seat_count END) WHERE id=$1", [booking.id, price]);
       }
       if (significant) {
         const { rows: previous } = await client.query<{ summary: ChangeSummary; new_unit_price_minor: number | null }>(
@@ -2802,7 +2802,7 @@ const decideBookingChange = (accept: boolean) => asyncHandler(async (req, res) =
     if (!approval) throw new ApiError(404, 'change unavailable');
     if (approval.status !== 'pending' || approval.booking_status !== 'confirmed') throw new ApiError(409, 'This change was already decided or replaced by a newer one', 'change_not_pending');
     if (accept) {
-      if (approval.new_unit_price_minor !== null) await client.query('UPDATE bookings SET unit_price_minor=$2,total_price_minor=$2*seat_count WHERE id=$1', [approval.booking_id, approval.new_unit_price_minor]);
+      if (approval.new_unit_price_minor !== null) await client.query("UPDATE bookings SET unit_price_minor=$2,total_price_minor=$2*(CASE WHEN fare_basis='TOTAL_ALL' THEN 1 ELSE seat_count END) WHERE id=$1", [approval.booking_id, approval.new_unit_price_minor]);
       await client.query("UPDATE booking_change_approvals SET status='accepted',decided_at=now() WHERE id=$1", [approval.id]);
       await insertRealtimeOutbox(client, 'booking.changed', `booking.change-accepted:${approval.id}`, [approval.driver_id], { booking_id: approval.booking_id, offer_id: approval.offer_id, status: 'confirmed' });
     } else {
@@ -2866,7 +2866,7 @@ app.get('/api/v1/offers', asyncHandler(async (req, res) => {
   const parameters = hasCoordinates ? [...coordinates, date, seats] : [origin, destination, date, seats];
   const searchOffers = (extraFilters: string, extraParameters: unknown[], limit: number) => pool.query(
     `SELECT o.id, o.origin_name, o.destination_name, o.departure_at, o.arrival_at,o.distance_m,o.duration_s,o.route_source,o.price_per_seat_minor,
-            o.currency, o.available_seats, o.total_seats, u.display_name AS driver_name,
+            o.fare_basis, o.currency, o.available_seats, o.total_seats, u.display_name AS driver_name,
             ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key
        FROM offers o JOIN users u ON u.id = o.driver_id
        LEFT JOIN vehicle_photos photo ON photo.vehicle_id=o.vehicle_id AND photo.is_primary=true
@@ -2897,7 +2897,7 @@ app.get('/api/v1/offers/:id', asyncHandler(async (req, res) => {
   }
   const { rows } = await pool.query(
     `SELECT o.id,o.origin_name,o.destination_name,o.departure_at,o.arrival_at,o.distance_m,o.duration_s,o.route_source,
-            o.price_per_seat_minor,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
+            o.price_per_seat_minor,o.fare_basis,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
             ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key,
             CASE WHEN o.route IS NULL THEN NULL ELSE ST_AsGeoJSON(o.route::geometry)::json->'coordinates' END AS route_geometry
        FROM offers o JOIN users u ON u.id=o.driver_id
@@ -3187,7 +3187,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     offer_id: string; driver_id: string; driver_name: string; vehicle_id: string;
     origin_name: string; destination_name: string; origin_lon: number; origin_lat: number;
     destination_lon: number; destination_lat: number; departure_at: Date; arrival_at: Date | null;
-    duration_s: number; distance_m: number; route_source: string; price_per_seat_minor: number;
+    duration_s: number; distance_m: number; route_source: string; price_per_seat_minor: number; fare_basis: string;
     currency: string; available_seats: number; average_rating: number | null; review_count: number;
     vehicle_make: string; vehicle_model: string; created_at: Date; snapshot_at: Date;
     origin_offset_m: number; destination_offset_m: number; route_geojson: string | null;
@@ -3197,7 +3197,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
             ST_X(o.destination::geometry) AS destination_lon,ST_Y(o.destination::geometry) AS destination_lat,
             ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography) AS origin_offset_m,
             ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography) AS destination_offset_m,
-            o.departure_at,o.arrival_at,o.duration_s,o.distance_m,o.route_source,o.price_per_seat_minor,o.currency,o.available_seats,
+            o.departure_at,o.arrival_at,o.duration_s,o.distance_m,o.route_source,o.price_per_seat_minor,o.fare_basis,o.currency,o.available_seats,
             ST_AsGeoJSON(o.route) AS route_geojson,
             ratings.average_rating,ratings.review_count,v.make AS vehicle_make,v.model AS vehicle_model,o.created_at,now() AS snapshot_at
        FROM offers o JOIN users u ON u.id=o.driver_id JOIN vehicles v ON v.id=o.vehicle_id
@@ -3235,7 +3235,9 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const arrivalAt = offer.arrival_at ?? new Date(offer.departure_at.getTime() + offer.duration_s * 1000);
     const durationSeconds = Math.ceil((arrivalAt.getTime() - search.departureAt.getTime()) / 1000);
     const waitingSeconds = Math.max(0, Math.ceil((offer.departure_at.getTime() - search.departureAt.getTime()) / 1000));
-    const totalPriceMinor = Number(offer.price_per_seat_minor) * search.passengers;
+    const totalPriceMinor = offer.fare_basis === 'TOTAL_ALL'
+      ? Number(offer.price_per_seat_minor)
+      : Number(offer.price_per_seat_minor) * search.passengers;
     const rating = offer.average_rating === null ? null : Number(offer.average_rating);
     if (!Number.isSafeInteger(totalPriceMinor) || totalPriceMinor < 0 || durationSeconds <= 0) return [];
     if (search.preferences.maxPriceMinor !== undefined && totalPriceMinor > search.preferences.maxPriceMinor) return [];
@@ -4040,6 +4042,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         origin: { name: offer.origin_name, coordinates: [offer.origin_lon, offer.origin_lat] },
         destination: { name: offer.destination_name, coordinates: [offer.destination_lon, offer.destination_lat] },
         distanceMeters: Number(offer.distance_m), pricePerSeatMinor: Number(offer.price_per_seat_minor),
+        fareBasis: offer.fare_basis === 'TOTAL_ALL' ? 'TOTAL_ALL' : 'PER_SEAT',
         currency: offer.currency.trim().toUpperCase(), availableSeats: Number(offer.available_seats),
         routeGeometry: parseOfferGeometry(offer.route_geojson), snapshotAt: offer.snapshot_at,
         metadata: { routeGeometrySource: 'osrm-car-route', driverName: offer.driver_name, vehicleId: offer.vehicle_id,
@@ -4768,7 +4771,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         const prefix = composition.prefix as SearchItinerary | null;
         const suffix = composition.suffix as SearchItinerary | null;
         if (prefix) await insertTransitPath(prefix, search.origin, offer.origin);
-        const communityPriceMinor = offer.pricePerSeatMinor * search.passengers;
+        const communityPriceMinor = offer.fareBasis === 'TOTAL_ALL' ? offer.pricePerSeatMinor : offer.pricePerSeatMinor * search.passengers;
         const safeCommunityPriceMinor = Number.isSafeInteger(communityPriceMinor) && communityPriceMinor >= 0 ? communityPriceMinor : null;
         const communityMetadata = legProvenanceMetadata({ mode: 'COMMUNITY', source: 'community-offer',
           routeGeometry: offer.routeGeometry, metadata: { ...offer.metadata, driverId: offer.driverId,
@@ -5678,7 +5681,7 @@ app.delete('/api/v1/vehicles/:id/photos/:photoId', requireAuth, requireRole('dri
 
 app.post('/api/v1/offers', requireAuth, requireRole('driver'), asyncHandler(async (req, res) => {
   const body = req.body ?? {};
-  const { vehicleId, originName, destinationName, origin, destination, departureAt, pricePerSeatMinor, seats } = body;
+  const { vehicleId, originName, destinationName, origin, destination, departureAt, pricePerSeatMinor, seats, fareBasis } = body;
   const pointValid = (point: unknown) => Array.isArray(point) && point.length === 2 &&
     typeof point[0] === 'number' && typeof point[1] === 'number' &&
     Number.isFinite(point[0]) && Number.isFinite(point[1]) && Math.abs(point[0]) <= 180 && Math.abs(point[1]) <= 90;
@@ -5688,7 +5691,8 @@ app.post('/api/v1/offers', requireAuth, requireRole('driver'), asyncHandler(asyn
       typeof destinationName !== 'string' || destinationName.trim().length < 1 || destinationName.length > MAX_PLACE_NAME_LENGTH ||
       !pointValid(origin) || !pointValid(destination) || !Number.isFinite(departure.getTime()) || departure <= new Date() ||
       !Number.isInteger(pricePerSeatMinor) || pricePerSeatMinor < 1 || pricePerSeatMinor > 100_000_000 ||
-      !Number.isInteger(seats) || seats < 1 || seats > 20) {
+      !Number.isInteger(seats) || seats < 1 || seats > 20 ||
+      (fareBasis !== undefined && fareBasis !== 'PER_SEAT' && fareBasis !== 'TOTAL_ALL')) {
     throw new ApiError(400, 'invalid offer fields');
   }
   let roadRoute: Awaited<ReturnType<typeof getRoadRoute>> | undefined;
@@ -5713,13 +5717,13 @@ app.post('/api/v1/offers', requireAuth, requireRole('driver'), asyncHandler(asyn
     if (!vehicle.rows[0].has_photo) throw new ApiError(409, 'A verified vehicle photo is required before publishing', 'vehicle_photo_required');
     if (seats > Number(vehicle.rows[0].seat_count)) throw new ApiError(400, 'offer exceeds vehicle capacity');
     const { rows } = await client.query(
-      `INSERT INTO offers(driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats)
+      `INSERT INTO offers(driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats,fare_basis)
        VALUES ($1,$2,$3,$4,ST_SetSRID(ST_MakePoint($5,$6),4326)::geography,ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,
-         CASE WHEN $9::text IS NULL THEN NULL ELSE ST_SetSRID(ST_GeomFromGeoJSON($9),4326) END,$10,$11,$12,$13,$14,$15,$16,$16)
-       RETURNING id,origin_name,destination_name,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,currency,total_seats,available_seats,status`,
+         CASE WHEN $9::text IS NULL THEN NULL ELSE ST_SetSRID(ST_GeomFromGeoJSON($9),4326) END,$10,$11,$12,$13,$14,$15,$16,$16,$17)
+       RETURNING id,origin_name,destination_name,departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,currency,total_seats,available_seats,status,fare_basis`,
       [req.userId, vehicleId, originName.trim(), destinationName.trim(), origin[0], origin[1], destination[0], destination[1], routeGeoJson,
         departure.toISOString(), arrivalAt?.toISOString() ?? null, roadRoute ? Math.round(roadRoute.distanceMeters) : null,
-        roadRoute ? Math.round(roadRoute.durationSeconds) : null, roadRoute ? 'osrm' : (process.env.NODE_ENV === 'production' ? null : 'development_unrouted'), pricePerSeatMinor, seats],
+        roadRoute ? Math.round(roadRoute.durationSeconds) : null, roadRoute ? 'osrm' : (process.env.NODE_ENV === 'production' ? null : 'development_unrouted'), pricePerSeatMinor, seats, fareBasis ?? 'PER_SEAT'],
     );
     await client.query('INSERT INTO audit_events(actor_id,action,entity_type,entity_id) VALUES ($1,$2,$3,$4)', [req.userId, 'offer.created', 'offer', rows[0].id]);
     await client.query('COMMIT');
@@ -5875,7 +5879,9 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
       }
     }
 
-    const total = Number(currentOffer.price_per_seat_minor) * seats;
+    const total = currentOffer.fare_basis === 'TOTAL_ALL'
+      ? Number(currentOffer.price_per_seat_minor)
+      : Number(currentOffer.price_per_seat_minor) * seats;
     const fee = calculatePlatformFee(total, 'community');
     const booking = await client.query(
       `INSERT INTO bookings(offer_id, passenger_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, idempotency_key, boarding_ordinal, alighting_ordinal, fare_basis)
@@ -6029,7 +6035,7 @@ app.get('/api/v1/bookings/:id/rescue', requireAuth, asyncHandler(async (req, res
   if (booking.status !== 'cancelled') throw new ApiError(409, 'rescue search is available only after cancellation');
   const { rows } = await pool.query(
     `SELECT o.id,o.origin_name,o.destination_name,o.departure_at,o.arrival_at,o.distance_m,o.duration_s,o.route_source,
-            o.price_per_seat_minor,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
+            o.price_per_seat_minor,o.fare_basis,o.currency,o.available_seats,o.total_seats,u.display_name AS driver_name,
             ratings.average_rating,ratings.review_count,photo.object_key AS vehicle_photo_key,
             round(ST_Distance(o.origin,ST_SetSRID(ST_MakePoint($1,$2),4326)::geography))::int AS origin_distance_m,
             round(ST_Distance(o.destination,ST_SetSRID(ST_MakePoint($3,$4),4326)::geography))::int AS destination_distance_m,

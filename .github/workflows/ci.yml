@@ -44,6 +44,10 @@ jobs:
         run: npm exec -- tsx --test tests/proposal-accept-revision-postgres.integration.test.ts
         env:
           PROPOSAL_ACCEPTANCE_TEST_DATABASE_URL: ${{ env.API_TEST_DATABASE_URL }}
+      - name: Verify carpool fare_basis group total transaction
+        run: npm exec -- tsx --test tests/carpool-fare-basis-postgres.integration.test.ts
+        env:
+          FARE_BASIS_TEST_DATABASE_URL: ${{ env.API_TEST_DATABASE_URL }}
       - run: npm run test:integration
       - name: Build production API image
         run: docker build --tag marshgo-server:ci .

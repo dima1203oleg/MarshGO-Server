@@ -13,6 +13,7 @@ export interface CommunityRideOption {
   destination: { name: string; coordinates: [number, number] };
   distanceMeters: number;
   pricePerSeatMinor: number;
+  fareBasis?: 'PER_SEAT' | 'TOTAL_ALL';
   currency: string;
   availableSeats: number;
   routeGeometry: Array<[number, number]> | null;
@@ -121,7 +122,9 @@ export function composeCommunityTransitJourneys(input: ComposeCommunityTransitIn
 
       const prefixFare = fareInUah(prefix);
       const suffixFare = fareInUah(suffix);
-      const rideFare = offer.currency === 'UAH' ? offer.pricePerSeatMinor * passengers : null;
+      const rideFare = offer.currency === 'UAH'
+        ? (offer.fareBasis === 'TOTAL_ALL' ? offer.pricePerSeatMinor : offer.pricePerSeatMinor * passengers)
+        : null;
       const allFaresKnown = prefixFare !== null && suffixFare !== null && rideFare !== null
         && Number.isSafeInteger(rideFare);
       const priceMinor = allFaresKnown ? prefixFare + rideFare + suffixFare : null;
