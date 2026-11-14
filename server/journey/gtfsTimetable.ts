@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { unzipSync, strFromU8 } from 'fflate';
 import { fetchBinary } from '../mobility/safeFetch';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
@@ -4563,10 +4564,15 @@ function estimateGtfsFeedCacheBytes(feed: GtfsTimetableFeed): number {
 }
 
 export function cachedGtfsTimetable(providerId: string, url: string, now = Date.now(), defaultTimezone = 'Europe/Kyiv'): Promise<GtfsTimetableFeed> {
-  return feedCache.getOrLoad(providerId, async () => {
+  return feedCache.getOrLoad(gtfsTimetableCacheKey(providerId, url, defaultTimezone), async () => {
     const { data } = await fetchBinary(url, MAX_FEED_BYTES, 45_000);
     const unzipped = unzipSync(data, { filter: (file) => /(^|\/)(agency|routes|stops|trips|stop_times|calendar|calendar_dates|shapes|transfers|pathways|levels|fare_attributes|fare_rules|fare_media|fare_products|fare_leg_rules|fare_leg_join_rules|fare_transfer_rules|rider_categories|timeframes|networks|route_networks|areas|stop_areas)\.txt$/.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
     const files = Object.fromEntries(Object.entries(unzipped).map(([name, content]) => [name.split('/').pop() as string, content]));
     return parseGtfsTimetable(files, new Date(now), defaultTimezone);
   }, estimateGtfsFeedCacheBytes, now);
+}
+
+/** Keep parsed schedules isolated by provider configuration without retaining feed URLs or credentials in cache keys. */
+export function gtfsTimetableCacheKey(providerId: string, url: string, defaultTimezone = 'Europe/Kyiv'): string {
+  return createHash('sha256').update(JSON.stringify([providerId, url, defaultTimezone])).digest('hex');
 }
