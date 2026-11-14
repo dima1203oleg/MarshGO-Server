@@ -36,10 +36,17 @@ const server = http.createServer((request, response) => {
   }
   const [from, to] = points;
   routeRequests.push({ from, to });
-  const distance = Math.max(1, Math.ceil(distanceMeters(from, to)));
+  // The standard-reach fixture stop is across a pedestrian barrier: the straight-line GTFS
+  // estimate can reach its 08:10 departure, but the confirmed street path cannot.
+  const crossesPedestrianBarrier = Math.abs(from[0] - 24.0100000) < 1e-6
+    && Math.abs(from[1] - 49.8681678) < 1e-6
+    && Math.abs(to[0] - 24.0029933) < 1e-6
+    && Math.abs(to[1] - 49.8681678) < 1e-6;
+  const detour = crossesPedestrianBarrier ? [from, [from[0], from[1] + 0.0028], to] : [from, to];
+  const distance = Math.max(1, Math.ceil(detour.slice(1).reduce((total, point, index) => total + distanceMeters(detour[index], point), 0)));
   response.writeHead(200, { 'content-type': 'application/json' });
   response.end(JSON.stringify({ code: 'Ok', routes: [{ distance, duration: Math.max(1, Math.ceil(distance / 1.3)),
-    geometry: { coordinates: [from, to] } }] }));
+    geometry: { coordinates: detour } }] }));
 });
 server.on('connection', (socket) => socket.on('error', () => {}));
 server.listen(Number(process.env.WALKING_ROUTE_STUB_PORT ?? 3306), '127.0.0.1');
