@@ -2,7 +2,7 @@
 
 ## Change
 
-The seeded Kyiv static GTFS entry now uses the HTTPS mirror at `https://jbb.ghsq.de/gtfs/ua-kyiv.gtfs.zip`. The previous publisher export is HTTP-only and remains unsuitable as the configured production fetch URL. The existing GTFS parser and routing pipeline are unchanged.
+The canonical seed catalog entry now uses the HTTPS mirror at `https://jbb.ghsq.de/gtfs/ua-kyiv.gtfs.zip`. The previous publisher export is HTTP-only and remains unsuitable as the configured production fetch URL. The existing GTFS parser and routing pipeline are unchanged. New provider rows are eligible for normal connection validation; the seed upsert intentionally preserves an existing disabled/paused admin decision, so this code change does not activate a previously disabled database row.
 
 ## Source evidence
 
@@ -23,5 +23,5 @@ The seeded Kyiv static GTFS entry now uses the HTTPS mirror at `https://jbb.ghsq
 - Direct publisher export: `PROBED_OK` on 2026-11-15.
 - HTTPS mirror: `PROBED_OK`, byte-identical to the publisher export on 2026-11-15.
 - Commercial terms: publisher page explicitly states commercial use is permitted; CKAN metadata conflict is noted above.
-- Seeded database state, planner route search, UI display, and nationwide coverage: `NOT_TESTED` by this change.
+- Seeded database state, provider health/activation, planner route search, UI display, and nationwide coverage: `NOT_TESTED` by this change.
 - Production release: `NOT_RELEASED`.
