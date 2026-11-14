@@ -9,11 +9,16 @@ import { Pool } from 'pg';
 // INSERT and the price-edit UPDATE ... CASE) on temp tables cloned from the live
 // schema, inside an outer transaction that is fully rolled back. No production
 // row is written. TOTAL_ALL must keep the quoted group price; PER_SEAT multiplies.
-const databaseUrl = process.env.API_TEST_DATABASE_URL;
+const databaseUrl = process.env.FARE_BASIS_TEST_DATABASE_URL;
 if (databaseUrl) {
   const database = new URL(databaseUrl);
-  if (database.hostname !== '127.0.0.1' || database.pathname !== '/marshgo_e2e_carpool5') {
-    throw new Error('Only the isolated loopback carpool fixture database is allowed');
+  const loopback = database.hostname === '127.0.0.1';
+  const localFixture = loopback && (
+    database.pathname === '/marshgo_e2e_carpool5' || /^\/marshgo_e2e_codex_[a-z0-9_]+$/.test(database.pathname)
+  );
+  const ciFixture = process.env.CI === 'true' && loopback && database.pathname === '/marshgo_e2e';
+  if (!localFixture && !ciFixture) {
+    throw new Error('Only the isolated loopback carpool fixture database or its CI shadow-table database is allowed');
   }
 }
 
