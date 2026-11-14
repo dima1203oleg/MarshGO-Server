@@ -23,6 +23,10 @@ describe('Journey search request validation', () => {
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: ['funicular'] } }, now), /allowedTransportTypes is invalid/);
   });
 
+  it('rejects an empty transport selection instead of searching for nothing', () => {
+    assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: [] } }, now), /at least one transport type/);
+  });
+
   it('accepts all twelve canonical categories from the journey selector in one request', () => {
     const parsed = parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: [...JOURNEY_TRANSPORT_TYPES] } }, now);
     assert.deepEqual(parsed.preferences.allowedTransportTypes, JOURNEY_TRANSPORT_TYPES);
