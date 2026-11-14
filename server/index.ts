@@ -74,6 +74,7 @@ import { expireDueProposals } from './proposals/expiry';
 import {
   WHOLE_ROUTE_BOARDING, WHOLE_ROUTE_ALIGHTING, MAX_PARTIAL_ALIGHTING,
   maxOccupancyOverInterval, globalMaxOccupancy, recordOccupancy, releaseOccupancy, releaseOfferOccupancy, refreshAvailableSeats,
+  routeIntervalViolation,
 } from './bookings/seatInventory';
 import {
   createVehiclePhotoUpload, createVerificationEvidenceUpload, deleteStoredVehiclePhoto, getVehiclePhotoUrl,
@@ -5798,8 +5799,8 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const offer = await client.query<{ price_per_seat_minor: number; currency: string; available_seats: number; total_seats: number; fare_basis: string; driver_id: string; status: string; departure_at: Date }>(
-      'SELECT price_per_seat_minor, currency, available_seats, total_seats, fare_basis, driver_id, status, departure_at FROM offers WHERE id = $1 FOR UPDATE', [offerId],
+    const offer = await client.query<{ price_per_seat_minor: number; currency: string; available_seats: number; total_seats: number; fare_basis: string; driver_id: string; status: string; departure_at: Date; route_points: number | null }>(
+      'SELECT price_per_seat_minor, currency, available_seats, total_seats, fare_basis, driver_id, status, departure_at, ST_NPoints(route) AS route_points FROM offers WHERE id = $1 FOR UPDATE', [offerId],
     );
     const currentOffer = offer.rows[0];
     if (!currentOffer || currentOffer.status !== 'published') throw new ApiError(404, 'offer unavailable');
@@ -5826,6 +5827,10 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
       throw new ApiError(409, 'offer departure has passed', 'offer_expired');
     }
     if (currentOffer.driver_id === userId) throw new ApiError(400, 'drivers cannot book their own offer');
+    if (rawBoarding !== undefined || rawAlighting !== undefined) {
+      const violation = routeIntervalViolation(currentOffer.route_points === null ? null : Number(currentOffer.route_points), alighting);
+      if (violation) throw new ApiError(400, violation.message, violation.code);
+    }
     const intervalOccupancy = await maxOccupancyOverInterval(client, offerId, boarding, alighting);
     if (intervalOccupancy + seats > Number(currentOffer.total_seats)) throw new ApiError(409, 'not enough available seats', 'no_capacity');
 
