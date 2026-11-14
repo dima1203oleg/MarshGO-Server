@@ -16,8 +16,6 @@ const num = (value: unknown) => (typeof value === 'number' ? value : typeof valu
 
 /** Maps the many transport-type spellings of local feeds onto the MARSHGO labels. */
 export function vehicleTransportLabel(vehicle: Json): string {
-  const routeType = num(vehicle.route_type);
-  if (Number.isFinite(routeType)) return routeTypeLabel(routeType);
   const raw = String(vehicle.transport_type ?? vehicle.type ?? '').toLowerCase();
   if (/marshrutka|minibus|маршрутк/.test(raw)) return 'marshrutka';
   if (/trolley|trol\b|тролейб/.test(raw)) return 'trolleybus';
@@ -25,7 +23,48 @@ export function vehicleTransportLabel(vehicle: Json): string {
   if (/metro|subway|метро/.test(raw)) return 'metro';
   if (/train|rail|поїзд|електрич/.test(raw)) return 'train';
   if (/bus|автобус/.test(raw)) return 'bus';
+  const routeType = num(vehicle.route_type);
+  if (Number.isFinite(routeType)) return routeTypeLabel(routeType);
   return 'other';
+}
+
+export interface JsonVehicleRouteMatch {
+  route: string;
+  type: string;
+  /** Set only when a unique published route label matches the loaded route index. */
+  routeId?: string;
+}
+
+const routeLabelKey = (value: unknown): string => typeof value === 'string' || typeof value === 'number'
+  ? String(value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('uk-UA')
+  : '';
+
+const textField = (...values: unknown[]): string => {
+  for (const value of values) {
+    if ((typeof value === 'string' || typeof value === 'number') && String(value).trim()) return String(value).trim();
+  }
+  return '';
+};
+
+/**
+ * Resolve a JSON vehicle label against the supplied route index. The map endpoint currently
+ * merges multiple providers' route IDs, so a raw JSON route_id is not trusted by itself:
+ * namespaces can collide. Labels are accepted only when they identify one loaded route.
+ */
+export function matchJsonVehicleRoute(
+  vehicle: Json,
+  routeNames: ReadonlyMap<string, { name: string; type: string }>,
+): JsonVehicleRouteMatch {
+  const route = textField(vehicle.route_short_name, vehicle.route_name, vehicle.route_long_name, vehicle.route, vehicle.line);
+  const routeKey = routeLabelKey(route);
+  if (routeKey) {
+    const matches = [...routeNames.entries()].filter(([, candidate]) => routeLabelKey(candidate.name) === routeKey);
+    if (matches.length === 1) {
+      const [routeId, match] = matches[0];
+      return { routeId, route: match.name, type: match.type };
+    }
+  }
+  return { route, type: vehicleTransportLabel(vehicle) };
 }
 
 export function summarizeVehicles(list: Json[], now = Date.now()) {
