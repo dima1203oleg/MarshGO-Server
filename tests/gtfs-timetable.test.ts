@@ -3430,6 +3430,62 @@ test('composes a city bus and rail itinerary across differently named railway pl
   }).filter((itinerary) => itinerary.segments.length === 2).length, 0);
 });
 
+test('discovers a national timetable trunk through permitted city feeders without expanding the walk shed', () => {
+  // The origin/destination pins can reach their city feeder stops on foot, while
+  // each intercity station is ~3 km away. A walk-first/direct-trunk-only search
+  // would miss the journey; the scheduled bus → rail → bus chain is feasible.
+  const lvivFeeder = transferFeed({ routeType: '3', routeName: 'Lviv city bus',
+    fromId: 'lviv-origin', fromName: 'Origin', fromLon: '24.0000', fromLat: '49.8400',
+    toId: 'lviv-terminal', toName: 'Lviv Main Station', toLon: '24.0400', toLat: '49.8400',
+    departure: '08:00:00', arrival: '08:20:00' });
+  const nationalTrunk = transferFeed({ routeType: '2', routeName: 'UZ intercity train',
+    fromId: 'lviv-rail', fromName: 'Lviv Main Station', fromLon: '24.0400', fromLat: '49.8400',
+    toId: 'uzh-rail', toName: 'Uzhhorod Station', toLon: '22.3000', toLat: '48.6200',
+    departure: '08:40:00', arrival: '12:00:00' });
+  const uzhhorodFeeder = transferFeed({ routeType: '3', routeName: 'Uzhhorod city bus',
+    fromId: 'uzh-terminal', fromName: 'Uzhhorod Station', fromLon: '22.3000', fromLat: '48.6200',
+    toId: 'uzh-destination', toName: 'Destination', toLon: '22.3400', toLat: '48.6200',
+    departure: '12:20:00', arrival: '12:35:00' });
+  const merged = mergeGtfsTimetables([
+    { providerId: 'lviv-city', providerName: 'Lviv city bus', providerCity: 'Львів', feed: lvivFeeder },
+    { providerId: 'uz-mainline', providerName: 'Ukrzaliznytsia', providerCity: 'Україна', feed: nationalTrunk },
+    { providerId: 'uzhhorod-city', providerName: 'Uzhhorod city bus', providerCity: 'Ужгород', feed: uzhhorodFeeder },
+  ])!;
+  const input = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    origin: [24.0000, 49.8400] as [number, number],
+    destination: [22.3400, 48.6200] as [number, number],
+    maximumAccessWalkingMeters: 900,
+    maximumEgressWalkingMeters: 1_000,
+    maximumTransferWalkingMeters: 400,
+    maximumJourneySeconds: 24 * 60 * 60,
+    maximumWaitSeconds: 24 * 60 * 60,
+    maximumTransfers: 2,
+    allowedModes: ['BUS', 'RAIL'] as const,
+    allowedTransportTypes: ['bus', 'train'] as const,
+  };
+  const production = findGtfsItinerariesWithStats(merged, input);
+  const chain = production.itineraries.find((journey) => journey.segments.length === 3);
+  assert.ok(chain, 'a permitted vehicle feeder must make the national rail trunk reachable');
+  assert.deepEqual(chain.segments.map((segment) => segment.transportType), ['bus', 'train', 'bus']);
+  assert.deepEqual(chain.segments.map((segment) => segment.providerId), ['lviv-city', 'uz-mainline', 'uzhhorod-city']);
+  assert.equal(chain.transfers, 2);
+  assert.ok(chain.segments[0]!.distanceToOriginStopMeters <= 900);
+  assert.ok(chain.segments.at(-1)!.distanceFromDestinationStopMeters <= 1_000);
+  assert.ok(chain.transferWalkingMeters.every((meters) => meters <= 400));
+
+  const exhaustive = lazyEventLabelSearchForRequest(merged, input);
+  assert.ok(exhaustive.itineraries.some((journey) => journey.segments.length === 3
+    && journey.segments.map((segment) => segment.transportType).join(',') === 'bus,train,bus'),
+  'the independent small-graph traversal also finds the feeder/trunk/feeder witness');
+
+  const trainOnly = findGtfsItinerariesWithStats(merged, {
+    ...input, maximumTransfers: 2, allowedModes: ['RAIL'], allowedTransportTypes: ['train'],
+  });
+  assert.equal(trainOnly.itineraries.length, 0,
+    'a train-only filter may not silently use bus feeders or exceed the walking cap');
+});
+
 test('retains secondary city-station platform coordinates when merging a third rail feed', () => {
   const cityBus = transferFeed({ routeType: '3', routeName: 'City bus', fromId: 'bus-start', fromName: 'Start',
     fromLon: '23.9900', fromLat: '49.8400', toId: 'bus-station', toName: 'Залізничний вокзал',

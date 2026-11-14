@@ -16,6 +16,17 @@ export interface JourneySearchTruncationState {
   resultSamplingTruncated: boolean;
 }
 
+// The GTFS worker bounds intercity routing itself; an API-level distance cutoff
+// would hide national rail and bus candidates before that bounded search runs.
+export function shouldSearchGtfsTimetables(input: {
+  routeDistanceMeters: number;
+  eligibleProviderCount: number;
+  hasMetroSource: boolean;
+}): boolean {
+  return Number.isFinite(input.routeDistanceMeters) && input.routeDistanceMeters >= 0
+    && (input.eligibleProviderCount > 0 || input.hasMetroSource);
+}
+
 export function getJourneySearchTruncationState(input: {
   candidateGenerationTruncated: boolean;
   resultSamplingTruncated: boolean;
