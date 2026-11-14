@@ -31,6 +31,7 @@ import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } f
 import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, routePedestrianPath, STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingConfiguredFor, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { enrichMicromobilityLegGeometry } from './journey/micromobilityGeometry';
 import { routeBicyclePath } from './journey/bicycleRoutes';
+import { geofenceRulesAt } from './mobility/gbfsGeofences';
 import { createDirectWalkingCandidate, directWalkingGeometryConnectsEndpoints, MAX_DIRECT_WALK_CANDIDATE_STRAIGHT_LINE_METERS, type DirectWalkingCandidate } from './journey/directWalkingCandidate';
 import { routeMultimodalWalks } from './journey/multimodalWalkRouter';
 import { generatePedestrianGeometry } from '../shared/navigation/pedestrianGeometry';
@@ -57,7 +58,7 @@ import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
 import { composeUkraineMultimodalChains, type MultimodalJourney } from './journey/multimodalChainEngine';
-import { buildBicycleRouteEstimates, buildScooterRouteEstimates, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
+import { buildBicycleRouteEstimates, buildScooterRouteEstimates, roadRouteMicromobilityEstimate, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
 import { micromobilityJourneyFareMinor } from './journey/micromobilityFare';
 import { memoizeRequestSearch } from './journey/requestSearchMemo';
 import { buildMicromobilityGeofenceFeatures, buildMicromobilityPointFeatures, buildStaticRentalPointFeature } from './mobility/micromobilityFeatures';
@@ -3819,11 +3820,35 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const transitPreferenceAllowed = (itinerary: GtfsItinerary) => itinerary.segments.every((segment) =>
     transitAllowed(segment.mode) && journeyTransportTypeSelected(segment.transportType, search.preferences.allowedTransportTypes)
       && transitProviderAllowed(search.preferences, segment.transportType, segment.providerName));
-  const estimateMicromobility = (mode: 'BICYCLE' | 'SCOOTER', origin: { name: string; coordinates: [number, number] }, destination: { name: string; coordinates: [number, number] }, departureAt: Date) => {
+  const straightMicromobilityEstimates = (mode: 'BICYCLE' | 'SCOOTER', origin: { name: string; coordinates: [number, number] }, destination: { name: string; coordinates: [number, number] }, departureAt: Date) => {
     const options = { ...micromobilityOptions, departureAt };
     return mode === 'BICYCLE'
       ? buildBicycleRouteEstimates({ origin, destination, points: microPoints, networks: microNetworks, options })
       : buildScooterRouteEstimates({ origin, destination, providers: scooterRouteProviders, options });
+  };
+  const micromobilityRoadRejections = new Set<string>();
+  const roadRoutedRides = new Map<string, ReturnType<typeof routeBicyclePath>>();
+  const scooterRideThrough = (estimate: MicromobilityRouteEstimate, point: [number, number]) => {
+    const provider = scooterRouteProviders.find((entry) => entry.providerId === estimate.providerId);
+    const ride = estimate.legs.find((leg) => leg.mode === 'SCOOTER');
+    const vehicleTypeId = typeof ride?.metadata.vehicleTypeId === 'string' ? ride.metadata.vehicleTypeId : '__provider_wide__';
+    return !provider || geofenceRulesAt(provider.snapshot, point, vehicleTypeId, estimate.departureAt.getTime()).rideThroughAllowed !== false;
+  };
+  const estimateMicromobility = async (mode: 'BICYCLE' | 'SCOOTER', origin: { name: string; coordinates: [number, number] }, destination: { name: string; coordinates: [number, number] }, departureAt: Date) => {
+    const routed: MicromobilityRouteEstimate[] = [];
+    for (const estimate of straightMicromobilityEstimates(mode, origin, destination, departureAt)) {
+      const outcome = await roadRouteMicromobilityEstimate(estimate, {
+        routeRide: (from, to) => {
+          const key = `${from.join(',')}>${to.join(',')}`;
+          if (!roadRoutedRides.has(key)) roadRoutedRides.set(key, routeBicyclePath(from, to));
+          return roadRoutedRides.get(key)!;
+        },
+        ...(mode === 'SCOOTER' ? { rideThroughAllowed: scooterRideThrough } : {}),
+      }, micromobilityOptions);
+      if (outcome.estimate) routed.push(outcome.estimate);
+      else micromobilityRoadRejections.add(`${mode === 'BICYCLE' ? 'bike' : 'scooter'}:${outcome.rejected}`);
+    }
+    return routed;
   };
   const pushMicromobilityCandidate = (estimate: MicromobilityRouteEstimate, itinerary?: SearchItinerary,
     microPosition?: 'before-transit' | 'after-transit') => {
@@ -3866,8 +3891,13 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     ...(wantsBike ? ['BICYCLE' as const] : []), ...(wantsScooter ? ['SCOOTER' as const] : []),
   ];
   for (const mode of requestedMicromobilityModes) {
-    const estimates = estimateMicromobility(mode, search.origin, search.destination, search.departureAt);
+    const estimates = await estimateMicromobility(mode, search.origin, search.destination, search.departureAt);
     for (const estimate of estimates) pushMicromobilityCandidate(estimate);
+    const label = mode === 'BICYCLE' ? 'bike' : 'scooter';
+    const corridorHasSupply = mode === 'BICYCLE' ? microPoints.length > 0 : scooterRouteProviders.length > 0;
+    if (estimates.length === 0 && corridorHasSupply && ![...micromobilityRoadRejections].some((reason) => reason.startsWith(`${label}:`))) {
+      micromobilityRoadRejections.add(`${label}:no-eligible-rental-trip`);
+    }
   }
 
   // Connect real rental estimates to nearby stops from any selected timetable mode.
@@ -3907,7 +3937,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       for (const station of originStations) {
         const stationPlace = { name: station.name, coordinates: station.coordinates };
         for (const mode of requestedMicromobilityModes) {
-          const estimates = estimateMicromobility(mode, search.origin, stationPlace, search.departureAt);
+          const estimates = await estimateMicromobility(mode, search.origin, stationPlace, search.departureAt);
           for (const estimate of estimates) {
             const earliest = new Date(estimate.arrivalAt.getTime() + configuredTransferBufferSeconds * 1000);
             if (earliest.getTime() > search.departureAt.getTime() + 120 * 60_000) continue;
@@ -3928,7 +3958,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       for (const station of destinationStations) {
         const stationPlace = { name: station.name, coordinates: station.coordinates };
         const hasEstimates = requestedMicromobilityModes.some((mode) =>
-          estimateMicromobility(mode, stationPlace, search.destination, search.departureAt).length > 0
+          straightMicromobilityEstimates(mode, stationPlace, search.destination, search.departureAt).length > 0
         );
         if (!hasEstimates) continue;
         const found = await searchStationPath(search.origin.coordinates, station.coordinates, search.departureAt);
@@ -3941,7 +3971,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           if (!routed) continue;
           for (const mode of requestedMicromobilityModes) {
             const estimateDeparture = new Date(routed.arrivalAt.getTime() + configuredTransferBufferSeconds * 1000);
-            const estimates = estimateMicromobility(mode, stationPlace, search.destination, estimateDeparture);
+            const estimates = await estimateMicromobility(mode, stationPlace, search.destination, estimateDeparture);
             for (const estimate of estimates) pushMicromobilityCandidate(estimate, fareForPassengerCount(routed), 'after-transit');
           }
         }
@@ -4254,6 +4284,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       ? ['door-to-door-walking:local-distance-cap-exceeded'] : []),
     'walking-transfers-between-unmatched-stops',
     'community-intermediate-pickup:requires-explicit-driver-approved-stop',
+    ...[...micromobilityRoadRejections].sort().map((reason) => `micromobility:${reason}`),
   ];
   const effectiveUserId = req.userId ?? '00000000-0000-0000-0000-000000000001';
   const client = await pool.connect();
