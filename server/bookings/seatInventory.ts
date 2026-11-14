@@ -8,6 +8,24 @@ export const WHOLE_ROUTE_BOARDING = 1;
 export const WHOLE_ROUTE_ALIGHTING = 32767;
 export const MAX_PARTIAL_ALIGHTING = 32766;
 
+// Route-bound ordinal validation (Carpool 5.0 P0.2, G10/G15). Ordinals are directed
+// segment-occurrence numbers (spec VIII.4 / XXXIX.1): N route vertices ⇒ N−1 segments,
+// so a partial interval is realizable only when 1 <= boarding < alighting <= N. An
+// unrouted offer has no segment space and admits only the whole-route sentinel. The
+// caller has already enforced the coarse abstract bound (1 <= boarding < alighting <=
+// 32766); this refines it against the offer's actual geometry. Dependency-free for tests.
+export function routeIntervalViolation(
+  routePoints: number | null, alighting: number,
+): { code: string; message: string } | null {
+  if (routePoints === null) {
+    return { code: 'ordinals_require_route', message: 'partial boarding/alighting ordinals require a routed offer; book the whole route instead' };
+  }
+  if (alighting > routePoints) {
+    return { code: 'ordinal_out_of_route', message: `alightingOrdinal must not exceed the route point count (${routePoints}); ordinals are directed segment occurrences` };
+  }
+  return null;
+}
+
 const ACTIVE_INTERVAL = `(oi.state = 'CONFIRMED' OR (oi.state = 'HELD' AND oi.expires_at > now()))`;
 
 // Occupancy is a step function that only rises at boarding ordinals, so its maximum

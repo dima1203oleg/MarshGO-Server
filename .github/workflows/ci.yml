@@ -48,6 +48,10 @@ jobs:
         run: npm exec -- tsx --test tests/carpool-fare-basis-postgres.integration.test.ts
         env:
           FARE_BASIS_TEST_DATABASE_URL: ${{ env.API_TEST_DATABASE_URL }}
+      - name: Verify carpool route-bound ordinal transaction
+        run: npm exec -- tsx --test tests/carpool-route-ordinals-postgres.integration.test.ts
+        env:
+          ROUTE_ORDINALS_TEST_DATABASE_URL: ${{ env.API_TEST_DATABASE_URL }}
       - run: npm run test:integration
       - name: Build production API image
         run: docker build --tag marshgo-server:ci .

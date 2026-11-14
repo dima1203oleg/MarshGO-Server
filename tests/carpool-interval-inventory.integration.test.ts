@@ -37,9 +37,27 @@ describe('Carpool interval seat inventory (opt-in local integration test)', { sk
        VALUES ($1,$2,$3,'Interval Origin','Interval Destination',
          ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
          ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
-         ST_MakeLine(ST_SetSRID(ST_MakePoint(24.0,49.0),4326),ST_SetSRID(ST_MakePoint(25.0,50.0),4326)),
+         (SELECT ST_MakeLine(ST_SetSRID(ST_MakePoint(24.0 + g/15.0, 49.0 + g/15.0),4326) ORDER BY g) FROM generate_series(0,15) AS g),
          now()+interval '10 days',now()+interval '10 days 1 hour',140000,3600,'osrm',15000,$4,$4,$5)`,
       [id, driver, vehicle, totalSeats, fareBasis],
+    );
+    createdOffers.push(id);
+    return id;
+  }
+
+  // An unrouted offer (route IS NULL) admits only the whole-route sentinel; partial
+  // ordinals have no segment space to bind to (G10/G15).
+  async function mkUnroutedOffer(totalSeats: number): Promise<string> {
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,
+         departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats,fare_basis)
+       VALUES ($1,$2,$3,'Unrouted Origin','Unrouted Destination',
+         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
+         ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
+         NULL,
+         now()+interval '10 days',now()+interval '10 days 1 hour',140000,3600,'development_unrouted',15000,$4,$4,'PER_SEAT')`,
+      [id, driver, vehicle, totalSeats],
     );
     createdOffers.push(id);
     return id;
@@ -68,6 +86,12 @@ describe('Carpool interval seat inventory (opt-in local integration test)', { sk
     const response = await book(userId, offerId, opts);
     assert.equal(response.status, 409, `expected 409, got ${response.status}: ${await response.clone().text()}`);
     assert.equal((await response.json() as { error: { code: string } }).error.code, 'no_capacity');
+  }
+
+  async function bookBadRequest(userId: string, offerId: string, opts: { seats?: number; boarding?: number; alighting?: number }, code: string) {
+    const response = await book(userId, offerId, opts);
+    assert.equal(response.status, 400, `expected 400, got ${response.status}: ${await response.clone().text()}`);
+    assert.equal((await response.json() as { error: { code: string } }).error.code, code);
   }
 
   const cancel = (userId: string, bookingId: string) => fetch(`${apiUrl}/api/v1/bookings/${bookingId}/cancel`, {
@@ -255,7 +279,50 @@ describe('Carpool interval seat inventory (opt-in local integration test)', { sk
     assert.equal(whole.boarding_ordinal, 1);
     assert.equal(whole.alighting_ordinal, 32767);
     await bookConflict(passengers[1], offer, { boarding: 2, alighting: 5 });
-    await bookConflict(passengers[2], offer, { boarding: 30000, alighting: 32766 });
+    // A partial near the upper end of the route's segment space still overlaps whole-route.
+    await bookConflict(passengers[2], offer, { boarding: 10, alighting: 15 });
+  });
+
+  it('A01: rejects partial ordinals beyond the route point count with 400 ordinal_out_of_route', async () => {
+    const offer = await mkOffer(2); // 16-vertex route ⇒ valid partial alighting <= 16
+    // The route has 16 points; alighting 17 exceeds the segment space and is physically unrealizable.
+    await bookBadRequest(passengers[0], offer, { boarding: 2, alighting: 17 }, 'ordinal_out_of_route');
+    await bookBadRequest(passengers[1], offer, { boarding: 5, alighting: 32766 }, 'ordinal_out_of_route');
+    // The boundary itself is realizable: alighting == point count books the final segment.
+    await bookOk(passengers[2], offer, { boarding: 14, alighting: 16 });
+    assert.equal((await activeIntervals(offer)).length, 1);
+    assert.equal((await offerState(offer)).available_seats, 1);
+  });
+
+  it('A01: an unrouted offer admits only the whole route, never a partial interval', async () => {
+    const offer = await mkUnroutedOffer(2);
+    await bookBadRequest(passengers[0], offer, { boarding: 2, alighting: 5 }, 'ordinals_require_route');
+    // Whole-route sentinel still books normally on an unrouted offer.
+    const whole = await bookOk(passengers[1], offer, { seats: 1 });
+    assert.equal(whole.boarding_ordinal, 1);
+    assert.equal(whole.alighting_ordinal, 32767);
+    assert.equal((await offerState(offer)).available_seats, 1);
+  });
+
+  it('A01: a two-point route admits only [1,2) partial or the whole-route sentinel', async () => {
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO offers(id,driver_id,vehicle_id,origin_name,destination_name,origin,destination,route,
+         departure_at,arrival_at,distance_m,duration_s,route_source,price_per_seat_minor,total_seats,available_seats,fare_basis)
+       VALUES ($1,$2,$3,'Two Point','Two Point',
+         ST_SetSRID(ST_MakePoint(24.0,49.0),4326)::geography,
+         ST_SetSRID(ST_MakePoint(25.0,50.0),4326)::geography,
+         ST_MakeLine(ST_SetSRID(ST_MakePoint(24.0,49.0),4326),ST_SetSRID(ST_MakePoint(25.0,50.0),4326)),
+         now()+interval '10 days',now()+interval '10 days 1 hour',140000,3600,'osrm',15000,1,1,'PER_SEAT')`,
+      [id, driver, vehicle],
+    );
+    createdOffers.push(id);
+    // The original defect: [2,5) on a single-segment route must now be rejected, not sold.
+    await bookBadRequest(passengers[0], id, { boarding: 2, alighting: 5 }, 'ordinal_out_of_route');
+    await bookOk(passengers[1], id, { boarding: 1, alighting: 2 });
+    // The single seat is now occupied; a disjoint-looking but out-of-route leg cannot reuse it.
+    await bookBadRequest(passengers[2], id, { boarding: 5, alighting: 8 }, 'ordinal_out_of_route');
+    assert.equal((await activeIntervals(id)).length, 1);
   });
 
   it('rejects malformed ordinals with 400 and leaves inventory untouched', async () => {
