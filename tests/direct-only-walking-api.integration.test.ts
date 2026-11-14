@@ -67,10 +67,11 @@ describe('direct-only walking retry at the HTTP API boundary (opt-in integration
     assert.ok(result.data.providerErrors.some((message) => message.includes('фактичний час або відстань пішохідного шляху')),
       'the standard-reach itinerary must be rejected by measured pedestrian feasibility before retry');
 
-    const direct = result.data.journeys.find((journey) => journey.legs.some((leg) => leg.routeId === 'direct-only'));
+    const isDirectOnlyRoute = (routeId: string | undefined) => routeId?.split(':').at(-1) === 'direct-only';
+    const direct = result.data.journeys.find((journey) => journey.legs.some((leg) => isDirectOnlyRoute(leg.routeId)));
     assert.ok(direct, `the expanded direct trip should be returned after standard reach fails; journeys=${JSON.stringify(result.data.journeys.map((journey) => journey.legs.map((leg) => leg.routeId ?? leg.mode)))}`);
     assert.equal(direct.legs.filter((leg) => leg.mode !== 'WALK').length, 1, 'the retry must retain zero transfers');
-    const transit = direct.legs.find((leg) => leg.routeId === 'direct-only');
+    const transit = direct.legs.find((leg) => isDirectOnlyRoute(leg.routeId));
     assert.ok(transit?.routeGeometry && transit.routeGeometry.length >= 2, 'the GTFS trip keeps its confirmed route geometry');
     const walks = direct.legs.filter((leg) => leg.mode === 'WALK');
     assert.equal(walks.length, 2, 'the itinerary exposes access and egress walks');
