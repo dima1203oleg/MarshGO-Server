@@ -40,7 +40,7 @@ export function matchLiveVehicleForJourneyLeg(
   const candidates = vehicles.filter((vehicle) => vehicle.providerId === leg.providerId
     && vehicle.tripId === tripId
     && vehicle.routeId === routeId
-    && (!vehicle.startDate || vehicle.startDate === leg.serviceDate)
+    && vehicle.startDate === leg.serviceDate
     && isFreshVehicleTimestamp(vehicle.timestamp, now));
   if (candidates.length === 0) return null;
 

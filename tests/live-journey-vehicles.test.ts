@@ -32,10 +32,9 @@ test('live journey leg rejects stale GPS and positions outside the scheduled tri
   assert.equal(matchLiveVehicleForJourneyLeg({ ...leg, scheduledArrivalAt: new Date(now - 11 * 60_000) }, [vehicle()], now), null);
 });
 
-test('a fresh vehicle without an explicit GTFS start date is matched only inside the leg time window', () => {
+test('live journey leg rejects a fresh matching trip without an explicit GTFS service date', () => {
   const match = vehicle({ startDate: undefined });
-  assert.equal(matchLiveVehicleForJourneyLeg(leg, [match], now), match);
-  assert.equal(matchLiveVehicleForJourneyLeg({ ...leg, scheduledDepartureAt: new Date(now - 2 * 86_400_000), scheduledArrivalAt: new Date(now - 2 * 86_400_000 + 20 * 60_000) }, [match], now), null);
+  assert.equal(matchLiveVehicleForJourneyLeg(leg, [match], now), null);
 });
 
 test('merged provider-scoped Journey IDs match raw IDs from the provider GTFS-Realtime feed', () => {
