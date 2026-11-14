@@ -4,8 +4,8 @@ import { matchJsonVehicleRoute, vehicleTransportLabel } from '../server/mobility
 import { parseJsonVehicles } from '../server/mobility/transportLayers';
 
 test('a unique JSON vehicle label resolves to the loaded static route and its class', () => {
-  const routes = new Map([['gtfs-29', { name: '29', type: 'bus' }]]);
-  assert.deepEqual(matchJsonVehicleRoute({ route_id: 'gtfs-29', route_short_name: '29', transport_type: 'marshrutka', route_type: 3 }, routes), {
+  const routes = new Map([['gtfs-29', { name: '29', type: 'marshrutka' }]]);
+  assert.deepEqual(matchJsonVehicleRoute({ route_id: 'gtfs-29', route_short_name: '29', route_type: 3 }, routes), {
     routeId: 'gtfs-29', route: '29', type: 'marshrutka',
   });
 });
@@ -36,6 +36,13 @@ test('ambiguous or unmatched route labels never acquire a guessed static route I
 test('explicit provider vehicle class takes priority over generic route_type', () => {
   assert.equal(vehicleTransportLabel({ route_type: 3, transport_type: 'marshrutka' }), 'marshrutka');
   assert.equal(vehicleTransportLabel({ route_type: 3, transport_type: 'trolleybus' }), 'trolleybus');
+});
+
+test('an explicit mode conflict preserves the feed class without attaching another mode route ID', () => {
+  const routes = new Map([['gtfs-12', { name: '12', type: 'bus' }]]);
+  assert.deepEqual(matchJsonVehicleRoute({ route_short_name: '12', transport_type: 'trolleybus', route_type: 3 }, routes), {
+    route: '12', type: 'trolleybus',
+  });
 });
 
 test('JSON feed adapter emits the confirmed static route ID and route class for map matching', () => {

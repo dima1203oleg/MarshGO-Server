@@ -68,7 +68,9 @@ export function matchJsonVehicleRoute(
     const matches = [...routeNames.entries()].filter(([, candidate]) => routeLabelKey(candidate.name) === routeKey);
     if (matches.length === 1) {
       const [routeId, match] = matches[0];
-      return { routeId, route: match.name, type: explicitVehicleTransportLabel(vehicle) ?? match.type };
+      const explicitType = explicitVehicleTransportLabel(vehicle);
+      if (explicitType && explicitType !== match.type) return { route, type: explicitType };
+      return { routeId, route: match.name, type: explicitType ?? match.type };
     }
   }
   return { route, type: vehicleTransportLabel(vehicle) };
