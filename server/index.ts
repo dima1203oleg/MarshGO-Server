@@ -520,24 +520,6 @@ app.get('/api/v1/mobility/providers', optionalAuth, asyncHandler(async (req, res
     `SELECT name,city,provider_type,source_type,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') ORDER BY priority,name`);
   const data = transportTileDefinitions.map((tile) => {
     if (tile.id === 'carpool') return { transportType: tile.id, providers: [{ id: 'carpool:MARSHGO', name: 'MARSHGO Community', available: true, cities: [], sources: ['marshgo'], services: [] }] };
-    if (tile.id === 'taxi') {
-      return { transportType: tile.id, providers: [
-        { id: 'taxi:Uklon', name: 'Uklon', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
-        { id: 'taxi:Bolt', name: 'Bolt', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
-        { id: 'taxi:Opti', name: 'Opti Taxi', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
-      ] };
-    }
-    if (tile.id === 'carsharing') {
-      return { transportType: tile.id, providers: [
-        { id: 'carsharing:Getmancar', name: 'Getmancar', available: true, cities: ['Київ', 'Дніпро'], sources: ['carsharing-api'], services: ['carsharing'] },
-      ] };
-    }
-    if (tile.id === 'transfer') {
-      return { transportType: tile.id, providers: [
-        { id: 'transfer:Kiwitaxi', name: 'Kiwitaxi Ukraine', available: true, cities: ['Україна'], sources: ['transfer-api'], services: ['transfer'] },
-        { id: 'transfer:Intercity', name: 'Міжміський трансфер MARSHGO', available: true, cities: ['Україна'], sources: ['transfer-api'], services: ['transfer'] },
-      ] };
-    }
     // Only advertise rental providers that have the same confirmed network
     // rules consumed by the journey estimator. Static bicycles are routable as
     // estimates; scooters require a connected GBFS source and return geofence.
