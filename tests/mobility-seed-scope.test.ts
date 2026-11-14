@@ -52,6 +52,21 @@ test('focused Kyiv feed seed selects only the routeTaxi geometry and Zelectra GB
   assert.ok(selected.some((entry) => entry.sourceType === 'gbfs' && entry.name.includes('Zelectra')));
 });
 
+test('regional mirror scope selects exactly the five unseeded Odesa/Bucha/EasyWay feeds', () => {
+  const selected = selectMobilitySeedEntries(catalog, '--regional-mirrors');
+  assert.ok(selected);
+  assert.deepEqual(selected.map((entry) => entry.city).sort(), ['Буча', 'Коростень', 'Одеса', 'Рівне', 'Чернівці'].sort());
+  assert.ok(selected.every((entry) => entry.city !== 'Малин'));
+});
+
+// The licence file in the feed: free below USD 100k revenue, share-alike, paid SaaS needs a written agreement.
+test('Malyn OwnNet feed cannot auto-enable for a commercial marketplace', () => {
+  const entry = catalog.find((row) => row.feedUrl === 'https://malin.kiev.ua/transport/gtfs.zip');
+  assert.ok(entry);
+  assert.equal(entry.access, 'requires_partner_access');
+  assert.equal(canEnableCommercialProvider(entry.access, entry.license), false);
+});
+
 test('unknown seed scope is rejected before any database or provider work', () => {
   assert.equal(selectMobilitySeedEntries(catalog, '--all-cities-ish'), null);
 });
