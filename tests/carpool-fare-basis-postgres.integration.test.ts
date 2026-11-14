@@ -47,6 +47,10 @@ const databaseUrl = process.env.API_TEST_DATABASE_URL;
 if (databaseUrl) {
   assertSafeTestDatabaseUrl(databaseUrl);
 }
+const postgresProofEnabled = process.env.CARPOOL_FARE_BASIS_PG_TEST === '1';
+if (postgresProofEnabled && !databaseUrl) {
+  throw new Error('The isolated API_TEST_DATABASE_URL is required for the PostgreSQL fare proof');
+}
 
 const source = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
 const extractTemplate = (marker: string) => {
@@ -70,7 +74,7 @@ const offersInsert = extractTemplate('INSERT INTO offers(driver_id,vehicle_id,or
 const bookingsInsert = extractTemplate('INSERT INTO bookings(offer_id, passenger_id, seat_count, unit_price_minor, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, idempotency_key, boarding_ordinal, alighting_ordinal, fare_basis)');
 const priceEditUpdate = extractQuoted("UPDATE bookings SET unit_price_minor=$2,total_price_minor=$2*(CASE WHEN fare_basis='TOTAL_ALL' THEN 1 ELSE seat_count END) WHERE id=$1");
 
-test('real PostgreSQL: fare_basis survives publication and the group total is never doubled', { skip: !databaseUrl }, async () => {
+test('real PostgreSQL: fare_basis survives publication and the group total is never doubled', { skip: !postgresProofEnabled }, async () => {
   // Both price-edit sites (driver drop + passenger accept) must use the CASE form.
   const caseStatement = "total_price_minor=$2*(CASE WHEN fare_basis='TOTAL_ALL' THEN 1 ELSE seat_count END)";
   assert.equal(source.split(caseStatement).length - 1, 2, 'both price-edit UPDATEs must branch on fare_basis');

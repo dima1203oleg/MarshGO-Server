@@ -40,6 +40,10 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: DATABASE_URL="$API_TEST_DATABASE_URL" npm run db:migrate
+      - name: Verify carpool fare basis against PostgreSQL
+        run: npm exec -- tsx --test tests/carpool-fare-basis-postgres.integration.test.ts
+        env:
+          CARPOOL_FARE_BASIS_PG_TEST: '1'
       - name: Verify proposal acceptance revision transaction
         run: npm exec -- tsx --test tests/proposal-accept-revision-postgres.integration.test.ts
         env:
