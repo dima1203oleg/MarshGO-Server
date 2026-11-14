@@ -14,8 +14,8 @@ export function extractVehicleList(body: unknown): Json[] {
 
 const num = (value: unknown) => (typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN);
 
-/** Maps the many transport-type spellings of local feeds onto the MARSHGO labels. */
-export function vehicleTransportLabel(vehicle: Json): string {
+/** Maps an explicitly supplied mode spelling, without inferring from generic route_type. */
+function explicitVehicleTransportLabel(vehicle: Json): string | null {
   const raw = String(vehicle.transport_type ?? vehicle.type ?? '').toLowerCase();
   if (/marshrutka|minibus|маршрутк/.test(raw)) return 'marshrutka';
   if (/trolley|trol\b|тролейб/.test(raw)) return 'trolleybus';
@@ -23,6 +23,13 @@ export function vehicleTransportLabel(vehicle: Json): string {
   if (/metro|subway|метро/.test(raw)) return 'metro';
   if (/train|rail|поїзд|електрич/.test(raw)) return 'train';
   if (/bus|автобус/.test(raw)) return 'bus';
+  return null;
+}
+
+/** Maps the many transport-type spellings of local feeds onto the MARSHGO labels. */
+export function vehicleTransportLabel(vehicle: Json): string {
+  const explicit = explicitVehicleTransportLabel(vehicle);
+  if (explicit) return explicit;
   const routeType = num(vehicle.route_type);
   if (Number.isFinite(routeType)) return routeTypeLabel(routeType);
   return 'other';
@@ -61,7 +68,7 @@ export function matchJsonVehicleRoute(
     const matches = [...routeNames.entries()].filter(([, candidate]) => routeLabelKey(candidate.name) === routeKey);
     if (matches.length === 1) {
       const [routeId, match] = matches[0];
-      return { routeId, route: match.name, type: match.type };
+      return { routeId, route: match.name, type: explicitVehicleTransportLabel(vehicle) ?? match.type };
     }
   }
   return { route, type: vehicleTransportLabel(vehicle) };

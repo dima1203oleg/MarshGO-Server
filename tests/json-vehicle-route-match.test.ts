@@ -4,8 +4,8 @@ import { matchJsonVehicleRoute, vehicleTransportLabel } from '../server/mobility
 import { parseJsonVehicles } from '../server/mobility/transportLayers';
 
 test('a unique JSON vehicle label resolves to the loaded static route and its class', () => {
-  const routes = new Map([['gtfs-29', { name: '29', type: 'marshrutka' }]]);
-  assert.deepEqual(matchJsonVehicleRoute({ route_id: 'gtfs-29', route_short_name: '29', route_type: 3 }, routes), {
+  const routes = new Map([['gtfs-29', { name: '29', type: 'bus' }]]);
+  assert.deepEqual(matchJsonVehicleRoute({ route_id: 'gtfs-29', route_short_name: '29', transport_type: 'marshrutka', route_type: 3 }, routes), {
     routeId: 'gtfs-29', route: '29', type: 'marshrutka',
   });
 });
