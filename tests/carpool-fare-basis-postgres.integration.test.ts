@@ -9,12 +9,43 @@ import { Pool } from 'pg';
 // INSERT and the price-edit UPDATE ... CASE) on temp tables cloned from the live
 // schema, inside an outer transaction that is fully rolled back. No production
 // row is written. TOTAL_ALL must keep the quoted group price; PER_SEAT multiplies.
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+const TEST_DATABASE_PATTERN = /^marshgo_e2e(_[a-z0-9_]+)?$/;
+
+function assertSafeTestDatabaseUrl(raw: string): void {
+  let database: URL;
+  try {
+    database = new URL(raw);
+  } catch {
+    throw new Error('Only an isolated loopback marshgo_e2e test database is allowed');
+  }
+  const hostname = database.hostname.replace(/^\[|\]$/g, '');
+  const databaseName = database.pathname.replace(/^\//, '');
+  if (!LOOPBACK_HOSTS.has(hostname) || !TEST_DATABASE_PATTERN.test(databaseName)) {
+    throw new Error('Only an isolated loopback marshgo_e2e test database is allowed');
+  }
+}
+
+test('database guard accepts only loopback marshgo_e2e test databases', () => {
+  for (const raw of [
+    'postgres://u:p@127.0.0.1:5434/marshgo_e2e',
+    'postgres://u:p@localhost:5432/marshgo_e2e_carpool5',
+    'postgres://u:p@[::1]:5432/marshgo_e2e_ci',
+  ]) {
+    assert.doesNotThrow(() => assertSafeTestDatabaseUrl(raw));
+  }
+  for (const raw of [
+    'postgres://u:p@db.example.com:5432/marshgo_e2e',
+    'postgres://u:p@127.0.0.1:5434/marshgo',
+    'not-a-url',
+  ]) {
+    assert.throws(() => assertSafeTestDatabaseUrl(raw));
+  }
+});
+
 const databaseUrl = process.env.API_TEST_DATABASE_URL;
 if (databaseUrl) {
-  const database = new URL(databaseUrl);
-  if (database.hostname !== '127.0.0.1' || database.pathname !== '/marshgo_e2e_carpool5') {
-    throw new Error('Only the isolated loopback carpool fixture database is allowed');
-  }
+  assertSafeTestDatabaseUrl(databaseUrl);
 }
 
 const source = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
