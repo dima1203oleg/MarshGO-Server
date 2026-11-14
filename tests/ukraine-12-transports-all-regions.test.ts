@@ -186,8 +186,9 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
     }
   });
 
-  it('generates cross-oblast multimodal chains across Ukraine', async () => {
-    // Intercity Corridor: Lviv to Kyiv
+  it('does not present static intercity corridor estimates as scheduled trains', async () => {
+    // Intercity departures, availability, fares, stops and track geometry must come from
+    // eligible dated GTFS/API data. The static corridor catalog is not a timetable.
     const lvivToKyiv = await composeUkraineMultimodalChains({
       origin: { name: 'пл. Ринок (Львів)', coordinates: [24.0315, 49.8418] },
       destination: { name: 'Майдан Незалежності (Київ)', coordinates: [30.5234, 50.4501] },
@@ -197,10 +198,8 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
       preferences: { allowPublicTransport: true, allowTaxi: true, allowedTransportTypes: ['train', 'tram', 'taxi'] },
     });
 
-    assert.ok(lvivToKyiv.length > 0, 'Should find Lviv to Kyiv multimodal chain');
-    const railChain = lvivToKyiv.find((c) => c.legs.some((l) => l.mode === 'RAIL'));
-    assert.ok(railChain, 'Should have rail leg for Lviv to Kyiv');
-    assert.ok(railChain.legs.length >= 3, 'Must have at least first-mile, rail, last-mile');
+    assert.equal(lvivToKyiv.some((candidate) => candidate.legs.some((leg) => leg.mode === 'RAIL')), false,
+      'a real rail candidate must be supplied by the scheduled-feed search, not the static corridor table');
 
     // Lviv → Odesa composes two rail corridors through Kyiv. The 30-minute connection is
     // represented by the schedule gap; no synthetic 200 m walk may be drawn at one coordinate.
@@ -212,13 +211,8 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
       strategy: 'BALANCED',
       preferences: { allowPublicTransport: true, allowTaxi: true, allowedTransportTypes: ['train', 'tram', 'taxi'] },
     });
-    const connectingChain = lvivToOdesa.find((candidate) => candidate.legs.filter((leg) => leg.mode === 'RAIL').length === 2);
-    assert.ok(connectingChain, 'Should retain a two-corridor rail journey via Kyiv');
-    assert.equal(connectingChain.transfers >= 1, true, 'The intercity change still counts as a transfer');
-    assert.equal(connectingChain.legs.some((leg) => leg.mode === 'WALK'
-      && leg.origin.coordinates[0] === leg.destination.coordinates[0]
-      && leg.origin.coordinates[1] === leg.destination.coordinates[1]), false,
-    'Must not invent a positive-distance walk between identical station coordinates');
+    assert.equal(lvivToOdesa.some((candidate) => candidate.legs.some((leg) => leg.mode === 'RAIL')), false,
+      'two static corridors must not be composed into a date-independent rail itinerary');
   });
 
   it('generates intra-city transit itineraries across multiple Ukrainian oblast capitals', () => {
