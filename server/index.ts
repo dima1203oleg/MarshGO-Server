@@ -21,7 +21,7 @@ import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, getWa
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
-import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
+import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, shouldSearchGtfsTimetables, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { resolveDirectOnlyWalkingPolicy, searchWalkingReachUntilFeasible } from './journey/directOnlyWalkingPolicy';
 import { priceStatusFor, scaleGtfsFareForPassengers } from './journey/gtfsFares';
@@ -3403,7 +3403,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const extendedTransitEgressWalkingMeters = explicitWalkLimit
     ? Math.max(transitEgressWalkingMeters, directOnlyWalkingPolicy.maximumEgressMeters)
     : Math.max(transitEgressWalkingMeters, directOnlyWalkingPolicy.maximumEgressMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS);
-  const shouldRunWorkerSearch = routeDistanceMeters < 45_000;
+  const shouldRunWorkerSearch = shouldSearchGtfsTimetables({
+    routeDistanceMeters,
+    eligibleProviderCount: eligibleGtfsProviders.length,
+    hasMetroSource: Boolean(metroSources),
+  });
   const gtfsSearchInput = {
     providerId: 'worker', providerName: 'worker', origin: search.origin.coordinates, destination: search.destination.coordinates,
     earliestDeparture: search.departureAt,
@@ -3425,7 +3429,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const gtfsWorkerProviders = eligibleGtfsProviders.map((provider) => ({ id: provider.id, name: provider.name, city: provider.city,
     feedUrl: provider.feed_url, ...(provider.realtime_url ? { realtimeUrl: provider.realtime_url } : {}) }));
   try {
-    if (shouldRunWorkerSearch && (eligibleGtfsProviders.length > 0 || metroSources)) {
+    if (shouldRunWorkerSearch) {
       gtfsWorkerSearch = await gtfsSearchWorker.search(gtfsSearchInput, gtfsWorkerProviders, metroSources);
     }
   } catch (error) {
