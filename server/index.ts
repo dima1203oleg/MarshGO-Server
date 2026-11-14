@@ -5806,11 +5806,14 @@ app.post('/api/v1/bookings', requireAuth, asyncHandler(async (req, res) => {
     if (!currentOffer || currentOffer.status !== 'published') throw new ApiError(404, 'offer unavailable');
 
     const prior = await client.query(
-      'SELECT id, offer_id, seat_count, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, status FROM bookings WHERE passenger_id = $1 AND idempotency_key = $2',
+      'SELECT id, offer_id, seat_count, total_price_minor, currency, fee_class, platform_fee_minor, fee_rule_version, status, boarding_ordinal, alighting_ordinal FROM bookings WHERE passenger_id = $1 AND idempotency_key = $2',
       [userId, key],
     );
     if (prior.rows[0]) {
-      if (prior.rows[0].offer_id !== offerId || Number(prior.rows[0].seat_count) !== seats) throw new ApiError(409, 'idempotency key already used for another request');
+      // Legacy bookings have NULL ordinals and occupy the whole route.
+      if (prior.rows[0].offer_id !== offerId || Number(prior.rows[0].seat_count) !== seats
+        || Number(prior.rows[0].boarding_ordinal ?? WHOLE_ROUTE_BOARDING) !== boarding
+        || Number(prior.rows[0].alighting_ordinal ?? WHOLE_ROUTE_ALIGHTING) !== alighting) throw new ApiError(409, 'idempotency key already used for another request');
       const priorJourney = await client.query<{ id: string }>(
         'SELECT id FROM journey_legs WHERE booking_id=$1 AND journey_id=$2 AND id=$3',
         [prior.rows[0].id, journeyId ?? null, journeyLegId ?? null],
