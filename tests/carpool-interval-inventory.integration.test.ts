@@ -247,13 +247,89 @@ describe('Carpool interval seat inventory (opt-in local integration test)', { sk
     const before = await offerState(offer);
     const replay = await book(passengers[0], offer, { boarding: 2, alighting: 5, key: replayKey });
     assert.equal(replay.status, 200);
-    const replayBody = await replay.json() as { replayed: boolean; data: { id: string } };
+    const replayBody = await replay.json() as { replayed: boolean; data: { id: string; boarding_ordinal: number; alighting_ordinal: number } };
     assert.equal(replayBody.replayed, true);
     assert.equal(replayBody.data.id, first.id);
+    assert.equal(replayBody.data.boarding_ordinal, 2);
+    assert.equal(replayBody.data.alighting_ordinal, 5);
     assert.equal((await activeIntervals(offer)).length, 1);
     const after = await offerState(offer);
     assert.equal(after.available_seats, before.available_seats);
     assert.equal(after.inventory_version, before.inventory_version);
+  });
+
+  it('rejects reuse of a partial-booking key for a changed interval without changing inventory', async () => {
+    const offer = await mkOffer(2);
+    const replayKey = key();
+    const first = await bookOk(passengers[0], offer, { boarding: 2, alighting: 5, key: replayKey });
+    const before = await offerState(offer);
+    const beforeIntervals = await activeIntervals(offer);
+    const changes = [
+      { boarding: 3, alighting: 5 },
+      { boarding: 2, alighting: 6 },
+      { boarding: 5, alighting: 8 },
+      {},
+    ];
+    for (const interval of changes) {
+      const response = await book(passengers[0], offer, { ...interval, key: replayKey });
+      assert.equal(response.status, 409, `expected idempotency conflict for ${JSON.stringify(interval)}`);
+      const body = await response.json() as { error: { message: string } };
+      assert.equal(body.error.message, 'idempotency key already used for another request');
+      assert.deepEqual(await offerState(offer), before);
+      assert.deepEqual(await activeIntervals(offer), beforeIntervals);
+    }
+    const stored = await pool.query(
+      'SELECT id,boarding_ordinal,alighting_ordinal FROM bookings WHERE offer_id=$1', [offer],
+    );
+    assert.deepEqual(stored.rows, [{ id: first.id, boarding_ordinal: 2, alighting_ordinal: 5 }]);
+    const replay = await book(passengers[0], offer, { boarding: 2, alighting: 5, key: replayKey });
+    assert.equal(replay.status, 200);
+    assert.equal((await replay.json() as { data: { id: string } }).data.id, first.id);
+  });
+
+  it('replays omitted whole-route ordinals but rejects changing the key to a partial interval', async () => {
+    const offer = await mkOffer(2);
+    const replayKey = key();
+    const first = await bookOk(passengers[0], offer, { key: replayKey });
+    const before = await offerState(offer);
+    const beforeIntervals = await activeIntervals(offer);
+    const changed = await book(passengers[0], offer, { boarding: 1, alighting: 16, key: replayKey });
+    assert.equal(changed.status, 409);
+    assert.equal((await changed.json() as { error: { message: string } }).error.message,
+      'idempotency key already used for another request');
+    const replay = await book(passengers[0], offer, { key: replayKey });
+    assert.equal(replay.status, 200);
+    const body = await replay.json() as { replayed: boolean; data: { id: string; boarding_ordinal: number; alighting_ordinal: number } };
+    assert.equal(body.replayed, true);
+    assert.equal(body.data.id, first.id);
+    assert.equal(body.data.boarding_ordinal, 1);
+    assert.equal(body.data.alighting_ordinal, 32767);
+    assert.deepEqual(await offerState(offer), before);
+    assert.deepEqual(await activeIntervals(offer), beforeIntervals);
+    const stored = await pool.query('SELECT id FROM bookings WHERE offer_id=$1', [offer]);
+    assert.deepEqual(stored.rows, [{ id: first.id }]);
+  });
+
+  it('replays legacy NULL booking ordinals only as the whole route without mutating the stored snapshot', async () => {
+    const offer = await mkOffer(2);
+    const replayKey = key();
+    const first = await bookOk(passengers[0], offer, { key: replayKey });
+    await pool.query('UPDATE bookings SET boarding_ordinal=NULL,alighting_ordinal=NULL WHERE id=$1', [first.id]);
+    const before = await offerState(offer);
+    const beforeIntervals = await activeIntervals(offer);
+    const partial = await book(passengers[0], offer, { boarding: 1, alighting: 16, key: replayKey });
+    assert.equal(partial.status, 409);
+    assert.equal((await partial.json() as { error: { message: string } }).error.message,
+      'idempotency key already used for another request');
+    const replay = await book(passengers[0], offer, { key: replayKey });
+    assert.equal(replay.status, 200);
+    const body = await replay.json() as { replayed: boolean; data: { id: string } };
+    assert.equal(body.replayed, true);
+    assert.equal(body.data.id, first.id);
+    assert.deepEqual(await offerState(offer), before);
+    assert.deepEqual(await activeIntervals(offer), beforeIntervals);
+    const stored = await pool.query('SELECT id,boarding_ordinal,alighting_ordinal FROM bookings WHERE offer_id=$1', [offer]);
+    assert.deepEqual(stored.rows, [{ id: first.id, boarding_ordinal: null, alighting_ordinal: null }]);
   });
 
   it('cancelling releases the interval so the seat is reusable, idempotently', async () => {
