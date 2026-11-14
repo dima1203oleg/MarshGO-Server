@@ -1,5 +1,6 @@
 import type { GtfsItinerary } from './gtfsTimetable';
 import { requestOsrmRoute } from '../routing/osrmGateway';
+import { MAX_FOOT_ENDPOINT_SNAP_METERS } from '../routing/providers/osrmTransport';
 import { generatePedestrianGeometry, calculatePedestrianRouteMetrics } from '../../shared/navigation/pedestrianGeometry';
 
 export interface WalkingRoutePath {
@@ -317,7 +318,12 @@ export async function routePedestrianPath(
     budget.spent += 1;
   }
 
-  const value = requestOsrmRoute([from, to], resolvedEndpoint, { timeoutMs: WALKING_ROUTE_TIMEOUT_MS, profile: 'FOOT', priority: 'background' })
+  const value = requestOsrmRoute([from, to], resolvedEndpoint, {
+    timeoutMs: WALKING_ROUTE_TIMEOUT_MS,
+    profile: 'FOOT',
+    priority: 'background',
+    cacheParameters: { maxEndpointSnapMeters: MAX_FOOT_ENDPOINT_SNAP_METERS },
+  })
     .then((route) => ({ distanceMeters: Math.ceil(route.distanceMeters), durationSeconds: Math.ceil(route.durationSeconds), geometry: route.geometry }))
     .catch(() => null);
   inFlightRouteRequests.set(key, value);

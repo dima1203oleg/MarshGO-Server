@@ -14,6 +14,21 @@ export class RoutingUnavailableError extends NavigationProviderError {
   constructor(message = 'Road routing is not configured', code: ErrorCode = 'ROUTING_PROVIDER_UNAVAILABLE') { super(code, 'osrm'); this.message = message; }
 }
 
+// A local valid Lviv foot probe snapped 5 m / 24 m; uncovered Stryi snapped 55 km.
+export const MAX_FOOT_ENDPOINT_SNAP_METERS = 100;
+const EARTH_RADIUS_METERS = 6_371_008.8;
+
+function distanceMeters(a: [number, number], b: [number, number]): number {
+  const toRadians = (degrees: number) => degrees * Math.PI / 180;
+  const latitudeDelta = toRadians(b[1] - a[1]);
+  const longitudeDelta = toRadians(b[0] - a[0]);
+  const latitudeA = toRadians(a[1]);
+  const latitudeB = toRadians(b[1]);
+  const haversine = Math.sin(latitudeDelta / 2) ** 2
+    + Math.cos(latitudeA) * Math.cos(latitudeB) * Math.sin(longitudeDelta / 2) ** 2;
+  return 2 * EARTH_RADIUS_METERS * Math.asin(Math.sqrt(Math.min(1, haversine)));
+}
+
 export async function fetchOsrmRoute(points: [number, number][], base: string | undefined, timeoutMs = 10000): Promise<RoadRoute> {
   if (points.length < 2 || points.length > 32) throw new RoutingUnavailableError('A road route needs 2–32 valid waypoint coordinates');
   for (const point of points) {
@@ -56,6 +71,20 @@ export async function fetchOsrmRoute(points: [number, number][], base: string | 
     }
     return [Number(point[0]), Number(point[1])];
   });
+  // A regional foot graph can return `Ok` after snapping an uncovered endpoint to a faraway
+  // edge. That response is syntactically valid but would draw a false sidewalk route. Only
+  // accept pedestrian geometry whose first and last coordinates remain near the requested
+  // anchors; road routing keeps its existing snapping behavior.
+  if (/\/foot(?:\/|$)/i.test(url.pathname)) {
+    const startSnapMeters = distanceMeters(points[0]!, geometry[0]!);
+    const endSnapMeters = distanceMeters(points.at(-1)!, geometry.at(-1)!);
+    if (startSnapMeters > MAX_FOOT_ENDPOINT_SNAP_METERS || endSnapMeters > MAX_FOOT_ENDPOINT_SNAP_METERS) {
+      throw new RoutingUnavailableError(
+        'Foot router snapped an endpoint outside the supported walking range',
+        'ROUTING_INVALID_RESPONSE',
+      );
+    }
+  }
   const legs = route.legs?.map((leg): RoadRouteLeg | null => {
     if (!Number.isFinite(leg.distance) || !Number.isFinite(leg.duration) || leg.distance! <= 0 || leg.duration! <= 0) return null;
     return { distanceMeters: leg.distance!, durationSeconds: leg.duration! };

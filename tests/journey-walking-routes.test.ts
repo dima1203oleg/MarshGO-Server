@@ -39,6 +39,11 @@ function itinerary(): GtfsItinerary {
 
 const limits = { maximumAccessMeters: 800, maximumEgressMeters: 800, maximumTransferMeters: 800 };
 
+function geometryForRequest(input: RequestInfo | URL) {
+  const routeCoordinates = new URL(String(input)).pathname.split('/').at(-1)!;
+  return { coordinates: routeCoordinates.split(';').map((point) => point.split(',').map(Number)) };
+}
+
 test('replaces straight-line walking with routed distance, geometry, time, and waiting', () => {
   const routed = applyRoutedWalkingPaths(itinerary(), {
     access: path(500, 480), egress: path(600, 500), transfers: [path(350, 240)],
@@ -131,10 +136,10 @@ test('uses the configured OSRM foot profile and preserves its routed geometry', 
 test('caps external foot-route requests per search without caching a budget miss', async (t) => {
   const originalFetch = globalThis.fetch;
   let fetchCount = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (input) => {
     fetchCount++;
     return new Response(JSON.stringify({
-      code: 'Ok', routes: [{ distance: 100, duration: 80, geometry: { coordinates: [[24, 49], [24.01, 49.01]] }, legs: [] }],
+      code: 'Ok', routes: [{ distance: 100, duration: 80, geometry: geometryForRequest(input), legs: [] }],
     }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
@@ -200,14 +205,14 @@ test('bounds concurrent provider work and drops excess queued walking paths', as
   let fetchCount = 0;
   let active = 0;
   let peakActive = 0;
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (input) => {
     fetchCount++;
     active++;
     peakActive = Math.max(peakActive, active);
     await new Promise((resolve) => setTimeout(resolve, 20));
     active--;
     return new Response(JSON.stringify({
-      code: 'Ok', routes: [{ distance: 100, duration: 80, geometry: { coordinates: [[24, 49], [24.01, 49.01]] }, legs: [] }],
+      code: 'Ok', routes: [{ distance: 100, duration: 80, geometry: geometryForRequest(input), legs: [] }],
     }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   t.after(() => { globalThis.fetch = originalFetch; });
