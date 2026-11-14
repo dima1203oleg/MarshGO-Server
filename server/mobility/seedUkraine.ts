@@ -5,7 +5,7 @@ import { canEnableCommercialProvider, commercialUseFromLicense } from './license
 import { initialMobilityProviderStatus, selectMobilitySeedEntries } from './seedScope';
 import { kyivOpenDataCatalog, ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3 } from './ukraineCatalog';
 
-/** Registers catalogue sources and refreshes health without overriding an existing admin enable/disable/pause decision. */
+// Revalidating a license must not override an existing admin disable or pause.
 async function main() {
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
   try {

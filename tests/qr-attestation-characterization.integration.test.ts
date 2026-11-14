@@ -8,15 +8,19 @@ import pg from 'pg';
 // and it deliberately records which of my earlier claims were too strong.
 // Local-only: throwaway accounts, loopback DB/API, strict cleanup. Fixtures, not live traffic.
 
-const apiUrl = process.env.API_TEST_URL || 'http://127.0.0.1:3002';
-const databaseUrl = process.env.API_TEST_DATABASE_URL || process.env.DATABASE_URL || 'postgres://marshgo:local_only_change_me@127.0.0.1:5434/marshgo';
+const apiUrl = process.env.API_TEST_URL;
+const databaseUrl = process.env.API_TEST_DATABASE_URL;
+const enabled = Boolean(apiUrl && databaseUrl);
 
-const database = new URL(databaseUrl);
-if (!['127.0.0.1', 'localhost', '::1'].includes(database.hostname)) {
-  throw new Error('QR attestation test is strictly restricted to a local loopback database');
-}
-if (!database.pathname.includes('marshgo') && !database.pathname.includes('test')) {
-  throw new Error('QR attestation test requires a database name containing "marshgo" or "test"');
+if (enabled) {
+  const database = new URL(databaseUrl!);
+  const api = new URL(apiUrl!);
+  if (![database.hostname, api.hostname].every((host) => ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(host))) {
+    throw new Error('QR attestation test is strictly restricted to a local loopback API and database');
+  }
+  if (!/^\/marshgo_e2e(?:_[a-z0-9_]+)?$/.test(database.pathname)) {
+    throw new Error('QR attestation test requires an explicitly configured disposable marshgo_e2e database');
+  }
 }
 
 const decodeClaims = (value: string) => {
@@ -26,14 +30,12 @@ const decodeClaims = (value: string) => {
   };
 };
 
-// This suite drives the booking lifecycle over HTTP, so it only has meaning next to a
-// running API. `npm test` runs without one; the managed-API integration job supplies it.
-const apiReachable = await fetch(`${apiUrl}/healthz`, { signal: AbortSignal.timeout(2_000) })
+const apiReachable = enabled && await fetch(`${apiUrl}/healthz`, { signal: AbortSignal.timeout(2_000) })
   .then((response) => response.ok)
   .catch(() => false);
 
 describe('POPUTKY-SEC-QR-1 — MarshPass ticket attestation, behaviour as shipped', {
-  skip: apiReachable ? false : `no API at ${apiUrl} (run through npm run test:integration)`,
+  skip: !enabled ? 'requires explicit API_TEST_URL and API_TEST_DATABASE_URL' : apiReachable ? false : `no API at ${apiUrl} (run through npm run test:integration)`,
 }, () => {
   it('gates booking boarding by the ticket, but never consumes its nonce', async () => {
     const pool = new pg.Pool({ connectionString: databaseUrl });
