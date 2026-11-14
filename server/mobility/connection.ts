@@ -67,7 +67,8 @@ export async function testProviderConnection(provider: { id: string; name?: stri
 
 /** Lightweight scheduled health check; full feed downloads and schema parsing remain an explicit admin action. */
 export async function probeProviderReachability(provider: { source_type: string; feed_url: string }): Promise<ConnectionReport> {
-  if (process.env.MARSHGO_API_TEST_FIXTURE_MODE === '1' && provider.feed_url === 'https://gtfs-api-fixture.invalid/lviv.zip') {
+  if (process.env.MARSHGO_API_TEST_FIXTURE_MODE === '1'
+    && ['https://gtfs-api-fixture.invalid/lviv.zip', 'https://gtfs-api-fixture.invalid/direct-only.zip'].includes(provider.feed_url)) {
     return {
       health: 'healthy',
       checks: [
