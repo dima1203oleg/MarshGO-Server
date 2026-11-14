@@ -5,12 +5,14 @@ import { fetchJson } from '../server/mobility/safeFetch';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
 import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
 import { selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
+import { summarizeSmokeItineraries } from './transport-feed-smoke-summary';
 
 /**
  * Read-only acceptance probe for all Ukrainian transport sources recorded in
  * the repository (Base + Wave 2 + Wave 3). It never changes provider configuration or writes to a DB.
  */
 const CONCURRENCY = 2;
+const ROUTE_SMOKE_RESULT_LIMIT = 10;
 const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
 
 /** Capture the planner's existing bounded-search diagnostics without mixing them into JSON stdout. */
@@ -110,24 +112,28 @@ async function main() {
         maximumWaitSeconds: 3 * 60 * 60,
         maximumTransfers: 2,
         maximumStopDistanceMeters: 1800,
-        limit: 10,
+        limit: ROUTE_SMOKE_RESULT_LIMIT,
         allowedTransportTypes: ['bus', 'tram', 'trolleybus'],
+      }));
+      const itineraryEvidence = search.itineraries.map((journey) => ({
+        modes: journey.segments.map((segment) => segment.transportType),
+        routes: journey.segments.map((segment) => segment.routeName),
+        orderedStops: journey.segments.map((segment) => [segment.originStop.name, segment.destinationStop.name]),
+        departureAt: journey.departureAt.toISOString(),
+        arrivalAt: journey.arrivalAt.toISOString(),
       }));
       return {
         id: routeCase.id,
         status: search.itineraries.length ? 'ROUTES_FOUND' : 'NO_ROUTE_IN_QUERY_WINDOW',
         count: search.itineraries.length,
+        ...summarizeSmokeItineraries(search.itineraries),
+        resultLimit: ROUTE_SMOKE_RESULT_LIMIT,
         searchTruncated: search.searchTruncated,
         resultLimitReached: search.resultLimitReached,
         truncation: search.truncation,
         plannerDiagnostics: diagnostics,
-        examples: search.itineraries.slice(0, 2).map((journey) => ({
-          modes: journey.segments.map((segment) => segment.transportType),
-          routes: journey.segments.map((segment) => segment.routeName),
-          orderedStops: journey.segments.map((segment) => [segment.originStop.name, segment.destinationStop.name]),
-          departureAt: journey.departureAt.toISOString(),
-          arrivalAt: journey.arrivalAt.toISOString(),
-        })),
+        examples: itineraryEvidence.slice(0, 2),
+        itineraries: itineraryEvidence,
       };
     }),
   };
