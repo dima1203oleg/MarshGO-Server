@@ -26,7 +26,8 @@ export interface EnrichedMicromobilityLeg {
  * (and its distance/duration) with the routed path so the map shows the streets a rider actually
  * uses. A missing or failed router is NOT a licence to invent: the leg keeps its straight-line
  * estimate and its existing honest source token, and `trustedRouteGeometry` downstream refuses to
- * promote it to SOURCE_GEOMETRY. Scooters have no street graph to route against, so they never do.
+ * promote it to SOURCE_GEOMETRY. Rental rides arrive already road-routed by
+ * `roadRouteMicromobilityEstimate` (or are dropped), so only walking connectors are routed here.
  */
 export async function enrichMicromobilityLegGeometry(
   leg: RentalRouteLeg,
@@ -41,7 +42,7 @@ export async function enrichMicromobilityLegGeometry(
     durationSeconds: leg.durationSeconds,
   });
 
-  if (leg.mode === 'SCOOTER') return straightLine();
+  if (leg.mode === 'SCOOTER' || leg.metadata.routeGeometrySource === 'osrm-bike-route') return straightLine();
 
   const from = leg.origin.coordinates;
   const to = leg.destination.coordinates;

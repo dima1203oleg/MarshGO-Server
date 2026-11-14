@@ -49,7 +49,7 @@ export interface MicromobilityRouteEstimate {
   availabilityStatus: 'UNKNOWN';
   transfers: number;
   legs: RentalRouteLeg[];
-  routeAccuracy: 'STRAIGHT_LINE_ESTIMATE';
+  routeAccuracy: 'STRAIGHT_LINE_ESTIMATE' | 'SOURCE_GEOMETRY';
 }
 
 export interface RoutePlace { name: string; coordinates: Point }
@@ -317,4 +317,54 @@ export function buildScooterRouteEstimates(input: {
   }
   return candidates.sort((a, b) => a.durationSeconds - b.durationSeconds || a.providerName.localeCompare(b.providerName))
     .slice(0, input.options.maxCandidates ?? 6);
+}
+
+export interface RoadRoutedPath { geometry: Point[]; distanceMeters: number; durationSeconds: number }
+export interface RoadRouteDeps {
+  /** A real street path from a bicycle-profile graph, or null when no graph covers the ride. */
+  routeRide: (from: Point, to: Point) => Promise<RoadRoutedPath | null>;
+  /** GBFS ride-through check for scooters; evaluated on the routed streets, not a straight line. */
+  rideThroughAllowed?: (estimate: MicromobilityRouteEstimate, point: Point) => boolean;
+}
+export type RoadRouteOutcome =
+  | { estimate: MicromobilityRouteEstimate; rejected: null }
+  | { estimate: null; rejected: 'no-road-router' | 'ride-through-forbidden' | 'rental-duration-exceeded' };
+
+/** Replace the straight ride line with a routed bicycle-profile path; without one the candidate is dropped. */
+export async function roadRouteMicromobilityEstimate(
+  estimate: MicromobilityRouteEstimate,
+  deps: RoadRouteDeps,
+  options: Pick<RouteEstimateOptions, 'maxRentalDurationSeconds'>,
+): Promise<RoadRouteOutcome> {
+  const rideIndex = estimate.legs.findIndex((leg) => leg.mode === estimate.mode);
+  const ride = estimate.legs[rideIndex];
+  if (!ride) return { estimate: null, rejected: 'no-road-router' };
+  const path = await deps.routeRide(ride.origin.coordinates, ride.destination.coordinates);
+  if (!path || path.geometry.length < 2 || !(path.distanceMeters > 0) || !(path.durationSeconds > 0)) {
+    return { estimate: null, rejected: 'no-road-router' };
+  }
+  if (deps.rideThroughAllowed && path.geometry.slice(1, -1).some((point) => !deps.rideThroughAllowed!(estimate, point))) {
+    return { estimate: null, rejected: 'ride-through-forbidden' };
+  }
+  const rideSeconds = Math.ceil(path.durationSeconds);
+  if (options.maxRentalDurationSeconds !== undefined && rideSeconds > options.maxRentalDurationSeconds) {
+    return { estimate: null, rejected: 'rental-duration-exceeded' };
+  }
+  const rideMeters = Math.round(path.distanceMeters);
+  const source = estimate.mode === 'BICYCLE' ? 'osrm-bike-route' : 'osrm-scooter-route';
+  const routedRide: RentalRouteLeg = {
+    ...ride, distanceMeters: rideMeters, durationSeconds: rideSeconds, routeGeometry: path.geometry,
+    metadata: { ...ride.metadata, routeAccuracy: 'SOURCE_GEOMETRY', geometryMethod: 'osrm-bicycle-profile', routeGeometrySource: source },
+  };
+  const legs = estimate.legs.map((leg, index) => index === rideIndex ? routedRide : leg);
+  const durationSeconds = legs.reduce((sum, leg) => sum + leg.durationSeconds, 0);
+  return {
+    rejected: null,
+    estimate: {
+      ...estimate, legs, durationSeconds,
+      arrivalAt: new Date(estimate.departureAt.getTime() + durationSeconds * 1000),
+      distanceMeters: estimate.distanceMeters - ride.distanceMeters + rideMeters,
+      routeAccuracy: 'SOURCE_GEOMETRY',
+    },
+  };
 }
