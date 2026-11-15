@@ -64,6 +64,8 @@ test('GTFS graph budget and materialization share the transfer-window rule', () 
     'transfer searches may omit distant non-destination pairs');
   assert.equal(shouldOmitGtfsStopPairBeyondLocalWindow(1, 0, 21, true), false,
     'a requested destination remains eligible beyond the local transfer window');
+  assert.equal(shouldOmitGtfsStopPairBeyondLocalWindow(1, 0, 21, false, true), false,
+    'a long first or last leg of a query-frontier transfer remains eligible');
 });
 
 test('a rail GTFS route remains a train when its public name contains intercity', () => {
@@ -934,6 +936,67 @@ test('keeps a direct GTFS segment whose destination lies beyond twenty interchan
   'the full ride must remain available when many intermediate stops are transfer-capable');
   assert.equal(result.searchTruncated, true,
     'the long direct segment is preserved, while omitted beyond-window transfer alternatives remain disclosed');
+});
+
+test('retains a long first leg when it reaches the interchange of a feasible transfer', () => {
+  const timetable = feed();
+  const routeStops = Array.from({ length: 22 }, (_, index) => {
+    const stopId = `long-transfer-${index}`;
+    const stop = { id: stopId, name: `Long transfer stop ${index}`, lon: 24.02 + index * 0.001, lat: 49.84 };
+    timetable.stops.set(stopId, stop);
+    return { stopId, seconds: 8 * 3600 + index * 60 };
+  });
+  const destination = { id: 'long-transfer-destination', name: 'Long transfer destination', lon: 24.042, lat: 49.84 };
+  timetable.stops.set(destination.id, destination);
+  timetable.routes.set('onward', { name: 'Onward bus', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.set('onward-trip', { routeId: 'onward', serviceId: 'weekday', headsign: 'Destination' });
+
+  const mainStopTimes = routeStops.map((stop, index) => ({
+    stopId: stop.stopId, sequence: index + 1, arrivalSeconds: stop.seconds, departureSeconds: stop.seconds,
+    pickupType: 0, dropOffType: 0,
+  }));
+  const onwardStopTimes = [
+    { stopId: routeStops[21].stopId, sequence: 1, arrivalSeconds: 8 * 3600 + 25 * 60, departureSeconds: 8 * 3600 + 25 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: destination.id, sequence: 2, arrivalSeconds: 8 * 3600 + 40 * 60, departureSeconds: 8 * 3600 + 40 * 60, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.stopTimes.set('t1', mainStopTimes);
+  timetable.stopTimes.set('onward-trip', onwardStopTimes);
+
+  // Make the intermediate corridor stops interchange-capable without creating
+  // additional boardable or alightable alternatives.
+  for (let index = 1; index < 21; index += 1) {
+    const routeId = `long-branch-${index}`;
+    const tripId = `long-branch-trip-${index}`;
+    const terminalId = `${routeId}-terminal`;
+    const at = routeStops[index]!;
+    timetable.routes.set(routeId, { name: `Branch ${index}`, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Remote terminal' });
+    timetable.stops.set(terminalId, { id: terminalId, name: terminalId, lon: 24.02 + index * 0.001, lat: 50.1 });
+    timetable.stopTimes.set(tripId, [
+      { stopId: at.stopId, sequence: 1, arrivalSeconds: at.seconds, departureSeconds: at.seconds, pickupType: 1, dropOffType: 0 },
+      { stopId: terminalId, sequence: 2, arrivalSeconds: at.seconds + 20 * 60, departureSeconds: at.seconds + 20 * 60, pickupType: 0, dropOffType: 1 },
+    ]);
+  }
+  timetable.stopTimesByStop.clear();
+  for (const [tripId, stopTimes] of timetable.stopTimes) {
+    stopTimes.forEach((stopTime, index) => timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+    ]));
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:45:00Z'),
+    origin: [24.02, 49.84], destination: [destination.lon, destination.lat],
+    maximumTransfers: 1, maximumStopDistanceMeters: 100,
+  });
+
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.length === 2
+    && itinerary.segments[0]?.tripId === 't1'
+    && itinerary.segments[0]?.originStop.id === routeStops[0].stopId
+    && itinerary.segments[0]?.destinationStop.id === routeStops[21].stopId
+    && itinerary.segments[1]?.tripId === 'onward-trip'
+    && itinerary.segments[1]?.destinationStop.id === destination.id),
+  'the long origin-to-interchange leg must remain available when it completes a feasible transfer');
 });
 
 test('bounds stop-pair alternatives by the requested page and reports objective sampling', () => {

@@ -1968,8 +1968,9 @@ export function tripInstanceCannotDepartInWindow(bounds: GtfsBoardingDepartureBo
 
 /** Keep the graph materializer and its budget estimator on the same stop-pair window rule. */
 export function shouldOmitGtfsStopPairBeyondLocalWindow(maximumTransfers: number,
-  fromCursor: number, toCursor: number, isQueryDestination: boolean): boolean {
-  return maximumTransfers > 0 && toCursor > fromCursor + 20 && !isQueryDestination;
+  fromCursor: number, toCursor: number, isQueryDestination: boolean, isQueryFrontierTransfer = false): boolean {
+  return maximumTransfers > 0 && toCursor > fromCursor + 20
+    && !isQueryDestination && !isQueryFrontierTransfer;
 }
 
 /**
@@ -1987,6 +1988,7 @@ export function visitTripInstanceLegs(
     earliestDeparture: Date;
     journeyEnd: Date;
     destinationStopIds: ReadonlySet<string>;
+    retainLongTransferPair?: (fromStopId: string, toStopId: string) => boolean;
     canBelongToDirectOnlyJourney: (fromStopId: string, toStopId: string) => boolean;
     boardingStopIndex?: number;
   },
@@ -2007,8 +2009,11 @@ export function visitTripInstanceLegs(
     for (let toCursor = fromCursor + 1; toCursor < events.length; toCursor++) {
       const toEvent = events[toCursor]!;
       const to = toEvent.stopTime;
+      const isQueryDestination = options.destinationStopIds.has(to.stopId);
+      const isLongPair = options.maximumTransfers > 0 && toCursor > fromCursor + 20;
       if (shouldOmitGtfsStopPairBeyondLocalWindow(options.maximumTransfers, fromCursor, toCursor,
-        options.destinationStopIds.has(to.stopId))) {
+        isQueryDestination, isLongPair && !isQueryDestination
+          && options.retainLongTransferPair?.(from.stopId, to.stopId) === true)) {
         const omittedArrivalAt = toEvent.scheduledArrivalAt;
         if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
           && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
@@ -2035,6 +2040,7 @@ export function* materializeTripInstanceLegs(
     earliestDeparture: Date;
     journeyEnd: Date;
     destinationStopIds: ReadonlySet<string>;
+    retainLongTransferPair?: (fromStopId: string, toStopId: string) => boolean;
     canBelongToDirectOnlyJourney: (fromStopId: string, toStopId: string) => boolean;
     boardingStopIndex?: number;
   },
@@ -2052,8 +2058,11 @@ export function* materializeTripInstanceLegs(
     for (let toCursor = fromCursor + 1; toCursor < events.length; toCursor++) {
       const toEvent = events[toCursor]!;
       const to = toEvent.stopTime;
+      const isQueryDestination = options.destinationStopIds.has(to.stopId);
+      const isLongPair = options.maximumTransfers > 0 && toCursor > fromCursor + 20;
       if (shouldOmitGtfsStopPairBeyondLocalWindow(options.maximumTransfers, fromCursor, toCursor,
-        options.destinationStopIds.has(to.stopId))) {
+        isQueryDestination, isLongPair && !isQueryDestination
+          && options.retainLongTransferPair?.(from.stopId, to.stopId) === true)) {
         const omittedArrivalAt = toEvent.scheduledArrivalAt;
         if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
           && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
@@ -3051,8 +3060,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
           for (let toCursor = fromCursor + 1; toCursor < tripEvents.events.length; toCursor++) {
             const toEvent = tripEvents.events[toCursor];
             const to = toEvent.stopTime;
+            const isQueryFrontierTransfer = (originStopIds.has(from.stopId) && interchangeStopIds.has(to.stopId))
+              || (interchangeStopIds.has(from.stopId) && destinationStopIds.has(to.stopId));
             if (shouldOmitGtfsStopPairBeyondLocalWindow(maximumTransfers, fromCursor, toCursor,
-              destinationStopIds.has(to.stopId))) continue;
+              destinationStopIds.has(to.stopId), isQueryFrontierTransfer)) continue;
             if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds) continue;
             const arrivalAt = toEvent.arrivalAt;
             if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
@@ -3472,6 +3483,9 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         }
         visitTripInstanceLegs(tripEvents.events, {
           maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
+          retainLongTransferPair: (fromStopId, toStopId) =>
+            (originStopIds.has(fromStopId) && interchangeStopIds.has(toStopId))
+            || (interchangeStopIds.has(fromStopId) && destinationStopIds.has(toStopId)),
           canBelongToDirectOnlyJourney,
         }, (fromCursor, toCursor, fromEvent, toEvent) => {
           const fromIndex = fromEvent.stopIndex;
