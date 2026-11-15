@@ -650,6 +650,13 @@ test('debug graph-budget diagnostics identify capped routes without changing res
   assert.ok(sample.every((route) => route.estimatedDemand > route.allocatedBudget
     && route.demandExcess === route.estimatedDemand - route.allocatedBudget),
   'every diagnostic row must disclose a real estimated-demand versus budget shortfall');
+  const truncationReasons = JSON.parse(String(graph.segmentGraphTruncationReasons)) as Record<string, number>;
+  assert.deepEqual(Object.keys(truncationReasons).sort(), [
+    'localStopPairWindowOmissions', 'perTripCandidateOverflowSegments',
+    'routeBudgetDiscardedPrimarySegments', 'routeBudgetRejectedTripGroups',
+  ].sort());
+  assert.ok(Object.values(truncationReasons).every((count) => Number.isSafeInteger(count) && count >= 0),
+    'every reported graph-truncation reason must be a non-negative integer');
   assert.equal(searchTruncated, true, 'diagnostic mode preserves truthful partial-search behavior');
 });
 
@@ -688,6 +695,9 @@ test('endpoint overflow reservoir retains up to its bounded per-route budget', (
   const graph = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown })
     .find((stage) => stage.stage === 'segments-built');
   assert.ok(graph);
+  const truncationReasons = JSON.parse(String(graph.segmentGraphTruncationReasons)) as Record<string, number>;
+  assert.ok(truncationReasons.routeBudgetRejectedTripGroups > 0,
+    'the one-route fixture exceeds its 1,024-segment allowance and must report rejected trip groups');
   assert.equal(graph.overflowReservoirRetained, 1_000,
     'endpoint overflow can use its per-route cap while the global graph budget remains the hard ceiling');
   assert.equal(graph.overflowReservoirsAtCap, 1);
