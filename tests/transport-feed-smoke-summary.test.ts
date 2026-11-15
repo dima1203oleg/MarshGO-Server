@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { summarizeSmokeItineraries } from '../scripts/transport-feed-smoke-summary';
+import { summarizeSmokeItineraries, withOptionalSourceFingerprint } from '../scripts/transport-feed-smoke-summary';
+
+test('preserves source fingerprints in acceptance evidence without inventing missing values', () => {
+  assert.deepEqual(withOptionalSourceFingerprint({ name: 'Lviv static GTFS' }, 'sourceVersion', 'a'.repeat(64)), {
+    name: 'Lviv static GTFS',
+    sourceVersion: 'a'.repeat(64),
+  });
+  assert.deepEqual(withOptionalSourceFingerprint({ stops: 1 }, 'staticFeedSha256', 'b'.repeat(64)), {
+    stops: 1,
+    staticFeedSha256: 'b'.repeat(64),
+  });
+  assert.deepEqual(withOptionalSourceFingerprint({ name: 'Unknown feed' }, 'sourceVersion'), { name: 'Unknown feed' });
+});
 
 test('summarizes every returned itinerary rather than inferring from a small example sample', () => {
   const summary = summarizeSmokeItineraries([

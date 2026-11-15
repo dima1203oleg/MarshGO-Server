@@ -6,6 +6,14 @@ export type SmokeItinerary = {
   segments: readonly SmokeItinerarySegment[];
 };
 
+export function withOptionalSourceFingerprint<T extends object>(
+  value: T,
+  field: 'sourceVersion' | 'staticFeedSha256',
+  fingerprint?: string,
+) {
+  return fingerprint ? { ...value, [field]: fingerprint } : value;
+}
+
 export function summarizeSmokeItineraries(itineraries: readonly SmokeItinerary[]) {
   const modeChains = new Map<string, { modes: string[]; count: number }>();
   let multiLegCount = 0;
