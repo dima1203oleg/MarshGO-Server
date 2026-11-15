@@ -34,6 +34,8 @@ const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
 const MAX_STOPS_PER_SIDE = 56;
 const MAX_STOPS_PER_ROUTE_PATTERN = 8;
+const MAX_DIAGNOSTIC_STOPS_PER_SIDE = 112;
+const MAX_DIAGNOSTIC_STOPS_PER_ROUTE_PATTERN = 16;
 const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
 // Bound the per-request materialized GTFS graph. A dense city feed can create
@@ -535,10 +537,13 @@ export function summarizeGtfsWalkReach(searches: readonly { walkReach?: GtfsWalk
   };
 }
 
-/** Optional lower graph limits let tests exercise bounded retention deterministically. */
+/** Optional graph and endpoint limits support deterministic tests and gated bounded diagnostics. */
 export interface GtfsGraphBudgetLimits {
   totalSegments?: number;
   segmentsPerRoute?: number;
+  /** Test-only endpoint selector ceilings for bounded Lviv diagnostics. */
+  maxStopsPerSide?: number;
+  maxStopsPerRoutePattern?: number;
   /** Test-only override for verifying bounded search-frontier behavior. */
   maxQueuedSearchWork?: number;
 }
@@ -1572,6 +1577,8 @@ function gtfsCandidateGraphCacheKey(feed: GtfsTimetableFeed, input: GtfsItinerar
   transferRadius: number;
   maximumGraphSegments: number;
   maximumGraphSegmentsPerRoute: number;
+  maxStopsPerSide: number;
+  maxStopsPerRoutePattern: number;
 }): string {
   const list = (values: readonly string[] | undefined) => values ? [...values].sort().join(',') : '*';
   return [
@@ -1585,6 +1592,7 @@ function gtfsCandidateGraphCacheKey(feed: GtfsTimetableFeed, input: GtfsItinerar
     `y:${list(input.allowedTransportTypes)}`,
     `p:${input.providerId}\u0000${input.providerName}\u0000${input.providerCity ?? ''}`,
     `g:${derived.maximumGraphSegments}:${derived.maximumGraphSegmentsPerRoute}`,
+    `s:${derived.maxStopsPerSide}:${derived.maxStopsPerRoutePattern}`,
   ].join('\u0001');
 }
 
@@ -2523,10 +2531,16 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   const maximumWaitSeconds = input.maximumWaitSeconds ?? 4 * 60 * 60;
   const maximumGraphSegments = graphLimits.totalSegments ?? MAX_GTFS_GRAPH_SEGMENTS;
   const maximumGraphSegmentsPerRoute = graphLimits.segmentsPerRoute ?? MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
+  const maxStopsPerSide = graphLimits.maxStopsPerSide ?? MAX_STOPS_PER_SIDE;
+  const maxStopsPerRoutePattern = graphLimits.maxStopsPerRoutePattern ?? MAX_STOPS_PER_ROUTE_PATTERN;
   const maximumAllowedGraphSegments = isGtfsGraphBudgetDiagnosticEnabled()
     ? MAX_GTFS_GRAPH_DIAGNOSTIC_SEGMENTS : MAX_GTFS_GRAPH_SEGMENTS;
   const maximumAllowedGraphSegmentsPerRoute = isGtfsGraphBudgetDiagnosticEnabled()
     ? MAX_GTFS_GRAPH_DIAGNOSTIC_SEGMENTS_PER_ROUTE : MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
+  const maximumAllowedStopsPerSide = isGtfsGraphBudgetDiagnosticEnabled()
+    ? MAX_DIAGNOSTIC_STOPS_PER_SIDE : MAX_STOPS_PER_SIDE;
+  const maximumAllowedStopsPerRoutePattern = isGtfsGraphBudgetDiagnosticEnabled()
+    ? MAX_DIAGNOSTIC_STOPS_PER_ROUTE_PATTERN : MAX_STOPS_PER_ROUTE_PATTERN;
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
@@ -2547,7 +2561,11 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     || !Number.isInteger(limit) || limit < 1 || limit > HARD_MAX_GTFS_SEARCH_LIMIT
     || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > maximumAllowedGraphSegments
     || !Number.isSafeInteger(maximumGraphSegmentsPerRoute) || maximumGraphSegmentsPerRoute < 1
-    || maximumGraphSegmentsPerRoute > maximumAllowedGraphSegmentsPerRoute) {
+    || maximumGraphSegmentsPerRoute > maximumAllowedGraphSegmentsPerRoute
+    || !Number.isSafeInteger(maxStopsPerSide) || maxStopsPerSide < MAX_STOPS_PER_SIDE
+    || maxStopsPerSide > maximumAllowedStopsPerSide
+    || !Number.isSafeInteger(maxStopsPerRoutePattern) || maxStopsPerRoutePattern < MAX_STOPS_PER_ROUTE_PATTERN
+    || maxStopsPerRoutePattern > maximumAllowedStopsPerRoutePattern) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
   const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
@@ -2649,9 +2667,9 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     for (const item of ranked) {
       if (selected.has(item.stop.id)) continue;
       const addsRoutePatternCoverage = [...routePatternsAtStop(item.stop.id)]
-        .some((pattern) => (selectedByRoutePattern.get(pattern) ?? 0) < MAX_STOPS_PER_ROUTE_PATTERN);
+        .some((pattern) => (selectedByRoutePattern.get(pattern) ?? 0) < maxStopsPerRoutePattern);
       if (!addsRoutePatternCoverage) continue;
-      if (selected.size >= MAX_STOPS_PER_SIDE) { stopSelectionTruncated = true; break; }
+      if (selected.size >= maxStopsPerSide) { stopSelectionTruncated = true; break; }
       addSelected(item);
     }
     // An omitted stop can change access time, departure choice, or transfer
@@ -2708,7 +2726,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   // ---------------------------------------------------------------------------
   // Candidate-graph reuse. The block below is a pure function of the feed
   // content fingerprint, the corridor walk sheds, service dates, the query
-  // window, allowed modes and the graph limits (see gtfsCandidateGraphCacheKey).
+  // window, allowed modes, endpoint selection, and graph limits (see gtfsCandidateGraphCacheKey).
   // A hit reuses the retained graph and its truncation flags verbatim, so only
   // the itinerary pass still runs for an identical repeat of the same search.
   // ---------------------------------------------------------------------------
@@ -2732,6 +2750,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   let segments: GtfsDirectJourney[];
   const candidateGraphKey = gtfsCandidateGraphCacheKey(feed, input, {
     journeyEnd, accessRadius, egressRadius, transferRadius, maximumGraphSegments, maximumGraphSegmentsPerRoute,
+    maxStopsPerSide, maxStopsPerRoutePattern,
   });
   const cachedCandidateGraph = readGtfsCandidateGraph(candidateGraphKey);
   if (cachedCandidateGraph) {

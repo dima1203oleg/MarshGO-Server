@@ -216,39 +216,45 @@ async function main() {
   const itinerarySignature = (itinerary: GtfsItinerary) => itinerary.segments.map((segment) =>
     `${segment.transportType}:${segment.routeId}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}`).join('|');
   const budgetDiagnostic = scope === 'lviv-budget-diagnostic' ? {
-    mode: 'diagnostic-only; does not alter the default/API graph budget',
-    expandedLimits: { totalSegments: 250_000, segmentsPerRoute: 30_000 },
+    mode: 'diagnostic-only 2x2 comparison; does not alter API graph or endpoint-selection defaults',
+    expandedGraphLimits: { totalSegments: 250_000, segmentsPerRoute: 30_000 },
+    expandedStopSelectionLimits: { maxStopsPerSide: 112, maxStopsPerRoutePattern: 16 },
     cases: lvivRouteCases.map((routeCase, index) => {
       const baseline = standardRuns[index]!;
-      const expanded = runLvivSearch(routeCase, { totalSegments: 250_000, segmentsPerRoute: 30_000 });
+      const graphOnly = runLvivSearch(routeCase, { totalSegments: 250_000, segmentsPerRoute: 30_000 });
+      const stopOnly = runLvivSearch(routeCase, { maxStopsPerSide: 112, maxStopsPerRoutePattern: 16 });
+      const graphAndStops = runLvivSearch(routeCase, {
+        totalSegments: 250_000, segmentsPerRoute: 30_000,
+        maxStopsPerSide: 112, maxStopsPerRoutePattern: 16,
+      });
       const baselineSignatures = baseline.result.itineraries.map(itinerarySignature);
-      const expandedSignatures = expanded.result.itineraries.map(itinerarySignature);
-      const baselineSet = new Set(baselineSignatures);
-      const expandedSet = new Set(expandedSignatures);
-      const introducedItineraries = expanded.result.itineraries
-        .filter((itinerary) => !baselineSet.has(itinerarySignature(itinerary)));
-      const removedItineraries = baseline.result.itineraries
-        .filter((itinerary) => !expandedSet.has(itinerarySignature(itinerary)));
+      const summarizeVariant = (variant: typeof baseline) => {
+        const signatures = variant.result.itineraries.map(itinerarySignature);
+        const baselineSet = new Set(baselineSignatures);
+        const variantSet = new Set(signatures);
+        return {
+          count: variant.result.itineraries.length,
+          searchTruncated: variant.result.searchTruncated,
+          resultLimitReached: variant.result.resultLimitReached,
+          signatures,
+          introducedSignatures: signatures.filter((signature) => !baselineSet.has(signature)),
+          removedSignatures: baselineSignatures.filter((signature) => !variantSet.has(signature)),
+          introducedItineraries: variant.result.itineraries
+            .filter((itinerary) => !baselineSet.has(itinerarySignature(itinerary))).map(serializeSmokeJourney),
+          removedItineraries: baseline.result.itineraries
+            .filter((itinerary) => !variantSet.has(itinerarySignature(itinerary))).map(serializeSmokeJourney),
+          plannerDiagnostics: variant.diagnostics,
+        };
+      };
+      const graphOnlySummary = summarizeVariant(graphOnly);
       return {
         id: routeCase.id,
-        baseline: {
-          count: baseline.result.itineraries.length,
-          searchTruncated: baseline.result.searchTruncated,
-          resultLimitReached: baseline.result.resultLimitReached,
-          signatures: baselineSignatures,
-          plannerDiagnostics: baseline.diagnostics,
-        },
-        expanded: {
-          count: expanded.result.itineraries.length,
-          searchTruncated: expanded.result.searchTruncated,
-          resultLimitReached: expanded.result.resultLimitReached,
-          signatures: expandedSignatures,
-          plannerDiagnostics: expanded.diagnostics,
-        },
-        introducedSignatures: [...expandedSet].filter((signature) => !baselineSet.has(signature)),
-        removedSignatures: [...baselineSet].filter((signature) => !expandedSet.has(signature)),
-        introducedItineraries: introducedItineraries.map(serializeSmokeJourney),
-        removedItineraries: removedItineraries.map(serializeSmokeJourney),
+        baseline: summarizeVariant(baseline),
+        // Preserve the existing report field for tooling that consumes prior diagnostic artifacts.
+        expanded: graphOnlySummary,
+        graphOnly: graphOnlySummary,
+        stopSelectionOnly: summarizeVariant(stopOnly),
+        graphAndStopSelection: summarizeVariant(graphAndStops),
       };
     }),
   } : undefined;
