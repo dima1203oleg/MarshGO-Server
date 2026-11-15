@@ -6,6 +6,7 @@ import {
 } from '../server/journey/micromobilityEstimates';
 import { bicycleEndpointFor } from '../server/journey/bicycleRoutes';
 import { trustedRouteGeometry } from '../server/journey/legGeometryProvenance';
+import { geofenceRulesAt, rideThroughForbiddenOnSegment, type GbfsGeofence } from '../server/mobility/gbfsGeofences';
 
 const station = (id: string, coordinates: [number, number]): RentalRoutePoint => ({
   id, providerId: 'nextbike-lviv', providerName: 'Nextbike', networkId: 'nextbike-ua', name: id, coordinates,
@@ -75,6 +76,67 @@ test('a scooter ride crossing a no-ride-through zone on the routed streets is re
 test('the routed ride duration is re-checked against the rental cap', async () => {
   const outcome = await roadRouteMicromobilityEstimate(straightEstimate(), { routeRide: async () => streetPath }, { maxRentalDurationSeconds: 1800 });
   assert.equal(outcome.rejected, 'rental-duration-exceeded');
+});
+
+const noRideZone = (id: string, rings: Array<Array<[number, number]>>, vehicleTypeIds: string[] | null = null): GbfsGeofence => ({
+  id, geometry: { type: 'Polygon', coordinates: rings },
+  rules: [{ vehicleTypeIds, rideStartAllowed: null, rideEndAllowed: null, rideThroughAllowed: false, maximumSpeedKph: null, startAt: null, endAt: null }],
+});
+const scooterEstimate = (): MicromobilityRouteEstimate => {
+  const straight = straightEstimate();
+  return { ...straight, mode: 'SCOOTER', legs: straight.legs.map((leg) => leg.mode === 'BICYCLE' ? { ...leg, mode: 'SCOOTER' } : leg) };
+};
+// A narrow zone around the midpoint of the [24.035,49.83]→[24.05,49.81] edge; no path vertex lies inside it.
+const narrowRing: Array<[number, number]> = [[24.042, 49.8195], [24.043, 49.8195], [24.043, 49.8205], [24.042, 49.8205], [24.042, 49.8195]];
+
+test('a narrow no-ride-through zone crossed by a routed edge is rejected even when no sampled vertex lies inside it', async () => {
+  const snapshot = { geofences: [noRideZone('narrow', [narrowRing])], globalRules: [] };
+  const scooter = scooterEstimate();
+  for (const point of streetPath.geometry) {
+    assert.equal(geofenceRulesAt(snapshot, point, 'scooter', scooter.departureAt.getTime()).rideThroughAllowed, null);
+  }
+  const vertexOnly = await roadRouteMicromobilityEstimate(scooter, {
+    routeRide: async () => streetPath,
+    rideThroughAllowed: (estimate, point) => geofenceRulesAt(snapshot, point, 'scooter', estimate.departureAt.getTime()).rideThroughAllowed !== false,
+  }, {});
+  assert.equal(vertexOnly.rejected, null, 'vertex sampling alone must miss this zone — that is the regression being fixed');
+  const segmentAware = await roadRouteMicromobilityEstimate(scooter, {
+    routeRide: async () => streetPath,
+    rideThroughSegmentAllowed: (estimate, from, to) => !rideThroughForbiddenOnSegment(snapshot, from, to, 'scooter', estimate.departureAt.getTime()),
+  }, {});
+  assert.equal(segmentAware.estimate, null);
+  assert.equal(segmentAware.rejected, 'ride-through-forbidden');
+});
+
+test('negative control: a no-ride-through zone away from the routed streets keeps the scooter candidate', async () => {
+  const farRing: Array<[number, number]> = [[24.1, 49.9], [24.11, 49.9], [24.11, 49.91], [24.1, 49.91], [24.1, 49.9]];
+  const snapshot = { geofences: [noRideZone('far', [farRing])], globalRules: [] };
+  const outcome = await roadRouteMicromobilityEstimate(scooterEstimate(), {
+    routeRide: async () => streetPath,
+    rideThroughSegmentAllowed: (estimate, from, to) => !rideThroughForbiddenOnSegment(snapshot, from, to, 'scooter', estimate.departureAt.getTime()),
+  }, {});
+  assert.equal(outcome.rejected, null);
+  assert.deepEqual(outcome.estimate!.legs.find((leg) => leg.mode === 'SCOOTER')!.routeGeometry, streetPath.geometry);
+});
+
+test('a ride staying inside a hole of a no-ride-through zone is allowed, but crossing the hole ring is forbidden', () => {
+  const outer: Array<[number, number]> = [[24.0, 49.7], [24.1, 49.7], [24.1, 49.9], [24.0, 49.9], [24.0, 49.7]];
+  const holeAroundPath: Array<[number, number]> = [[24.02, 49.79], [24.07, 49.79], [24.07, 49.85], [24.02, 49.85], [24.02, 49.79]];
+  const inHole = { geofences: [noRideZone('hole', [outer, holeAroundPath])], globalRules: [] };
+  for (let i = 1; i < streetPath.geometry.length; i++) {
+    assert.equal(rideThroughForbiddenOnSegment(inHole, streetPath.geometry[i - 1], streetPath.geometry[i], 'scooter'), false);
+  }
+  const smallHole: Array<[number, number]> = [[24.02, 49.825], [24.04, 49.825], [24.04, 49.85], [24.02, 49.85], [24.02, 49.825]];
+  const crossingHole = { geofences: [noRideZone('small-hole', [outer, smallHole])], globalRules: [] };
+  assert.equal(rideThroughForbiddenOnSegment(crossingHole, PICKUP, [24.035, 49.83], 'scooter'), false);
+  assert.equal(rideThroughForbiddenOnSegment(crossingHole, [24.035, 49.83], [24.05, 49.81], 'scooter'), true);
+});
+
+test('a no-ride-through rule scoped to one vehicle type does not forbid another type', () => {
+  const snapshot = { geofences: [noRideZone('typed', [narrowRing], ['e-scooter'])], globalRules: [] };
+  const from: [number, number] = [24.035, 49.83], to: [number, number] = [24.05, 49.81];
+  assert.equal(rideThroughForbiddenOnSegment(snapshot, from, to, 'e-scooter'), true);
+  assert.equal(rideThroughForbiddenOnSegment(snapshot, from, to, 'e-bike'), false);
 });
 
 test('a city bike graph answers only for rides with both ends inside its bbox', () => {

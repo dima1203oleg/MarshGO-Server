@@ -325,6 +325,8 @@ export interface RoadRouteDeps {
   routeRide: (from: Point, to: Point) => Promise<RoadRoutedPath | null>;
   /** GBFS ride-through check for scooters; evaluated on the routed streets, not a straight line. */
   rideThroughAllowed?: (estimate: MicromobilityRouteEstimate, point: Point) => boolean;
+  /** Segment-level GBFS ride-through check: an edge can cross a narrow zone without any sampled vertex inside it. */
+  rideThroughSegmentAllowed?: (estimate: MicromobilityRouteEstimate, from: Point, to: Point) => boolean;
 }
 export type RoadRouteOutcome =
   | { estimate: MicromobilityRouteEstimate; rejected: null }
@@ -344,6 +346,10 @@ export async function roadRouteMicromobilityEstimate(
     return { estimate: null, rejected: 'no-road-router' };
   }
   if (deps.rideThroughAllowed && path.geometry.slice(1, -1).some((point) => !deps.rideThroughAllowed!(estimate, point))) {
+    return { estimate: null, rejected: 'ride-through-forbidden' };
+  }
+  if (deps.rideThroughSegmentAllowed && path.geometry.some((point, index) => index > 0
+    && !deps.rideThroughSegmentAllowed!(estimate, path.geometry[index - 1], point))) {
     return { estimate: null, rejected: 'ride-through-forbidden' };
   }
   const rideSeconds = Math.ceil(path.durationSeconds);

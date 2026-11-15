@@ -95,6 +95,63 @@ function pointInGeometry(point: [number, number], geometry: Record<string, unkno
   return false;
 }
 
+function orientation(a: [number, number], b: [number, number], c: [number, number]): number {
+  const value = (b[1] - a[1]) * (c[0] - b[0]) - (b[0] - a[0]) * (c[1] - b[1]);
+  return value > 0 ? 1 : value < 0 ? -1 : 0;
+}
+
+function onSegment(a: [number, number], b: [number, number], c: [number, number]): boolean {
+  return c[0] >= Math.min(a[0], b[0]) && c[0] <= Math.max(a[0], b[0])
+    && c[1] >= Math.min(a[1], b[1]) && c[1] <= Math.max(a[1], b[1]);
+}
+
+function segmentsIntersect(p1: [number, number], p2: [number, number], p3: [number, number], p4: [number, number]): boolean {
+  const o1 = orientation(p1, p2, p3), o2 = orientation(p1, p2, p4);
+  const o3 = orientation(p3, p4, p1), o4 = orientation(p3, p4, p2);
+  if (o1 !== o2 && o3 !== o4) return true;
+  return (o1 === 0 && onSegment(p1, p2, p3)) || (o2 === 0 && onSegment(p1, p2, p4))
+    || (o3 === 0 && onSegment(p3, p4, p1)) || (o4 === 0 && onSegment(p3, p4, p2));
+}
+
+function segmentIntersectsRing(from: [number, number], to: [number, number], ring: unknown): boolean {
+  if (!Array.isArray(ring) || ring.length < 4) return false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    if (!Array.isArray(a) || !Array.isArray(b) || typeof a[0] !== 'number' || typeof a[1] !== 'number' || typeof b[0] !== 'number' || typeof b[1] !== 'number') continue;
+    if (segmentsIntersect(from, to, [a[0], a[1]], [b[0], b[1]])) return true;
+  }
+  return false;
+}
+
+/** A ride segment crosses the zone when an endpoint lies inside or the segment meets any ring edge, including holes. */
+function segmentIntersectsGeometry(from: [number, number], to: [number, number], geometry: Record<string, unknown>): boolean {
+  const crossesPolygon = (polygon: unknown) => {
+    if (!Array.isArray(polygon)) return false;
+    const [outer, ...holes] = polygon;
+    const inZone = (point: [number, number]) => pointInRing(point, outer) && !holes.some((hole) => pointInRing(point, hole));
+    if (inZone(from) || inZone(to)) return true;
+    return [outer, ...holes].some((ring) => segmentIntersectsRing(from, to, ring));
+  };
+  if (geometry.type === 'Polygon') return crossesPolygon(geometry.coordinates);
+  if (geometry.type === 'MultiPolygon' && Array.isArray(geometry.coordinates)) return geometry.coordinates.some(crossesPolygon);
+  return false;
+}
+
+/** True when any active no-ride-through zone is met by the segment, even without a sampled vertex inside it. */
+export function rideThroughForbiddenOnSegment(
+  snapshot: { geofences: GbfsGeofence[]; globalRules: GbfsGeofenceRule[] },
+  from: [number, number], to: [number, number], vehicleTypeId: string, at = Date.now(),
+): boolean {
+  const activeRule = (rule: GbfsGeofenceRule) => (rule.startAt === null || rule.startAt === undefined || at >= rule.startAt)
+    && (rule.endAt === null || rule.endAt === undefined || at <= rule.endAt);
+  const forVehicle = (rule: GbfsGeofenceRule) => rule.vehicleTypeIds === null || rule.vehicleTypeIds.includes(vehicleTypeId);
+  return snapshot.geofences.some((zone) => {
+    if (!(zone.startAt == null || at >= zone.startAt) || !(zone.endAt == null || at <= zone.endAt)) return false;
+    const rule = zone.rules.find((entry) => activeRule(entry) && forVehicle(entry));
+    return rule?.rideThroughAllowed === false && segmentIntersectsGeometry(from, to, zone.geometry);
+  });
+}
+
 /** GBFS order is authoritative: first applicable rule, then first applicable polygon; polygons override globals. */
 export function geofenceRulesAt(snapshot: { geofences: GbfsGeofence[]; globalRules: GbfsGeofenceRule[] }, point: [number, number], vehicleTypeId: string, at = Date.now()) {
   const activeRule = (rule: GbfsGeofenceRule) => (rule.startAt === null || rule.startAt === undefined || at >= rule.startAt)

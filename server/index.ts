@@ -31,7 +31,7 @@ import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } f
 import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, routePedestrianPath, STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingConfiguredFor, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { enrichMicromobilityLegGeometry } from './journey/micromobilityGeometry';
 import { routeBicyclePath } from './journey/bicycleRoutes';
-import { geofenceRulesAt } from './mobility/gbfsGeofences';
+import { geofenceRulesAt, rideThroughForbiddenOnSegment } from './mobility/gbfsGeofences';
 import { createDirectWalkingCandidate, directWalkingGeometryConnectsEndpoints, MAX_DIRECT_WALK_CANDIDATE_STRAIGHT_LINE_METERS, type DirectWalkingCandidate } from './journey/directWalkingCandidate';
 import { routeMultimodalWalks } from './journey/multimodalWalkRouter';
 import { generatePedestrianGeometry } from '../shared/navigation/pedestrianGeometry';
@@ -3834,6 +3834,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     const vehicleTypeId = typeof ride?.metadata.vehicleTypeId === 'string' ? ride.metadata.vehicleTypeId : '__provider_wide__';
     return !provider || geofenceRulesAt(provider.snapshot, point, vehicleTypeId, estimate.departureAt.getTime()).rideThroughAllowed !== false;
   };
+  const scooterRideThroughSegment = (estimate: MicromobilityRouteEstimate, from: [number, number], to: [number, number]) => {
+    const provider = scooterRouteProviders.find((entry) => entry.providerId === estimate.providerId);
+    const ride = estimate.legs.find((leg) => leg.mode === 'SCOOTER');
+    const vehicleTypeId = typeof ride?.metadata.vehicleTypeId === 'string' ? ride.metadata.vehicleTypeId : '__provider_wide__';
+    return !provider || !rideThroughForbiddenOnSegment(provider.snapshot, from, to, vehicleTypeId, estimate.departureAt.getTime());
+  };
   const estimateMicromobility = async (mode: 'BICYCLE' | 'SCOOTER', origin: { name: string; coordinates: [number, number] }, destination: { name: string; coordinates: [number, number] }, departureAt: Date) => {
     const routed: MicromobilityRouteEstimate[] = [];
     for (const estimate of straightMicromobilityEstimates(mode, origin, destination, departureAt)) {
@@ -3843,7 +3849,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           if (!roadRoutedRides.has(key)) roadRoutedRides.set(key, routeBicyclePath(from, to));
           return roadRoutedRides.get(key)!;
         },
-        ...(mode === 'SCOOTER' ? { rideThroughAllowed: scooterRideThrough } : {}),
+        ...(mode === 'SCOOTER' ? { rideThroughAllowed: scooterRideThrough, rideThroughSegmentAllowed: scooterRideThroughSegment } : {}),
       }, micromobilityOptions);
       if (outcome.estimate) routed.push(outcome.estimate);
       else micromobilityRoadRejections.add(`${mode === 'BICYCLE' ? 'bike' : 'scooter'}:${outcome.rejected}`);

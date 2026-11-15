@@ -1,4 +1,4 @@
-import { haversineMeters, planKyivRapidTransitJourneys, KYIV_METRO_STATIONS, findStationsWithinRadius } from '../mobility/kyivTransitGraph';
+import { haversineMeters, planKyivRapidTransitJourneys, KYIV_METRO_STATIONS } from '../mobility/kyivTransitGraph';
 import {
   planCityTransitJourneys,
   findUkraineStationsWithinRadius,
