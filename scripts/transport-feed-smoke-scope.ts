@@ -1,13 +1,15 @@
 import type { CatalogEntry } from '../server/mobility/ukraineCatalog';
 
-export type TransportFeedSmokeScope = 'all' | 'lviv-route';
+export type TransportFeedSmokeScope = 'all' | 'lviv-route' | 'ukraine-rail-route';
 
 export function parseTransportFeedSmokeScope(args: readonly string[]): TransportFeedSmokeScope {
   const values = args.filter((argument) => argument.startsWith('--scope='))
     .map((argument) => argument.slice('--scope='.length));
   if (values.length > 1) throw new Error('Specify --scope only once');
   const value = values[0] ?? 'all';
-  if (value !== 'all' && value !== 'lviv-route') throw new Error(`Unsupported transport feed smoke scope: ${value}`);
+  if (value !== 'all' && value !== 'lviv-route' && value !== 'ukraine-rail-route') {
+    throw new Error(`Unsupported transport feed smoke scope: ${value}`);
+  }
   return value;
 }
 
@@ -17,6 +19,12 @@ export function selectTransportFeedSmokeEntries(
   scope: TransportFeedSmokeScope,
 ): CatalogEntry[] {
   if (scope === 'all') return [...catalog];
+  if (scope === 'ukraine-rail-route') {
+    const railFeed = catalog.find((entry) => entry.city === 'Україна' && entry.sourceType === 'gtfs'
+      && entry.feedUrl === 'https://jbb.ghsq.de/gtfs/ua-ukrzaliznytsya.gtfs.zip');
+    if (!railFeed) throw new Error('Ukraine railway GTFS source is required for --scope=ukraine-rail-route');
+    return [railFeed];
+  }
   const staticFeed = catalog.find((entry) => entry.city === 'Львів'
     && entry.sourceType === 'gtfs' && entry.feedUrl === 'https://track.ua-gis.com/gtfs/lviv/static.zip');
   const vehiclePositions = catalog.find((entry) => entry.city === 'Львів'

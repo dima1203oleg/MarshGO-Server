@@ -1,9 +1,18 @@
-name: Lviv live transit acceptance
+name: Ukraine route acceptance
 on:
   pull_request:
     paths:
       - '.github/workflows/lviv-live-transit-acceptance.yml'
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Route acceptance scenario
+        type: choice
+        required: true
+        default: lviv-route
+        options:
+          - lviv-route
+          - ukraine-rail-route
 permissions:
   contents: read
 concurrency:
@@ -18,7 +27,7 @@ jobs:
       - name: Parse workflow YAML
         run: ruby -e 'require "yaml"; YAML.load_file(".github/workflows/lviv-live-transit-acceptance.yml")'
 
-  lviv-route:
+  route-acceptance:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -29,19 +38,21 @@ jobs:
           node-version: 24.21.0
           cache: npm
       - run: npm ci --no-audit --no-fund
-      - name: Run focused Lviv GTFS and realtime acceptance
+      - name: Run selected read-only route acceptance
+        env:
+          ROUTE_SCOPE: ${{ inputs.scope || 'lviv-route' }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          npm run --silent acceptance:lviv-route-feed | tee artifacts/lviv-route-acceptance.json
+          npm exec -- tsx scripts/transport-feed-smoke.ts --scope="$ROUTE_SCOPE" | tee artifacts/route-acceptance.json
       - name: Write run provenance
         if: always()
         run: |
           {
-            echo '# Lviv live transit acceptance'
+            echo '# Ukraine route acceptance'
             echo "- Server SHA: \`${GITHUB_SHA}\`"
             echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
-            echo '- Probe scope: Lviv static GTFS timetable and GTFS-RT vehicle positions only'
+            echo "- Probe scope: \`${{ inputs.scope || 'lviv-route' }}\`"
             echo '- Database writes: none'
             echo '- User-origin/destination data: none'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -49,7 +60,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lviv-live-transit-${{ github.sha }}
-          path: artifacts/lviv-route-acceptance.json
+          name: route-acceptance-${{ inputs.scope || 'lviv-route' }}-${{ github.sha }}
+          path: artifacts/route-acceptance.json
           if-no-files-found: warn
           retention-days: 14

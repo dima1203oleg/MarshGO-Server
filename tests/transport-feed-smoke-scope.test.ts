@@ -15,10 +15,15 @@ const lvivTripUpdates = {
   ...lvivVehiclePositions, name: 'Lviv trip updates', feedUrl: 'https://track.ua-gis.com/gtfs/lviv/trip_updates', sourceRef: 'lviv-trip-updates',
 };
 const kyivStatic = { ...lvivStatic, name: 'Kyiv GTFS', city: 'Київ', sourceRef: 'kyiv-static' };
+const ukraineRail = {
+  ...lvivStatic, name: 'Ukraine rail GTFS', city: 'Україна',
+  feedUrl: 'https://jbb.ghsq.de/gtfs/ua-ukrzaliznytsya.gtfs.zip', sourceRef: 'ukraine-rail',
+};
 
 test('transport feed smoke defaults to the complete catalog and accepts focused Lviv route scope', () => {
   assert.equal(parseTransportFeedSmokeScope([]), 'all');
   assert.equal(parseTransportFeedSmokeScope(['--scope=lviv-route']), 'lviv-route');
+  assert.equal(parseTransportFeedSmokeScope(['--scope=ukraine-rail-route']), 'ukraine-rail-route');
   assert.throws(() => parseTransportFeedSmokeScope(['--scope=unknown']), /Unsupported/);
   assert.throws(() => parseTransportFeedSmokeScope(['--scope=all', '--scope=lviv-route']), /only once/);
 });
@@ -28,4 +33,10 @@ test('focused Lviv route scope selects only static schedule and vehicle position
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'all'), catalog);
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'lviv-route'), [lvivStatic, lvivVehiclePositions]);
   assert.throws(() => selectTransportFeedSmokeEntries([kyivStatic], 'lviv-route'), /required/);
+});
+
+test('Ukraine rail route scope selects only the cataloged ODbL rail GTFS', () => {
+  const catalog = [kyivStatic, ukraineRail, lvivStatic];
+  assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'ukraine-rail-route'), [ukraineRail]);
+  assert.throws(() => selectTransportFeedSmokeEntries([kyivStatic], 'ukraine-rail-route'), /required/);
 });
