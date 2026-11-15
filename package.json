@@ -43,6 +43,7 @@
     "mobility:seed": "tsx server/mobility/seedUkraine.ts",
     "acceptance:transport-feeds": "tsx scripts/transport-feed-smoke.ts --scope=all",
     "acceptance:lviv-route-feed": "tsx scripts/transport-feed-smoke.ts --scope=lviv-route",
+    "acceptance:ukraine-rail-route": "tsx scripts/transport-feed-smoke.ts --scope=ukraine-rail-route",
     "mobility:audit-osm-bikes": "tsx scripts/audit-osm-bike-rentals.ts",
     "mobility:extract-osm-bikes": "bash scripts/extract-osm-bike-rentals.sh",
     "mobility:import-osm-bikes": "tsx scripts/import-osm-bike-rentals.ts"

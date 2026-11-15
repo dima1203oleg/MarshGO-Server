@@ -12,7 +12,7 @@ async function main() {
     const scope = process.argv[2] ?? 'all';
     const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
     const entries = selectMobilitySeedEntries(catalog, scope);
-    if (!entries) throw new Error('Supported seed scopes: all, --kyiv-metro, --kyiv-route-taxi-zelectra, --lviv');
+    if (!entries) throw new Error('Supported seed scopes: all, --kyiv-metro, --kyiv-route-taxi-zelectra, --lviv, --regional-mirrors');
     for (const entry of entries) {
       const accessValidated = entry.access === 'open' && canEnableCommercialProvider(entry.access, entry.license);
       const { rows } = await pool.query<{ id: string; status: 'enabled' | 'disabled' | 'paused' }>(

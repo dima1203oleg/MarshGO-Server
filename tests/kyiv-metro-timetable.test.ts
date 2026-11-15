@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildKyivMetroTimetable } from '../server/mobility/kyivMetroTimetable';
+import { buildKyivMetroTimetable, loadKyivMetroTimetable } from '../server/mobility/kyivMetroTimetable';
 import { findGtfsItinerariesWithStats, mergeGtfsTimetables } from '../server/journey/gtfsTimetable';
 
 const stamp = (seconds: number) => {
@@ -107,4 +107,12 @@ test('searches and renders an interline metro chain with stop calls and one shap
     assert.ok(segment.stops!.every((stop, index, all) => index === 0
       || Date.parse(stop.arrivalAt) >= Date.parse(all[index - 1]!.departureAt)));
   }
+});
+
+test('does not synthesize a metro timetable when official sources are unavailable', async () => {
+  await assert.rejects(loadKyivMetroTimetable({
+    scheduleSources: [],
+    stationSource: { id: 'unavailable-stations', name: 'Kyiv Metro stations', feed_url: '' },
+    routeSource: { id: 'unavailable-routes', name: 'Kyiv Metro routes', feed_url: '' },
+  }), /Kyiv Metro timetable is unavailable from its official sources/);
 });

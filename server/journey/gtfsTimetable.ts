@@ -586,7 +586,9 @@ type RetainedGtfsSegment = {
 };
 type RetainedGtfsTrip = BoundedTripGroup<RetainedGtfsSegment>;
 // Small deterministic endpoint-only reservoir to use route-budget gaps left by whole-trip bundles.
-const MAX_ROUTE_OVERFLOW_SEGMENTS = 200;
+// Its capacity cannot exceed that route's existing graph budget, so aggregate retained memory
+// remains bounded by the global candidate-graph ceiling.
+const MAX_ROUTE_OVERFLOW_SEGMENTS = 1_000;
 
 // Keep the same deterministic, order-independent sample for a feed snapshot.
 // GTFS feeds are often written in departure-time order, so a simple prefix cap
@@ -891,7 +893,9 @@ function gtfsTime(value: string | undefined): number | null {
 
 function routeMode(routeType: number, routeName: string): { mode: TransitJourneyMode; transportType: GtfsTransportType } | null {
   const normalizedName = routeName.normalize('NFKC').toLocaleLowerCase('uk-UA');
-  if (normalizedName.includes('міжміськ') || normalizedName.includes('intercity')) return { mode: 'BUS', transportType: 'intercity_bus' };
+  const isGtfsBus = routeType === 3 || (routeType >= 700 && routeType < 800);
+  if (isGtfsBus && (normalizedName.includes('міжміськ') || normalizedName.includes('intercity')))
+    return { mode: 'BUS', transportType: 'intercity_bus' };
   const label = routeTypeLabel(routeType, routeName);
   if (label === 'bus') return { mode: 'BUS', transportType: classifyLvivTransport({ routeType, routeName })?.classifiedType ?? 'bus' };
   if (label === 'marshrutka') return { mode: 'MINIBUS', transportType: 'marshrutka' };

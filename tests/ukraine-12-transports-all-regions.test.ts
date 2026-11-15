@@ -9,12 +9,11 @@ import {
   type CanonicalTransportTypeId,
 } from '../server/mobility/ukraineRegionalCatalog';
 import { composeUkraineMultimodalChains } from '../server/journey/multimodalChainEngine';
-import { planCityTransitJourneys } from '../server/mobility/ukraineTransitGraph';
 
-describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
-  it('covers exactly all 26 regions: 24 Oblasts + Kyiv City + Crimea', () => {
+describe('Ukraine regional transport catalog metadata', () => {
+  it('covers exactly all 27 administrative units: 24 Oblasts + Kyiv + Crimea + Sevastopol', () => {
     const regions = getAllRegions();
-    assert.equal(regions.length, 26, 'Must contain exactly 26 administrative units');
+    assert.equal(regions.length, 27, 'Must contain exactly 27 administrative units');
 
     const expectedRegionIds = [
       'kyiv',
@@ -43,6 +42,7 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
       'donetsk-oblast',
       'luhansk-oblast',
       'crimea',
+      'sevastopol',
     ];
 
     const actualIds = regions.map((r) => r.id);
@@ -51,7 +51,7 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
     }
   });
 
-  it('provides all 12 canonical transport modes in every single region without exception', () => {
+  it('lists the 12 canonical transport IDs with regional status metadata (not feed activation)', () => {
     const regions = getAllRegions();
     const expectedModes: CanonicalTransportTypeId[] = [
       'bus',
@@ -101,6 +101,17 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
     assert.ok(lviv, 'Lviv coordinates should resolve');
     assert.equal(lviv.id, 'lviv-oblast');
 
+    // Sevastopol is a distinct special-status unit, not part of the Crimea record.
+    const sevastopol = findRegionByCoordinates(33.53, 44.6);
+    assert.equal(sevastopol?.id, 'sevastopol');
+    assert.equal(findRegion('Севастополь')?.id, 'sevastopol');
+    assert.equal(findRegionByCoordinates(35.0, 45.0)?.id, 'crimea');
+
+    const sevastopolCatalog = getTransportCatalogForCity('sevastopol');
+    assert.equal(sevastopolCatalog.length, 12);
+    assert.equal(sevastopolCatalog.find((mode) => mode.id === 'carpool')?.enabled, true, 'Carpool search is backed by actual MARSHGO listings');
+    assert.ok(sevastopolCatalog.filter((mode) => mode.id !== 'carpool').every((mode) => !mode.enabled), 'No unverified external service is advertised as route-searchable');
+
     // Odesa
     const odesa = findRegionByCoordinates(30.7412, 46.4674);
     assert.ok(odesa, 'Odesa coordinates should resolve');
@@ -132,7 +143,7 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
     assert.equal(crimea.id, 'crimea');
   });
 
-  it('guarantees carpool availability nationwide across all 26 regions', () => {
+  it('offers carpool search nationally through published MARSHGO listings', () => {
     for (const region of getAllRegions()) {
       const carpool = region.transportModes.carpool;
       assert.equal(carpool.available, true, `Carpool must be available in ${region.name}`);
@@ -141,10 +152,15 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
     }
   });
 
-  it('guarantees railway connectivity across Ukraine through Ukrzaliznytsia', () => {
+  it('records the UZ source where catalogued without implying loaded route coverage', () => {
     for (const region of getAllRegions()) {
       const train = region.transportModes.train;
-      assert.ok(train.sources.some((s) => s.name.includes('Укрзалізниця')), `Train in ${region.name} must reference Укрзалізниця`);
+      if (region.id === 'sevastopol') {
+        assert.equal(train.available, false, 'No train service is advertised as searchable without an accessible validated feed');
+        assert.equal(train.sources.length, 0);
+      } else {
+        assert.ok(train.sources.some((s) => s.name.includes('Укрзалізниця')), `Train in ${region.name} must reference Укрзалізниця`);
+      }
     }
   });
 
@@ -177,7 +193,7 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
     assert.equal(vinnytsiaTram?.available, true);
   });
 
-  it('returns exactly 12 catalog DTOs from getTransportCatalogForCity for any city', () => {
+  it('returns 12 catalog DTOs for supported cities without asserting live provider availability', () => {
     for (const city of ['Київ', 'Львів', 'Одеса', 'Харків', 'Дніпро', 'Полтава', 'Вінниця', 'Чернівці']) {
       const catalog = getTransportCatalogForCity(city);
       assert.equal(catalog.length, 12, `City ${city} catalog must have 12 entries`);
@@ -186,8 +202,9 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
     }
   });
 
-  it('generates cross-oblast multimodal chains across Ukraine', async () => {
-    // Intercity Corridor: Lviv to Kyiv
+  it('does not present static intercity corridor estimates as scheduled trains', async () => {
+    // Intercity departures, availability, fares, stops and track geometry must come from
+    // eligible dated GTFS/API data. The static corridor catalog is not a timetable.
     const lvivToKyiv = await composeUkraineMultimodalChains({
       origin: { name: 'пл. Ринок (Львів)', coordinates: [24.0315, 49.8418] },
       destination: { name: 'Майдан Незалежності (Київ)', coordinates: [30.5234, 50.4501] },
@@ -197,10 +214,8 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
       preferences: { allowPublicTransport: true, allowTaxi: true, allowedTransportTypes: ['train', 'tram', 'taxi'] },
     });
 
-    assert.ok(lvivToKyiv.length > 0, 'Should find Lviv to Kyiv multimodal chain');
-    const railChain = lvivToKyiv.find((c) => c.legs.some((l) => l.mode === 'RAIL'));
-    assert.ok(railChain, 'Should have rail leg for Lviv to Kyiv');
-    assert.ok(railChain.legs.length >= 3, 'Must have at least first-mile, rail, last-mile');
+    assert.equal(lvivToKyiv.some((candidate) => candidate.legs.some((leg) => leg.mode === 'RAIL')), false,
+      'a real rail candidate must be supplied by the scheduled-feed search, not the static corridor table');
 
     // Lviv → Odesa composes two rail corridors through Kyiv. The 30-minute connection is
     // represented by the schedule gap; no synthetic 200 m walk may be drawn at one coordinate.
@@ -212,34 +227,42 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
       strategy: 'BALANCED',
       preferences: { allowPublicTransport: true, allowTaxi: true, allowedTransportTypes: ['train', 'tram', 'taxi'] },
     });
-    const connectingChain = lvivToOdesa.find((candidate) => candidate.legs.filter((leg) => leg.mode === 'RAIL').length === 2);
-    assert.ok(connectingChain, 'Should retain a two-corridor rail journey via Kyiv');
-    assert.equal(connectingChain.transfers >= 1, true, 'The intercity change still counts as a transfer');
-    assert.equal(connectingChain.legs.some((leg) => leg.mode === 'WALK'
-      && leg.origin.coordinates[0] === leg.destination.coordinates[0]
-      && leg.origin.coordinates[1] === leg.destination.coordinates[1]), false,
-    'Must not invent a positive-distance walk between identical station coordinates');
+    assert.equal(lvivToOdesa.some((candidate) => candidate.legs.some((leg) => leg.mode === 'RAIL')), false,
+      'two static corridors must not be composed into a date-independent rail itinerary');
   });
 
-  it('generates intra-city transit itineraries across multiple Ukrainian oblast capitals', () => {
-    // 1. Lviv (Львівська обл.)
-    const lviv = planCityTransitJourneys('Львів', [24.0560, 49.7942], [23.9950, 49.8358], 2500);
-    assert.ok(lviv.length > 0);
-    assert.equal(lviv[0].segments[0].transportType, 'tram');
+  it('does not emit regional city transit from an unconnected static station list', async () => {
+    const point = (name: string, coordinates: [number, number]) => ({ name, coordinates });
+    const cityPairs = [
+      {
+        origin: point('Сихів, Львів', [24.0560, 49.7942]),
+        destination: point('Львів-Головний', [23.9950, 49.8358]),
+      },
+      {
+        origin: point('центр Одеси', [30.7675, 46.4298]),
+        destination: point('вокзал Одеса', [30.7412, 46.4674]),
+      },
+      {
+        origin: point('центр Харкова', [36.3245, 50.0245]),
+        destination: point('вокзал Харків', [36.2050, 49.9880]),
+      },
+      {
+        origin: point('центр Дніпра', [34.9255, 48.4835]),
+        destination: point('вокзал Дніпро', [35.0165, 48.4760]),
+      },
+    ];
 
-    // 2. Odesa (Одеська обл.)
-    const odesa = planCityTransitJourneys('Одеса', [30.7675, 46.4298], [30.7412, 46.4674], 2500);
-    assert.ok(odesa.length > 0);
-    assert.equal(odesa[0].segments[0].transportType, 'tram');
-
-    // 3. Kharkiv (Харківська обл.)
-    const kharkiv = planCityTransitJourneys('Харків', [36.3245, 50.0245], [36.2050, 49.9880], 2500);
-    assert.ok(kharkiv.length > 0);
-    assert.equal(kharkiv[0].segments[0].transportType, 'metro');
-
-    // 4. Dnipro (Дніпропетровська обл.)
-    const dnipro = planCityTransitJourneys('Дніпро', [34.9255, 48.4835], [35.0165, 48.4760], 2500);
-    assert.ok(dnipro.length > 0);
-    assert.equal(dnipro[0].segments[0].transportType, 'metro');
+    for (const pair of cityPairs) {
+      const journeys = await composeUkraineMultimodalChains({
+        ...pair,
+        departureAt: new Date('2026-11-15T08:00:00.000Z'),
+        passengers: 1,
+        strategy: 'FASTEST',
+        preferences: { allowPublicTransport: true, allowedTransportTypes: ['bus', 'tram', 'trolleybus', 'metro'] },
+      });
+      assert.equal(journeys.some((journey) => journey.source === 'ukraine-city-data'
+        || journey.legs.some((leg) => leg.source === 'ukraine-city-data')), false,
+        `${pair.origin.name} to ${pair.destination.name} must come from a connected dated feed, not nearest static station pairing`);
+    }
   });
 });

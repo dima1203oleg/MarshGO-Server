@@ -144,13 +144,16 @@ export function selectStrategyAlternatives<T extends JourneyOption>(
     const strategyCandidates = strategy === 'CHEAPEST'
       ? pool.filter((journey) => journey.priceMinor !== null)
       : pool;
-    const chainCounts = new Map<string, number>();
+    const chainPicks = new Map<string, T[]>();
     let rank = 0;
     for (const { journey, score } of scoreJourneys(strategyCandidates, strategy)) {
       const diversityKey = routeChainKey(journey);
-      const count = chainCounts.get(diversityKey) ?? 0;
-      if (count >= 3) continue;
-      chainCounts.set(diversityKey, count + 1);
+      const picks = chainPicks.get(diversityKey) ?? [];
+      if (picks.length >= 3) continue;
+      // Exact ties reach the frontier together: one train fed by three tram departures is one card.
+      if (picks.length > 0 && !addsADecision(journey, picks)) continue;
+      picks.push(journey);
+      chainPicks.set(diversityKey, picks);
       rank += 1;
       const existing = alternatives.get(journey.id);
       if (existing) {

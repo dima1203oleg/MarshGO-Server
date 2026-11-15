@@ -21,7 +21,7 @@ import { calculateCanonicalRoute, getRoadRoute, getRoadRouteThroughPoints, getWa
 import { routeRequestSchema } from '../shared/navigation/contracts';
 import { calculatePlatformFee } from './fees';
 import { getTrustedProxyHops, validateRuntimeConfig } from './config';
-import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, transitProviderAllowed } from './journey/search';
+import { getJourneySearchPartialReasons, getJourneySearchTruncationState, JOURNEY_SEARCH_TRANSIT_MODES, journeySearchTransitModeAllowed, MAX_PLACE_NAME_LENGTH, parseJourneySearchRequest, shouldSearchGtfsTimetables, transitProviderAllowed } from './journey/search';
 import { composeCommunityTransitJourneys, type CommunityRideOption } from './journey/communityComposition';
 import { resolveDirectOnlyWalkingPolicy, searchWalkingReachUntilFeasible } from './journey/directOnlyWalkingPolicy';
 import { priceStatusFor, scaleGtfsFareForPassengers } from './journey/gtfsFares';
@@ -38,7 +38,7 @@ import { generatePedestrianGeometry } from '../shared/navigation/pedestrianGeome
 import { buildLiveJourneySegment } from './journey/liveJourneySegments';
 import { legProvenanceMetadata, sanitizePersistedJourney, trustedRouteGeometry } from './journey/legGeometryProvenance';
 import { cachedGtfsRealtimeTripUpdates } from './journey/gtfsRealtime';
-import { bboxIntersectsRouteCorridor, gtfsProvidersInRouteCorridor } from './journey/providerCoverage';
+import { bboxIntersectsRouteCorridor, selectGtfsProvidersInRouteCorridor } from './journey/providerCoverage';
 import { projectNotification } from './notifications';
 import { optimizeStopInsertion, type NavigationStop } from './navigation/stopOptimizer';
 import { matchRouteProgress, type LonLat, type PreviousProgress } from './navigation/routeProgress';
@@ -521,24 +521,6 @@ app.get('/api/v1/mobility/providers', optionalAuth, asyncHandler(async (req, res
     `SELECT name,city,provider_type,source_type,last_report FROM mobility_providers WHERE status='enabled' AND health IN ('healthy','degraded') ORDER BY priority,name`);
   const data = transportTileDefinitions.map((tile) => {
     if (tile.id === 'carpool') return { transportType: tile.id, providers: [{ id: 'carpool:MARSHGO', name: 'MARSHGO Community', available: true, cities: [], sources: ['marshgo'], services: [] }] };
-    if (tile.id === 'taxi') {
-      return { transportType: tile.id, providers: [
-        { id: 'taxi:Uklon', name: 'Uklon', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
-        { id: 'taxi:Bolt', name: 'Bolt', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
-        { id: 'taxi:Opti', name: 'Opti Taxi', available: true, cities: ['Україна'], sources: ['taxi-ridehailing-api'], services: ['taxi'] },
-      ] };
-    }
-    if (tile.id === 'carsharing') {
-      return { transportType: tile.id, providers: [
-        { id: 'carsharing:Getmancar', name: 'Getmancar', available: true, cities: ['Київ', 'Дніпро'], sources: ['carsharing-api'], services: ['carsharing'] },
-      ] };
-    }
-    if (tile.id === 'transfer') {
-      return { transportType: tile.id, providers: [
-        { id: 'transfer:Kiwitaxi', name: 'Kiwitaxi Ukraine', available: true, cities: ['Україна'], sources: ['transfer-api'], services: ['transfer'] },
-        { id: 'transfer:Intercity', name: 'Міжміський трансфер MARSHGO', available: true, cities: ['Україна'], sources: ['transfer-api'], services: ['transfer'] },
-      ] };
-    }
     // Only advertise rental providers that have the same confirmed network
     // rules consumed by the journey estimator. Static bicycles are routable as
     // estimates; scooters require a connected GBFS source and return geofence.
@@ -3293,20 +3275,19 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     `SELECT id,name,city,feed_url,realtime_url,last_report FROM mobility_providers
       WHERE provider_type='public_transit' AND source_type='gtfs' AND access='open'
         AND status='enabled' AND health IN ('healthy','degraded')
-      ORDER BY priority,name LIMIT 101`,
+      ORDER BY priority,name`,
   );
-  if (discoveredGtfsProviders.length > 100) candidateGenerationTruncated = true;
-  const gtfsProviders = discoveredGtfsProviders.slice(0, 100);
   const transitAllowed = (mode: TransitJourneyMode) => journeySearchTransitModeAllowed(mode, search.preferences);
-  const spatiallyEligibleGtfsProviders = gtfsProvidersInRouteCorridor(
-    gtfsProviders, search.origin.coordinates, search.destination.coordinates, corridorWidthMeters,
+  const allowedTransitModes = JOURNEY_SEARCH_TRANSIT_MODES.filter(transitAllowed);
+  const providerSelection = selectGtfsProvidersInRouteCorridor(
+    allowedTransitModes.length > 0 ? discoveredGtfsProviders : [],
+    search.origin.coordinates, search.destination.coordinates, corridorWidthMeters,
   );
-  const allTransitModes = JOURNEY_SEARCH_TRANSIT_MODES;
-  const allowedTransitModes = allTransitModes.filter(transitAllowed);
+  if (providerSelection.truncated) candidateGenerationTruncated = true;
   // Do not prune a feed by cached `last_report.counts`: a validated report can
   // predate a feed refresh or route classifier fix. The worker parses the
   // current feed and applies the selected modes to actual scheduled itineraries.
-  const eligibleGtfsProviders = allowedTransitModes.length === 0 ? [] : spatiallyEligibleGtfsProviders;
+  const eligibleGtfsProviders = providerSelection.providers;
   const providerMetadata = new Map<string, { name: string; routeGeometrySource?: 'gtfs_shape' | 'official_geojson' }>(
     eligibleGtfsProviders.map((provider) => [provider.id, { name: provider.name }]),
   );
@@ -3404,7 +3385,11 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const extendedTransitEgressWalkingMeters = explicitWalkLimit
     ? Math.max(transitEgressWalkingMeters, directOnlyWalkingPolicy.maximumEgressMeters)
     : Math.max(transitEgressWalkingMeters, directOnlyWalkingPolicy.maximumEgressMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS);
-  const shouldRunWorkerSearch = routeDistanceMeters < 45_000;
+  const shouldRunWorkerSearch = shouldSearchGtfsTimetables({
+    routeDistanceMeters,
+    eligibleProviderCount: eligibleGtfsProviders.length,
+    hasMetroSource: Boolean(metroSources),
+  });
   const gtfsSearchInput = {
     providerId: 'worker', providerName: 'worker', origin: search.origin.coordinates, destination: search.destination.coordinates,
     earliestDeparture: search.departureAt,
@@ -3426,7 +3411,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   const gtfsWorkerProviders = eligibleGtfsProviders.map((provider) => ({ id: provider.id, name: provider.name, city: provider.city,
     feedUrl: provider.feed_url, ...(provider.realtime_url ? { realtimeUrl: provider.realtime_url } : {}) }));
   try {
-    if (shouldRunWorkerSearch && (eligibleGtfsProviders.length > 0 || metroSources)) {
+    if (shouldRunWorkerSearch) {
       gtfsWorkerSearch = await gtfsSearchWorker.search(gtfsSearchInput, gtfsWorkerProviders, metroSources);
     }
   } catch (error) {

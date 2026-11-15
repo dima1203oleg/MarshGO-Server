@@ -16,6 +16,17 @@ export interface JourneySearchTruncationState {
   resultSamplingTruncated: boolean;
 }
 
+// The GTFS worker bounds intercity routing itself; an API-level distance cutoff
+// would hide national rail and bus candidates before that bounded search runs.
+export function shouldSearchGtfsTimetables(input: {
+  routeDistanceMeters: number;
+  eligibleProviderCount: number;
+  hasMetroSource: boolean;
+}): boolean {
+  return Number.isFinite(input.routeDistanceMeters) && input.routeDistanceMeters >= 0
+    && (input.eligibleProviderCount > 0 || input.hasMetroSource);
+}
+
 export function getJourneySearchTruncationState(input: {
   candidateGenerationTruncated: boolean;
   resultSamplingTruncated: boolean;
@@ -189,6 +200,8 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
     const types = rawPreferences.allowedTransportTypes;
     if (!Array.isArray(types) || types.length > JOURNEY_TRANSPORT_TYPES.length + 3
       || types.some((type) => typeof type !== 'string')) throw new TypeError('allowedTransportTypes is invalid');
+    // An empty selection cannot match any leg; searching it only burns the timetable worker.
+    if (types.length === 0) throw new TypeError('allowedTransportTypes must select at least one transport type');
     const normalized = (types as string[]).map(canonicalJourneyTransportType);
     if (normalized.some((type) => type === null) || new Set(normalized).size !== normalized.length) {
       throw new TypeError('allowedTransportTypes is invalid');

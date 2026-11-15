@@ -30,3 +30,16 @@ test('Stryi municipal GTFS records its official CC BY attribution and remains sc
   assert.match(stryi.license ?? '', /data\.loda\.gov\.ua\/dataset\/7b9ddbc6-df4b-4d2e-9567-af66ede840cc/);
   assert.match(stryi.coverage, /live-позиції, тарифи та бронювання цим GTFS не підтверджуються/i);
 });
+
+test('Kyivpastrans GTFS uses the verified HTTPS mirror and only claims publisher-licensed static modes', () => {
+  const kyiv = ukraineCatalog.find((entry) => entry.city === 'Київ' && entry.sourceType === 'gtfs');
+
+  assert.ok(kyiv);
+  assert.equal(kyiv.access, 'open');
+  assert.equal(kyiv.feedUrl, 'https://jbb.ghsq.de/gtfs/ua-kyiv.gtfs.zip');
+  assert.equal(canEnableCommercialProvider(kyiv.access, kyiv.license), true);
+  assert.match(kyiv.license ?? '', /commercial use permitted/i);
+  assert.match(kyiv.sourceRef, /data\.kyivcity\.gov\.ua\/dataset\/rozklad-rukhu-miskoho-elektrychnoho-ta-avtomobilnoho-transportu-dep-transport/);
+  assert.match(kyiv.coverage, /bus\/tram\/trolleybus/i);
+  assert.match(kyiv.coverage, /Does not provide metro schedules, live vehicle positions, fares or booking/i);
+});

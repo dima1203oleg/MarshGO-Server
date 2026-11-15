@@ -4,6 +4,8 @@ export type GtfsProviderCoverageRecord = {
   last_report?: { bbox?: GeographicBbox; counts?: Record<string, number> } | null;
 };
 
+export const MAX_ROUTE_ELIGIBLE_GTFS_PROVIDERS = 100;
+
 function segmentIntersectsRectangle(
   start: readonly [number, number],
   end: readonly [number, number],
@@ -86,4 +88,21 @@ export function gtfsProvidersInRouteCorridor<T extends GtfsProviderCoverageRecor
     const box = provider.last_report?.bbox;
     return Boolean(box && bboxIntersectsRouteCorridor(box, origin, destination, corridorWidthMeters));
   });
+}
+
+/** Apply the bounded feed budget after geographic filtering, so unrelated high-priority city feeds
+ * cannot crowd a national provider out before its coverage is checked. Input order remains the
+ * registry's priority/name order, and callers can disclose when relevant feeds exceeded the cap.
+ */
+export function selectGtfsProvidersInRouteCorridor<T extends GtfsProviderCoverageRecord>(
+  providers: readonly T[],
+  origin: readonly [longitude: number, latitude: number],
+  destination: readonly [longitude: number, latitude: number],
+  corridorWidthMeters: number,
+  maximumProviders = MAX_ROUTE_ELIGIBLE_GTFS_PROVIDERS,
+): { providers: T[]; truncated: boolean } {
+  const eligible = gtfsProvidersInRouteCorridor(providers, origin, destination, corridorWidthMeters);
+  const limit = Number.isInteger(maximumProviders) && maximumProviders >= 0
+    ? maximumProviders : MAX_ROUTE_ELIGIBLE_GTFS_PROVIDERS;
+  return { providers: eligible.slice(0, limit), truncated: eligible.length > limit };
 }

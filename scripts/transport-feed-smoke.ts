@@ -5,12 +5,15 @@ import { fetchJson } from '../server/mobility/safeFetch';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
 import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
 import { selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
+import { serializeSmokeJourney, summarizeSmokeItineraries, withOptionalSourceFingerprint } from './transport-feed-smoke-summary';
 
 /**
  * Read-only acceptance probe for all Ukrainian transport sources recorded in
  * the repository (Base + Wave 2 + Wave 3). It never changes provider configuration or writes to a DB.
  */
 const CONCURRENCY = 2;
+const ROUTE_SMOKE_RESULT_LIMIT = 10;
+const RAIL_ROUTE_SMOKE_RESULT_LIMIT = 20;
 const catalog = [...ukraineCatalog, ...ukraineCatalogWave2, ...ukraineCatalogWave3, ...kyivOpenDataCatalog];
 
 /** Capture the planner's existing bounded-search diagnostics without mixing them into JSON stdout. */
@@ -56,12 +59,87 @@ async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T) => Pr
   return result;
 }
 
+async function buildUkraineRailRouteAcceptance(entry: typeof catalog[number]) {
+  const providerId = 'ukraine-uz-odbl-rail-smoke';
+  const feed = await cachedGtfsTimetable(providerId, entry.feedUrl);
+  const { earliestDeparture, latestDeparture, serviceDate } = selectUpcomingSmokeServiceWindow(feed, new Date(), {
+    localHour: 8,
+    windowMinutes: 12 * 60,
+    minimumLeadMinutes: 120,
+    horizonDays: 14,
+  });
+  const routeCase = {
+    id: 'kyiv-to-lviv',
+    origin: [30.4897, 50.4408] as [number, number],
+    destination: [23.9937, 49.8408] as [number, number],
+  };
+  const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(feed, {
+    providerId,
+    providerName: entry.name,
+    providerCity: entry.city,
+    origin: routeCase.origin,
+    destination: routeCase.destination,
+    earliestDeparture,
+    latestDeparture,
+    maximumJourneySeconds: 16 * 60 * 60,
+    maximumWaitSeconds: 4 * 60 * 60,
+    maximumTransfers: 0,
+    maximumStopDistanceMeters: 2500,
+    limit: RAIL_ROUTE_SMOKE_RESULT_LIMIT,
+    allowedTransportTypes: ['train'],
+  }));
+  const journeys = search.itineraries.map(serializeSmokeJourney);
+  const geometryEvidence = search.itineraries.map((journey) => journey.segments.map((segment) => {
+    const shapeId = feed.trips.get(segment.tripId)?.shapeId;
+    const shapePoints = shapeId ? feed.shapes?.get(shapeId) : undefined;
+    return {
+      tripId: segment.tripId,
+      routeId: segment.routeId,
+      shapeId: shapeId ?? null,
+      shapePointCount: shapePoints?.length ?? 0,
+      confirmedShape: (shapePoints?.length ?? 0) >= 2,
+    };
+  }));
+  const geometryConfirmed = geometryEvidence.length > 0 && geometryEvidence.every((chain) => chain.every((item) => item.confirmedShape));
+  return {
+    provider: entry.name,
+    source: { feedUrl: entry.feedUrl, sourceRef: entry.sourceRef, access: entry.access, license: entry.license ?? null,
+      updateFrequency: entry.updateFrequency ?? null, coverage: entry.coverage },
+    feed: withOptionalSourceFingerprint({
+      stops: feed.stops.size,
+      routes: feed.routes.size,
+      trips: feed.trips.size,
+      shapes: feed.shapes?.size ?? 0,
+      timezone: feed.timezone,
+    }, 'staticFeedSha256', feed.staticFeedSha256),
+    serviceDate,
+    queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
+    cases: [{
+      id: routeCase.id,
+      origin: { label: 'Київ-Пасажирський, station-area pin', coordinates: routeCase.origin },
+      destination: { label: 'Львів, station-area pin', coordinates: routeCase.destination },
+      status: journeys.length ? 'ROUTES_FOUND' : 'NO_ROUTE_IN_QUERY_WINDOW',
+      count: journeys.length,
+      ...summarizeSmokeItineraries(search.itineraries),
+      resultLimit: RAIL_ROUTE_SMOKE_RESULT_LIMIT,
+      searchTruncated: search.searchTruncated,
+      resultLimitReached: search.resultLimitReached,
+      truncation: search.truncation,
+      confirmedShapeGeometry: geometryConfirmed,
+      geometryEvidence: geometryEvidence.slice(0, 5),
+      plannerDiagnostics: diagnostics,
+      examples: journeys.slice(0, 5),
+      itineraries: journeys,
+    }],
+  };
+}
+
 async function probe(entry: typeof catalog[number]) {
   if (entry.access !== 'open') {
     return { name: entry.name, city: entry.city, sourceType: entry.sourceType, state: 'SKIPPED', reason: entry.access };
   }
   const report = await testProviderConnection({ id: entry.sourceRef, name: entry.name, source_type: entry.sourceType, feed_url: entry.feedUrl });
-  return {
+  return withOptionalSourceFingerprint({
     name: entry.name,
     city: entry.city,
     sourceType: entry.sourceType,
@@ -71,7 +149,7 @@ async function probe(entry: typeof catalog[number]) {
     responseMs: report.responseMs,
     checks: report.checks,
     ...(report.error ? { error: report.error } : {}),
-  };
+  }, 'sourceVersion', report.sourceVersion);
 }
 
 async function main() {
@@ -81,8 +159,32 @@ async function main() {
   // probe the realtime endpoint here to avoid downloading/parsing the static archive twice.
   const providerProbeEntries = scope === 'lviv-route'
     ? selectedEntries.filter((entry) => entry.sourceType === 'gtfs_rt')
-    : selectedEntries;
+    : scope === 'ukraine-rail-route' ? [] : selectedEntries;
   const results = await mapLimit(providerProbeEntries, scope === 'lviv-route' ? 1 : CONCURRENCY, probe);
+
+  if (scope === 'ukraine-rail-route') {
+    const railFeed = selectedEntries[0];
+    if (!railFeed) throw new Error('Ukraine rail GTFS source is missing from the catalog');
+    const routePlanner = await buildUkraineRailRouteAcceptance(railFeed);
+    console.log(JSON.stringify({
+      checkedAt: new Date().toISOString(),
+      summary: {
+        scope,
+        catalogRows: catalog.length,
+        selectedSources: selectedEntries.length,
+        providerSourcesProbed: 0,
+        note: 'Read-only dated GTFS planner acceptance. ODbL aggregate schedule is not an official operator feed; shapes must be present for geometry confirmation.',
+      },
+      catalog: [],
+      routePlanner,
+      supplementary: [],
+    }, null, 2));
+    const routeCase = routePlanner.cases[0]!;
+    if (routeCase.count === 0 || routeCase.searchTruncated || routeCase.resultLimitReached || !routeCase.confirmedShapeGeometry) {
+      process.exitCode = 1;
+    }
+    return;
+  }
 
   const lvivStaticFeed = selectTransportFeedSmokeEntries(catalog, 'lviv-route')[0];
   if (!lvivStaticFeed) throw new Error('Lviv static GTFS source is missing from the catalog');
@@ -94,7 +196,12 @@ async function main() {
   ];
   const routePlanner = {
     provider: 'Львівавтодор GTFS → MARSHGO GTFS timetable planner',
-    feed: { stops: lvivFeed.stops.size, routes: lvivFeed.routes.size, trips: lvivFeed.trips.size, timezone: lvivFeed.timezone },
+    feed: withOptionalSourceFingerprint({
+      stops: lvivFeed.stops.size,
+      routes: lvivFeed.routes.size,
+      trips: lvivFeed.trips.size,
+      timezone: lvivFeed.timezone,
+    }, 'staticFeedSha256', lvivFeed.staticFeedSha256),
     serviceDate,
     queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
     cases: lvivRouteCases.map((routeCase) => {
@@ -110,29 +217,27 @@ async function main() {
         maximumWaitSeconds: 3 * 60 * 60,
         maximumTransfers: 2,
         maximumStopDistanceMeters: 1800,
-        limit: 10,
+        limit: ROUTE_SMOKE_RESULT_LIMIT,
         allowedTransportTypes: ['bus', 'tram', 'trolleybus'],
       }));
+      const itineraryEvidence = search.itineraries.map(serializeSmokeJourney);
       return {
         id: routeCase.id,
         status: search.itineraries.length ? 'ROUTES_FOUND' : 'NO_ROUTE_IN_QUERY_WINDOW',
         count: search.itineraries.length,
+        ...summarizeSmokeItineraries(search.itineraries),
+        resultLimit: ROUTE_SMOKE_RESULT_LIMIT,
         searchTruncated: search.searchTruncated,
         resultLimitReached: search.resultLimitReached,
         truncation: search.truncation,
         plannerDiagnostics: diagnostics,
-        examples: search.itineraries.slice(0, 2).map((journey) => ({
-          modes: journey.segments.map((segment) => segment.transportType),
-          routes: journey.segments.map((segment) => segment.routeName),
-          orderedStops: journey.segments.map((segment) => [segment.originStop.name, segment.destinationStop.name]),
-          departureAt: journey.departureAt.toISOString(),
-          arrivalAt: journey.arrivalAt.toISOString(),
-        })),
+        examples: itineraryEvidence.slice(0, 2),
+        itineraries: itineraryEvidence,
       };
     }),
   };
 
-  const supplementary = scope === 'lviv-route' ? [] : await Promise.all([
+  const supplementary = scope !== 'all' ? [] : await Promise.all([
     (async () => {
       try {
         const { data } = await fetchJson('https://api.citybik.es/v2/networks');
