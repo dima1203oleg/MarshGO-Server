@@ -546,6 +546,8 @@ export interface GtfsGraphBudgetLimits {
   maxStopsPerRoutePattern?: number;
   /** Test-only global retained-itinerary ceiling; response page size stays unchanged. */
   maxSearchResults?: number;
+  /** Test-only objective-reservoir lookahead for dense-feed diagnostics. */
+  maxObjectiveReservoirSearchSteps?: number;
   /** Test-only override for verifying bounded search-frontier behavior. */
   maxQueuedSearchWork?: number;
 }
@@ -2537,6 +2539,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   const maxStopsPerSide = graphLimits.maxStopsPerSide ?? MAX_STOPS_PER_SIDE;
   const maxStopsPerRoutePattern = graphLimits.maxStopsPerRoutePattern ?? MAX_STOPS_PER_ROUTE_PATTERN;
   const maximumSearchResults = graphLimits.maxSearchResults ?? limit * 25;
+  const objectiveReservoirSearchSteps = graphLimits.maxObjectiveReservoirSearchSteps ?? 25_000;
   const maximumAllowedGraphSegments = isGtfsGraphBudgetDiagnosticEnabled()
     ? MAX_GTFS_GRAPH_DIAGNOSTIC_SEGMENTS : MAX_GTFS_GRAPH_SEGMENTS;
   const maximumAllowedGraphSegmentsPerRoute = isGtfsGraphBudgetDiagnosticEnabled()
@@ -2546,6 +2549,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   const maximumAllowedStopsPerRoutePattern = isGtfsGraphBudgetDiagnosticEnabled()
     ? MAX_DIAGNOSTIC_STOPS_PER_ROUTE_PATTERN : MAX_STOPS_PER_ROUTE_PATTERN;
   const maximumAllowedSearchResults = isGtfsGraphBudgetDiagnosticEnabled() ? limit * 100 : limit * 25;
+  const maximumAllowedObjectiveReservoirSearchSteps = isGtfsGraphBudgetDiagnosticEnabled() ? 200_000 : 25_000;
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
@@ -2571,7 +2575,9 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     || !Number.isSafeInteger(maxStopsPerRoutePattern) || maxStopsPerRoutePattern < MAX_STOPS_PER_ROUTE_PATTERN
     || maxStopsPerRoutePattern > maximumAllowedStopsPerRoutePattern
     || !Number.isSafeInteger(maximumSearchResults) || maximumSearchResults < limit * 25
-    || maximumSearchResults > maximumAllowedSearchResults) {
+    || maximumSearchResults > maximumAllowedSearchResults
+    || !Number.isSafeInteger(objectiveReservoirSearchSteps) || objectiveReservoirSearchSteps < 25_000
+    || objectiveReservoirSearchSteps > maximumAllowedObjectiveReservoirSearchSteps) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
   const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
@@ -4075,7 +4081,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   // Once a leg-count pool is full, keep searching a bounded window so late
   // objective improvements can enter the reservoirs without scanning the
   // entire dense feed. Any remaining work is still reported as truncated.
-  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = 25_000;
+  const MAX_OBJECTIVE_RESERVOIR_SEARCH_STEPS = objectiveReservoirSearchSteps;
   let candidatePoolReachedAtStep: number | null = null;
   const objectiveCandidateSamples = new Map<string, GtfsItinerary[]>();
   const objectiveSampleLimit = Math.max(1, Math.floor(limit / 5));
