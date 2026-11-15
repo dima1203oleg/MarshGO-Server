@@ -293,28 +293,34 @@ async function main() {
       // candidate graph; both variants must pay the same graph-build cost.
       clearGtfsCandidateGraphCache();
       const ordered = runLvivSearch(routeCase, { finalLegCandidateOrder: 'earliest-door-arrival' });
-      const baselineSignatures = baseline.result.itineraries.map(itinerarySignature);
-      const orderedSignatures = ordered.result.itineraries.map(itinerarySignature);
-      const baselineSet = new Set(baselineSignatures);
-      const orderedSet = new Set(orderedSignatures);
+      const summarizeComparison = (variant: typeof baseline, against?: typeof baseline) => {
+        const signatures = variant.result.itineraries.map(itinerarySignature);
+        const againstSet = new Set(against?.result.itineraries.map(itinerarySignature) ?? []);
+        const signatureSet = new Set(signatures);
+        return {
+          signatures,
+          ...(against ? {
+            introducedSignatures: signatures.filter((signature) => !againstSet.has(signature)),
+            removedSignatures: against.result.itineraries.map(itinerarySignature).filter((signature) => !signatureSet.has(signature)),
+          } : {}),
+          searchTruncated: variant.result.searchTruncated,
+          resultLimitReached: variant.result.resultLimitReached,
+          plannerDiagnostics: variant.diagnostics,
+          itineraries: variant.result.itineraries.map(serializeSmokeJourney),
+        };
+      };
+      const lookaheadSweep = [50_000, 100_000, 200_000].map((maxObjectiveReservoirSearchSteps) => {
+        clearGtfsCandidateGraphCache();
+        const variant = runLvivSearch(routeCase, {
+          finalLegCandidateOrder: 'earliest-door-arrival', maxObjectiveReservoirSearchSteps,
+        });
+        return { maxObjectiveReservoirSearchSteps, ...summarizeComparison(variant, baseline) };
+      });
       return {
         id: routeCase.id,
-        baseline: {
-          signatures: baselineSignatures,
-          searchTruncated: baseline.result.searchTruncated,
-          resultLimitReached: baseline.result.resultLimitReached,
-          plannerDiagnostics: baseline.diagnostics,
-          itineraries: baseline.result.itineraries.map(serializeSmokeJourney),
-        },
-        earliestDoorArrival: {
-          signatures: orderedSignatures,
-          introducedSignatures: orderedSignatures.filter((signature) => !baselineSet.has(signature)),
-          removedSignatures: baselineSignatures.filter((signature) => !orderedSet.has(signature)),
-          searchTruncated: ordered.result.searchTruncated,
-          resultLimitReached: ordered.result.resultLimitReached,
-          plannerDiagnostics: ordered.diagnostics,
-          itineraries: ordered.result.itineraries.map(serializeSmokeJourney),
-        },
+        baseline: summarizeComparison(baseline),
+        earliestDoorArrival: summarizeComparison(ordered, baseline),
+        lookaheadSweep,
       };
     }),
   } : undefined;
