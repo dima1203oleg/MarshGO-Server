@@ -61,6 +61,9 @@ export function serializeSmokeJourney(journey: SmokeJourneyEvidence) {
     transferMinimumBufferSeconds: journey.transferMinimumBufferSeconds,
     transferRuleMinimumSeconds: journey.transferRuleMinimumSeconds,
     transferInSeat: journey.transferInSeat,
+    modes: journey.segments.map((segment) => segment.transportType),
+    routes: journey.segments.map((segment) => segment.routeName),
+    orderedStops: journey.segments.map((segment) => [segment.originStop.name, segment.destinationStop.name]),
     segments: journey.segments.map((segment) => ({
       providerId: segment.providerId,
       routeId: segment.routeId,

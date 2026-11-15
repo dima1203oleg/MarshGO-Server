@@ -50,6 +50,9 @@ test('serializes dated trip, stop, schedule, and transfer facts without losing u
   });
 
   assert.equal(evidence.transfers, 1);
+  assert.deepEqual(evidence.modes, ['bus', 'tram']);
+  assert.deepEqual(evidence.routes, ['A53', 'T1']);
+  assert.deepEqual(evidence.orderedStops, [['Stop 1', 'Stop 2'], ['Stop 3', 'Stop 4']]);
   assert.deepEqual(evidence.transferWalkingMeters, [120]);
   assert.deepEqual(evidence.transferRuleMinimumSeconds, [null]);
   assert.equal(evidence.segments[0]?.staticFeedSha256, 'c'.repeat(64));
