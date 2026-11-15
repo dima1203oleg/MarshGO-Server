@@ -1083,6 +1083,64 @@ test('preserves stops for the reverse direction when nearby stops crowd the same
   assert.equal(result.searchTruncated, false, 'all in-radius route patterns fit within the bounded stop set');
 });
 
+test('keeps a feasible route at the 49th nearby stop when the endpoint stop set is bounded', () => {
+  const timetable = feed();
+  const origin = { id: 'origin', name: 'Origin', lon: 24.0201, lat: 49.8401 };
+  const destination = { id: 'destination', name: 'Destination', lon: 24.0301, lat: 49.8501 };
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set(destination.id, destination);
+
+  // Each closer decoy exposes a distinct route pattern, so endpoint selection
+  // cannot collapse them as duplicates. They are deliberately non-routable
+  // one-stop trips; the only usable itinerary boards at the 49th route stop.
+  for (let index = 1; index <= 48; index += 1) {
+    const stopId = `decoy-stop-${index}`;
+    const routeId = `decoy-route-${index}`;
+    const tripId = `decoy-trip-${index}`;
+    timetable.stops.set(stopId, {
+      id: stopId, name: `Decoy ${index}`, lon: origin.lon + index * 0.0000005, lat: origin.lat,
+    });
+    timetable.routes.set(routeId, { name: `Decoy ${index}`, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: `Decoy ${index}` });
+    const stopTime = {
+      stopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0,
+    };
+    timetable.stopTimes.set(tripId, [stopTime]);
+    timetable.stopTimesByStop.set(stopId, [{ tripId, index: 0 }]);
+  }
+
+  const targetStopId = 'route-stop-49';
+  const targetTripId = 'only-feasible-trip';
+  const targetRouteId = 'only-feasible-route';
+  timetable.stops.set(targetStopId, {
+    id: targetStopId, name: 'Route stop 49', lon: origin.lon + 0.0007, lat: origin.lat,
+  });
+  timetable.routes.set(targetRouteId, { name: 'Useful route', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.set(targetTripId, { routeId: targetRouteId, serviceId: 'weekday', headsign: 'Destination' });
+  const targetStopTimes = [
+    { stopId: targetStopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+    { stopId: destination.id, sequence: 2, arrivalSeconds: 8 * 3600 + 30 * 60, departureSeconds: 8 * 3600 + 30 * 60, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.stopTimes.set(targetTripId, targetStopTimes);
+  targetStopTimes.forEach((stopTime, index) => timetable.stopTimesByStop.set(stopTime.stopId, [
+    ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId: targetTripId, index },
+  ]));
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    limit: 10, maximumTransfers: 0, maximumStopDistanceMeters: 900,
+  });
+
+  assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === targetTripId),
+    'a feasible route must not disappear behind 48 closer stops with unrelated route patterns');
+  assert.equal(result.truncation.stopSelection, false,
+    'the 64-stop bounded set includes all 49 nearby route stops in this fixture');
+});
+
 test('retains additional same-direction boarding stops within the bounded pattern cap', () => {
   const timetable = feed();
   const route = timetable.routes.get('r');
