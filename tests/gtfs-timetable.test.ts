@@ -621,6 +621,48 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.ok(Object.values(samplingEvents).every((count) => Number.isInteger(count) && count >= 0));
 });
 
+test('endpoint overflow reservoir retains up to its bounded per-route budget', () => {
+  const timetable = feed();
+  const originEntries = [...(timetable.stopTimesByStop.get('origin') ?? [])];
+  const destinationEntries = [...(timetable.stopTimesByStop.get('destination') ?? [])];
+  for (let index = 1; index < 600; index++) {
+    const tripId = `overflow-trip-${String(index).padStart(3, '0')}`;
+    timetable.trips.set(tripId, { routeId: 'r', serviceId: 'weekday', headsign: 'Destination' });
+    timetable.stopTimes.set(tripId, [
+      { stopId: 'origin', sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: 'destination', sequence: 2, arrivalSeconds: 9 * 3600, departureSeconds: 9 * 3600, pickupType: 0, dropOffType: 0 },
+    ]);
+    originEntries.push({ tripId, index: 0 });
+    destinationEntries.push({ tripId, index: 1 });
+  }
+  timetable.stopTimesByStop.set('origin', originEntries);
+  timetable.stopTimesByStop.set('destination', destinationEntries);
+
+  const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const originalInfo = console.info;
+  const messages: string[] = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
+  try {
+    findGtfsItinerariesWithStats(timetable, {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+    }, { totalSegments: 512, segmentsPerRoute: 512 });
+  } finally {
+    console.info = originalInfo;
+    if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+  }
+
+  const graph = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown })
+    .find((stage) => stage.stage === 'segments-built');
+  assert.ok(graph);
+  assert.equal(graph.overflowReservoirRetained, 500,
+    'endpoint overflow can use its per-route cap while the global graph budget remains the hard ceiling');
+  assert.equal(graph.overflowReservoirsAtCap, 1);
+  assert.ok(Number(graph.overflowReservoirRetained) <= Number(graph.graphSegmentBudgetTotal));
+  assert.ok(Number(graph.graphSegmentBudgetTotal) <= 512);
+});
+
 test('GTFS maximum transfer wait never exceeds the total journey horizon', () => {
   assert.equal(maximumGtfsWaitWithinJourney(30 * 60), 30 * 60,
     'a short user journey limit must produce valid shorter transfer bounds');
