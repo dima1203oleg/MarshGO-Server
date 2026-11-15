@@ -2,7 +2,7 @@ import { ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3, kyivOpenDataC
 import { testProviderConnection } from '../server/mobility/connection';
 import { testGbfsConnection } from '../server/mobility/gbfs';
 import { fetchJson } from '../server/mobility/safeFetch';
-import { cachedGtfsTimetable, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
+import { cachedGtfsTimetable, clearGtfsCandidateGraphCache, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
 import type { GtfsGraphBudgetLimits, GtfsItinerary } from '../server/journey/gtfsTimetable';
 import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
 import { selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
@@ -289,6 +289,9 @@ async function main() {
     mode: 'test-only final-leg stop-pair order by predicted door arrival; production search remains chronological',
     cases: selectedLvivRouteCases.map((routeCase, index) => {
       const baseline = standardRuns[index]!;
+      // Avoid letting the second comparison borrow the baseline's retained
+      // candidate graph; both variants must pay the same graph-build cost.
+      clearGtfsCandidateGraphCache();
       const ordered = runLvivSearch(routeCase, { finalLegCandidateOrder: 'earliest-door-arrival' });
       const baselineSignatures = baseline.result.itineraries.map(itinerarySignature);
       const orderedSignatures = ordered.result.itineraries.map(itinerarySignature);
