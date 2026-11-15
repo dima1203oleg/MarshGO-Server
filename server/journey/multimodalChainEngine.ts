@@ -19,7 +19,7 @@ export interface MultimodalLeg {
   priceMinor: number | null;
   currency: string;
   priceStatus: 'LOCKED' | 'ESTIMATED' | 'DYNAMIC' | 'UNKNOWN';
-  availabilityStatus: 'AVAILABLE';
+  availabilityStatus: 'AVAILABLE' | 'UNKNOWN';
   providerId?: string;
   providerType: string;
   providerName?: string;
@@ -94,18 +94,8 @@ export interface MultimodalChainInput {
   }>;
 }
 
-// Kyiv Taxi Fare calculation based on official Kyiv market rates (Uklon / Bolt / Uber)
-export function calculateKyivTaxiEstimate(distanceMeters: number, durationSeconds: number) {
-  const km = distanceMeters / 1000;
-  const minutes = durationSeconds / 60;
-  // Base 60 UAH + 12 UAH/km + 2 UAH/min, minimum 85 UAH
-  const fareUah = Math.max(85, 60 + km * 12 + minutes * 2);
-  const fareMinor = Math.round(fareUah * 100);
-  return {
-    fareMinor,
-    currency: 'UAH',
-    priceStatus: 'ESTIMATED' as const,
-  };
+export interface MultimodalChainDependencies {
+  getRoadRoute: typeof getRoadRoute;
 }
 
 /**
@@ -115,10 +105,13 @@ export function calculateKyivTaxiEstimate(distanceMeters: number, durationSecond
  * - City Express (Кільцева електричка УЗ)
  * - Funicular (Київський фунікулер)
  * - Municipal Bus, Tram, Trolleybus, Marshrutka (Київпастранс)
- * - Taxi / Ride-hail (Uklon, Bolt, Uber)
+ * - Road-route estimates for taxi legs (provider quote/availability remain unknown)
  * - Carpool (MARSHGO Community offers)
  */
-export async function composeKyivMultimodalChains(input: MultimodalChainInput): Promise<MultimodalJourney[]> {
+export async function composeKyivMultimodalChains(
+  input: MultimodalChainInput,
+  dependencies: MultimodalChainDependencies = { getRoadRoute },
+): Promise<MultimodalJourney[]> {
   const { origin, destination, departureAt, passengers, strategy, preferences } = input;
   const allowed = preferences.allowedTransportTypes;
   const isTypeAllowed = (type: string) => !allowed || allowed.includes(type as any);
@@ -126,6 +119,7 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
   const journeys: MultimodalJourney[] = [];
   const originCoord = origin.coordinates;
   const destCoord = destination.coordinates;
+  const getRoadRouteForJourney = dependencies.getRoadRoute;
 
   const totalDirectDistance = haversineMeters(originCoord, destCoord);
 
@@ -286,29 +280,29 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
   }
 
   // Rental bikes and scooters are planned only from live GBFS assets in the search handler.
-  // 3. DIRECT TAXI (Uklon / Bolt / Uber)
+  // A road path is an estimate, not a provider quote or a confirmed taxi.
+  // Keep it useful for route geometry while leaving price and availability unknown.
   if (isTypeAllowed('taxi')) {
     try {
-      const roadRoute = await getRoadRoute(originCoord, destCoord);
-      const taxiEstimate = calculateKyivTaxiEstimate(roadRoute.distanceMeters, roadRoute.durationSeconds);
+      const roadRoute = await getRoadRouteForJourney(originCoord, destCoord);
       const arrivalAt = new Date(departureAt.getTime() + roadRoute.durationSeconds * 1000);
 
       journeys.push({
         id: `taxi:direct:${Math.round(roadRoute.distanceMeters)}`,
         strategy,
-        score: roadRoute.durationSeconds * 0.8 + taxiEstimate.fareMinor * 0.3,
+        score: roadRoute.durationSeconds,
         state: 'PLANNED',
-        source: 'taxi',
-        providerName: 'Uklon / Bolt Таксі',
+        source: 'road-route-estimate',
+        providerName: 'Орієнтовний маршрут таксі',
         totalDurationSeconds: roadRoute.durationSeconds,
-        totalPriceMinor: taxiEstimate.fareMinor,
+        totalPriceMinor: null,
         confirmedPriceMinor: null,
-        estimatedPriceMinMinor: Math.round(taxiEstimate.fareMinor * 0.9),
-        estimatedPriceMaxMinor: Math.round(taxiEstimate.fareMinor * 1.15),
+        estimatedPriceMinMinor: null,
+        estimatedPriceMaxMinor: null,
         walkingMeters: 0,
         transfers: 0,
-        reliabilityScore: 0.94,
-        comfortScore: 0.98,
+        reliabilityScore: null,
+        comfortScore: null,
         legs: [
           {
             ordinal: 0,
@@ -319,66 +313,26 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
             arrivalAt,
             durationSeconds: roadRoute.durationSeconds,
             distanceMeters: Math.round(roadRoute.distanceMeters),
-            priceMinor: taxiEstimate.fareMinor,
+            priceMinor: null,
             currency: 'UAH',
-            priceStatus: 'ESTIMATED',
-            availabilityStatus: 'AVAILABLE',
+            priceStatus: 'UNKNOWN',
+            availabilityStatus: 'UNKNOWN',
             providerType: 'taxi',
-            providerName: 'Таксі (Uklon / Bolt / Uber)',
+            providerName: 'Орієнтовний маршрут таксі',
             state: 'SUGGESTED',
-            source: 'partner-taxi',
+            source: 'road-route-estimate',
+            routeGeometry: roadRoute.geometry,
             metadata: {
-              pickupMinutes: 4,
-              vehicleClasses: ['Standard', 'Comfort', 'Eco'],
               roadDistanceKm: (roadRoute.distanceMeters / 1000).toFixed(1),
+              durationStatus: 'ESTIMATED',
+              routeAccuracy: 'SOURCE_ROAD_GEOMETRY',
+              providerQuote: false,
             },
           },
         ],
       });
     } catch {
-      // Fallback taxi calculation using haversine road estimation
-      const estRoadDist = Math.round(totalDirectDistance * 1.35);
-      const estDur = Math.round(estRoadDist / 11); // ~40 km/h city speed
-      const taxiEstimate = calculateKyivTaxiEstimate(estRoadDist, estDur);
-      const arrAt = new Date(departureAt.getTime() + estDur * 1000);
-
-      journeys.push({
-        id: `taxi:direct-est:${estRoadDist}`,
-        strategy,
-        score: estDur * 0.8 + taxiEstimate.fareMinor * 0.3,
-        state: 'PLANNED',
-        source: 'taxi',
-        providerName: 'Uklon / Bolt Таксі',
-        totalDurationSeconds: estDur,
-        totalPriceMinor: taxiEstimate.fareMinor,
-        confirmedPriceMinor: null,
-        estimatedPriceMinMinor: Math.round(taxiEstimate.fareMinor * 0.9),
-        estimatedPriceMaxMinor: Math.round(taxiEstimate.fareMinor * 1.15),
-        walkingMeters: 0,
-        transfers: 0,
-        reliabilityScore: 0.90,
-        comfortScore: 0.95,
-        legs: [
-          {
-            ordinal: 0,
-            mode: 'TAXI',
-            origin,
-            destination,
-            departureAt: new Date(departureAt),
-            arrivalAt: arrAt,
-            durationSeconds: estDur,
-            distanceMeters: estRoadDist,
-            priceMinor: taxiEstimate.fareMinor,
-            currency: 'UAH',
-            priceStatus: 'ESTIMATED',
-            availabilityStatus: 'AVAILABLE',
-            providerType: 'taxi',
-            providerName: 'Таксі (Uklon / Bolt / Uber)',
-            state: 'SUGGESTED',
-            source: 'partner-taxi',
-          },
-        ],
-      });
+      // Without road geometry, do not invent a direct taxi route or arrival time.
     }
   }
 
@@ -391,15 +345,18 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
         const rapidLeg = hubJourneys[0];
         const distToHub = haversineMeters(originCoord, hub.coordinates);
         if (distToHub >= 3000) {
-          const taxiDistance = Math.round(distToHub * 1.3);
-          const taxiDuration = Math.round(taxiDistance / 12);
-          const taxiFare = calculateKyivTaxiEstimate(taxiDistance, taxiDuration).fareMinor;
+          let taxiRoadRoute: Awaited<ReturnType<typeof getRoadRoute>>;
+          try {
+            taxiRoadRoute = await getRoadRouteForJourney(originCoord, hub.coordinates);
+          } catch {
+            continue;
+          }
 
           const legs: MultimodalLeg[] = [];
           let curTime = new Date(departureAt);
 
           // Leg 1: Taxi to central hub
-          const taxiArr = new Date(curTime.getTime() + taxiDuration * 1000);
+          const taxiArr = new Date(curTime.getTime() + taxiRoadRoute.durationSeconds * 1000);
           legs.push({
             ordinal: legs.length,
             mode: 'TAXI',
@@ -407,16 +364,18 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
             destination: { name: `Вокзал / ст. ${hub.name}`, coordinates: hub.coordinates },
             departureAt: new Date(curTime),
             arrivalAt: taxiArr,
-            durationSeconds: taxiDuration,
-            distanceMeters: taxiDistance,
-            priceMinor: taxiFare,
+            durationSeconds: taxiRoadRoute.durationSeconds,
+            distanceMeters: taxiRoadRoute.distanceMeters,
+            priceMinor: null,
             currency: 'UAH',
-            priceStatus: 'ESTIMATED',
-            availabilityStatus: 'AVAILABLE',
+            priceStatus: 'UNKNOWN',
+            availabilityStatus: 'UNKNOWN',
             providerType: 'taxi',
-            providerName: 'Uklon / Bolt Таксі',
+            providerName: 'Орієнтовний маршрут таксі',
             state: 'SUGGESTED',
-            source: 'partner-taxi',
+            source: 'road-route-estimate',
+            routeGeometry: taxiRoadRoute.geometry,
+            metadata: { durationStatus: 'ESTIMATED', routeAccuracy: 'SOURCE_ROAD_GEOMETRY', providerQuote: false },
           });
           curTime = new Date(taxiArr.getTime() + 180_000); // 3 min entry buffer
 
@@ -501,24 +460,24 @@ export async function composeKyivMultimodalChains(input: MultimodalChainInput): 
           }
 
           const totalDur = Math.round((curTime.getTime() - departureAt.getTime()) / 1000);
-          const totalPrice = taxiFare + rapidLeg.totalFareMinor;
+          const totalPrice = null;
 
           journeys.push({
             id: `chain:taxi-metro:${hub.id}-${rapidLeg.destinationStation.id}`,
             strategy,
-            score: totalDur + totalPrice * 0.1,
+            score: totalDur,
             state: 'PLANNED',
             source: 'multimodal-chain',
-            providerName: `Таксі + ${rapidLeg.segments[0].providerName}`,
+            providerName: `Орієнтовний маршрут таксі + ${rapidLeg.segments[0].providerName}`,
             totalDurationSeconds: totalDur,
             totalPriceMinor: totalPrice,
             confirmedPriceMinor: null,
-            estimatedPriceMinMinor: totalPrice,
-            estimatedPriceMaxMinor: Math.round(totalPrice * 1.1),
+            estimatedPriceMinMinor: null,
+            estimatedPriceMaxMinor: null,
             walkingMeters: rapidLeg.distanceFromDestinationStationMeters,
             transfers: rapidLeg.transfers + 1,
-            reliabilityScore: 0.95,
-            comfortScore: 0.94,
+            reliabilityScore: null,
+            comfortScore: null,
             legs,
           });
           break; // Keep best hub option
