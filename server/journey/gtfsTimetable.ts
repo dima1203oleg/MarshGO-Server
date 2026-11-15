@@ -2532,8 +2532,17 @@ function findGtfsItinerariesAtWalkingReachWithStats(
 
   let stopSelectionTruncated = false;
   const closestStops = (point: [number, number], radius: number) => {
+    const hasTraversableTrip = (stopId: string) => (feed.stopTimesByStop.get(stopId) ?? []).some(({ tripId, index }) => {
+      const trip = feed.trips.get(tripId);
+      const tripStops = feed.stopTimes.get(tripId);
+      if (!trip || !feed.routes.has(trip.routeId) || !tripStops || tripStops.length < 2
+        || !Number.isInteger(index) || index < 0 || index >= tripStops.length) return false;
+      return tripStops[index]?.stopId === stopId;
+    });
     const measured = [...feed.stops.values()]
-      .filter((stop) => feed.stopTimesByStop.has(stop.id))
+      // A single-stop trip cannot produce a ride segment. Do not let malformed
+      // or non-traversable endpoint-only records consume the bounded stop set.
+      .filter((stop) => hasTraversableTrip(stop.id))
       .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]) }));
     // The radius filter below would discard the only measurement of the nearest stop,
     // so take the minimum from the full mapped pass that already ran over every stop.

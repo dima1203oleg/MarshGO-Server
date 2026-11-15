@@ -1141,7 +1141,7 @@ test('keeps a feasible route at the 49th nearby stop when the endpoint stop set 
     'the 56-stop bounded set includes all 49 nearby route stops in this fixture');
 });
 
-test('identifies a feasible route omitted beyond the bounded endpoint set and reports partial search', () => {
+test('ignores non-traversable one-stop patterns before endpoint bounds hide a feasible route', () => {
   const targetTripId = 'only-feasible-trip';
   const origin = { id: 'origin', name: 'Origin', lon: 24.0201, lat: 49.8401 };
   const destination = { id: 'destination', name: 'Destination', lon: 24.0301, lat: 49.8501 };
@@ -1196,14 +1196,13 @@ test('identifies a feasible route omitted beyond the bounded endpoint set and re
     'the independently feasible target trip is the exhaustive oracle for this one-route feed');
   assert.equal(exhaustiveFixture.searchTruncated, false);
 
-  // Fifty-six closer stops expose distinct one-stop route patterns; the only
-  // feasible origin is rank 57 and cannot enter the current 56-stop endpoint set.
+  // Fifty-six closer one-stop records expose distinct, but non-traversable,
+  // route patterns. They must not crowd the only feasible trip out of the set.
   const bounded = findGtfsItinerariesWithStats(buildFeed(56), query);
-  assert.ok(!bounded.itineraries.some((journey) => journey.segments.some((segment) => segment.tripId === targetTripId)),
-    'the current endpoint bound omits a named feasible route despite its independent oracle witness');
-  assert.equal(bounded.truncation.stopSelection, true);
-  assert.equal(bounded.searchTruncated, true,
-    'an omitted feasible endpoint route must be disclosed as a partial search');
+  assert.ok(bounded.itineraries.some((journey) => journey.segments.some((segment) => segment.tripId === targetTripId)),
+    'non-traversable one-stop records must not hide the independently feasible target trip');
+  assert.equal(bounded.truncation.stopSelection, false);
+  assert.equal(bounded.searchTruncated, false);
 });
 
 test('retains additional same-direction boarding stops within the bounded pattern cap', () => {
