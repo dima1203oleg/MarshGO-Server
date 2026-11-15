@@ -142,6 +142,11 @@ test('isolated diagnostics can diversify onward and final-leg candidates without
   // stop on the same trip is at the destination, so its door arrival is earlier
   // even though its vehicle arrival is five minutes later.
   timetable.stops.set('finish', { id: 'finish', name: 'Finish', lon: 24.0400, lat: 49.8500 });
+  for (const stopTimes of timetable.stopTimes.values()) {
+    for (const stopTime of stopTimes) {
+      if (stopTime.stopId === 'finish') stopTime.sourceStopCoordinates = [24.0400, 49.8500];
+    }
+  }
   const addTrip = (routeId: string, tripId: string, departure: string, arrival: string) => {
     timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
     timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Finish' });
