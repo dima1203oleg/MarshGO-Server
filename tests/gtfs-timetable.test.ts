@@ -1138,7 +1138,7 @@ test('keeps a feasible route at the 49th nearby stop when the endpoint stop set 
   assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === targetTripId),
     'a feasible route must not disappear behind 48 closer stops with unrelated route patterns');
   assert.equal(result.truncation.stopSelection, false,
-    'the 64-stop bounded set includes all 49 nearby route stops in this fixture');
+    'the 56-stop bounded set includes all 49 nearby route stops in this fixture');
 });
 
 test('retains additional same-direction boarding stops within the bounded pattern cap', () => {
