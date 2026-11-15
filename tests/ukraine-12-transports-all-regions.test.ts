@@ -11,9 +11,9 @@ import {
 import { composeUkraineMultimodalChains } from '../server/journey/multimodalChainEngine';
 
 describe('Ukraine regional transport catalog metadata', () => {
-  it('covers exactly all 26 regions: 24 Oblasts + Kyiv City + Crimea', () => {
+  it('covers exactly all 27 administrative units: 24 Oblasts + Kyiv + Crimea + Sevastopol', () => {
     const regions = getAllRegions();
-    assert.equal(regions.length, 26, 'Must contain exactly 26 administrative units');
+    assert.equal(regions.length, 27, 'Must contain exactly 27 administrative units');
 
     const expectedRegionIds = [
       'kyiv',
@@ -42,6 +42,7 @@ describe('Ukraine regional transport catalog metadata', () => {
       'donetsk-oblast',
       'luhansk-oblast',
       'crimea',
+      'sevastopol',
     ];
 
     const actualIds = regions.map((r) => r.id);
@@ -100,6 +101,17 @@ describe('Ukraine regional transport catalog metadata', () => {
     assert.ok(lviv, 'Lviv coordinates should resolve');
     assert.equal(lviv.id, 'lviv-oblast');
 
+    // Sevastopol is a distinct special-status unit, not part of the Crimea record.
+    const sevastopol = findRegionByCoordinates(33.53, 44.6);
+    assert.equal(sevastopol?.id, 'sevastopol');
+    assert.equal(findRegion('Севастополь')?.id, 'sevastopol');
+    assert.equal(findRegionByCoordinates(35.0, 45.0)?.id, 'crimea');
+
+    const sevastopolCatalog = getTransportCatalogForCity('sevastopol');
+    assert.equal(sevastopolCatalog.length, 12);
+    assert.equal(sevastopolCatalog.find((mode) => mode.id === 'carpool')?.enabled, true, 'Carpool search is backed by actual MARSHGO listings');
+    assert.ok(sevastopolCatalog.filter((mode) => mode.id !== 'carpool').every((mode) => !mode.enabled), 'No unverified external service is advertised as route-searchable');
+
     // Odesa
     const odesa = findRegionByCoordinates(30.7412, 46.4674);
     assert.ok(odesa, 'Odesa coordinates should resolve');
@@ -131,7 +143,7 @@ describe('Ukraine regional transport catalog metadata', () => {
     assert.equal(crimea.id, 'crimea');
   });
 
-  it('guarantees carpool availability nationwide across all 26 regions', () => {
+  it('offers carpool search nationally through published MARSHGO listings', () => {
     for (const region of getAllRegions()) {
       const carpool = region.transportModes.carpool;
       assert.equal(carpool.available, true, `Carpool must be available in ${region.name}`);
@@ -140,10 +152,15 @@ describe('Ukraine regional transport catalog metadata', () => {
     }
   });
 
-  it('records the UZ source in the regional catalog without claiming loaded route coverage', () => {
+  it('records the UZ source where catalogued without implying loaded route coverage', () => {
     for (const region of getAllRegions()) {
       const train = region.transportModes.train;
-      assert.ok(train.sources.some((s) => s.name.includes('Укрзалізниця')), `Train in ${region.name} must reference Укрзалізниця`);
+      if (region.id === 'sevastopol') {
+        assert.equal(train.available, false, 'No train service is advertised as searchable without an accessible validated feed');
+        assert.equal(train.sources.length, 0);
+      } else {
+        assert.ok(train.sources.some((s) => s.name.includes('Укрзалізниця')), `Train in ${region.name} must reference Укрзалізниця`);
+      }
     }
   });
 
