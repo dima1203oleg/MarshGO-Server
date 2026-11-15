@@ -231,7 +231,7 @@ async function main() {
       const objectiveLookahead50k = runLvivSearch(routeCase, { maxObjectiveReservoirSearchSteps: 50_000 });
       const objectiveLookahead100k = runLvivSearch(routeCase, { maxObjectiveReservoirSearchSteps: 100_000 });
       const expandedObjectiveLookaheadOnly = runLvivSearch(routeCase, { maxObjectiveReservoirSearchSteps: 200_000 });
-      const routeRoundRobinOnly = runLvivSearch(routeCase, { transferCandidateOrder: 'route-round-robin' });
+      const tripRoundRobinOnly = runLvivSearch(routeCase, { transferCandidateOrder: 'trip-round-robin' });
       const graphAndStops = runLvivSearch(routeCase, {
         totalSegments: 250_000, segmentsPerRoute: 30_000,
         maxStopsPerSide: 112, maxStopsPerRoutePattern: 16,
@@ -268,7 +268,7 @@ async function main() {
         objectiveLookahead50k: summarizeVariant(objectiveLookahead50k),
         objectiveLookahead100k: summarizeVariant(objectiveLookahead100k),
         expandedObjectiveLookaheadOnly: summarizeVariant(expandedObjectiveLookaheadOnly),
-        routeRoundRobinOnly: summarizeVariant(routeRoundRobinOnly),
+        tripRoundRobinOnly: summarizeVariant(tripRoundRobinOnly),
         graphAndStopSelection: summarizeVariant(graphAndStops),
       };
     }),
