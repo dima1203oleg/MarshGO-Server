@@ -3715,6 +3715,23 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         .sort((left, right) => right.unused - left.unused || compareStableId(left.routeId, right.routeId))
         .slice(0, 10)
       : undefined;
+    const graphBudgetLimitedRouteSample = debugEnabled
+      ? [...candidateDemandByRoute].flatMap(([routeId, estimatedDemand]) => {
+        const allocatedBudget = graphSegmentBudgetByRoute.get(routeId) ?? 0;
+        if (estimatedDemand <= allocatedBudget) return [];
+        const route = feed.routes.get(routeId);
+        return [{
+          routeId,
+          routeName: route?.name ?? routeId,
+          transportType: route?.transportType ?? 'unknown',
+          estimatedDemand,
+          allocatedBudget,
+          retainedSegments: selectedSegmentsByRoute.get(routeId)?.length ?? 0,
+          demandExcess: estimatedDemand - allocatedBudget,
+        }];
+      }).sort((left, right) => right.demandExcess - left.demandExcess
+        || compareStableId(left.routeId, right.routeId)).slice(0, 10)
+      : undefined;
     debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
       phaseTripLoopMs, phaseTripPrologueMs, phaseInstanceRetentionMs,
       phaseInstanceEventsMs, phasePairVisitationMs, phaseRetentionMs,
@@ -3738,6 +3755,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         retainedTripSegmentsByRetentionTier: JSON.stringify(retainedTripSegmentsByRetentionTier),
       } : {}),
       ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
+      ...(graphBudgetLimitedRouteSample ? { graphBudgetLimitedRouteSample: JSON.stringify(graphBudgetLimitedRouteSample) } : {}),
       estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
       globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
       segmentGraphTruncated: Number(segmentGraphTruncated) });

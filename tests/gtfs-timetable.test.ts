@@ -621,6 +621,38 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.ok(Object.values(samplingEvents).every((count) => Number.isInteger(count) && count >= 0));
 });
 
+test('debug graph-budget diagnostics identify capped routes without changing results', () => {
+  const timetable = feed({ withArrivalAlternatives: true });
+  const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const originalInfo = console.info;
+  const messages: string[] = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
+  let searchTruncated: boolean | undefined;
+  try {
+    searchTruncated = findGtfsItinerariesWithStats(timetable, {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+    }, { totalSegments: 1, segmentsPerRoute: 1 }).searchTruncated;
+  } finally {
+    console.info = originalInfo;
+    if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+  }
+
+  const graph = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown })
+    .find((stage) => stage.stage === 'segments-built');
+  assert.ok(graph, 'segment graph should emit its budget-binding diagnostics');
+  const sample = JSON.parse(String(graph.graphBudgetLimitedRouteSample)) as Array<{
+    routeId: string; estimatedDemand: number; allocatedBudget: number; retainedSegments: number; demandExcess: number;
+  }>;
+  assert.ok(sample.length > 0, 'the one-segment graph budget excludes or caps at least one feasible route');
+  assert.ok(sample.length <= 10, 'the diagnostic route sample stays bounded');
+  assert.ok(sample.every((route) => route.estimatedDemand > route.allocatedBudget
+    && route.demandExcess === route.estimatedDemand - route.allocatedBudget),
+  'every diagnostic row must disclose a real estimated-demand versus budget shortfall');
+  assert.equal(searchTruncated, true, 'diagnostic mode preserves truthful partial-search behavior');
+});
+
 test('endpoint overflow reservoir retains up to its bounded per-route budget', () => {
   const timetable = feed();
   const originEntries = [...(timetable.stopTimesByStop.get('origin') ?? [])];
