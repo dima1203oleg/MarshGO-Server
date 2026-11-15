@@ -28,11 +28,25 @@ describe('bounded GTFS graph budgets', () => {
     assert.equal([...budgets.values()].reduce((sum, value) => sum + value, 0), 16);
   });
 
-  it('leaves unused capacity unassigned when the estimated route supply is smaller than the graph budget', () => {
+  it('keeps all estimated route supply and leaves only surplus global capacity unused', () => {
     const budgets = allocateBoundedGraphBudgets(new Map([['small-line', 2], ['large-line', 100]]), 200, 50);
 
-    assert.deepEqual([...budgets], [['large-line', 50], ['small-line', 2]]);
-    assert.equal([...budgets.values()].reduce((sum, value) => sum + value, 0), 52);
+    assert.deepEqual([...budgets], [['large-line', 100], ['small-line', 2]]);
+    assert.equal([...budgets.values()].reduce((sum, value) => sum + value, 0), 102);
+  });
+
+  it('does not discard route demand under the per-route ceiling when global capacity is available', () => {
+    const budgets = allocateBoundedGraphBudgets(new Map([['lviv-A20', 9_390]]), 100_000, 5_000);
+
+    assert.equal(budgets.get('lviv-A20'), 9_390);
+  });
+
+  it('retains the per-route ceiling when aggregate estimated demand exceeds the global budget', () => {
+    const demand = new Map(Array.from({ length: 24 }, (_, index) => [`route-${index}`, 5_000] as const));
+    const budgets = allocateBoundedGraphBudgets(demand, 100_000, 5_000);
+
+    assert.equal([...budgets.values()].reduce((sum, value) => sum + value, 0), 100_000);
+    assert.ok([...budgets.values()].every((value) => value <= 5_000));
   });
 
   it('filters non-positive demand and validates the hard bounds', () => {
