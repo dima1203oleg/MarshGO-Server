@@ -88,6 +88,9 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
     assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
       transferCandidateOrder: 'trip-round-robin',
     }), /bounds are invalid/, 'alternate transfer ordering is unavailable outside the isolated diagnostic runner');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      finalLegCandidateOrder: 'earliest-door-arrival',
+    }), /bounds are invalid/, 'final-leg objective ordering is unavailable outside the isolated diagnostic runner');
 
     process.env.NODE_ENV = 'test';
     delete process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
@@ -108,6 +111,9 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
     assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, {
       maxObjectiveReservoirSearchSteps: 200_000,
     }), 'the isolated diagnostic runner can test a larger objective lookahead');
+    assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      finalLegCandidateOrder: 'earliest-door-arrival',
+    }), 'the isolated diagnostic runner can test final-leg door-arrival ordering');
     assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
       ...expandedLimits, maxStopsPerSide: 113,
     }), /bounds are invalid/, 'endpoint diagnostics remain capped at 112 stops per side');
@@ -130,8 +136,12 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
   }
 });
 
-test('dense-feed diagnostic interleaves onward routes while default search remains chronological', () => {
+test('isolated diagnostics can diversify onward and final-leg candidates without changing default order', () => {
   const timetable = connectingFeed({ secondRouteType: '3' });
+  // The scheduled stop is about 700 m from the requested destination. A later
+  // stop on the same trip is at the destination, so its door arrival is earlier
+  // even though its vehicle arrival is five minutes later.
+  timetable.stops.set('finish', { id: 'finish', name: 'Finish', lon: 24.0400, lat: 49.8500 });
   const addTrip = (routeId: string, tripId: string, departure: string, arrival: string) => {
     timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
     timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Finish' });
@@ -161,10 +171,14 @@ test('dense-feed diagnostic interleaves onward routes while default search remai
     assert.ok(observed);
     const firstLeg = observed.segments.find(({ journey }) => journey.tripId === 'b1' && journey.originStop.id === 'start');
     assert.ok(firstLeg);
-    return observed.successors(firstLeg.id, 1).map((id) => observed!.segments.find((segment) => segment.id === id)!.journey.tripId);
+    return observed.successors(firstLeg.id, 1).map((id) => {
+      const journey = observed!.segments.find((segment) => segment.id === id)!.journey;
+      return `${journey.tripId}:${journey.destinationStop.id}`;
+    });
   };
 
-  assert.deepEqual(captureOnwardRoutes(), ['r1', 'r1', 'r2', 'n1'], 'default traversal keeps all onward candidates chronological');
+  assert.deepEqual(captureOnwardRoutes(), ['r1:finish', 'r1:finish-near', 'r2:finish', 'n1:finish'],
+    'default traversal keeps all onward candidates in their existing chronology');
   const previousNodeEnv = process.env.NODE_ENV;
   const previousCi = process.env.CI;
   const previousDiagnosticOptIn = process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
@@ -172,8 +186,11 @@ test('dense-feed diagnostic interleaves onward routes while default search remai
     process.env.NODE_ENV = 'test';
     process.env.CI = 'true';
     process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
-    assert.deepEqual(captureOnwardRoutes({ transferCandidateOrder: 'trip-round-robin' }), ['r1', 'r2', 'n1', 'r1'],
+    assert.deepEqual(captureOnwardRoutes({ transferCandidateOrder: 'trip-round-robin' }), ['r1:finish', 'r2:finish', 'n1:finish', 'r1:finish-near'],
       'the opt-in diagnostic visits distinct scheduled runs before repeated stop-pair variants of the same run');
+    assert.deepEqual(captureOnwardRoutes({ finalLegCandidateOrder: 'earliest-door-arrival' }),
+      ['r1:finish-near', 'r1:finish', 'r2:finish', 'n1:finish'],
+      'final-leg diagnostic accounts for the destination walk, while the default remains vehicle-chronological');
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
