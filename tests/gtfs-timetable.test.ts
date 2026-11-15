@@ -1289,7 +1289,7 @@ test('retains additional same-direction boarding stops within the bounded patter
   assert.equal(result.searchTruncated, false, 'all relevant stops fit below the per-side bound for this fixture');
 });
 
-test('bounds a dense route graph and reports omitted GTFS segment candidates', () => {
+test('bounds a dense route candidate pool without truncating graph demand under global slack', () => {
   const timetable = feed();
   // Routes elsewhere in a national feed must not dilute this corridor's
   // retention quota when they have no stops in the query's interchange set.
@@ -1326,9 +1326,9 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
   assert.ok(result.itineraries.length > 0, 'the bounded graph still returns feasible scheduled options');
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === 'fast-late-trip')),
     'bounded retention must not favor early rows in a chronologically ordered feed');
-  assert.equal(result.searchTruncated, true, 'omitting graph candidates must be visible as a partial search');
-  assert.equal(result.candidateGraphTruncated, true, 'the internal result identifies graph-level truncation');
-  assert.equal(result.truncation.candidateGraph, true, 'structured truncation reasons identify graph loss');
+  assert.equal(result.searchTruncated, true, 'sampling the dense candidate pool must be visible as a partial search');
+  assert.equal(result.candidateGraphTruncated, false, 'global graph slack keeps the route graph intact');
+  assert.equal(result.truncation.candidateGraph, false, 'candidate-pool sampling is not graph loss');
   assert.equal(result.truncation.stopSelection, false, 'graph loss is distinguishable from stop-selection loss');
   assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
 
