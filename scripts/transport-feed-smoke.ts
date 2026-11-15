@@ -159,7 +159,8 @@ async function main() {
   // The static feed is parsed below by the planner. In the focused Lviv scope, only
   // probe the realtime endpoint here to avoid downloading/parsing the static archive twice.
   const isLvivDiagnosticScope = scope === 'lviv-route' || scope === 'lviv-budget-diagnostic'
-    || scope === 'lviv-north-baseline-diagnostic' || scope === 'lviv-north-trip-fairness-diagnostic';
+    || scope === 'lviv-north-baseline-diagnostic' || scope === 'lviv-north-trip-fairness-diagnostic'
+    || scope === 'lviv-north-final-arrival-diagnostic';
   const providerProbeEntries = isLvivDiagnosticScope
     ? selectedEntries.filter((entry) => entry.sourceType === 'gtfs_rt')
     : scope === 'ukraine-rail-route' ? [] : selectedEntries;
@@ -198,6 +199,7 @@ async function main() {
     { id: 'north-to-sykhiv', origin: [24.0029933, 49.8681678] as [number, number], destination: [24.057585, 49.794117] as [number, number] },
   ];
   const selectedLvivRouteCases = scope === 'lviv-north-baseline-diagnostic' || scope === 'lviv-north-trip-fairness-diagnostic'
+    || scope === 'lviv-north-final-arrival-diagnostic'
     ? lvivRouteCases.filter((routeCase) => routeCase.id === 'north-to-sykhiv') : lvivRouteCases;
   const selectedGraphLimits: GtfsGraphBudgetLimits = scope === 'lviv-north-trip-fairness-diagnostic'
     ? { transferCandidateOrder: 'trip-round-robin' } : {};
@@ -283,6 +285,36 @@ async function main() {
       };
     }),
   } : undefined;
+  const finalArrivalDiagnostic = scope === 'lviv-north-final-arrival-diagnostic' ? {
+    mode: 'test-only final-leg stop-pair order by predicted door arrival; production search remains chronological',
+    cases: selectedLvivRouteCases.map((routeCase, index) => {
+      const baseline = standardRuns[index]!;
+      const ordered = runLvivSearch(routeCase, { finalLegCandidateOrder: 'earliest-door-arrival' });
+      const baselineSignatures = baseline.result.itineraries.map(itinerarySignature);
+      const orderedSignatures = ordered.result.itineraries.map(itinerarySignature);
+      const baselineSet = new Set(baselineSignatures);
+      const orderedSet = new Set(orderedSignatures);
+      return {
+        id: routeCase.id,
+        baseline: {
+          signatures: baselineSignatures,
+          searchTruncated: baseline.result.searchTruncated,
+          resultLimitReached: baseline.result.resultLimitReached,
+          plannerDiagnostics: baseline.diagnostics,
+          itineraries: baseline.result.itineraries.map(serializeSmokeJourney),
+        },
+        earliestDoorArrival: {
+          signatures: orderedSignatures,
+          introducedSignatures: orderedSignatures.filter((signature) => !baselineSet.has(signature)),
+          removedSignatures: baselineSignatures.filter((signature) => !orderedSet.has(signature)),
+          searchTruncated: ordered.result.searchTruncated,
+          resultLimitReached: ordered.result.resultLimitReached,
+          plannerDiagnostics: ordered.diagnostics,
+          itineraries: ordered.result.itineraries.map(serializeSmokeJourney),
+        },
+      };
+    }),
+  } : undefined;
   const routePlanner = {
     provider: 'Львівавтодор GTFS → MARSHGO GTFS timetable planner',
     feed: withOptionalSourceFingerprint({
@@ -293,7 +325,8 @@ async function main() {
     }, 'staticFeedSha256', lvivFeed.staticFeedSha256),
     serviceDate,
     queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
-    searchVariant: scope === 'lviv-north-trip-fairness-diagnostic' ? 'test-only-trip-round-robin' : 'chronological-default',
+    searchVariant: scope === 'lviv-north-trip-fairness-diagnostic' ? 'test-only-trip-round-robin'
+      : scope === 'lviv-north-final-arrival-diagnostic' ? 'test-only-earliest-door-arrival' : 'chronological-default',
     cases: selectedLvivRouteCases.map((routeCase, index) => {
       const { result: search, diagnostics } = standardRuns[index]!;
       const itineraryEvidence = search.itineraries.map(serializeSmokeJourney);
@@ -361,7 +394,8 @@ async function main() {
     offline: checkedResults.filter((row) => row.state === 'OFFLINE').length,
     note: 'Read-only probe; HEALTHY means feed health only, not commercial permission, route-search integration, price, availability or booking.',
   };
-  console.log(JSON.stringify({ checkedAt: new Date().toISOString(), summary, catalog: results, routePlanner, supplementary }, null, 2));
+  console.log(JSON.stringify({ checkedAt: new Date().toISOString(), summary, catalog: results, routePlanner,
+    ...(finalArrivalDiagnostic ? { finalArrivalDiagnostic } : {}), supplementary }, null, 2));
   if (scope === 'lviv-route' && !routePlanner.cases.some((routeCase) =>
     routeCase.count > 0 && !routeCase.searchTruncated)) {
     process.exitCode = 1;

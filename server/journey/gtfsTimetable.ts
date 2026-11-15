@@ -550,6 +550,8 @@ export interface GtfsGraphBudgetLimits {
   maxObjectiveReservoirSearchSteps?: number;
   /** Test-only onward-route diversification for dense-feed diagnostics. */
   transferCandidateOrder?: 'chronological' | 'trip-round-robin';
+  /** Test-only final-stop ordering by predicted door arrival. */
+  finalLegCandidateOrder?: 'chronological' | 'earliest-door-arrival';
   /** Test-only override for verifying bounded search-frontier behavior. */
   maxQueuedSearchWork?: number;
 }
@@ -2553,6 +2555,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   const maximumAllowedSearchResults = isGtfsGraphBudgetDiagnosticEnabled() ? limit * 100 : limit * 25;
   const maximumAllowedObjectiveReservoirSearchSteps = isGtfsGraphBudgetDiagnosticEnabled() ? 200_000 : 25_000;
   const transferCandidateOrder = graphLimits.transferCandidateOrder ?? 'chronological';
+  const finalLegCandidateOrder = graphLimits.finalLegCandidateOrder ?? 'chronological';
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
@@ -2582,7 +2585,9 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     || !Number.isSafeInteger(objectiveReservoirSearchSteps) || objectiveReservoirSearchSteps < 25_000
     || objectiveReservoirSearchSteps > maximumAllowedObjectiveReservoirSearchSteps
     || !['chronological', 'trip-round-robin'].includes(transferCandidateOrder)
-    || (transferCandidateOrder !== 'chronological' && !isGtfsGraphBudgetDiagnosticEnabled())) {
+    || (transferCandidateOrder !== 'chronological' && !isGtfsGraphBudgetDiagnosticEnabled())
+    || !['chronological', 'earliest-door-arrival'].includes(finalLegCandidateOrder)
+    || (finalLegCandidateOrder !== 'chronological' && !isGtfsGraphBudgetDiagnosticEnabled())) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
   const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
@@ -4176,6 +4181,22 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     const canReach = reachableWithin[remainingLegs - 1];
     const chronologicallyOrdered = transferCandidates(previous).filter((candidate) => canReach.has(candidate.destinationStop.id));
     let candidates = chronologicallyOrdered;
+    if (remainingLegs === 1 && finalLegCandidateOrder === 'earliest-door-arrival') {
+      // For a final transit leg the passenger's arrival includes the egress
+      // walk. Prefer stop-pair variants with the earlier predicted door arrival
+      // so the bounded cursor does not spend its first slots on early vehicle
+      // arrivals that leave a long walk to the requested destination.
+      candidates = [...chronologicallyOrdered].sort((left, right) => {
+        const leftDoorArrival = left.arrivalAt.getTime()
+          + walkingSeconds(left.distanceFromDestinationStopMeters) * 1000;
+        const rightDoorArrival = right.arrivalAt.getTime()
+          + walkingSeconds(right.distanceFromDestinationStopMeters) * 1000;
+        return leftDoorArrival - rightDoorArrival
+          || left.arrivalAt.getTime() - right.arrivalAt.getTime()
+          || left.distanceFromDestinationStopMeters - right.distanceFromDestinationStopMeters
+          || compareStableId(left.tripId, right.tripId);
+      });
+    }
     if (transferCandidateOrder === 'trip-round-robin') {
       // In dense feeds a single trip contributes many stop-pair alternatives
       // and can consume a bounded child cursor before other departures on the
