@@ -37,6 +37,10 @@ test('serializes dated trip, stop, schedule, and transfer facts without losing u
         departureAt: at('2026-11-15T07:05:00.000Z'), arrivalAt: at('2026-11-15T07:30:00.000Z'),
         originStop: { id: 'stop-1', name: 'Stop 1', coordinates: [24, 49] },
         destinationStop: { id: 'stop-2', name: 'Stop 2', coordinates: [24.01, 49.01] },
+        routeGeometry: [[24, 49], [24.005, 49.006], [24.01, 49.01]] as [number, number][],
+        shapeDistanceMeters: 1480,
+        stops: [{ id: 'stop-1', name: 'Stop 1', coordinates: [24, 49], arrivalAt: '2026-11-15T07:05:00.000Z',
+          departureAt: '2026-11-15T07:05:00.000Z', pickupType: 0, dropOffType: 0 }],
       },
       {
         providerId: 'provider', routeId: 'route-2', routeName: 'T1', tripId: 'trip-2', serviceDate: '20261115',
@@ -58,6 +62,15 @@ test('serializes dated trip, stop, schedule, and transfer facts without losing u
   assert.equal(evidence.segments[0]?.staticFeedSha256, 'c'.repeat(64));
   assert.equal(evidence.segments[0]?.tripId, 'trip-1');
   assert.equal(evidence.segments[0]?.originStop.id, 'stop-1');
+  assert.deepEqual(evidence.segments[0]?.routeGeometry, [[24, 49], [24.005, 49.006], [24.01, 49.01]]);
+  assert.equal(evidence.segments[0]?.routeGeometrySource, 'gtfs-trip-shape');
+  assert.equal(evidence.segments[0]?.shapeDistanceMeters, 1480);
+  assert.equal(evidence.segments[0]?.stops?.length, 1);
+  assert.equal(evidence.segments[1]?.routeGeometry, null,
+    'missing GTFS geometry must stay unavailable rather than being synthesized in evidence');
+  assert.equal(evidence.segments[1]?.routeGeometrySource, 'unavailable');
+  assert.equal(evidence.segments[1]?.stops, null,
+    'missing stop-call evidence must not be inferred from endpoints');
   assert.equal(evidence.segments[1]?.scheduleSemantics, 'frequency_estimate');
   assert.equal('staticFeedSha256' in (evidence.segments[1] ?? {}), false);
 });

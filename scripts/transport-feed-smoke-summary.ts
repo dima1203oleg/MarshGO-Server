@@ -29,6 +29,11 @@ type SmokeJourneySegment = {
   arrivalAt: Date;
   originStop: { id: string; name: string; coordinates: [number, number] };
   destinationStop: { id: string; name: string; coordinates: [number, number] };
+  /** Source geometry is optional; never synthesize a straight-line fallback in acceptance evidence. */
+  routeGeometry?: readonly [number, number][];
+  shapeDistanceMeters?: number;
+  stops?: readonly { id: string; name: string; coordinates: [number, number]; arrivalAt: string; departureAt: string;
+    pickupType: number; dropOffType: number; skipped?: boolean }[];
 };
 
 type SmokeJourneyEvidence = {
@@ -79,6 +84,10 @@ export function serializeSmokeJourney(journey: SmokeJourneyEvidence) {
       arrivalAt: segment.arrivalAt.toISOString(),
       originStop: segment.originStop,
       destinationStop: segment.destinationStop,
+      routeGeometry: segment.routeGeometry ?? null,
+      routeGeometrySource: segment.routeGeometry ? 'gtfs-trip-shape' : 'unavailable',
+      ...(segment.shapeDistanceMeters !== undefined ? { shapeDistanceMeters: segment.shapeDistanceMeters } : {}),
+      stops: segment.stops ?? null,
     })),
   };
 }
