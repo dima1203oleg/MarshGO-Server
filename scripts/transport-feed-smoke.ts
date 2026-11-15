@@ -225,6 +225,10 @@ async function main() {
       const expandedSignatures = expanded.result.itineraries.map(itinerarySignature);
       const baselineSet = new Set(baselineSignatures);
       const expandedSet = new Set(expandedSignatures);
+      const introducedItineraries = expanded.result.itineraries
+        .filter((itinerary) => !baselineSet.has(itinerarySignature(itinerary)));
+      const removedItineraries = baseline.result.itineraries
+        .filter((itinerary) => !expandedSet.has(itinerarySignature(itinerary)));
       return {
         id: routeCase.id,
         baseline: {
@@ -243,6 +247,8 @@ async function main() {
         },
         introducedSignatures: [...expandedSet].filter((signature) => !baselineSet.has(signature)),
         removedSignatures: [...baselineSet].filter((signature) => !expandedSet.has(signature)),
+        introducedItineraries: introducedItineraries.map(serializeSmokeJourney),
+        removedItineraries: removedItineraries.map(serializeSmokeJourney),
       };
     }),
   } : undefined;
