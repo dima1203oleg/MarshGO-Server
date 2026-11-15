@@ -4,6 +4,7 @@ export type RouteCoordinate = [number, number];
 const TRUSTED_GEOMETRY_MODES: Readonly<Record<string, ReadonlySet<string>>> = {
   'osrm-foot-route': new Set(['WALK']),
   'osrm-bike-route': new Set(['BICYCLE']),
+  'osrm-scooter-route': new Set(['SCOOTER']),
   'gtfs-pathway': new Set(['WALK']),
   'gtfs-pathways': new Set(['WALK']),
   'osrm-car-route': new Set(['TAXI', 'COMMUNITY']),

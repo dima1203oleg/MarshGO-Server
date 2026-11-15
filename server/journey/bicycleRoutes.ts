@@ -13,7 +13,41 @@ export interface BicycleRoutePath {
  * straight-line estimate and label it honestly instead of inventing a street path.
  */
 export function bicycleRoutingEnabled(): boolean {
-  return Boolean(process.env.BIKING_ROUTING_URL?.trim());
+  return Boolean(process.env.BIKING_ROUTING_URL?.trim()) || bicycleEndpointRules().length > 0;
+}
+
+type BicycleEndpointRule = { bbox: [number, number, number, number]; url: string };
+let bicycleEndpointCache: { raw: string; rules: BicycleEndpointRule[] } | null = null;
+
+function bicycleEndpointRules(): BicycleEndpointRule[] {
+  const raw = process.env.BIKING_ROUTING_URLS?.trim();
+  if (!raw) return [];
+  if (bicycleEndpointCache?.raw === raw) return bicycleEndpointCache.rules;
+  let rules: BicycleEndpointRule[] = [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) rules = parsed.flatMap((item): BicycleEndpointRule[] => {
+      const rule = item as { bbox?: unknown; url?: unknown } | null;
+      const bbox = rule?.bbox;
+      if (!Array.isArray(bbox) || bbox.length !== 4 || !bbox.every((value) => typeof value === 'number' && Number.isFinite(value))) return [];
+      if (typeof rule?.url !== 'string' || !rule.url.trim()) return [];
+      return [{ bbox: bbox as [number, number, number, number], url: normalizeBikeEndpoint(rule.url) }];
+    });
+  } catch {
+    rules = [];
+  }
+  bicycleEndpointCache = { raw, rules };
+  return rules;
+}
+
+/** A city graph answers only for rides whose both ends lie inside it; OSRM would otherwise snap a
+ *  foreign ride onto its own streets and return a plausible-looking but false path. */
+export function bicycleEndpointFor(from: [number, number], to: [number, number]): string | undefined {
+  const rules = bicycleEndpointRules();
+  if (!rules.length) return process.env.BIKING_ROUTING_URL?.trim() || undefined;
+  const inside = (bbox: [number, number, number, number], point: [number, number]) =>
+    point[0] >= bbox[0] && point[0] <= bbox[2] && point[1] >= bbox[1] && point[1] <= bbox[3];
+  return rules.find(({ bbox }) => inside(bbox, from) && inside(bbox, to))?.url;
 }
 
 const BICYCLE_ROUTE_TIMEOUT_MS = 2000;
@@ -65,7 +99,7 @@ function anchorsRoute(geometry: Array<[number, number]>, from: [number, number],
 export async function routeBicyclePath(
   from: [number, number],
   to: [number, number],
-  endpoint = process.env.BIKING_ROUTING_URL,
+  endpoint = bicycleEndpointFor(from, to),
 ): Promise<BicycleRoutePath | null> {
   if (!endpoint?.trim()) return null;
   const resolvedEndpoint = normalizeBikeEndpoint(endpoint);
