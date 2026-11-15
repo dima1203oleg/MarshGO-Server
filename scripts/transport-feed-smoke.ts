@@ -158,10 +158,12 @@ async function main() {
   const selectedEntries = selectTransportFeedSmokeEntries(catalog, scope);
   // The static feed is parsed below by the planner. In the focused Lviv scope, only
   // probe the realtime endpoint here to avoid downloading/parsing the static archive twice.
-  const providerProbeEntries = scope === 'lviv-route' || scope === 'lviv-budget-diagnostic'
+  const isLvivDiagnosticScope = scope === 'lviv-route' || scope === 'lviv-budget-diagnostic'
+    || scope === 'lviv-north-baseline-diagnostic' || scope === 'lviv-north-trip-fairness-diagnostic';
+  const providerProbeEntries = isLvivDiagnosticScope
     ? selectedEntries.filter((entry) => entry.sourceType === 'gtfs_rt')
     : scope === 'ukraine-rail-route' ? [] : selectedEntries;
-  const results = await mapLimit(providerProbeEntries, scope === 'lviv-route' || scope === 'lviv-budget-diagnostic' ? 1 : CONCURRENCY, probe);
+  const results = await mapLimit(providerProbeEntries, isLvivDiagnosticScope ? 1 : CONCURRENCY, probe);
 
   if (scope === 'ukraine-rail-route') {
     const railFeed = selectedEntries[0];
@@ -195,6 +197,10 @@ async function main() {
     { id: 'center-to-main-station', origin: [24.0297, 49.8397] as [number, number], destination: [23.9893, 49.8397] as [number, number] },
     { id: 'north-to-sykhiv', origin: [24.0029933, 49.8681678] as [number, number], destination: [24.057585, 49.794117] as [number, number] },
   ];
+  const selectedLvivRouteCases = scope === 'lviv-north-baseline-diagnostic' || scope === 'lviv-north-trip-fairness-diagnostic'
+    ? lvivRouteCases.filter((routeCase) => routeCase.id === 'north-to-sykhiv') : lvivRouteCases;
+  const selectedGraphLimits: GtfsGraphBudgetLimits = scope === 'lviv-north-trip-fairness-diagnostic'
+    ? { transferCandidateOrder: 'trip-round-robin' } : {};
   const createLvivSearchInput = (routeCase: typeof lvivRouteCases[number]) => ({
     providerId: 'live-lviv-route-smoke',
     providerName: 'Львівавтодор GTFS',
@@ -212,7 +218,7 @@ async function main() {
   });
   const runLvivSearch = (routeCase: typeof lvivRouteCases[number], graphLimits: GtfsGraphBudgetLimits = {}) =>
     findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(lvivFeed, createLvivSearchInput(routeCase), graphLimits));
-  const standardRuns = lvivRouteCases.map((routeCase) => runLvivSearch(routeCase));
+  const standardRuns = selectedLvivRouteCases.map((routeCase) => runLvivSearch(routeCase, selectedGraphLimits));
   const itinerarySignature = (itinerary: GtfsItinerary) => itinerary.segments.map((segment) =>
     `${segment.transportType}:${segment.routeId}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}`).join('|');
   const budgetDiagnostic = scope === 'lviv-budget-diagnostic' ? {
@@ -287,7 +293,8 @@ async function main() {
     }, 'staticFeedSha256', lvivFeed.staticFeedSha256),
     serviceDate,
     queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
-    cases: lvivRouteCases.map((routeCase, index) => {
+    searchVariant: scope === 'lviv-north-trip-fairness-diagnostic' ? 'test-only-trip-round-robin' : 'chronological-default',
+    cases: selectedLvivRouteCases.map((routeCase, index) => {
       const { result: search, diagnostics } = standardRuns[index]!;
       const itineraryEvidence = search.itineraries.map(serializeSmokeJourney);
       return {
