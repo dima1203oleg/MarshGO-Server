@@ -173,11 +173,16 @@ test('isolated diagnostics can diversify onward and final-leg candidates without
     assert.ok(firstLeg);
     return observed.successors(firstLeg.id, 1).map((id) => {
       const journey = observed!.segments.find((segment) => segment.id === id)!.journey;
-      return `${journey.tripId}:${journey.destinationStop.id}`;
+      return {
+        id: `${journey.tripId}:${journey.destinationStop.id}`,
+        arrivalAt: journey.arrivalAt.toISOString(),
+        egressMeters: journey.distanceFromDestinationStopMeters,
+      };
     });
   };
 
-  assert.deepEqual(captureOnwardRoutes(), ['r1:finish', 'r1:finish-near', 'r2:finish', 'n1:finish'],
+  const defaultOrder = captureOnwardRoutes();
+  assert.deepEqual(defaultOrder.map(({ id }) => id), ['r1:finish', 'r1:finish-near', 'r2:finish', 'n1:finish'],
     'default traversal keeps all onward candidates in their existing chronology');
   const previousNodeEnv = process.env.NODE_ENV;
   const previousCi = process.env.CI;
@@ -186,11 +191,12 @@ test('isolated diagnostics can diversify onward and final-leg candidates without
     process.env.NODE_ENV = 'test';
     process.env.CI = 'true';
     process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
-    assert.deepEqual(captureOnwardRoutes({ transferCandidateOrder: 'trip-round-robin' }), ['r1:finish', 'r2:finish', 'n1:finish', 'r1:finish-near'],
+    assert.deepEqual(captureOnwardRoutes({ transferCandidateOrder: 'trip-round-robin' }).map(({ id }) => id), ['r1:finish', 'r2:finish', 'n1:finish', 'r1:finish-near'],
       'the opt-in diagnostic visits distinct scheduled runs before repeated stop-pair variants of the same run');
-    assert.deepEqual(captureOnwardRoutes({ finalLegCandidateOrder: 'earliest-door-arrival' }),
+    const doorArrivalOrder = captureOnwardRoutes({ finalLegCandidateOrder: 'earliest-door-arrival' });
+    assert.deepEqual(doorArrivalOrder.map(({ id }) => id),
       ['r1:finish-near', 'r1:finish', 'r2:finish', 'n1:finish'],
-      'final-leg diagnostic accounts for the destination walk, while the default remains vehicle-chronological');
+      `final-leg diagnostic accounts for the destination walk; candidates=${JSON.stringify(doorArrivalOrder)}; default=${JSON.stringify(defaultOrder)}`);
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
