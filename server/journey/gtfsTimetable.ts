@@ -32,7 +32,7 @@ const MERGED_FEED_CACHE_TTL_MS = 60_000;
 const MAX_MERGED_FEED_CACHE_ENTRIES = 2;
 const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
-const MAX_STOPS_PER_SIDE = 48;
+const MAX_STOPS_PER_SIDE = 56;
 const MAX_STOPS_PER_ROUTE_PATTERN = 8;
 const EARTH_RADIUS_M = 6_371_000;
 const MAX_ROUTE_GEOMETRY_POINTS = 500;
@@ -1304,6 +1304,12 @@ interface CachedGtfsCandidateGraph {
   segments: GtfsDirectJourney[];
   shapeIndexes: Array<{ fromIndex: number; toIndex: number; serviceDate: string }>;
   segmentGraphTruncated: boolean;
+  segmentGraphTruncationReasons?: {
+    localStopPairWindowOmissions: number;
+    perTripCandidateOverflowSegments: number;
+    routeBudgetDiscardedSegments: number;
+    routeBudgetRejectedTripGroups: number;
+  };
   stopSelectionTruncated: boolean;
   corridorStops: number;
   interchangeStops: number;
@@ -1962,8 +1968,9 @@ export function tripInstanceCannotDepartInWindow(bounds: GtfsBoardingDepartureBo
 
 /** Keep the graph materializer and its budget estimator on the same stop-pair window rule. */
 export function shouldOmitGtfsStopPairBeyondLocalWindow(maximumTransfers: number,
-  fromCursor: number, toCursor: number, isQueryDestination: boolean): boolean {
-  return maximumTransfers > 0 && toCursor > fromCursor + 20 && !isQueryDestination;
+  fromCursor: number, toCursor: number, isQueryDestination: boolean, isQueryFrontierTransfer = false): boolean {
+  return maximumTransfers > 0 && toCursor > fromCursor + 20
+    && !isQueryDestination && !isQueryFrontierTransfer;
 }
 
 /**
@@ -1981,6 +1988,7 @@ export function visitTripInstanceLegs(
     earliestDeparture: Date;
     journeyEnd: Date;
     destinationStopIds: ReadonlySet<string>;
+    retainLongTransferPair?: (fromStopId: string, toStopId: string) => boolean;
     canBelongToDirectOnlyJourney: (fromStopId: string, toStopId: string) => boolean;
     boardingStopIndex?: number;
   },
@@ -2001,8 +2009,11 @@ export function visitTripInstanceLegs(
     for (let toCursor = fromCursor + 1; toCursor < events.length; toCursor++) {
       const toEvent = events[toCursor]!;
       const to = toEvent.stopTime;
+      const isQueryDestination = options.destinationStopIds.has(to.stopId);
+      const isLongPair = options.maximumTransfers > 0 && toCursor > fromCursor + 20;
       if (shouldOmitGtfsStopPairBeyondLocalWindow(options.maximumTransfers, fromCursor, toCursor,
-        options.destinationStopIds.has(to.stopId))) {
+        isQueryDestination, isLongPair && !isQueryDestination
+          && options.retainLongTransferPair?.(from.stopId, to.stopId) === true)) {
         const omittedArrivalAt = toEvent.scheduledArrivalAt;
         if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
           && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
@@ -2029,6 +2040,7 @@ export function* materializeTripInstanceLegs(
     earliestDeparture: Date;
     journeyEnd: Date;
     destinationStopIds: ReadonlySet<string>;
+    retainLongTransferPair?: (fromStopId: string, toStopId: string) => boolean;
     canBelongToDirectOnlyJourney: (fromStopId: string, toStopId: string) => boolean;
     boardingStopIndex?: number;
   },
@@ -2046,8 +2058,11 @@ export function* materializeTripInstanceLegs(
     for (let toCursor = fromCursor + 1; toCursor < events.length; toCursor++) {
       const toEvent = events[toCursor]!;
       const to = toEvent.stopTime;
+      const isQueryDestination = options.destinationStopIds.has(to.stopId);
+      const isLongPair = options.maximumTransfers > 0 && toCursor > fromCursor + 20;
       if (shouldOmitGtfsStopPairBeyondLocalWindow(options.maximumTransfers, fromCursor, toCursor,
-        options.destinationStopIds.has(to.stopId))) {
+        isQueryDestination, isLongPair && !isQueryDestination
+          && options.retainLongTransferPair?.(from.stopId, to.stopId) === true)) {
         const omittedArrivalAt = toEvent.scheduledArrivalAt;
         if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
           && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
@@ -2532,8 +2547,17 @@ function findGtfsItinerariesAtWalkingReachWithStats(
 
   let stopSelectionTruncated = false;
   const closestStops = (point: [number, number], radius: number) => {
+    const hasTraversableTrip = (stopId: string) => (feed.stopTimesByStop.get(stopId) ?? []).some(({ tripId, index }) => {
+      const trip = feed.trips.get(tripId);
+      const tripStops = feed.stopTimes.get(tripId);
+      if (!trip || !feed.routes.has(trip.routeId) || !tripStops || tripStops.length < 2
+        || !Number.isInteger(index) || index < 0 || index >= tripStops.length) return false;
+      return tripStops[index]?.stopId === stopId;
+    });
     const measured = [...feed.stops.values()]
-      .filter((stop) => feed.stopTimesByStop.has(stop.id))
+      // A single-stop trip cannot produce a ride segment. Do not let malformed
+      // or non-traversable endpoint-only records consume the bounded stop set.
+      .filter((stop) => hasTraversableTrip(stop.id))
       .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]) }));
     // The radius filter below would discard the only measurement of the nearest stop,
     // so take the minimum from the full mapped pass that already ran over every stop.
@@ -2668,6 +2692,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   const shapeIndexesBySegment = new WeakMap<GtfsDirectJourney, GtfsCandidateShapeIndex>();
   let segmentShapeIndexes: GtfsCandidateShapeIndex[] = [];
   let segmentGraphTruncated = false;
+  let segmentGraphTruncationReasons: CachedGtfsCandidateGraph['segmentGraphTruncationReasons'] = debugEnabled
+    ? { localStopPairWindowOmissions: 0, perTripCandidateOverflowSegments: 0,
+      routeBudgetDiscardedSegments: 0, routeBudgetRejectedTripGroups: 0 }
+    : undefined;
   let segments: GtfsDirectJourney[];
   const candidateGraphKey = gtfsCandidateGraphCacheKey(feed, input, {
     journeyEnd, accessRadius, egressRadius, transferRadius, maximumGraphSegments, maximumGraphSegmentsPerRoute,
@@ -2677,10 +2705,13 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     segments = cachedCandidateGraph.segments;
     segmentShapeIndexes = [...cachedCandidateGraph.shapeIndexes];
     segmentGraphTruncated = cachedCandidateGraph.segmentGraphTruncated;
+    segmentGraphTruncationReasons = cachedCandidateGraph.segmentGraphTruncationReasons;
     stopSelectionTruncated ||= cachedCandidateGraph.stopSelectionTruncated;
     debugStage('graph-cached', {
       segments: segments.length, corridorStops: cachedCandidateGraph.corridorStops,
       interchangeStops: cachedCandidateGraph.interchangeStops,
+      segmentGraphTruncationReasons: segmentGraphTruncationReasons
+        ? JSON.stringify(segmentGraphTruncationReasons) : 'unavailable-cached-graph',
       graphCacheEntries: getGtfsCandidateGraphCacheStats().entries,
     });
   } else {
@@ -3029,8 +3060,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
           for (let toCursor = fromCursor + 1; toCursor < tripEvents.events.length; toCursor++) {
             const toEvent = tripEvents.events[toCursor];
             const to = toEvent.stopTime;
+            const isQueryFrontierTransfer = (originStopIds.has(from.stopId) && interchangeStopIds.has(to.stopId))
+              || (interchangeStopIds.has(from.stopId) && destinationStopIds.has(to.stopId));
             if (shouldOmitGtfsStopPairBeyondLocalWindow(maximumTransfers, fromCursor, toCursor,
-              destinationStopIds.has(to.stopId))) continue;
+              destinationStopIds.has(to.stopId), isQueryFrontierTransfer)) continue;
             if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds) continue;
             const arrivalAt = toEvent.arrivalAt;
             if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
@@ -3450,6 +3483,9 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         }
         visitTripInstanceLegs(tripEvents.events, {
           maximumTransfers, earliestDeparture: input.earliestDeparture, journeyEnd, destinationStopIds,
+          retainLongTransferPair: (fromStopId, toStopId) =>
+            (originStopIds.has(fromStopId) && interchangeStopIds.has(toStopId))
+            || (interchangeStopIds.has(fromStopId) && destinationStopIds.has(toStopId)),
           canBelongToDirectOnlyJourney,
         }, (fromCursor, toCursor, fromEvent, toEvent) => {
           const fromIndex = fromEvent.stopIndex;
@@ -3507,6 +3543,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         }, () => {
           // Preserve the partial-search signal for omitted, potentially useful legs.
           segmentGraphTruncated = true;
+          if (segmentGraphTruncationReasons) segmentGraphTruncationReasons.localStopPairWindowOmissions++;
         });
         if (debugEnabled) {
           const now = phaseMarkMs();
@@ -3516,6 +3553,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         if (boundedTripCandidates) {
           tripCandidates = boundedTripCandidates.toSortedArray();
           segmentGraphTruncated = true;
+          if (segmentGraphTruncationReasons) {
+            segmentGraphTruncationReasons.perTripCandidateOverflowSegments += Math.max(0,
+              tripCandidateCount - tripCandidates.length);
+          }
         }
         if (debugEnabled) {
           tripInstanceSegmentCandidatesGenerated += tripCandidateCount;
@@ -3538,7 +3579,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
             canAlightAtDestination ||= endsAtDestination;
           }
           overflowSegmentsByRoute.set(trip.routeId, overflow);
-          segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
+          const retainedRouteSegments = retainedSegmentCountByRoute.get(trip.routeId) ?? 0;
+          const offeredRouteSegments = retainedRouteSegments + tripCandidates.length;
+          const exceedsRouteBudget = offeredRouteSegments > graphSegmentLimitPerRoute;
+          segmentGraphTruncated ||= exceedsRouteBudget;
           const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
           // Endpoint coverage is a property of the retained trip group, which
           // may offer different boarding/alighting alternatives on loop routes.
@@ -3593,7 +3637,12 @@ function findGtfsItinerariesAtWalkingReachWithStats(
             // trips consume a bounded route graph.
             priority: retentionPriorityTier * 0x2_0000_0000 + gtfsSegmentRetentionPriority(tripKey),
             segments: tripCandidates,
-          }, retainedSegmentCountByRoute.get(trip.routeId) ?? 0, graphSegmentLimitPerRoute);
+          }, retainedRouteSegments, graphSegmentLimitPerRoute);
+          if (segmentGraphTruncationReasons && exceedsRouteBudget) {
+            segmentGraphTruncationReasons.routeBudgetDiscardedSegments += retained.retained
+              ? Math.max(0, offeredRouteSegments - retained.segments) : tripCandidates.length;
+            if (!retained.retained) segmentGraphTruncationReasons.routeBudgetRejectedTripGroups++;
+          }
           if (retained.retained) {
             segmentsByRoute.set(trip.routeId, routeCandidates);
             retainedSegmentCountByRoute.set(trip.routeId, retained.segments);
@@ -3706,6 +3755,23 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         .sort((left, right) => right.unused - left.unused || compareStableId(left.routeId, right.routeId))
         .slice(0, 10)
       : undefined;
+    const graphBudgetLimitedRouteSample = debugEnabled
+      ? [...candidateDemandByRoute].flatMap(([routeId, estimatedDemand]) => {
+        const allocatedBudget = graphSegmentBudgetByRoute.get(routeId) ?? 0;
+        if (estimatedDemand <= allocatedBudget) return [];
+        const route = feed.routes.get(routeId);
+        return [{
+          routeId,
+          routeName: route?.name ?? routeId,
+          transportType: route?.transportType ?? 'unknown',
+          estimatedDemand,
+          allocatedBudget,
+          retainedSegments: selectedSegmentsByRoute.get(routeId)?.length ?? 0,
+          demandExcess: estimatedDemand - allocatedBudget,
+        }];
+      }).sort((left, right) => right.demandExcess - left.demandExcess
+        || compareStableId(left.routeId, right.routeId)).slice(0, 10)
+      : undefined;
     debugStage('segments-built', { tripsConsidered, tripsWithEligibleStops, segments: segments.length,
       phaseTripLoopMs, phaseTripPrologueMs, phaseInstanceRetentionMs,
       phaseInstanceEventsMs, phasePairVisitationMs, phaseRetentionMs,
@@ -3729,6 +3795,9 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         retainedTripSegmentsByRetentionTier: JSON.stringify(retainedTripSegmentsByRetentionTier),
       } : {}),
       ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
+      ...(graphBudgetLimitedRouteSample ? { graphBudgetLimitedRouteSample: JSON.stringify(graphBudgetLimitedRouteSample) } : {}),
+      ...(segmentGraphTruncationReasons
+        ? { segmentGraphTruncationReasons: JSON.stringify(segmentGraphTruncationReasons) } : {}),
       estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
       globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
       segmentGraphTruncated: Number(segmentGraphTruncated) });
@@ -3743,7 +3812,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     redistributed.routes.clear();
     writeGtfsCandidateGraph(candidateGraphKey, {
       segments: structuralGtfsCandidateSegments(segments), shapeIndexes: segmentShapeIndexes,
-      segmentGraphTruncated, stopSelectionTruncated,
+      segmentGraphTruncated, segmentGraphTruncationReasons, stopSelectionTruncated,
       corridorStops: corridorStops.size, interchangeStops: interchangeStopIds.size,
     });
   }

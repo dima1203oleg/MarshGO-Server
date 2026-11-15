@@ -64,6 +64,8 @@ test('GTFS graph budget and materialization share the transfer-window rule', () 
     'transfer searches may omit distant non-destination pairs');
   assert.equal(shouldOmitGtfsStopPairBeyondLocalWindow(1, 0, 21, true), false,
     'a requested destination remains eligible beyond the local transfer window');
+  assert.equal(shouldOmitGtfsStopPairBeyondLocalWindow(1, 0, 21, false, true), false,
+    'a long first or last leg of a query-frontier transfer remains eligible');
 });
 
 test('a rail GTFS route remains a train when its public name contains intercity', () => {
@@ -621,6 +623,45 @@ test('debug search diagnostics separate graph demand from bounded search saturat
   assert.ok(Object.values(samplingEvents).every((count) => Number.isInteger(count) && count >= 0));
 });
 
+test('debug graph-budget diagnostics identify capped routes without changing results', () => {
+  const timetable = feed({ withArrivalAlternatives: true });
+  const previousDebugValue = process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+  const originalInfo = console.info;
+  const messages: string[] = [];
+  process.env.MARSHGO_GTFS_SEARCH_DEBUG = '1';
+  console.info = (...args: unknown[]) => { messages.push(String(args[0])); };
+  let searchTruncated: boolean | undefined;
+  try {
+    searchTruncated = findGtfsItinerariesWithStats(timetable, {
+      ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0,
+    }, { totalSegments: 1, segmentsPerRoute: 1 }).searchTruncated;
+  } finally {
+    console.info = originalInfo;
+    if (previousDebugValue === undefined) delete process.env.MARSHGO_GTFS_SEARCH_DEBUG;
+    else process.env.MARSHGO_GTFS_SEARCH_DEBUG = previousDebugValue;
+  }
+
+  const graph = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown })
+    .find((stage) => stage.stage === 'segments-built');
+  assert.ok(graph, 'segment graph should emit its budget-binding diagnostics');
+  const sample = JSON.parse(String(graph.graphBudgetLimitedRouteSample)) as Array<{
+    routeId: string; estimatedDemand: number; allocatedBudget: number; retainedSegments: number; demandExcess: number;
+  }>;
+  assert.ok(sample.length > 0, 'the one-segment graph budget excludes or caps at least one feasible route');
+  assert.ok(sample.length <= 10, 'the diagnostic route sample stays bounded');
+  assert.ok(sample.every((route) => route.estimatedDemand > route.allocatedBudget
+    && route.demandExcess === route.estimatedDemand - route.allocatedBudget),
+  'every diagnostic row must disclose a real estimated-demand versus budget shortfall');
+  const truncationReasons = JSON.parse(String(graph.segmentGraphTruncationReasons)) as Record<string, number>;
+  assert.deepEqual(Object.keys(truncationReasons).sort(), [
+    'localStopPairWindowOmissions', 'perTripCandidateOverflowSegments',
+    'routeBudgetDiscardedSegments', 'routeBudgetRejectedTripGroups',
+  ].sort());
+  assert.ok(Object.values(truncationReasons).every((count) => Number.isSafeInteger(count) && count >= 0),
+    'every reported graph-truncation reason must be a non-negative integer');
+  assert.equal(searchTruncated, true, 'diagnostic mode preserves truthful partial-search behavior');
+});
+
 test('endpoint overflow reservoir retains up to its bounded per-route budget', () => {
   const timetable = feed();
   const originEntries = [...(timetable.stopTimesByStop.get('origin') ?? [])];
@@ -656,6 +697,9 @@ test('endpoint overflow reservoir retains up to its bounded per-route budget', (
   const graph = messages.map((message) => JSON.parse(message) as { stage: string; [key: string]: unknown })
     .find((stage) => stage.stage === 'segments-built');
   assert.ok(graph);
+  const truncationReasons = JSON.parse(String(graph.segmentGraphTruncationReasons)) as Record<string, number>;
+  assert.ok(truncationReasons.routeBudgetRejectedTripGroups > 0,
+    'the one-route fixture exceeds its 1,024-segment allowance and must report rejected trip groups');
   assert.equal(graph.overflowReservoirRetained, 1_000,
     'endpoint overflow can use its per-route cap while the global graph budget remains the hard ceiling');
   assert.equal(graph.overflowReservoirsAtCap, 1);
@@ -894,6 +938,67 @@ test('keeps a direct GTFS segment whose destination lies beyond twenty interchan
     'the long direct segment is preserved, while omitted beyond-window transfer alternatives remain disclosed');
 });
 
+test('retains a long first leg when it reaches the interchange of a feasible transfer', () => {
+  const timetable = feed();
+  const routeStops = Array.from({ length: 22 }, (_, index) => {
+    const stopId = `long-transfer-${index}`;
+    const stop = { id: stopId, name: `Long transfer stop ${index}`, lon: 24.02 + index * 0.001, lat: 49.84 };
+    timetable.stops.set(stopId, stop);
+    return { stopId, seconds: 8 * 3600 + index * 60 };
+  });
+  const destination = { id: 'long-transfer-destination', name: 'Long transfer destination', lon: 24.042, lat: 49.84 };
+  timetable.stops.set(destination.id, destination);
+  timetable.routes.set('onward', { name: 'Onward bus', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.set('onward-trip', { routeId: 'onward', serviceId: 'weekday', headsign: 'Destination' });
+
+  const mainStopTimes = routeStops.map((stop, index) => ({
+    stopId: stop.stopId, sequence: index + 1, arrivalSeconds: stop.seconds, departureSeconds: stop.seconds,
+    pickupType: 0, dropOffType: 0,
+  }));
+  const onwardStopTimes = [
+    { stopId: routeStops[21].stopId, sequence: 1, arrivalSeconds: 8 * 3600 + 25 * 60, departureSeconds: 8 * 3600 + 25 * 60, pickupType: 0, dropOffType: 0 },
+    { stopId: destination.id, sequence: 2, arrivalSeconds: 8 * 3600 + 40 * 60, departureSeconds: 8 * 3600 + 40 * 60, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.stopTimes.set('t1', mainStopTimes);
+  timetable.stopTimes.set('onward-trip', onwardStopTimes);
+
+  // Make the intermediate corridor stops interchange-capable without creating
+  // additional boardable or alightable alternatives.
+  for (let index = 1; index < 21; index += 1) {
+    const routeId = `long-branch-${index}`;
+    const tripId = `long-branch-trip-${index}`;
+    const terminalId = `${routeId}-terminal`;
+    const at = routeStops[index]!;
+    timetable.routes.set(routeId, { name: `Branch ${index}`, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Remote terminal' });
+    timetable.stops.set(terminalId, { id: terminalId, name: terminalId, lon: 24.02 + index * 0.001, lat: 50.1 });
+    timetable.stopTimes.set(tripId, [
+      { stopId: at.stopId, sequence: 1, arrivalSeconds: at.seconds, departureSeconds: at.seconds, pickupType: 1, dropOffType: 0 },
+      { stopId: terminalId, sequence: 2, arrivalSeconds: at.seconds + 20 * 60, departureSeconds: at.seconds + 20 * 60, pickupType: 0, dropOffType: 1 },
+    ]);
+  }
+  timetable.stopTimesByStop.clear();
+  for (const [tripId, stopTimes] of timetable.stopTimes) {
+    stopTimes.forEach((stopTime, index) => timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+    ]));
+  }
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:45:00Z'),
+    origin: [24.02, 49.84], destination: [destination.lon, destination.lat],
+    maximumTransfers: 1, maximumStopDistanceMeters: 100,
+  });
+
+  assert.ok(result.itineraries.some((itinerary) => itinerary.segments.length === 2
+    && itinerary.segments[0]?.tripId === 't1'
+    && itinerary.segments[0]?.originStop.id === routeStops[0].stopId
+    && itinerary.segments[0]?.destinationStop.id === routeStops[21].stopId
+    && itinerary.segments[1]?.tripId === 'onward-trip'
+    && itinerary.segments[1]?.destinationStop.id === destination.id),
+  'the long origin-to-interchange leg must remain available when it completes a feasible transfer');
+});
+
 test('bounds stop-pair alternatives by the requested page and reports objective sampling', () => {
   const timetable = feed({ withIntermediate: true });
   const stops = [
@@ -1083,6 +1188,128 @@ test('preserves stops for the reverse direction when nearby stops crowd the same
   assert.equal(result.searchTruncated, false, 'all in-radius route patterns fit within the bounded stop set');
 });
 
+test('keeps a feasible route at the 49th nearby stop when the endpoint stop set is bounded', () => {
+  const timetable = feed();
+  const origin = { id: 'origin', name: 'Origin', lon: 24.0201, lat: 49.8401 };
+  const destination = { id: 'destination', name: 'Destination', lon: 24.0301, lat: 49.8501 };
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set(destination.id, destination);
+
+  // Each closer decoy exposes a distinct route pattern, so endpoint selection
+  // cannot collapse them as duplicates. They are deliberately non-routable
+  // one-stop trips; the only usable itinerary boards at the 49th route stop.
+  for (let index = 1; index <= 48; index += 1) {
+    const stopId = `decoy-stop-${index}`;
+    const routeId = `decoy-route-${index}`;
+    const tripId = `decoy-trip-${index}`;
+    timetable.stops.set(stopId, {
+      id: stopId, name: `Decoy ${index}`, lon: origin.lon + index * 0.0000005, lat: origin.lat,
+    });
+    timetable.routes.set(routeId, { name: `Decoy ${index}`, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: `Decoy ${index}` });
+    const stopTime = {
+      stopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0,
+    };
+    timetable.stopTimes.set(tripId, [stopTime]);
+    timetable.stopTimesByStop.set(stopId, [{ tripId, index: 0 }]);
+  }
+
+  const targetStopId = 'route-stop-49';
+  const targetTripId = 'only-feasible-trip';
+  const targetRouteId = 'only-feasible-route';
+  timetable.stops.set(targetStopId, {
+    id: targetStopId, name: 'Route stop 49', lon: origin.lon + 0.0007, lat: origin.lat,
+  });
+  timetable.routes.set(targetRouteId, { name: 'Useful route', mode: 'BUS', transportType: 'bus' });
+  timetable.trips.set(targetTripId, { routeId: targetRouteId, serviceId: 'weekday', headsign: 'Destination' });
+  const targetStopTimes = [
+    { stopId: targetStopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+    { stopId: destination.id, sequence: 2, arrivalSeconds: 8 * 3600 + 30 * 60, departureSeconds: 8 * 3600 + 30 * 60, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.stopTimes.set(targetTripId, targetStopTimes);
+  targetStopTimes.forEach((stopTime, index) => timetable.stopTimesByStop.set(stopTime.stopId, [
+    ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId: targetTripId, index },
+  ]));
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    limit: 10, maximumTransfers: 0, maximumStopDistanceMeters: 900,
+  });
+
+  assert.ok(result.itineraries.some((journey) => journey.segments[0]?.tripId === targetTripId),
+    'a feasible route must not disappear behind 48 closer stops with unrelated route patterns');
+  assert.equal(result.truncation.stopSelection, false,
+    'the 56-stop bounded set includes all 49 nearby route stops in this fixture');
+});
+
+test('ignores non-traversable one-stop patterns before endpoint bounds hide a feasible route', () => {
+  const targetTripId = 'only-feasible-trip';
+  const origin = { id: 'origin', name: 'Origin', lon: 24.0201, lat: 49.8401 };
+  const destination = { id: 'destination', name: 'Destination', lon: 24.0301, lat: 49.8501 };
+  const buildFeed = (decoyCount: number) => {
+    const timetable = feed();
+    timetable.routes.clear();
+    timetable.trips.clear();
+    timetable.stopTimes.clear();
+    timetable.stopTimesByStop.clear();
+    timetable.stops.clear();
+    timetable.stops.set(destination.id, destination);
+
+    for (let index = 1; index <= decoyCount; index += 1) {
+      const stopId = `decoy-stop-${index}`;
+      const routeId = `decoy-route-${index}`;
+      const tripId = `decoy-trip-${index}`;
+      timetable.stops.set(stopId, {
+        id: stopId, name: `Decoy ${index}`, lon: origin.lon + index * 0.0000005, lat: origin.lat,
+      });
+      timetable.routes.set(routeId, { name: `Decoy ${index}`, mode: 'BUS', transportType: 'bus' });
+      timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: `Decoy ${index}` });
+      const stopTime = {
+        stopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0,
+      };
+      timetable.stopTimes.set(tripId, [stopTime]);
+      timetable.stopTimesByStop.set(stopId, [{ tripId, index: 0 }]);
+    }
+
+    const targetStopId = 'route-stop-57';
+    timetable.stops.set(targetStopId, {
+      id: targetStopId, name: 'Only feasible route stop', lon: origin.lon + 0.0007, lat: origin.lat,
+    });
+    timetable.routes.set('only-feasible-route', { name: 'Useful route', mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(targetTripId, { routeId: 'only-feasible-route', serviceId: 'weekday', headsign: 'Destination' });
+    const targetStopTimes = [
+      { stopId: targetStopId, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: destination.id, sequence: 2, arrivalSeconds: 8 * 3600 + 30 * 60, departureSeconds: 8 * 3600 + 30 * 60, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(targetTripId, targetStopTimes);
+    targetStopTimes.forEach((stopTime, index) => timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId: targetTripId, index },
+    ]));
+    return timetable;
+  };
+  const query = {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'),
+    limit: 10, maximumTransfers: 0, maximumStopDistanceMeters: 900,
+  };
+
+  const exhaustiveFixture = findGtfsItinerariesWithStats(buildFeed(0), query);
+  assert.ok(exhaustiveFixture.itineraries.some((journey) => journey.segments[0]?.tripId === targetTripId),
+    'the independently feasible target trip is the exhaustive oracle for this one-route feed');
+  assert.equal(exhaustiveFixture.searchTruncated, false);
+
+  // Fifty-six closer one-stop records expose distinct, but non-traversable,
+  // route patterns. They must not crowd the only feasible trip out of the set.
+  const bounded = findGtfsItinerariesWithStats(buildFeed(56), query);
+  assert.ok(bounded.itineraries.some((journey) => journey.segments.some((segment) => segment.tripId === targetTripId)),
+    'non-traversable one-stop records must not hide the independently feasible target trip');
+  assert.equal(bounded.truncation.stopSelection, false);
+  assert.equal(bounded.searchTruncated, false);
+});
+
 test('retains additional same-direction boarding stops within the bounded pattern cap', () => {
   const timetable = feed();
   const route = timetable.routes.get('r');
@@ -1135,7 +1362,7 @@ test('retains additional same-direction boarding stops within the bounded patter
   assert.equal(result.searchTruncated, false, 'all relevant stops fit below the per-side bound for this fixture');
 });
 
-test('bounds a dense route graph and reports omitted GTFS segment candidates', () => {
+test('bounds a dense route candidate pool without truncating graph demand under global slack', () => {
   const timetable = feed();
   // Routes elsewhere in a national feed must not dilute this corridor's
   // retention quota when they have no stops in the query's interchange set.
@@ -1172,9 +1399,9 @@ test('bounds a dense route graph and reports omitted GTFS segment candidates', (
   assert.ok(result.itineraries.length > 0, 'the bounded graph still returns feasible scheduled options');
   assert.ok(result.itineraries.some((itinerary) => itinerary.segments.some((segment) => segment.tripId === 'fast-late-trip')),
     'bounded retention must not favor early rows in a chronologically ordered feed');
-  assert.equal(result.searchTruncated, true, 'omitting graph candidates must be visible as a partial search');
-  assert.equal(result.candidateGraphTruncated, true, 'the internal result identifies graph-level truncation');
-  assert.equal(result.truncation.candidateGraph, true, 'structured truncation reasons identify graph loss');
+  assert.equal(result.searchTruncated, true, 'sampling the dense candidate pool must be visible as a partial search');
+  assert.equal(result.candidateGraphTruncated, false, 'global graph slack keeps the route graph intact');
+  assert.equal(result.truncation.candidateGraph, false, 'candidate-pool sampling is not graph loss');
   assert.equal(result.truncation.stopSelection, false, 'graph loss is distinguishable from stop-selection loss');
   assert.equal(result.resultLimitReached, true, 'candidate-pool sampling is separately reported');
 
@@ -3373,14 +3600,14 @@ test('keeps nearest stops, represents distinct routes, and reports the bounded s
   const denseTexts: Record<string, string> = {
     'agency.txt': 'agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv',
     'routes.txt': ['route_id,agency_id,route_short_name,route_long_name,route_type',
-      ...Array.from({ length: 60 }, (_, index) => `r${index},a,${index},Route ${index},3`)].join('\n'),
+      ...Array.from({ length: 80 }, (_, index) => `r${index},a,${index},Route ${index},3`)].join('\n'),
     'trips.txt': ['route_id,service_id,trip_id,trip_headsign',
-      ...Array.from({ length: 60 }, (_, index) => `r${index},weekday,t${index},Headsign ${index}`)].join('\n'),
+      ...Array.from({ length: 80 }, (_, index) => `r${index},weekday,t${index},Headsign ${index}`)].join('\n'),
     'stops.txt': ['stop_id,stop_name,stop_lat,stop_lon',
-      ...Array.from({ length: 60 }, (_, index) => `o${index},Origin ${index},49.8401,${(24.0201 + index * 0.000001).toFixed(7)}`),
-      ...Array.from({ length: 60 }, (_, index) => `d${index},Destination ${index},49.8501,${(24.0301 + index * 0.000001).toFixed(7)}`)].join('\n'),
+      ...Array.from({ length: 80 }, (_, index) => `o${index},Origin ${index},49.8401,${(24.0201 + index * 0.000001).toFixed(7)}`),
+      ...Array.from({ length: 80 }, (_, index) => `d${index},Destination ${index},49.8501,${(24.0301 + index * 0.000001).toFixed(7)}`)].join('\n'),
     'stop_times.txt': ['trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
-      ...Array.from({ length: 60 }, (_, index) => [
+      ...Array.from({ length: 80 }, (_, index) => [
         `t${index},08:00:00,08:00:00,o${index},1,0,0`,
         `t${index},08:40:00,08:40:00,d${index},2,0,0`,
       ]).flat()].join('\n'),
@@ -3397,7 +3624,7 @@ test('keeps nearest stops, represents distinct routes, and reports the bounded s
     maximumTransfers: 0,
   });
   assert.equal(dense.truncation.stopSelection, true,
-    'when the per-side cap stops before 60 distinct route patterns are represented, the omission is a real coverage loss');
+    'when the per-side cap stops before 80 distinct route patterns are represented, the omission is a real coverage loss');
 });
 
 test('composes across provider feeds using equivalent Kyiv timezone names and closely matched stops', () => {

@@ -90,3 +90,21 @@ test('the twins agree with no transfer window, one boarding stop, and unboardabl
     assert.deepEqual(visited, generated, testCase.name);
   }
 });
+
+test('retains a long query-frontier transfer pair while pruning unrelated long pairs', () => {
+  const visit = events(25, (index) => ({
+    stopId: index === 0 ? 'origin' : index === 21 ? 'interchange' : `s${index}`,
+  }));
+  const options = {
+    ...window,
+    maximumTransfers: 1,
+    retainLongTransferPair: (fromStopId: string, toStopId: string) =>
+      fromStopId === 'origin' && toStopId === 'interchange',
+  };
+  const { generated, visited } = collect(visit, options);
+  assert.deepEqual(visited, generated);
+  assert.ok(generated.some((entry) => entry.includes('origin->interchange')),
+    'the long origin-to-interchange leg must survive');
+  assert.ok(generated.includes('omitted-beyond-window'),
+    'unrelated long intermediate pairs must remain bounded');
+});

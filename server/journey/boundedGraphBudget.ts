@@ -2,9 +2,10 @@ import { compareStableId } from './stableOrdering';
 
 /**
  * Allocate a hard graph-segment budget proportionally to estimated route demand.
- * Every positive-demand route gets one slot when the budget permits; routes
- * cannot exceed either the route's estimated candidate supply or the per-route
- * ceiling. Any budget beyond total estimated supply remains unassigned.
+ * Every positive-demand route gets one slot when the budget permits. When
+ * estimated demand fits the global budget, do not truncate a route at the
+ * per-route ceiling; that ceiling exists to keep a globally oversubscribed
+ * graph fair. Any budget beyond total estimated supply remains unassigned.
  */
 export function allocateBoundedGraphBudgets(
   demandByRoute: ReadonlyMap<string, number>,
@@ -15,10 +16,14 @@ export function allocateBoundedGraphBudgets(
     || !Number.isSafeInteger(maximumPerRoute) || maximumPerRoute < 1) {
     throw new TypeError('graph budget bounds are invalid');
   }
-  const candidates = [...demandByRoute]
+  const estimatedRoutes = [...demandByRoute]
     .filter(([routeId, demand]) => routeId.length > 0 && Number.isFinite(demand) && demand > 0)
-    .map(([routeId, demand]) => [routeId, demand, Math.min(maximumPerRoute, Math.ceil(demand))] as const)
+    .map(([routeId, demand]) => [routeId, demand, Math.ceil(demand)] as const)
     .sort(([a], [b]) => compareStableId(a, b));
+  const estimatedSupply = estimatedRoutes.reduce((sum, [, , capacity]) => sum + capacity, 0);
+  const routeCeiling = estimatedSupply <= totalBudget ? totalBudget : maximumPerRoute;
+  const candidates = estimatedRoutes.map(([routeId, demand, capacity]) =>
+    [routeId, demand, Math.min(routeCeiling, capacity)] as const);
   if (totalBudget === 0 || candidates.length === 0) return new Map();
 
   // If more routes qualify than the global budget can represent, retain the
