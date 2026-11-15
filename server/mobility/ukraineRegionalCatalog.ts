@@ -141,7 +141,7 @@ const ownBikeSource: RegionalModeSource = {
 };
 
 // -----------------------------------------------------------------------------------------
-// Complete Catalog of all 26 Ukrainian Regions (24 Oblasts + Kyiv City + Crimea)
+// Complete catalog of 27 Ukrainian administrative units (24 oblasts + Kyiv + Crimea + Sevastopol)
 // -----------------------------------------------------------------------------------------
 
 export const UKRAINE_REGIONS: UkraineOblast[] = [
@@ -3332,12 +3332,12 @@ export const UKRAINE_REGIONS: UkraineOblast[] = [
     },
   },
 
-  // 26. Автономна Республіка Крим та місто Севастополь
+  // 26. Автономна Республіка Крим (місто Севастополь має окремий статус)
   {
     id: 'crimea',
     name: 'Автономна Республіка Крим',
     capital: 'Сімферополь',
-    majorCities: ['Сімферополь', 'Севастополь', 'Ялта', 'Керч', 'Євпаторія', 'Феодосія'],
+    majorCities: ['Сімферополь', 'Ялта', 'Керч', 'Євпаторія', 'Феодосія'],
     bbox: [32.4, 44.3, 36.7, 46.2],
     transportModes: {
       bus: {
@@ -3427,7 +3427,43 @@ export const UKRAINE_REGIONS: UkraineOblast[] = [
       },
     },
   },
+  // 27. Місто зі спеціальним статусом Севастополь (окремо від АР Крим)
+  // Lookup envelope follows the EPSG:9865 area-of-use bounds; it is not a routing polygon.
+  {
+    id: 'sevastopol',
+    name: 'місто Севастополь',
+    capital: 'Севастополь',
+    majorCities: ['Севастополь'],
+    bbox: [33.37, 44.38, 33.93, 44.85],
+    transportModes: {
+      bus: unverifiedRegionalMode('Немає підтвердженого доступного розкладу автобусів для пошуку в цьому регіоні.'),
+      marshrutka: unverifiedRegionalMode('Немає підтвердженого доступного розкладу маршруток для пошуку в цьому регіоні.'),
+      trolleybus: unverifiedRegionalMode('Немає підтвердженого доступного розкладу тролейбусів для пошуку в цьому регіоні.'),
+      tram: unverifiedRegionalMode('Немає підтвердженого доступного розкладу трамваїв для пошуку в цьому регіоні.'),
+      metro: unverifiedRegionalMode('Метрополітен у місті відсутній.', 'NOT_AVAILABLE_IN_CITY'),
+      carpool: {
+        available: true,
+        status: 'AVAILABLE',
+        reason: 'Пошук працює лише за фактично опублікованими пропозиціями MARSHGO; доступність визначається під час пошуку.',
+        capabilities: ['SEARCH'],
+        sources: carpoolSources,
+      },
+      taxi: unverifiedRegionalMode('Потрібен підтверджений партнерський API та дозвіл на роботу.', 'REQUIRES_CONTRACT'),
+      train: unverifiedRegionalMode('Немає підтвердженого доступного розкладу поїздів для пошуку в цьому регіоні.'),
+      bike: unverifiedRegionalMode('Немає підтвердженої доступної веломаршрутизації або мережі оренди.'),
+      scooter: unverifiedRegionalMode('Потрібен підтверджений партнерський API та дозвіл на роботу.', 'REQUIRES_CONTRACT'),
+      carsharing: unverifiedRegionalMode('Потрібен підтверджений партнерський API та дозвіл на роботу.', 'REQUIRES_CONTRACT'),
+      transfer: unverifiedRegionalMode('Потрібен підтверджений партнерський API та дозвіл на роботу.', 'REQUIRES_CONTRACT'),
+    },
+  },
 ];
+
+function unverifiedRegionalMode(
+  reason: string,
+  status: RegionalModeAvailability['status'] = 'LIMITED',
+): RegionalModeAvailability {
+  return { available: false, status, reason, capabilities: [], sources: [] };
+}
 
 // -----------------------------------------------------------------------------------------
 // Fast Lookups and Canonical Catalog Engine API
@@ -3448,10 +3484,13 @@ export function findRegion(query: string): UkraineOblast | undefined {
 }
 
 export function findRegionByCoordinates(lon: number, lat: number): UkraineOblast | undefined {
-  return UKRAINE_REGIONS.find((reg) => {
+  return UKRAINE_REGIONS.filter((reg) => {
     const [minLon, minLat, maxLon, maxLat] = reg.bbox;
     return lon >= minLon && lon <= maxLon && lat >= minLat && lat <= maxLat;
-  });
+  }).sort((a, b) => {
+    const area = (region: UkraineOblast) => (region.bbox[2] - region.bbox[0]) * (region.bbox[3] - region.bbox[1]);
+    return area(a) - area(b);
+  })[0];
 }
 
 export interface CatalogTransportTypeDto {
