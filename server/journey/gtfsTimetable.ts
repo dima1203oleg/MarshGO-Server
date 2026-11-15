@@ -2691,12 +2691,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   const candidateGraphKey = gtfsCandidateGraphCacheKey(feed, input, {
     journeyEnd, accessRadius, egressRadius, transferRadius, maximumGraphSegments, maximumGraphSegmentsPerRoute,
   });
-  const cachedCandidateGraphEntry = readGtfsCandidateGraph(candidateGraphKey);
-  // A non-debug graph cache entry has no cause attribution. Rebuild only when
-  // the diagnostic route asks for it; normal planner requests still use cache.
-  const cachedCandidateGraph = debugEnabled && cachedCandidateGraphEntry
-    && !cachedCandidateGraphEntry.segmentGraphTruncationReasons
-    ? undefined : cachedCandidateGraphEntry;
+  const cachedCandidateGraph = readGtfsCandidateGraph(candidateGraphKey);
   if (cachedCandidateGraph) {
     segments = cachedCandidateGraph.segments;
     segmentShapeIndexes = [...cachedCandidateGraph.shapeIndexes];
@@ -2706,8 +2701,8 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     debugStage('graph-cached', {
       segments: segments.length, corridorStops: cachedCandidateGraph.corridorStops,
       interchangeStops: cachedCandidateGraph.interchangeStops,
-      ...(segmentGraphTruncationReasons
-        ? { segmentGraphTruncationReasons: JSON.stringify(segmentGraphTruncationReasons) } : {}),
+      segmentGraphTruncationReasons: segmentGraphTruncationReasons
+        ? JSON.stringify(segmentGraphTruncationReasons) : 'unavailable-cached-graph',
       graphCacheEntries: getGtfsCandidateGraphCacheStats().entries,
     });
   } else {
