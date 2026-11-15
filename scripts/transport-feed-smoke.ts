@@ -5,7 +5,7 @@ import { fetchJson } from '../server/mobility/safeFetch';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
 import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
 import { selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
-import { summarizeSmokeItineraries, withOptionalSourceFingerprint } from './transport-feed-smoke-summary';
+import { serializeSmokeJourney, summarizeSmokeItineraries, withOptionalSourceFingerprint } from './transport-feed-smoke-summary';
 
 /**
  * Read-only acceptance probe for all Ukrainian transport sources recorded in
@@ -120,13 +120,7 @@ async function main() {
         limit: ROUTE_SMOKE_RESULT_LIMIT,
         allowedTransportTypes: ['bus', 'tram', 'trolleybus'],
       }));
-      const itineraryEvidence = search.itineraries.map((journey) => ({
-        modes: journey.segments.map((segment) => segment.transportType),
-        routes: journey.segments.map((segment) => segment.routeName),
-        orderedStops: journey.segments.map((segment) => [segment.originStop.name, segment.destinationStop.name]),
-        departureAt: journey.departureAt.toISOString(),
-        arrivalAt: journey.arrivalAt.toISOString(),
-      }));
+      const itineraryEvidence = search.itineraries.map(serializeSmokeJourney);
       return {
         id: routeCase.id,
         status: search.itineraries.length ? 'ROUTES_FOUND' : 'NO_ROUTE_IN_QUERY_WINDOW',
