@@ -58,6 +58,7 @@ import { bboxContains } from './mobility/types';
 import type { MobilityAssetType } from './mobility/types';
 import { canRent, type RentalLocation, type RentalNetworkRule } from './mobility/rentalCompatibility';
 import { composeUkraineMultimodalChains, type MultimodalJourney } from './journey/multimodalChainEngine';
+import { isStaticMultimodalFallbackEnabled } from './journey/staticMultimodalFallbackPolicy';
 import { buildBicycleRouteEstimates, buildScooterRouteEstimates, roadRouteMicromobilityEstimate, type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint, type ScooterRouteProvider } from './journey/micromobilityEstimates';
 import { micromobilityJourneyFareMinor } from './journey/micromobilityFare';
 import { memoizeRequestSearch } from './journey/requestSearchMemo';
@@ -4141,7 +4142,12 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     journey: MultimodalJourney;
   };
   const multimodalCandidates: MultimodalCandidate[] = [];
-  const shouldRunUkraineMultimodal = routeDistanceMeters >= 20_000 || (scheduledCandidates.length === 0 && candidates.length === 0);
+  const allowUnverifiedStaticMultimodal = isStaticMultimodalFallbackEnabled({
+    nodeEnv: process.env.NODE_ENV,
+    allowUnverifiedEstimates: process.env.MARSHGO_ALLOW_UNVERIFIED_MULTIMODAL_ESTIMATES,
+  });
+  const shouldRunUkraineMultimodal = allowUnverifiedStaticMultimodal
+    && (routeDistanceMeters >= 20_000 || (scheduledCandidates.length === 0 && candidates.length === 0));
   if (shouldRunUkraineMultimodal) {
     try {
       const generatedMultimodal = await composeUkraineMultimodalChains({
