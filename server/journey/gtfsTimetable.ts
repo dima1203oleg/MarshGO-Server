@@ -1304,6 +1304,12 @@ interface CachedGtfsCandidateGraph {
   segments: GtfsDirectJourney[];
   shapeIndexes: Array<{ fromIndex: number; toIndex: number; serviceDate: string }>;
   segmentGraphTruncated: boolean;
+  segmentGraphTruncationReasons?: {
+    localStopPairWindowOmissions: number;
+    perTripCandidateOverflowSegments: number;
+    routeBudgetDiscardedSegments: number;
+    routeBudgetRejectedTripGroups: number;
+  };
   stopSelectionTruncated: boolean;
   corridorStops: number;
   interchangeStops: number;
@@ -2677,6 +2683,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   const shapeIndexesBySegment = new WeakMap<GtfsDirectJourney, GtfsCandidateShapeIndex>();
   let segmentShapeIndexes: GtfsCandidateShapeIndex[] = [];
   let segmentGraphTruncated = false;
+  let segmentGraphTruncationReasons: CachedGtfsCandidateGraph['segmentGraphTruncationReasons'] = debugEnabled
+    ? { localStopPairWindowOmissions: 0, perTripCandidateOverflowSegments: 0,
+      routeBudgetDiscardedSegments: 0, routeBudgetRejectedTripGroups: 0 }
+    : undefined;
   let segments: GtfsDirectJourney[];
   const candidateGraphKey = gtfsCandidateGraphCacheKey(feed, input, {
     journeyEnd, accessRadius, egressRadius, transferRadius, maximumGraphSegments, maximumGraphSegmentsPerRoute,
@@ -2686,10 +2696,13 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     segments = cachedCandidateGraph.segments;
     segmentShapeIndexes = [...cachedCandidateGraph.shapeIndexes];
     segmentGraphTruncated = cachedCandidateGraph.segmentGraphTruncated;
+    segmentGraphTruncationReasons = cachedCandidateGraph.segmentGraphTruncationReasons;
     stopSelectionTruncated ||= cachedCandidateGraph.stopSelectionTruncated;
     debugStage('graph-cached', {
       segments: segments.length, corridorStops: cachedCandidateGraph.corridorStops,
       interchangeStops: cachedCandidateGraph.interchangeStops,
+      segmentGraphTruncationReasons: segmentGraphTruncationReasons
+        ? JSON.stringify(segmentGraphTruncationReasons) : 'unavailable-cached-graph',
       graphCacheEntries: getGtfsCandidateGraphCacheStats().entries,
     });
   } else {
@@ -3516,6 +3529,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         }, () => {
           // Preserve the partial-search signal for omitted, potentially useful legs.
           segmentGraphTruncated = true;
+          if (segmentGraphTruncationReasons) segmentGraphTruncationReasons.localStopPairWindowOmissions++;
         });
         if (debugEnabled) {
           const now = phaseMarkMs();
@@ -3525,6 +3539,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         if (boundedTripCandidates) {
           tripCandidates = boundedTripCandidates.toSortedArray();
           segmentGraphTruncated = true;
+          if (segmentGraphTruncationReasons) {
+            segmentGraphTruncationReasons.perTripCandidateOverflowSegments += Math.max(0,
+              tripCandidateCount - tripCandidates.length);
+          }
         }
         if (debugEnabled) {
           tripInstanceSegmentCandidatesGenerated += tripCandidateCount;
@@ -3547,7 +3565,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
             canAlightAtDestination ||= endsAtDestination;
           }
           overflowSegmentsByRoute.set(trip.routeId, overflow);
-          segmentGraphTruncated ||= (retainedSegmentCountByRoute.get(trip.routeId) ?? 0) + tripCandidates.length > graphSegmentLimitPerRoute;
+          const retainedRouteSegments = retainedSegmentCountByRoute.get(trip.routeId) ?? 0;
+          const offeredRouteSegments = retainedRouteSegments + tripCandidates.length;
+          const exceedsRouteBudget = offeredRouteSegments > graphSegmentLimitPerRoute;
+          segmentGraphTruncated ||= exceedsRouteBudget;
           const tripKey = `${trip.routeId}\u0000${tripId}\u0000${serviceDate}`;
           // Endpoint coverage is a property of the retained trip group, which
           // may offer different boarding/alighting alternatives on loop routes.
@@ -3602,7 +3623,12 @@ function findGtfsItinerariesAtWalkingReachWithStats(
             // trips consume a bounded route graph.
             priority: retentionPriorityTier * 0x2_0000_0000 + gtfsSegmentRetentionPriority(tripKey),
             segments: tripCandidates,
-          }, retainedSegmentCountByRoute.get(trip.routeId) ?? 0, graphSegmentLimitPerRoute);
+          }, retainedRouteSegments, graphSegmentLimitPerRoute);
+          if (segmentGraphTruncationReasons && exceedsRouteBudget) {
+            segmentGraphTruncationReasons.routeBudgetDiscardedSegments += retained.retained
+              ? Math.max(0, offeredRouteSegments - retained.segments) : tripCandidates.length;
+            if (!retained.retained) segmentGraphTruncationReasons.routeBudgetRejectedTripGroups++;
+          }
           if (retained.retained) {
             segmentsByRoute.set(trip.routeId, routeCandidates);
             retainedSegmentCountByRoute.set(trip.routeId, retained.segments);
@@ -3756,6 +3782,8 @@ function findGtfsItinerariesAtWalkingReachWithStats(
       } : {}),
       ...(routeBudgetUnderfillSample ? { routeBudgetUnderfillSample: JSON.stringify(routeBudgetUnderfillSample) } : {}),
       ...(graphBudgetLimitedRouteSample ? { graphBudgetLimitedRouteSample: JSON.stringify(graphBudgetLimitedRouteSample) } : {}),
+      ...(segmentGraphTruncationReasons
+        ? { segmentGraphTruncationReasons: JSON.stringify(segmentGraphTruncationReasons) } : {}),
       estimatedGraphDemand, graphRoutesBudgetLimited, graphRoutesAtPerRouteCap,
       globalGraphBudgetBinding: Number(globalGraphBudgetBinding),
       segmentGraphTruncated: Number(segmentGraphTruncated) });
@@ -3770,7 +3798,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     redistributed.routes.clear();
     writeGtfsCandidateGraph(candidateGraphKey, {
       segments: structuralGtfsCandidateSegments(segments), shapeIndexes: segmentShapeIndexes,
-      segmentGraphTruncated, stopSelectionTruncated,
+      segmentGraphTruncated, segmentGraphTruncationReasons, stopSelectionTruncated,
       corridorStops: corridorStops.size, interchangeStops: interchangeStopIds.size,
     });
   }
