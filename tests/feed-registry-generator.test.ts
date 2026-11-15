@@ -45,6 +45,10 @@ function liveProbe(counts: Record<string, number | undefined>, state = 'HEALTHY'
   return { checkedAt: measuredAt, catalog: [{ name: liveName, state, counts }] };
 }
 
+// The Generated line carries new Date().toISOString(); its fractional seconds
+// (e.g. .317Z) must not be mistaken for a fabricated report count.
+const withoutGeneratedTimestamp = (text: string) => text.split('\n').filter((line) => !line.startsWith('**Generated:**')).join('\n');
+
 describe('feed registry generator honesty contract', () => {
   const currentDir = fileURLToPath(new URL('.', import.meta.url));
   const scriptPath = resolve(currentDir, '../scripts/build-transport-registry.ts');
@@ -153,8 +157,16 @@ describe('feed registry generator honesty contract', () => {
     const output = generate({ catalog: [] });
     assert.equal(output.registry.inventory.feedsWithLivePositions, 0);
     assert.equal(output.registry.databaseSnapshot, null);
-    assert.doesNotMatch(output.audit + output.matrix, /14 vehicles|998 vehicles|6 of 12|А47→Т08|317/);
+    assert.doesNotMatch(withoutGeneratedTimestamp(output.audit + output.matrix), /14 vehicles|998 vehicles|6 of 12|А47→Т08|317/);
     assert.ok(output.registry.feeds.every((feed) => Object.values(feed.capabilities).every((value) => !value.startsWith('VERIFIED'))));
+  });
+
+  it('negative control: the empty-input count guard still catches a hardcoded 317 outside the timestamp line', () => {
+    assert.match('**Generated:** 2026-11-15T04:53:12.317Z', /317/, 'root cause: fractional seconds matched the bare count guard');
+    const mutant = scriptContent.replace('**Generator:**', '**Generator:** 317 routes ·');
+    assert.notEqual(mutant, scriptContent);
+    const output = generate({ catalog: [] }, mutant);
+    assert.throws(() => assert.doesNotMatch(withoutGeneratedTimestamp(output.audit + output.matrix), /14 vehicles|998 vehicles|6 of 12|А47→Т08|317/));
   });
 
   it('negative control catches the former positive-count live classification', () => {
