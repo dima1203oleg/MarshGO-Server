@@ -1,6 +1,5 @@
-import { haversineMeters, planKyivRapidTransitJourneys, KYIV_METRO_STATIONS } from '../mobility/kyivTransitGraph';
+import { planKyivRapidTransitJourneys } from '../mobility/kyivTransitGraph';
 import { generatePedestrianGeometry } from '../../shared/navigation/pedestrianGeometry';
-import { getRoadRoute } from '../routing';
 import type { JourneyStrategy, JourneyPreferences, JourneyLegMode } from './types';
 import type { GtfsItinerary } from './gtfsTimetable';
 import { scoreJourneys } from './scoring';
@@ -94,10 +93,6 @@ export interface MultimodalChainInput {
   }>;
 }
 
-export interface MultimodalChainDependencies {
-  getRoadRoute: typeof getRoadRoute;
-}
-
 /**
  * Builds multimodal journey chains combining:
  * - Walking (Пішки)
@@ -105,13 +100,10 @@ export interface MultimodalChainDependencies {
  * - City Express (Кільцева електричка УЗ)
  * - Funicular (Київський фунікулер)
  * - Municipal Bus, Tram, Trolleybus, Marshrutka (Київпастранс)
- * - Road-route estimates for taxi legs (provider quote/availability remain unknown)
+ * - Taxi is intentionally omitted until an authorized provider adapter is integrated
  * - Carpool (MARSHGO Community offers)
  */
-export async function composeKyivMultimodalChains(
-  input: MultimodalChainInput,
-  dependencies: MultimodalChainDependencies = { getRoadRoute },
-): Promise<MultimodalJourney[]> {
+export async function composeKyivMultimodalChains(input: MultimodalChainInput): Promise<MultimodalJourney[]> {
   const { origin, destination, departureAt, passengers, strategy, preferences } = input;
   const allowed = preferences.allowedTransportTypes;
   const isTypeAllowed = (type: string) => !allowed || allowed.includes(type as any);
@@ -119,10 +111,6 @@ export async function composeKyivMultimodalChains(
   const journeys: MultimodalJourney[] = [];
   const originCoord = origin.coordinates;
   const destCoord = destination.coordinates;
-  const getRoadRouteForJourney = dependencies.getRoadRoute;
-
-  const totalDirectDistance = haversineMeters(originCoord, destCoord);
-
   // 1. DIRECT RAPID TRANSIT (Metro, City Express, Funicular)
   const rapidTransitOptions = planKyivRapidTransitJourneys(originCoord, destCoord, 3000);
 
@@ -279,212 +267,8 @@ export async function composeKyivMultimodalChains(
     });
   }
 
-  // Rental bikes and scooters are planned only from live GBFS assets in the search handler.
-  // A road path is an estimate, not a provider quote or a confirmed taxi.
-  // Keep it useful for route geometry while leaving price and availability unknown.
-  if (isTypeAllowed('taxi')) {
-    try {
-      const roadRoute = await getRoadRouteForJourney(originCoord, destCoord);
-      const arrivalAt = new Date(departureAt.getTime() + roadRoute.durationSeconds * 1000);
-
-      journeys.push({
-        id: `taxi:direct:${Math.round(roadRoute.distanceMeters)}`,
-        strategy,
-        score: roadRoute.durationSeconds,
-        state: 'PLANNED',
-        source: 'road-route-estimate',
-        providerName: 'Орієнтовний маршрут таксі',
-        totalDurationSeconds: roadRoute.durationSeconds,
-        totalPriceMinor: null,
-        confirmedPriceMinor: null,
-        estimatedPriceMinMinor: null,
-        estimatedPriceMaxMinor: null,
-        walkingMeters: 0,
-        transfers: 0,
-        reliabilityScore: null,
-        comfortScore: null,
-        legs: [
-          {
-            ordinal: 0,
-            mode: 'TAXI',
-            origin,
-            destination,
-            departureAt: new Date(departureAt),
-            arrivalAt,
-            durationSeconds: roadRoute.durationSeconds,
-            distanceMeters: Math.round(roadRoute.distanceMeters),
-            priceMinor: null,
-            currency: 'UAH',
-            priceStatus: 'UNKNOWN',
-            availabilityStatus: 'UNKNOWN',
-            providerType: 'taxi',
-            providerName: 'Орієнтовний маршрут таксі',
-            state: 'SUGGESTED',
-            source: 'road-route-estimate',
-            routeGeometry: roadRoute.geometry,
-            metadata: {
-              roadDistanceKm: (roadRoute.distanceMeters / 1000).toFixed(1),
-              durationStatus: 'ESTIMATED',
-              routeAccuracy: 'SOURCE_ROAD_GEOMETRY',
-              providerQuote: false,
-            },
-          },
-        ],
-      });
-    } catch {
-      // Without road geometry, do not invent a direct taxi route or arrival time.
-    }
-  }
-
-  // 4. MULTIMODAL CHAIN: TAXI -> RAPID TRANSIT / TRAIN -> WALK
-  if (isTypeAllowed('taxi') && isTypeAllowed('metro') && totalDirectDistance > 8000) {
-    const centralStations = KYIV_METRO_STATIONS.filter((st) => ['Вокзальна', 'Видубичі', 'Деміївська', 'Почайна'].includes(st.name));
-    for (const hub of centralStations) {
-      const hubJourneys = planKyivRapidTransitJourneys(hub.coordinates, destCoord, 2000);
-      if (hubJourneys.length > 0) {
-        const rapidLeg = hubJourneys[0];
-        const distToHub = haversineMeters(originCoord, hub.coordinates);
-        if (distToHub >= 3000) {
-          let taxiRoadRoute: Awaited<ReturnType<typeof getRoadRoute>>;
-          try {
-            taxiRoadRoute = await getRoadRouteForJourney(originCoord, hub.coordinates);
-          } catch {
-            continue;
-          }
-
-          const legs: MultimodalLeg[] = [];
-          let curTime = new Date(departureAt);
-
-          // Leg 1: Taxi to central hub
-          const taxiArr = new Date(curTime.getTime() + taxiRoadRoute.durationSeconds * 1000);
-          legs.push({
-            ordinal: legs.length,
-            mode: 'TAXI',
-            origin,
-            destination: { name: `Вокзал / ст. ${hub.name}`, coordinates: hub.coordinates },
-            departureAt: new Date(curTime),
-            arrivalAt: taxiArr,
-            durationSeconds: taxiRoadRoute.durationSeconds,
-            distanceMeters: taxiRoadRoute.distanceMeters,
-            priceMinor: null,
-            currency: 'UAH',
-            priceStatus: 'UNKNOWN',
-            availabilityStatus: 'UNKNOWN',
-            providerType: 'taxi',
-            providerName: 'Орієнтовний маршрут таксі',
-            state: 'SUGGESTED',
-            source: 'road-route-estimate',
-            routeGeometry: taxiRoadRoute.geometry,
-            metadata: { durationStatus: 'ESTIMATED', routeAccuracy: 'SOURCE_ROAD_GEOMETRY', providerQuote: false },
-          });
-          curTime = new Date(taxiArr.getTime() + 180_000); // 3 min entry buffer
-
-          // Leg 2..N: Rapid transit
-          for (let i = 0; i < rapidLeg.segments.length; i++) {
-            const seg = rapidLeg.segments[i];
-
-            // If transfer between rapid transit segments
-            if (i > 0 && rapidLeg.transferWalkingSeconds && rapidLeg.transferWalkingSeconds[i - 1]) {
-              const transDur = rapidLeg.transferWalkingSeconds[i - 1];
-              const transDist = rapidLeg.transferWalkingMeters?.[i - 1] ?? 150;
-              const transArr = new Date(curTime.getTime() + transDur * 1000);
-              legs.push({
-                ordinal: legs.length,
-                mode: 'WALK',
-                origin: { name: legs.at(-1)!.destination.name, coordinates: legs.at(-1)!.destination.coordinates },
-                destination: { name: `ст. ${seg.originStation.name}`, coordinates: seg.originStation.coordinates },
-                departureAt: new Date(curTime),
-                arrivalAt: transArr,
-                durationSeconds: transDur,
-                distanceMeters: transDist,
-                walkingDistanceMeters: transDist,
-                priceMinor: 0,
-                currency: 'UAH',
-                priceStatus: 'LOCKED',
-                availabilityStatus: 'AVAILABLE',
-                providerType: 'walking',
-                state: 'SUGGESTED',
-                source: 'transfer-walk',
-                metadata: { title: 'Пересадка між лініями' },
-              });
-              curTime = transArr;
-            }
-
-            const segArr = new Date(curTime.getTime() + seg.durationSeconds * 1000);
-            legs.push({
-              ordinal: legs.length,
-              mode: seg.mode,
-              origin: { name: `ст. ${seg.originStation.name}`, coordinates: seg.originStation.coordinates },
-              destination: { name: `ст. ${seg.destinationStation.name}`, coordinates: seg.destinationStation.coordinates },
-              departureAt: new Date(curTime),
-              arrivalAt: segArr,
-              durationSeconds: seg.durationSeconds,
-              distanceMeters: seg.distanceMeters,
-              priceMinor: seg.fareMinor,
-              currency: 'UAH',
-              priceStatus: 'LOCKED',
-              availabilityStatus: 'AVAILABLE',
-              providerId: seg.providerId,
-              providerType: 'public_transit',
-              providerName: seg.providerName,
-              routeName: seg.lineName,
-              state: 'SUGGESTED',
-              source: 'kyiv-open-data',
-            });
-            curTime = segArr;
-          }
-
-          // Walk to dest
-          if (rapidLeg.distanceFromDestinationStationMeters > 50) {
-            const walkDur = Math.ceil(rapidLeg.distanceFromDestinationStationMeters / 1.25);
-            const walkArr = new Date(curTime.getTime() + walkDur * 1000);
-            legs.push({
-              ordinal: legs.length,
-              mode: 'WALK',
-              origin: { name: `ст. ${rapidLeg.destinationStation.name}`, coordinates: rapidLeg.destinationStation.coordinates },
-              destination,
-              departureAt: new Date(curTime),
-              arrivalAt: walkArr,
-              durationSeconds: walkDur,
-              distanceMeters: rapidLeg.distanceFromDestinationStationMeters,
-              walkingDistanceMeters: rapidLeg.distanceFromDestinationStationMeters,
-              priceMinor: 0,
-              currency: 'UAH',
-              priceStatus: 'LOCKED',
-              availabilityStatus: 'AVAILABLE',
-              providerType: 'walking',
-              state: 'SUGGESTED',
-              source: 'walking',
-            });
-            curTime = walkArr;
-          }
-
-          const totalDur = Math.round((curTime.getTime() - departureAt.getTime()) / 1000);
-          const totalPrice = null;
-
-          journeys.push({
-            id: `chain:taxi-metro:${hub.id}-${rapidLeg.destinationStation.id}`,
-            strategy,
-            score: totalDur,
-            state: 'PLANNED',
-            source: 'multimodal-chain',
-            providerName: `Орієнтовний маршрут таксі + ${rapidLeg.segments[0].providerName}`,
-            totalDurationSeconds: totalDur,
-            totalPriceMinor: totalPrice,
-            confirmedPriceMinor: null,
-            estimatedPriceMinMinor: null,
-            estimatedPriceMaxMinor: null,
-            walkingMeters: rapidLeg.distanceFromDestinationStationMeters,
-            transfers: rapidLeg.transfers + 1,
-            reliabilityScore: null,
-            comfortScore: null,
-            legs,
-          });
-          break; // Keep best hub option
-        }
-      }
-    }
-  }
+  // Taxi remains fail-closed until an authorized provider adapter supplies real availability and a quote.
+  // A road router alone can describe a car path but cannot establish a bookable taxi service.
 
   // Intercity rail is supplied only by eligible dated GTFS/API candidates in the journey search.
   // Do not turn the static corridor catalog into invented departures, fares, stops or geometry.
