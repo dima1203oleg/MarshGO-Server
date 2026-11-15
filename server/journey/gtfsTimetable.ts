@@ -4361,11 +4361,34 @@ function findGtfsItinerariesAtWalkingReachWithStats(
       tripId: segment.tripId, originStop: segment.originStop.name, destinationStop: segment.destinationStop.name,
       departureAt: segment.departureAt.toISOString(), arrivalAt: segment.arrivalAt.toISOString(),
     });
+    const endpointRouteCounts = (candidates: readonly GtfsDirectJourney[]) => {
+      const counts = new Map<string, { routeName: string; transportType: string; count: number; stopNames: Set<string> }>();
+      for (const segment of candidates) {
+        const route = feed.routes.get(segment.routeId);
+        const entry = counts.get(segment.routeId) ?? {
+          routeName: route?.name ?? segment.routeId,
+          transportType: route?.transportType ?? segment.transportType,
+          count: 0,
+          stopNames: new Set<string>(),
+        };
+        entry.count++;
+        entry.stopNames.add(segment.originStop.name);
+        entry.stopNames.add(segment.destinationStop.name);
+        counts.set(segment.routeId, entry);
+      }
+      return [...counts.entries()].map(([routeId, entry]) => ({
+        routeId, routeName: entry.routeName, transportType: entry.transportType,
+        candidateSegments: entry.count, sampleStops: [...entry.stopNames].slice(0, 8),
+      })).sort((left, right) => right.candidateSegments - left.candidateSegments
+        || compareStableId(left.routeId, right.routeId)).slice(0, 20);
+    };
     debugStage('omitted-endpoint-segments', {
       originStopsWithPassengerReadySegments: omittedOriginFirstLegs.length,
       destinationStopsWithInWindowSegments: omittedDestinationLastLegs.length,
       originSegmentSample: JSON.stringify(omittedOriginFirstLegs.slice(0, 10).map(summarizeEndpointOmission)),
       destinationSegmentSample: JSON.stringify(omittedDestinationLastLegs.slice(0, 10).map(summarizeEndpointOmission)),
+      originRouteCounts: JSON.stringify(endpointRouteCounts(omittedOriginFirstLegs)),
+      destinationRouteCounts: JSON.stringify(endpointRouteCounts(omittedDestinationLastLegs)),
     });
   }
 
