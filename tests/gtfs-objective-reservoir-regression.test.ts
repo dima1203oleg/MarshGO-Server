@@ -98,6 +98,12 @@ test('objective reservoir preserves global least-walking witness when same-trip 
     leastWalking,
     'global least-walking witness (0m walking) must be preserved in returned candidates via the objective reservoir',
   );
+  const sameScheduledTripVariants = result.itineraries.filter((itinerary) =>
+    itinerary.segments.length === 1 && itinerary.segments[0]?.tripId === 't1');
+  assert.ok(sameScheduledTripVariants.length <= 3,
+    'objective reservoirs must not return more than three stop-pair variants for one scheduled trip');
+  assert.equal(new Set(sameScheduledTripVariants.map((itinerary) => itinerary.id)).size,
+    sameScheduledTripVariants.length, 'same-trip response variants must remain unique');
   assert.equal(leastWalking.segments[0]?.originStop.id, 'stop-b');
   assert.equal(leastWalking.segments[0]?.destinationStop.id, 'stop-c');
   const retainedSegment = leastWalking.segments[0];

@@ -4534,7 +4534,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   }
 
   const allCandidateIds = new Set(results.keys());
-  const rankedResults = [...results.values()];
+  let rankedResults = [...results.values()];
   for (const sample of objectiveCandidateSamples.values()) {
     for (const candidate of sample) {
       if (allCandidateIds.has(candidate.id)) continue;
@@ -4542,6 +4542,27 @@ function findGtfsItinerariesAtWalkingReachWithStats(
       rankedResults.push(candidate);
     }
   }
+  // Objective reservoirs intentionally recover candidates rejected by the
+  // streaming two-variant cap. Keep the three strongest objective witnesses
+  // for a scheduled trip chain (fastest, genuinely cheapest, and least walking)
+  // while preventing those reservoirs from flooding one response with many
+  // stop-pair variants of the same vehicle journey.
+  const MAX_RESPONSE_VARIANTS_PER_TRIP_CHAIN = 3;
+  const variantsByTripChain = new Map<string, GtfsItinerary[]>();
+  for (const itinerary of rankedResults) {
+    const tripChain = itinerary.segments
+      .map((segment) => `${segment.providerId}:${segment.serviceDate}:${segment.tripId}`).join('>');
+    const variants = variantsByTripChain.get(tripChain) ?? [];
+    variants.push(itinerary);
+    variantsByTripChain.set(tripChain, variants);
+  }
+  const sampledRankedResults: GtfsItinerary[] = [];
+  for (const variants of variantsByTripChain.values()) {
+    const sampled = sampleGtfsTripChainCandidates(variants, MAX_RESPONSE_VARIANTS_PER_TRIP_CHAIN);
+    if (sampled.length < variants.length) candidateSamplingTruncated = true;
+    sampledRankedResults.push(...sampled);
+  }
+  rankedResults = sampledRankedResults;
   rankedResults.sort((a, b) => a.arrivalAt.getTime() - b.arrivalAt.getTime() || a.transfers - b.transfers || compareStableId(a.id, b.id));
   const byDuration = [...rankedResults].sort((a, b) => a.durationSeconds - b.durationSeconds
     || a.transfers - b.transfers || compareStableId(a.id, b.id));
