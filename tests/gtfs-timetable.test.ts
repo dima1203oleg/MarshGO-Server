@@ -1037,7 +1037,8 @@ test('retains a long middle leg between interchanges in a feasible three-leg cha
   const serviceStart = 8 * 3600;
   addTrip('first-route', 'first-trip', [origin, firstHub], serviceStart, 20 * 60);
   addTrip('middle-route', 'middle-trip', [firstHub, ...middleStops, lastHub], serviceStart + 25 * 60, 60);
-  addTrip('last-route', 'last-trip', [lastHub, destination], serviceStart + 49 * 60, 16 * 60);
+  // Rail transfers require the intercity buffer; leave ten minutes after the long tram leg.
+  addTrip('last-route', 'last-trip', [lastHub, destination], serviceStart + 56 * 60, 16 * 60);
 
   // Make each interior middle-route stop a valid interchange without adding
   // another usable ride; this creates more than twenty eligible stop events.
