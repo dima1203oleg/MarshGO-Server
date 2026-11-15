@@ -3431,14 +3431,14 @@ test('keeps nearest stops, represents distinct routes, and reports the bounded s
   const denseTexts: Record<string, string> = {
     'agency.txt': 'agency_id,agency_name,agency_url,agency_timezone\na,Test,https://example.test,Europe/Kyiv',
     'routes.txt': ['route_id,agency_id,route_short_name,route_long_name,route_type',
-      ...Array.from({ length: 60 }, (_, index) => `r${index},a,${index},Route ${index},3`)].join('\n'),
+      ...Array.from({ length: 80 }, (_, index) => `r${index},a,${index},Route ${index},3`)].join('\n'),
     'trips.txt': ['route_id,service_id,trip_id,trip_headsign',
-      ...Array.from({ length: 60 }, (_, index) => `r${index},weekday,t${index},Headsign ${index}`)].join('\n'),
+      ...Array.from({ length: 80 }, (_, index) => `r${index},weekday,t${index},Headsign ${index}`)].join('\n'),
     'stops.txt': ['stop_id,stop_name,stop_lat,stop_lon',
-      ...Array.from({ length: 60 }, (_, index) => `o${index},Origin ${index},49.8401,${(24.0201 + index * 0.000001).toFixed(7)}`),
-      ...Array.from({ length: 60 }, (_, index) => `d${index},Destination ${index},49.8501,${(24.0301 + index * 0.000001).toFixed(7)}`)].join('\n'),
+      ...Array.from({ length: 80 }, (_, index) => `o${index},Origin ${index},49.8401,${(24.0201 + index * 0.000001).toFixed(7)}`),
+      ...Array.from({ length: 80 }, (_, index) => `d${index},Destination ${index},49.8501,${(24.0301 + index * 0.000001).toFixed(7)}`)].join('\n'),
     'stop_times.txt': ['trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
-      ...Array.from({ length: 60 }, (_, index) => [
+      ...Array.from({ length: 80 }, (_, index) => [
         `t${index},08:00:00,08:00:00,o${index},1,0,0`,
         `t${index},08:40:00,08:40:00,d${index},2,0,0`,
       ]).flat()].join('\n'),
@@ -3455,7 +3455,7 @@ test('keeps nearest stops, represents distinct routes, and reports the bounded s
     maximumTransfers: 0,
   });
   assert.equal(dense.truncation.stopSelection, true,
-    'when the per-side cap stops before 60 distinct route patterns are represented, the omission is a real coverage loss');
+    'when the per-side cap stops before 80 distinct route patterns are represented, the omission is a real coverage loss');
 });
 
 test('composes across provider feeds using equivalent Kyiv timezone names and closely matched stops', () => {
