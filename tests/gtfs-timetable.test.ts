@@ -85,6 +85,9 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
     process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
     assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits), /bounds are invalid/,
       'an environment opt-in outside NODE_ENV=test cannot raise either bound');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      transferCandidateOrder: 'route-round-robin',
+    }), /bounds are invalid/, 'alternate transfer ordering is unavailable outside the isolated diagnostic runner');
 
     process.env.NODE_ENV = 'test';
     delete process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
@@ -117,6 +120,55 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
     assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
       ...expandedLimits, maxObjectiveReservoirSearchSteps: 200_001,
     }), /bounds are invalid/, 'objective lookahead diagnostics remain capped at 200,000 steps');
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousCi === undefined) delete process.env.CI;
+    else process.env.CI = previousCi;
+    if (previousDiagnosticOptIn === undefined) delete process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+    else process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = previousDiagnosticOptIn;
+  }
+});
+
+test('dense-feed diagnostic interleaves onward routes while default search remains chronological', () => {
+  const timetable = connectingFeed({ secondRouteType: '3' });
+  const addTrip = (routeId: string, tripId: string, departure: string, arrival: string) => {
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Finish' });
+    const toSeconds = (value: string) => {
+      const [hours, minutes] = value.split(':').map(Number);
+      return hours! * 3600 + minutes! * 60;
+    };
+    const stopTimes = [
+      { stopId: 'hub', sequence: 1, arrivalSeconds: toSeconds(departure), departureSeconds: toSeconds(departure), pickupType: 0, dropOffType: 0 },
+      { stopId: 'finish', sequence: 2, arrivalSeconds: toSeconds(arrival), departureSeconds: toSeconds(arrival), pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, stopTimes);
+    stopTimes.forEach((stopTime, index) => timetable.stopTimesByStop.set(stopTime.stopId,
+      [...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index }]));
+  };
+  addTrip('rail', 'r2', '08:36', '09:01');
+  addTrip('bus-next', 'n1', '08:36:30', '09:02');
+  const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 1 };
+  const captureOnwardRoutes = (limits: Parameters<typeof findGtfsItinerariesWithStats>[2] = {}) => {
+    let observed: GtfsCandidateGraphSnapshot | undefined;
+    findGtfsItinerariesWithStats(timetable, query, limits, (snapshot) => { observed = snapshot; });
+    assert.ok(observed);
+    const firstLeg = observed.segments.find(({ journey }) => journey.tripId === 'b1' && journey.originStop.id === 'start');
+    assert.ok(firstLeg);
+    return observed.successors(firstLeg.id, 1).map((id) => observed!.segments.find((segment) => segment.id === id)!.journey.tripId);
+  };
+
+  assert.deepEqual(captureOnwardRoutes(), ['r1', 'r2', 'n1'], 'default traversal keeps all onward candidates chronological');
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousCi = process.env.CI;
+  const previousDiagnosticOptIn = process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+  try {
+    process.env.NODE_ENV = 'test';
+    process.env.CI = 'true';
+    process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
+    assert.deepEqual(captureOnwardRoutes({ transferCandidateOrder: 'route-round-robin' }), ['r1', 'n1', 'r2'],
+      'the opt-in diagnostic visits a second feasible route before repeated departures from the first route');
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;

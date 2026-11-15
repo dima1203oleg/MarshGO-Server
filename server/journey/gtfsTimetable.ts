@@ -548,6 +548,8 @@ export interface GtfsGraphBudgetLimits {
   maxSearchResults?: number;
   /** Test-only objective-reservoir lookahead for dense-feed diagnostics. */
   maxObjectiveReservoirSearchSteps?: number;
+  /** Test-only onward-route diversification for dense-feed diagnostics. */
+  transferCandidateOrder?: 'chronological' | 'route-round-robin';
   /** Test-only override for verifying bounded search-frontier behavior. */
   maxQueuedSearchWork?: number;
 }
@@ -2550,6 +2552,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     ? MAX_DIAGNOSTIC_STOPS_PER_ROUTE_PATTERN : MAX_STOPS_PER_ROUTE_PATTERN;
   const maximumAllowedSearchResults = isGtfsGraphBudgetDiagnosticEnabled() ? limit * 100 : limit * 25;
   const maximumAllowedObjectiveReservoirSearchSteps = isGtfsGraphBudgetDiagnosticEnabled() ? 200_000 : 25_000;
+  const transferCandidateOrder = graphLimits.transferCandidateOrder ?? 'chronological';
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
@@ -2577,7 +2580,9 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     || !Number.isSafeInteger(maximumSearchResults) || maximumSearchResults < limit * 25
     || maximumSearchResults > maximumAllowedSearchResults
     || !Number.isSafeInteger(objectiveReservoirSearchSteps) || objectiveReservoirSearchSteps < 25_000
-    || objectiveReservoirSearchSteps > maximumAllowedObjectiveReservoirSearchSteps) {
+    || objectiveReservoirSearchSteps > maximumAllowedObjectiveReservoirSearchSteps
+    || !['chronological', 'route-round-robin'].includes(transferCandidateOrder)
+    || (transferCandidateOrder !== 'chronological' && !isGtfsGraphBudgetDiagnosticEnabled())) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
   const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
@@ -4169,7 +4174,32 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     const cached = transferCandidateReachableCache.get(cacheKey);
     if (cached) return cached;
     const canReach = reachableWithin[remainingLegs - 1];
-    const candidates = transferCandidates(previous).filter((candidate) => canReach.has(candidate.destinationStop.id));
+    const chronologicallyOrdered = transferCandidates(previous).filter((candidate) => canReach.has(candidate.destinationStop.id));
+    let candidates = chronologicallyOrdered;
+    if (transferCandidateOrder === 'route-round-robin') {
+      // In dense feeds a single onward route can contribute many earlier
+      // departures and consume a bounded child cursor before other feasible
+      // lines are examined. Preserve chronology within each route, but cycle
+      // across routes so bounded search gets an early sample of each option.
+      const byRoute = new Map<string, GtfsDirectJourney[]>();
+      for (const candidate of chronologicallyOrdered) {
+        const routeKey = `${candidate.providerId}:${candidate.routeId}`;
+        const routeCandidates = byRoute.get(routeKey) ?? [];
+        routeCandidates.push(candidate);
+        byRoute.set(routeKey, routeCandidates);
+      }
+      const routeGroups = [...byRoute.values()];
+      const interleaved: GtfsDirectJourney[] = [];
+      let maximumRouteDepth = 0;
+      for (const group of routeGroups) maximumRouteDepth = Math.max(maximumRouteDepth, group.length);
+      for (let depth = 0; depth < maximumRouteDepth; depth++) {
+        for (const group of routeGroups) {
+          const candidate = group[depth];
+          if (candidate) interleaved.push(candidate);
+        }
+      }
+      candidates = interleaved;
+    }
     transferCandidateReachableCache.set(cacheKey, candidates);
     return candidates;
   };
