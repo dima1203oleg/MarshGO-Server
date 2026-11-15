@@ -4358,7 +4358,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
       && segment.departureAt.getTime() >= input.earliestDeparture.getTime()
         + walkingSeconds(segment.distanceToOriginStopMeters) * 1000);
     const omittedDestinationLastLegs = segments.filter((segment) => omittedDestinationStopIds.has(segment.destinationStop.id)
-      && segment.arrivalAt.getTime() <= journeyEnd);
+      && segment.arrivalAt.getTime() <= journeyEnd.getTime());
     const summarizeEndpointOmission = (segment: GtfsDirectJourney) => ({
       routeId: segment.routeId, routeName: feed.routes.get(segment.routeId)?.name ?? segment.routeId,
       tripId: segment.tripId, originStop: segment.originStop.name, destinationStop: segment.destinationStop.name,
