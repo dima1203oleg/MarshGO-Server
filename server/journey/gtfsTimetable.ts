@@ -2673,6 +2673,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
       unrepresentedRoutePatternCount: unrepresentedRoutePatterns?.size ?? 0,
       unrepresentedRoutePatternSample: unrepresentedRoutePatterns
         ? [...unrepresentedRoutePatterns].sort(compareStableId).slice(0, 10) : [],
+      omittedStopIds: debugEnabled ? ranked.filter((item) => !selected.has(item.stop.id)).map(({ stop }) => stop.id) : [],
     };
   };
   const originReach = closestStops(input.origin, accessRadius);
@@ -4349,6 +4350,27 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         || compareStableId(a.tripId, b.tripId)
         || compareStableId(a.destinationStop.id, b.destinationStop.id);
     });
+  if (debugEnabled) {
+    const omittedOriginStopIds = new Set(originReach.omittedStopIds);
+    const omittedDestinationStopIds = new Set(destinationReach.omittedStopIds);
+    const omittedOriginFirstLegs = segments.filter((segment) => omittedOriginStopIds.has(segment.originStop.id)
+      && segment.departureAt.getTime() <= maxFirstDeparture
+      && segment.departureAt.getTime() >= input.earliestDeparture.getTime()
+        + walkingSeconds(segment.distanceToOriginStopMeters) * 1000);
+    const omittedDestinationLastLegs = segments.filter((segment) => omittedDestinationStopIds.has(segment.destinationStop.id)
+      && segment.arrivalAt.getTime() <= journeyEnd);
+    const summarizeEndpointOmission = (segment: GtfsDirectJourney) => ({
+      routeId: segment.routeId, routeName: feed.routes.get(segment.routeId)?.name ?? segment.routeId,
+      tripId: segment.tripId, originStop: segment.originStop.name, destinationStop: segment.destinationStop.name,
+      departureAt: segment.departureAt.toISOString(), arrivalAt: segment.arrivalAt.toISOString(),
+    });
+    debugStage('omitted-endpoint-segments', {
+      originStopsWithPassengerReadySegments: omittedOriginFirstLegs.length,
+      destinationStopsWithInWindowSegments: omittedDestinationLastLegs.length,
+      originSegmentSample: JSON.stringify(omittedOriginFirstLegs.slice(0, 10).map(summarizeEndpointOmission)),
+      destinationSegmentSample: JSON.stringify(omittedDestinationLastLegs.slice(0, 10).map(summarizeEndpointOmission)),
+    });
+  }
 
   // Optional test seam: expose copies of the exact graph that production is
   // about to traverse. The observer receives stable IDs and delegates every
