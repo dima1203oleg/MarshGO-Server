@@ -544,6 +544,8 @@ export interface GtfsGraphBudgetLimits {
   /** Test-only endpoint selector ceilings for bounded Lviv diagnostics. */
   maxStopsPerSide?: number;
   maxStopsPerRoutePattern?: number;
+  /** Test-only global retained-itinerary ceiling; response page size stays unchanged. */
+  maxSearchResults?: number;
   /** Test-only override for verifying bounded search-frontier behavior. */
   maxQueuedSearchWork?: number;
 }
@@ -2525,6 +2527,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     stepProfile[key === 'expandPathMs' ? 'expandPathCalls' : 'expandNextChildCalls']++;
   };
   const now = input.now ?? new Date();
+  const limit = input.limit ?? 20;
   const maximumJourneySeconds = input.maximumJourneySeconds ?? 24 * 60 * 60;
   const maximumTransfers = input.maximumTransfers ?? MAX_GTFS_TRANSFERS;
   const minimumTransferBufferSeconds = input.minimumTransferBufferSeconds ?? DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS;
@@ -2533,6 +2536,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   const maximumGraphSegmentsPerRoute = graphLimits.segmentsPerRoute ?? MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
   const maxStopsPerSide = graphLimits.maxStopsPerSide ?? MAX_STOPS_PER_SIDE;
   const maxStopsPerRoutePattern = graphLimits.maxStopsPerRoutePattern ?? MAX_STOPS_PER_ROUTE_PATTERN;
+  const maximumSearchResults = graphLimits.maxSearchResults ?? limit * 25;
   const maximumAllowedGraphSegments = isGtfsGraphBudgetDiagnosticEnabled()
     ? MAX_GTFS_GRAPH_DIAGNOSTIC_SEGMENTS : MAX_GTFS_GRAPH_SEGMENTS;
   const maximumAllowedGraphSegmentsPerRoute = isGtfsGraphBudgetDiagnosticEnabled()
@@ -2541,12 +2545,12 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     ? MAX_DIAGNOSTIC_STOPS_PER_SIDE : MAX_STOPS_PER_SIDE;
   const maximumAllowedStopsPerRoutePattern = isGtfsGraphBudgetDiagnosticEnabled()
     ? MAX_DIAGNOSTIC_STOPS_PER_ROUTE_PATTERN : MAX_STOPS_PER_ROUTE_PATTERN;
+  const maximumAllowedSearchResults = isGtfsGraphBudgetDiagnosticEnabled() ? limit * 50 : limit * 25;
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
   const egressRadius = input.maximumEgressWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_EGRESS_WALKING_METERS;
   const transferRadius = input.maximumTransferWalkingMeters ?? DEFAULT_MAX_TRANSFER_WALKING_METERS;
-  const limit = input.limit ?? 20;
   if (!Number.isFinite(input.earliestDeparture.getTime()) || !Number.isFinite(input.latestDeparture.getTime())
     || input.latestDeparture < input.earliestDeparture || input.earliestDeparture < now
     || !Number.isInteger(maximumJourneySeconds) || maximumJourneySeconds < 60 || maximumJourneySeconds > 7 * 24 * 60 * 60
@@ -2565,7 +2569,9 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     || !Number.isSafeInteger(maxStopsPerSide) || maxStopsPerSide < MAX_STOPS_PER_SIDE
     || maxStopsPerSide > maximumAllowedStopsPerSide
     || !Number.isSafeInteger(maxStopsPerRoutePattern) || maxStopsPerRoutePattern < MAX_STOPS_PER_ROUTE_PATTERN
-    || maxStopsPerRoutePattern > maximumAllowedStopsPerRoutePattern) {
+    || maxStopsPerRoutePattern > maximumAllowedStopsPerRoutePattern
+    || !Number.isSafeInteger(maximumSearchResults) || maximumSearchResults < limit * 25
+    || maximumSearchResults > maximumAllowedSearchResults) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
   const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });
@@ -4065,7 +4071,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   }
 
   const results = new Map<string, GtfsItinerary>();
-  const MAX_SEARCH_RESULTS = limit * 25;
+  const MAX_SEARCH_RESULTS = maximumSearchResults;
   // Once a leg-count pool is full, keep searching a bounded window so late
   // objective improvements can enter the reservoirs without scanning the
   // entire dense feed. Any remaining work is still reported as truncated.

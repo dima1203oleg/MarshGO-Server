@@ -216,13 +216,15 @@ async function main() {
   const itinerarySignature = (itinerary: GtfsItinerary) => itinerary.segments.map((segment) =>
     `${segment.transportType}:${segment.routeId}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}`).join('|');
   const budgetDiagnostic = scope === 'lviv-budget-diagnostic' ? {
-    mode: 'diagnostic-only 2x2 comparison; does not alter API graph or endpoint-selection defaults',
+    mode: 'diagnostic-only bounded cap sweeps; does not alter API graph, endpoint-selection, candidate-pool, or response-page defaults',
     expandedGraphLimits: { totalSegments: 250_000, segmentsPerRoute: 30_000 },
     expandedStopSelectionLimits: { maxStopsPerSide: 112, maxStopsPerRoutePattern: 16 },
+    expandedCandidatePool: { maxSearchResults: ROUTE_SMOKE_RESULT_LIMIT * 50, responsePageLimit: ROUTE_SMOKE_RESULT_LIMIT },
     cases: lvivRouteCases.map((routeCase, index) => {
       const baseline = standardRuns[index]!;
       const graphOnly = runLvivSearch(routeCase, { totalSegments: 250_000, segmentsPerRoute: 30_000 });
       const stopOnly = runLvivSearch(routeCase, { maxStopsPerSide: 112, maxStopsPerRoutePattern: 16 });
+      const candidatePoolOnly = runLvivSearch(routeCase, { maxSearchResults: ROUTE_SMOKE_RESULT_LIMIT * 50 });
       const graphAndStops = runLvivSearch(routeCase, {
         totalSegments: 250_000, segmentsPerRoute: 30_000,
         maxStopsPerSide: 112, maxStopsPerRoutePattern: 16,
@@ -254,6 +256,7 @@ async function main() {
         expanded: graphOnlySummary,
         graphOnly: graphOnlySummary,
         stopSelectionOnly: summarizeVariant(stopOnly),
+        candidatePoolOnly: summarizeVariant(candidatePoolOnly),
         graphAndStopSelection: summarizeVariant(graphAndStops),
       };
     }),

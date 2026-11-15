@@ -68,13 +68,17 @@ test('GTFS graph budget and materialization share the transfer-window rule', () 
     'a long first or last leg of a query-frontier transfer remains eligible');
 });
 
-test('expanded GTFS graph and endpoint selector limits require the exact test-only diagnostic opt-in', () => {
+test('expanded GTFS graph, endpoint selector, and candidate-pool limits require exact test-only diagnostic opt-in', () => {
   const previousNodeEnv = process.env.NODE_ENV;
   const previousCi = process.env.CI;
   const previousDiagnosticOptIn = process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
   const timetable = feed({ withIntermediate: true });
-  const searchInput = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0 };
-  const expandedLimits = { totalSegments: 100_001, segmentsPerRoute: 5_001, maxStopsPerSide: 57, maxStopsPerRoutePattern: 9 };
+  const searchInput = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0, limit: 10 };
+  const expandedLimits = {
+    totalSegments: 100_001, segmentsPerRoute: 5_001,
+    maxStopsPerSide: 57, maxStopsPerRoutePattern: 9,
+    maxSearchResults: searchInput.limit * 25 + 1,
+  };
   try {
     process.env.NODE_ENV = 'production';
     process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
@@ -100,6 +104,9 @@ test('expanded GTFS graph and endpoint selector limits require the exact test-on
     assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
       ...expandedLimits, maxStopsPerRoutePattern: 17,
     }), /bounds are invalid/, 'endpoint diagnostics remain capped at 16 stops per route pattern');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      ...expandedLimits, maxSearchResults: searchInput.limit * 50 + 1,
+    }), /bounds are invalid/, 'candidate-pool diagnostics remain capped at 50 results per requested page item');
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
