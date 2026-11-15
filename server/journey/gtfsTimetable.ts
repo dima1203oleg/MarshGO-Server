@@ -42,6 +42,10 @@ const MAX_ROUTE_GEOMETRY_POINTS = 500;
 // preserves a fair slice for each line and makes truncation explicit.
 const MAX_GTFS_GRAPH_SEGMENTS = 100_000;
 const MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE = 5_000;
+const MAX_GTFS_GRAPH_DIAGNOSTIC_SEGMENTS = 250_000;
+const MAX_GTFS_GRAPH_DIAGNOSTIC_SEGMENTS_PER_ROUTE = 30_000;
+const isGtfsGraphBudgetDiagnosticEnabled = () => process.env.NODE_ENV === 'test' && process.env.CI === 'true'
+  && process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS === '1';
 export const MAX_GTFS_TRANSFERS = 4;
 /** Upper bound for `limit`; callers that ask for more make the search throw, so share this value. */
 export const MAX_GTFS_SEARCH_LIMIT = 100;
@@ -2519,6 +2523,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   const maximumWaitSeconds = input.maximumWaitSeconds ?? 4 * 60 * 60;
   const maximumGraphSegments = graphLimits.totalSegments ?? MAX_GTFS_GRAPH_SEGMENTS;
   const maximumGraphSegmentsPerRoute = graphLimits.segmentsPerRoute ?? MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
+  const maximumAllowedGraphSegments = isGtfsGraphBudgetDiagnosticEnabled()
+    ? MAX_GTFS_GRAPH_DIAGNOSTIC_SEGMENTS : MAX_GTFS_GRAPH_SEGMENTS;
+  const maximumAllowedGraphSegmentsPerRoute = isGtfsGraphBudgetDiagnosticEnabled()
+    ? MAX_GTFS_GRAPH_DIAGNOSTIC_SEGMENTS_PER_ROUTE : MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE;
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
@@ -2537,9 +2545,9 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     || (input.maximumTotalWalkingMeters !== undefined
       && (!Number.isInteger(input.maximumTotalWalkingMeters) || input.maximumTotalWalkingMeters < 0 || input.maximumTotalWalkingMeters > 100_000))
     || !Number.isInteger(limit) || limit < 1 || limit > HARD_MAX_GTFS_SEARCH_LIMIT
-    || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > MAX_GTFS_GRAPH_SEGMENTS
+    || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > maximumAllowedGraphSegments
     || !Number.isSafeInteger(maximumGraphSegmentsPerRoute) || maximumGraphSegmentsPerRoute < 1
-    || maximumGraphSegmentsPerRoute > MAX_GTFS_GRAPH_SEGMENTS_PER_ROUTE) {
+    || maximumGraphSegmentsPerRoute > maximumAllowedGraphSegmentsPerRoute) {
     throw new TypeError('GTFS itinerary search bounds are invalid');
   }
   const transferDecisionContext = createGtfsTransferDecisionContext({ feed, transferRadius, minimumTransferBufferSeconds });

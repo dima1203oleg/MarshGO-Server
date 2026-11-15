@@ -3,6 +3,7 @@ import { testProviderConnection } from '../server/mobility/connection';
 import { testGbfsConnection } from '../server/mobility/gbfs';
 import { fetchJson } from '../server/mobility/safeFetch';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
+import type { GtfsGraphBudgetLimits, GtfsItinerary } from '../server/journey/gtfsTimetable';
 import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
 import { selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
 import { serializeSmokeJourney, summarizeSmokeItineraries, withOptionalSourceFingerprint } from './transport-feed-smoke-summary';
@@ -157,10 +158,10 @@ async function main() {
   const selectedEntries = selectTransportFeedSmokeEntries(catalog, scope);
   // The static feed is parsed below by the planner. In the focused Lviv scope, only
   // probe the realtime endpoint here to avoid downloading/parsing the static archive twice.
-  const providerProbeEntries = scope === 'lviv-route'
+  const providerProbeEntries = scope === 'lviv-route' || scope === 'lviv-budget-diagnostic'
     ? selectedEntries.filter((entry) => entry.sourceType === 'gtfs_rt')
     : scope === 'ukraine-rail-route' ? [] : selectedEntries;
-  const results = await mapLimit(providerProbeEntries, scope === 'lviv-route' ? 1 : CONCURRENCY, probe);
+  const results = await mapLimit(providerProbeEntries, scope === 'lviv-route' || scope === 'lviv-budget-diagnostic' ? 1 : CONCURRENCY, probe);
 
   if (scope === 'ukraine-rail-route') {
     const railFeed = selectedEntries[0];
@@ -194,6 +195,57 @@ async function main() {
     { id: 'center-to-main-station', origin: [24.0297, 49.8397] as [number, number], destination: [23.9893, 49.8397] as [number, number] },
     { id: 'north-to-sykhiv', origin: [24.0029933, 49.8681678] as [number, number], destination: [24.057585, 49.794117] as [number, number] },
   ];
+  const createLvivSearchInput = (routeCase: typeof lvivRouteCases[number]) => ({
+    providerId: 'live-lviv-route-smoke',
+    providerName: 'Львівавтодор GTFS',
+    providerCity: 'Львів',
+    origin: routeCase.origin,
+    destination: routeCase.destination,
+    earliestDeparture,
+    latestDeparture,
+    maximumJourneySeconds: 3 * 60 * 60,
+    maximumWaitSeconds: 3 * 60 * 60,
+    maximumTransfers: 2,
+    maximumStopDistanceMeters: 1800,
+    limit: ROUTE_SMOKE_RESULT_LIMIT,
+    allowedTransportTypes: ['bus', 'tram', 'trolleybus'] as const,
+  });
+  const runLvivSearch = (routeCase: typeof lvivRouteCases[number], graphLimits: GtfsGraphBudgetLimits = {}) =>
+    findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(lvivFeed, createLvivSearchInput(routeCase), graphLimits));
+  const standardRuns = lvivRouteCases.map((routeCase) => runLvivSearch(routeCase));
+  const itinerarySignature = (itinerary: GtfsItinerary) => itinerary.segments.map((segment) =>
+    `${segment.transportType}:${segment.routeId}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}`).join('|');
+  const budgetDiagnostic = scope === 'lviv-budget-diagnostic' ? {
+    mode: 'diagnostic-only; does not alter the default/API graph budget',
+    expandedLimits: { totalSegments: 250_000, segmentsPerRoute: 30_000 },
+    cases: lvivRouteCases.map((routeCase, index) => {
+      const baseline = standardRuns[index]!;
+      const expanded = runLvivSearch(routeCase, { totalSegments: 250_000, segmentsPerRoute: 30_000 });
+      const baselineSignatures = baseline.result.itineraries.map(itinerarySignature);
+      const expandedSignatures = expanded.result.itineraries.map(itinerarySignature);
+      const baselineSet = new Set(baselineSignatures);
+      const expandedSet = new Set(expandedSignatures);
+      return {
+        id: routeCase.id,
+        baseline: {
+          count: baseline.result.itineraries.length,
+          searchTruncated: baseline.result.searchTruncated,
+          resultLimitReached: baseline.result.resultLimitReached,
+          signatures: baselineSignatures,
+          plannerDiagnostics: baseline.diagnostics,
+        },
+        expanded: {
+          count: expanded.result.itineraries.length,
+          searchTruncated: expanded.result.searchTruncated,
+          resultLimitReached: expanded.result.resultLimitReached,
+          signatures: expandedSignatures,
+          plannerDiagnostics: expanded.diagnostics,
+        },
+        introducedSignatures: [...expandedSet].filter((signature) => !baselineSet.has(signature)),
+        removedSignatures: [...baselineSet].filter((signature) => !expandedSet.has(signature)),
+      };
+    }),
+  } : undefined;
   const routePlanner = {
     provider: 'Львівавтодор GTFS → MARSHGO GTFS timetable planner',
     feed: withOptionalSourceFingerprint({
@@ -204,22 +256,8 @@ async function main() {
     }, 'staticFeedSha256', lvivFeed.staticFeedSha256),
     serviceDate,
     queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
-    cases: lvivRouteCases.map((routeCase) => {
-      const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(lvivFeed, {
-        providerId: 'live-lviv-route-smoke',
-        providerName: 'Львівавтодор GTFS',
-        providerCity: 'Львів',
-        origin: routeCase.origin,
-        destination: routeCase.destination,
-        earliestDeparture,
-        latestDeparture,
-        maximumJourneySeconds: 3 * 60 * 60,
-        maximumWaitSeconds: 3 * 60 * 60,
-        maximumTransfers: 2,
-        maximumStopDistanceMeters: 1800,
-        limit: ROUTE_SMOKE_RESULT_LIMIT,
-        allowedTransportTypes: ['bus', 'tram', 'trolleybus'],
-      }));
+    cases: lvivRouteCases.map((routeCase, index) => {
+      const { result: search, diagnostics } = standardRuns[index]!;
       const itineraryEvidence = search.itineraries.map(serializeSmokeJourney);
       return {
         id: routeCase.id,
@@ -235,6 +273,7 @@ async function main() {
         itineraries: itineraryEvidence,
       };
     }),
+    ...(budgetDiagnostic ? { budgetDiagnostic } : {}),
   };
 
   const supplementary = scope !== 'all' ? [] : await Promise.all([
