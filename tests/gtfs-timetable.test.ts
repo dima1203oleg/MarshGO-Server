@@ -98,6 +98,9 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
     process.env.CI = 'true';
     assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits),
       'the isolated diagnostic runner can use its explicitly enabled bounded graph and endpoint limits');
+    assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      maxSearchResults: searchInput.limit * 100,
+    }), 'the isolated diagnostic runner can test a 100x candidate pool without changing the response page');
     assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
       ...expandedLimits, maxStopsPerSide: 113,
     }), /bounds are invalid/, 'endpoint diagnostics remain capped at 112 stops per side');
@@ -105,8 +108,8 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
       ...expandedLimits, maxStopsPerRoutePattern: 17,
     }), /bounds are invalid/, 'endpoint diagnostics remain capped at 16 stops per route pattern');
     assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
-      ...expandedLimits, maxSearchResults: searchInput.limit * 50 + 1,
-    }), /bounds are invalid/, 'candidate-pool diagnostics remain capped at 50 results per requested page item');
+      ...expandedLimits, maxSearchResults: searchInput.limit * 100 + 1,
+    }), /bounds are invalid/, 'candidate-pool diagnostics remain capped at 100 results per requested page item');
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;

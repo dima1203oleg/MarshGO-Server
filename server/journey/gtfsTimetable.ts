@@ -2545,7 +2545,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     ? MAX_DIAGNOSTIC_STOPS_PER_SIDE : MAX_STOPS_PER_SIDE;
   const maximumAllowedStopsPerRoutePattern = isGtfsGraphBudgetDiagnosticEnabled()
     ? MAX_DIAGNOSTIC_STOPS_PER_ROUTE_PATTERN : MAX_STOPS_PER_ROUTE_PATTERN;
-  const maximumAllowedSearchResults = isGtfsGraphBudgetDiagnosticEnabled() ? limit * 50 : limit * 25;
+  const maximumAllowedSearchResults = isGtfsGraphBudgetDiagnosticEnabled() ? limit * 100 : limit * 25;
   // Keep the older common radius as an explicit override for callers that
   // still use it. Production search uses the distinct access/egress values.
   const accessRadius = input.maximumAccessWalkingMeters ?? input.maximumStopDistanceMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
