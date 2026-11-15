@@ -61,6 +61,9 @@ test('focused route acceptance fails without an untruncated route and promised g
     count: 1, searchTruncated: false, resultLimitReached: true, confirmedShapeGeometry: true,
   }]), false);
   assert.equal(routeSmokeAcceptancePassed('ukraine-rail-route', [{
+    count: 1, searchTruncated: false, confirmedShapeGeometry: true,
+  }]), false, 'missing result-page evidence cannot pass the rail acceptance gate');
+  assert.equal(routeSmokeAcceptancePassed('ukraine-rail-route', [{
     count: 1, searchTruncated: false, resultLimitReached: false, confirmedShapeGeometry: true,
   }]), true);
   assert.equal(routeSmokeAcceptancePassed('lviv-route', [{

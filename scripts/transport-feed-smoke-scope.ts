@@ -7,7 +7,7 @@ export type TransportFeedSmokeScope = 'all' | 'lviv-route' | 'lviv-budget-diagno
 export interface RouteSmokeAcceptanceCase {
   count: number;
   searchTruncated: boolean;
-  resultLimitReached: boolean;
+  resultLimitReached?: boolean;
   confirmedShapeGeometry?: boolean;
 }
 
@@ -18,7 +18,7 @@ export function routeSmokeAcceptancePassed(scope: TransportFeedSmokeScope, cases
   }
   if (scope === 'ukraine-rail-route') {
     return cases.some((routeCase) => routeCase.count > 0 && !routeCase.searchTruncated
-      && !routeCase.resultLimitReached && routeCase.confirmedShapeGeometry === true);
+      && routeCase.resultLimitReached === false && routeCase.confirmedShapeGeometry === true);
   }
   return true;
 }
