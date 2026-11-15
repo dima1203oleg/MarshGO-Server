@@ -95,61 +95,56 @@ function pointInGeometry(point: [number, number], geometry: Record<string, unkno
   return false;
 }
 
-function orientation(a: [number, number], b: [number, number], c: [number, number]): number {
-  const value = (b[1] - a[1]) * (c[0] - b[0]) - (b[0] - a[0]) * (c[1] - b[1]);
-  return value > 0 ? 1 : value < 0 ? -1 : 0;
-}
-
-function onSegment(a: [number, number], b: [number, number], c: [number, number]): boolean {
-  return c[0] >= Math.min(a[0], b[0]) && c[0] <= Math.max(a[0], b[0])
-    && c[1] >= Math.min(a[1], b[1]) && c[1] <= Math.max(a[1], b[1]);
-}
-
-function segmentsIntersect(p1: [number, number], p2: [number, number], p3: [number, number], p4: [number, number]): boolean {
-  const o1 = orientation(p1, p2, p3), o2 = orientation(p1, p2, p4);
-  const o3 = orientation(p3, p4, p1), o4 = orientation(p3, p4, p2);
-  if (o1 !== o2 && o3 !== o4) return true;
-  return (o1 === 0 && onSegment(p1, p2, p3)) || (o2 === 0 && onSegment(p1, p2, p4))
-    || (o3 === 0 && onSegment(p3, p4, p1)) || (o4 === 0 && onSegment(p3, p4, p2));
-}
-
-function segmentIntersectsRing(from: [number, number], to: [number, number], ring: unknown): boolean {
-  if (!Array.isArray(ring) || ring.length < 4) return false;
+/** Segment parameters where the ride can enter or leave a zone ring. Between consecutive
+ *  parameters the governing GBFS rule cannot change, so one representative point per interval
+ *  makes the check exact for polygonal zones instead of relying on sampled vertices. */
+function ringCrossingParameters(from: [number, number], to: [number, number], ring: unknown, out: number[]): void {
+  if (!Array.isArray(ring) || ring.length < 4) return;
+  const dx = to[0] - from[0], dy = to[1] - from[1];
+  const lengthSquared = dx * dx + dy * dy;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
     const a = ring[i], b = ring[j];
     if (!Array.isArray(a) || !Array.isArray(b) || typeof a[0] !== 'number' || typeof a[1] !== 'number' || typeof b[0] !== 'number' || typeof b[1] !== 'number') continue;
-    if (segmentsIntersect(from, to, [a[0], a[1]], [b[0], b[1]])) return true;
+    const ex = b[0] - a[0], ey = b[1] - a[1];
+    const denominator = dx * ey - dy * ex;
+    if (denominator !== 0) {
+      const t = ((a[0] - from[0]) * ey - (a[1] - from[1]) * ex) / denominator;
+      const u = ((a[0] - from[0]) * dy - (a[1] - from[1]) * dx) / denominator;
+      if (t >= 0 && t <= 1 && u >= 0 && u <= 1) out.push(t);
+    } else if (lengthSquared > 0) {
+      for (const point of [a, b]) {
+        const t = ((point[0] - from[0]) * dx + (point[1] - from[1]) * dy) / lengthSquared;
+        if (t > 0 && t < 1) out.push(t);
+      }
+    }
   }
-  return false;
 }
 
-/** A ride segment crosses the zone when an endpoint lies inside or the segment meets any ring edge, including holes. */
-function segmentIntersectsGeometry(from: [number, number], to: [number, number], geometry: Record<string, unknown>): boolean {
-  const crossesPolygon = (polygon: unknown) => {
-    if (!Array.isArray(polygon)) return false;
-    const [outer, ...holes] = polygon;
-    const inZone = (point: [number, number]) => pointInRing(point, outer) && !holes.some((hole) => pointInRing(point, hole));
-    if (inZone(from) || inZone(to)) return true;
-    return [outer, ...holes].some((ring) => segmentIntersectsRing(from, to, ring));
-  };
-  if (geometry.type === 'Polygon') return crossesPolygon(geometry.coordinates);
-  if (geometry.type === 'MultiPolygon' && Array.isArray(geometry.coordinates)) return geometry.coordinates.some(crossesPolygon);
-  return false;
-}
-
-/** True when any active no-ride-through zone is met by the segment, even without a sampled vertex inside it. */
+/** True when any point of the segment is governed by a no-ride-through rule. Evaluated through
+ *  geofenceRulesAt so GBFS polygon-over-global precedence holds: a global ride-through ban applies
+ *  outside zones, and an allowing zone overrides it only while the ride stays inside that zone. */
 export function rideThroughForbiddenOnSegment(
   snapshot: { geofences: GbfsGeofence[]; globalRules: GbfsGeofenceRule[] },
   from: [number, number], to: [number, number], vehicleTypeId: string, at = Date.now(),
 ): boolean {
-  const activeRule = (rule: GbfsGeofenceRule) => (rule.startAt === null || rule.startAt === undefined || at >= rule.startAt)
-    && (rule.endAt === null || rule.endAt === undefined || at <= rule.endAt);
-  const forVehicle = (rule: GbfsGeofenceRule) => rule.vehicleTypeIds === null || rule.vehicleTypeIds.includes(vehicleTypeId);
-  return snapshot.geofences.some((zone) => {
-    if (!(zone.startAt == null || at >= zone.startAt) || !(zone.endAt == null || at <= zone.endAt)) return false;
-    const rule = zone.rules.find((entry) => activeRule(entry) && forVehicle(entry));
-    return rule?.rideThroughAllowed === false && segmentIntersectsGeometry(from, to, zone.geometry);
-  });
+  const parameters = [0, 1];
+  for (const zone of snapshot.geofences) {
+    if (!(zone.startAt == null || at >= zone.startAt) || !(zone.endAt == null || at <= zone.endAt)) continue;
+    const polygons = zone.geometry.type === 'Polygon' ? [zone.geometry.coordinates]
+      : zone.geometry.type === 'MultiPolygon' && Array.isArray(zone.geometry.coordinates) ? zone.geometry.coordinates : [];
+    for (const polygon of polygons) {
+      if (!Array.isArray(polygon)) continue;
+      for (const ring of polygon) ringCrossingParameters(from, to, ring, parameters);
+    }
+  }
+  parameters.sort((a, b) => a - b);
+  const pointAt = (t: number): [number, number] => [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t];
+  const forbiddenAt = (t: number) => geofenceRulesAt(snapshot, pointAt(t), vehicleTypeId, at).rideThroughAllowed === false;
+  for (let i = 0; i < parameters.length; i++) {
+    if (forbiddenAt(parameters[i]!)) return true;
+    if (i + 1 < parameters.length && forbiddenAt((parameters[i]! + parameters[i + 1]!) / 2)) return true;
+  }
+  return false;
 }
 
 /** GBFS order is authoritative: first applicable rule, then first applicable polygon; polygons override globals. */

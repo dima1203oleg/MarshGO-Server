@@ -6,7 +6,7 @@ import {
 } from '../server/journey/micromobilityEstimates';
 import { bicycleEndpointFor } from '../server/journey/bicycleRoutes';
 import { trustedRouteGeometry } from '../server/journey/legGeometryProvenance';
-import { geofenceRulesAt, rideThroughForbiddenOnSegment, type GbfsGeofence } from '../server/mobility/gbfsGeofences';
+import { geofenceRulesAt, rideThroughForbiddenOnSegment, type GbfsGeofence, type GbfsGeofenceRule } from '../server/mobility/gbfsGeofences';
 
 const station = (id: string, coordinates: [number, number]): RentalRoutePoint => ({
   id, providerId: 'nextbike-lviv', providerName: 'Nextbike', networkId: 'nextbike-ua', name: id, coordinates,
@@ -137,6 +137,51 @@ test('a no-ride-through rule scoped to one vehicle type does not forbid another 
   const from: [number, number] = [24.035, 49.83], to: [number, number] = [24.05, 49.81];
   assert.equal(rideThroughForbiddenOnSegment(snapshot, from, to, 'e-scooter'), true);
   assert.equal(rideThroughForbiddenOnSegment(snapshot, from, to, 'e-bike'), false);
+});
+
+const globalRule = (rideThroughAllowed: boolean | null, vehicleTypeIds: string[] | null = null): GbfsGeofenceRule => ({
+  vehicleTypeIds, rideStartAllowed: null, rideEndAllowed: null, rideThroughAllowed, maximumSpeedKph: null, startAt: null, endAt: null,
+});
+const allowingZone = (id: string, ring: Array<[number, number]>): GbfsGeofence => ({
+  id, geometry: { type: 'Polygon', coordinates: [ring] }, rules: [globalRule(true)],
+});
+
+test('a global no-ride-through rule forbids a two-point routed ride that vertex sampling cannot see', async () => {
+  const snapshot = { geofences: [], globalRules: [globalRule(false)] };
+  const twoPointPath = { geometry: [PICKUP, DROPOFF] as Array<[number, number]>, distanceMeters: 6350, durationSeconds: 2077 };
+  const scooter = scooterEstimate();
+  const vertexOnly = await roadRouteMicromobilityEstimate(scooter, {
+    routeRide: async () => twoPointPath,
+    rideThroughAllowed: (estimate, point) => geofenceRulesAt(snapshot, point, 'scooter', estimate.departureAt.getTime()).rideThroughAllowed !== false,
+  }, {});
+  assert.equal(vertexOnly.rejected, null, 'a two-point geometry has no interior vertex — vertex sampling alone must miss the global ban');
+  assert.equal(rideThroughForbiddenOnSegment(snapshot, PICKUP, DROPOFF, 'scooter'), true);
+  const segmentAware = await roadRouteMicromobilityEstimate(scooter, {
+    routeRide: async () => twoPointPath,
+    rideThroughSegmentAllowed: (estimate, from, to) => !rideThroughForbiddenOnSegment(snapshot, from, to, 'scooter', estimate.departureAt.getTime()),
+  }, {});
+  assert.equal(segmentAware.estimate, null);
+  assert.equal(segmentAware.rejected, 'ride-through-forbidden');
+});
+
+test('an allowing zone overrides a global no-ride-through rule while the ride stays inside it', () => {
+  const coveringRing: Array<[number, number]> = [[24.02, 49.79], [24.07, 49.79], [24.07, 49.85], [24.02, 49.85], [24.02, 49.79]];
+  const snapshot = { geofences: [allowingZone('allow', coveringRing)], globalRules: [globalRule(false)] };
+  assert.equal(rideThroughForbiddenOnSegment(snapshot, PICKUP, DROPOFF, 'scooter'), false);
+});
+
+test('leaving an allowing zone into a global no-ride-through ban is forbidden mid-segment', () => {
+  const pickupOnlyRing: Array<[number, number]> = [[24.02, 49.83], [24.04, 49.83], [24.04, 49.85], [24.02, 49.85], [24.02, 49.83]];
+  const snapshot = { geofences: [allowingZone('allow-pickup', pickupOnlyRing)], globalRules: [globalRule(false)] };
+  assert.equal(rideThroughForbiddenOnSegment(snapshot, PICKUP, DROPOFF, 'scooter'), true);
+});
+
+test('a permissive global rule keeps the ride, and a global ban stays scoped to its vehicle types', () => {
+  const permissive = { geofences: [], globalRules: [globalRule(true)] };
+  assert.equal(rideThroughForbiddenOnSegment(permissive, PICKUP, DROPOFF, 'scooter'), false);
+  const typed = { geofences: [], globalRules: [globalRule(false, ['e-scooter'])] };
+  assert.equal(rideThroughForbiddenOnSegment(typed, PICKUP, DROPOFF, 'e-scooter'), true);
+  assert.equal(rideThroughForbiddenOnSegment(typed, PICKUP, DROPOFF, 'e-bike'), false);
 });
 
 test('a city bike graph answers only for rides with both ends inside its bbox', () => {
