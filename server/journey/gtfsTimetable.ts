@@ -2658,7 +2658,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     // connectivity even when its route pattern is represented elsewhere.
     // Without proving graph equivalence, report the capped stop set as partial.
     if (selected.size < ranked.length) stopSelectionTruncated = true;
-    return { stops: [...selected.values()], nearestMeters, reachedWithinRadius };
+    return {
+      stops: [...selected.values()], nearestMeters, reachedWithinRadius,
+      candidateCount: ranked.length, selectedRoutePatternCount: selectedByRoutePattern.size,
+    };
   };
   const originReach = closestStops(input.origin, accessRadius);
   const destinationReach = closestStops(input.destination, egressRadius);
@@ -2672,7 +2675,12 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     nearestOriginStopMeters: originReach.nearestMeters,
     nearestDestinationStopMeters: destinationReach.nearestMeters,
   };
-  debugStage('stops-selected', { originStops: originStops.length, destinationStops: destinationStops.length });
+  debugStage('stops-selected', {
+    originStops: originStops.length, originStopCandidates: originReach.candidateCount,
+    originSelectedRoutePatterns: originReach.selectedRoutePatternCount,
+    destinationStops: destinationStops.length, destinationStopCandidates: destinationReach.candidateCount,
+    destinationSelectedRoutePatterns: destinationReach.selectedRoutePatternCount,
+  });
   if (!originStops.length || !destinationStops.length) {
     return { itineraries: [], searchTruncated: false, resultLimitReached: false, candidateGraphTruncated: false,
       walkReach,
