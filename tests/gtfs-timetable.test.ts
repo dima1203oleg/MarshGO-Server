@@ -653,7 +653,7 @@ test('debug graph-budget diagnostics identify capped routes without changing res
   const truncationReasons = JSON.parse(String(graph.segmentGraphTruncationReasons)) as Record<string, number>;
   assert.deepEqual(Object.keys(truncationReasons).sort(), [
     'localStopPairWindowOmissions', 'perTripCandidateOverflowSegments',
-    'routeBudgetDiscardedPrimarySegments', 'routeBudgetRejectedTripGroups',
+    'routeBudgetDiscardedSegments', 'routeBudgetRejectedTripGroups',
   ].sort());
   assert.ok(Object.values(truncationReasons).every((count) => Number.isSafeInteger(count) && count >= 0),
     'every reported graph-truncation reason must be a non-negative integer');

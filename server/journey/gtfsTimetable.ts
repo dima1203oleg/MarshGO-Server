@@ -1307,7 +1307,7 @@ interface CachedGtfsCandidateGraph {
   segmentGraphTruncationReasons?: {
     localStopPairWindowOmissions: number;
     perTripCandidateOverflowSegments: number;
-    routeBudgetDiscardedPrimarySegments: number;
+    routeBudgetDiscardedSegments: number;
     routeBudgetRejectedTripGroups: number;
   };
   stopSelectionTruncated: boolean;
@@ -2685,7 +2685,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   let segmentGraphTruncated = false;
   let segmentGraphTruncationReasons: CachedGtfsCandidateGraph['segmentGraphTruncationReasons'] = debugEnabled
     ? { localStopPairWindowOmissions: 0, perTripCandidateOverflowSegments: 0,
-      routeBudgetDiscardedPrimarySegments: 0, routeBudgetRejectedTripGroups: 0 }
+      routeBudgetDiscardedSegments: 0, routeBudgetRejectedTripGroups: 0 }
     : undefined;
   let segments: GtfsDirectJourney[];
   const candidateGraphKey = gtfsCandidateGraphCacheKey(feed, input, {
@@ -3630,7 +3630,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
             segments: tripCandidates,
           }, retainedRouteSegments, graphSegmentLimitPerRoute);
           if (segmentGraphTruncationReasons && exceedsRouteBudget) {
-            segmentGraphTruncationReasons.routeBudgetDiscardedPrimarySegments += retained.retained
+            segmentGraphTruncationReasons.routeBudgetDiscardedSegments += retained.retained
               ? Math.max(0, offeredRouteSegments - retained.segments) : tripCandidates.length;
             if (!retained.retained) segmentGraphTruncationReasons.routeBudgetRejectedTripGroups++;
           }
