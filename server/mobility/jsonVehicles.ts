@@ -77,7 +77,7 @@ export function matchJsonVehicleRoute(
 }
 
 export function summarizeVehicles(list: Json[], now = Date.now()) {
-  let valid = 0, invalid = 0, timestamped = 0; let newest = 0;
+  let valid = 0, invalid = 0, timestamped = 0, freshVehicles = 0, staleVehicles = 0; let newest = 0;
   const points: Array<[number, number]> = [];
   const byType: Record<string, number> = {};
   for (const vehicle of list) {
@@ -87,9 +87,17 @@ export function summarizeVehicles(list: Json[], now = Date.now()) {
     const label = vehicleTransportLabel(vehicle);
     byType[label] = (byType[label] ?? 0) + 1;
     const timestamp = parseMobilityTimestamp(vehicle.timestamp ?? vehicle.updated_at ?? vehicle.last_update ?? vehicle.time, 'Europe/Kyiv', now);
-    if (timestamp) { timestamped++; newest = Math.max(newest, timestamp.getTime()); }
+    if (timestamp) {
+      timestamped++;
+      newest = Math.max(newest, timestamp.getTime());
+      if (isFreshMobilityTimestamp(timestamp, now)) freshVehicles++;
+      else staleVehicles++;
+    }
   }
-  return { points, valid, invalid, timestamped, byType, newestTimestampMs: newest || null,
+  const missingTimestamps = valid - timestamped;
+  return { points, valid, invalid, timestamped, freshVehicles, staleVehicles, missingTimestamps,
+    allPositionsFresh: valid > 0 && freshVehicles === valid,
+    byType, newestTimestampMs: newest || null,
     ageSeconds: newest > 0 ? Math.round((now - newest) / 1000) : null };
 }
 
@@ -105,9 +113,12 @@ export async function testJsonVehiclesConnection(url: string): Promise<Connectio
   const summary = summarizeVehicles(list);
   checks.push({ name: 'Coordinates', ok: summary.valid > 0 && summary.invalid <= summary.valid * 0.05, detail: `${summary.valid} valid, ${summary.invalid} invalid` });
   checks.push({ name: 'Timestamped positions', ok: summary.timestamped > 0, detail: `${summary.timestamped} of ${summary.valid} positions have a parseable update time` });
-  const fresh = summary.newestTimestampMs !== null
-    && isFreshMobilityTimestamp(new Date(summary.newestTimestampMs), Date.now());
-  checks.push({ name: 'Freshness', ok: fresh, detail: summary.ageSeconds === null ? 'no parseable update time' : `${summary.ageSeconds}s old; live threshold is 90s` });
-  const counts: Record<string, number> = { vehicles: summary.valid, timestamped: summary.timestamped, ...Object.fromEntries(Object.entries(summary.byType).map(([type, count]) => [`vehicles_${type}`, count])), ...(summary.ageSeconds !== null ? { ageSeconds: summary.ageSeconds } : {}) };
+  checks.push({ name: 'Freshness', ok: summary.allPositionsFresh,
+    detail: `${summary.freshVehicles}/${summary.valid} valid positions fresh; ${summary.staleVehicles} stale, ${summary.missingTimestamps} without timestamp${summary.ageSeconds === null ? '' : `; newest ${summary.ageSeconds}s old`}; live threshold is 90s` });
+  const counts: Record<string, number> = { vehicles: summary.valid, timestamped: summary.timestamped,
+    freshVehiclePositions: summary.freshVehicles, staleVehiclePositions: summary.staleVehicles,
+    missingVehicleTimestamps: summary.missingTimestamps,
+    ...Object.fromEntries(Object.entries(summary.byType).map(([type, count]) => [`vehicles_${type}`, count])),
+    ...(summary.ageSeconds !== null ? { ageSeconds: summary.ageSeconds } : {}) };
   return { health: checks.every((check) => check.ok) ? 'healthy' : 'degraded', checks, counts, responseMs: Date.now() - started, ...(bboxOf(summary.points) ? { bbox: bboxOf(summary.points) } : {}) };
 }
