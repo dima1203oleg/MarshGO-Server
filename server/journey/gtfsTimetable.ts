@@ -2671,6 +2671,8 @@ function findGtfsItinerariesAtWalkingReachWithStats(
       stops: [...selected.values()], nearestMeters, reachedWithinRadius,
       candidateCount: ranked.length, selectedRoutePatternCount: selectedByRoutePattern.size,
       unrepresentedRoutePatternCount: unrepresentedRoutePatterns?.size ?? 0,
+      unrepresentedRoutePatternSample: unrepresentedRoutePatterns
+        ? [...unrepresentedRoutePatterns].sort(compareStableId).slice(0, 10) : [],
     };
   };
   const originReach = closestStops(input.origin, accessRadius);
@@ -2689,9 +2691,11 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     originStops: originStops.length, originStopCandidates: originReach.candidateCount,
     originSelectedRoutePatterns: originReach.selectedRoutePatternCount,
     originUnrepresentedRoutePatterns: originReach.unrepresentedRoutePatternCount,
+    originUnrepresentedRoutePatternSample: JSON.stringify(originReach.unrepresentedRoutePatternSample),
     destinationStops: destinationStops.length, destinationStopCandidates: destinationReach.candidateCount,
     destinationSelectedRoutePatterns: destinationReach.selectedRoutePatternCount,
     destinationUnrepresentedRoutePatterns: destinationReach.unrepresentedRoutePatternCount,
+    destinationUnrepresentedRoutePatternSample: JSON.stringify(destinationReach.unrepresentedRoutePatternSample),
   });
   if (!originStops.length || !destinationStops.length) {
     return { itineraries: [], searchTruncated: false, resultLimitReached: false, candidateGraphTruncated: false,
