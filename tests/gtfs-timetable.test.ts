@@ -78,6 +78,7 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
     totalSegments: 100_001, segmentsPerRoute: 5_001,
     maxStopsPerSide: 57, maxStopsPerRoutePattern: 9,
     maxSearchResults: searchInput.limit * 25 + 1,
+    maxObjectiveReservoirSearchSteps: 25_001,
   };
   try {
     process.env.NODE_ENV = 'production';
@@ -101,6 +102,9 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
     assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, {
       maxSearchResults: searchInput.limit * 100,
     }), 'the isolated diagnostic runner can test a 100x candidate pool without changing the response page');
+    assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      maxObjectiveReservoirSearchSteps: 200_000,
+    }), 'the isolated diagnostic runner can test a larger objective lookahead');
     assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
       ...expandedLimits, maxStopsPerSide: 113,
     }), /bounds are invalid/, 'endpoint diagnostics remain capped at 112 stops per side');
@@ -110,6 +114,9 @@ test('expanded GTFS graph, endpoint selector, and candidate-pool limits require 
     assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
       ...expandedLimits, maxSearchResults: searchInput.limit * 100 + 1,
     }), /bounds are invalid/, 'candidate-pool diagnostics remain capped at 100 results per requested page item');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      ...expandedLimits, maxObjectiveReservoirSearchSteps: 200_001,
+    }), /bounds are invalid/, 'objective lookahead diagnostics remain capped at 200,000 steps');
   } finally {
     if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previousNodeEnv;
