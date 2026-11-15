@@ -68,6 +68,42 @@ test('GTFS graph budget and materialization share the transfer-window rule', () 
     'a long first or last leg of a query-frontier transfer remains eligible');
 });
 
+test('expanded GTFS graph budgets require the exact test-only diagnostic opt-in', () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousCi = process.env.CI;
+  const previousDiagnosticOptIn = process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+  const timetable = feed({ withIntermediate: true });
+  const searchInput = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0 };
+  const expandedLimits = { totalSegments: 100_001, segmentsPerRoute: 5_001 };
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits), /bounds are invalid/,
+      'an environment opt-in outside NODE_ENV=test cannot raise either bound');
+
+    process.env.NODE_ENV = 'test';
+    delete process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits), /bounds are invalid/,
+      'NODE_ENV=test alone cannot raise either bound');
+
+    process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
+    process.env.CI = 'false';
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits), /bounds are invalid/,
+      'the diagnostic is unavailable outside CI even with its explicit opt-in');
+
+    process.env.CI = 'true';
+    assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits),
+      'the isolated diagnostic runner can use its explicitly enabled bounded budget');
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousCi === undefined) delete process.env.CI;
+    else process.env.CI = previousCi;
+    if (previousDiagnosticOptIn === undefined) delete process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+    else process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = previousDiagnosticOptIn;
+  }
+});
+
 test('a rail GTFS route remains a train when its public name contains intercity', () => {
   assert.equal(feed({ routeType: '2', routeName: 'Intercity train' }).routes.get('r')?.transportType, 'train');
   assert.equal(feed({ routeType: '2', routeName: 'City train' }).routes.get('r')?.transportType, 'city_train');

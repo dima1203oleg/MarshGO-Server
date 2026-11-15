@@ -23,6 +23,7 @@ const ukraineRail = {
 test('transport feed smoke defaults to the complete catalog and accepts focused Lviv route scope', () => {
   assert.equal(parseTransportFeedSmokeScope([]), 'all');
   assert.equal(parseTransportFeedSmokeScope(['--scope=lviv-route']), 'lviv-route');
+  assert.equal(parseTransportFeedSmokeScope(['--scope=lviv-budget-diagnostic']), 'lviv-budget-diagnostic');
   assert.equal(parseTransportFeedSmokeScope(['--scope=ukraine-rail-route']), 'ukraine-rail-route');
   assert.throws(() => parseTransportFeedSmokeScope(['--scope=unknown']), /Unsupported/);
   assert.throws(() => parseTransportFeedSmokeScope(['--scope=all', '--scope=lviv-route']), /only once/);
@@ -32,6 +33,7 @@ test('focused Lviv route scope selects only static schedule and vehicle position
   const catalog = [kyivStatic, lvivStatic, lvivTripUpdates, lvivVehiclePositions];
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'all'), catalog);
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'lviv-route'), [lvivStatic, lvivVehiclePositions]);
+  assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'lviv-budget-diagnostic'), [lvivStatic, lvivVehiclePositions]);
   assert.throws(() => selectTransportFeedSmokeEntries([kyivStatic], 'lviv-route'), /required/);
 });
 
