@@ -309,6 +309,8 @@ async function main() {
           itineraries: variant.result.itineraries.map(serializeSmokeJourney),
         };
       };
+      clearGtfsCandidateGraphCache();
+      const chronologicalLookahead50k = runLvivSearch(routeCase, { maxObjectiveReservoirSearchSteps: 50_000 });
       const lookaheadSweep = [50_000, 100_000, 200_000].map((maxObjectiveReservoirSearchSteps) => {
         clearGtfsCandidateGraphCache();
         const variant = runLvivSearch(routeCase, {
@@ -320,6 +322,7 @@ async function main() {
         id: routeCase.id,
         baseline: summarizeComparison(baseline),
         earliestDoorArrival: summarizeComparison(ordered, baseline),
+        chronologicalLookahead50k: summarizeComparison(chronologicalLookahead50k, baseline),
         lookaheadSweep,
       };
     }),
