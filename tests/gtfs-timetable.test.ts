@@ -999,6 +999,79 @@ test('retains a long first leg when it reaches the interchange of a feasible tra
   'the long origin-to-interchange leg must remain available when it completes a feasible transfer');
 });
 
+test('retains a long middle leg between interchanges in a feasible three-leg chain', () => {
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+
+  const putStop = (id: string, lon: number) => timetable.stops.set(id, {
+    id, name: id, lon, lat: 49.84,
+  });
+  const origin = 'query-origin';
+  const firstHub = 'first-hub';
+  const lastHub = 'last-hub';
+  const destination = 'query-destination';
+  putStop(origin, 24.0200);
+  putStop(firstHub, 24.0500);
+  putStop(lastHub, 24.1000);
+  putStop(destination, 24.1300);
+  const middleStops = Array.from({ length: 20 }, (_, index) => {
+    const id = `middle-interchange-${index + 1}`;
+    putStop(id, 24.0500 + (index + 1) * (0.0500 / 21));
+    return id;
+  });
+
+  for (const [id, mode, transportType] of [
+    ['first-route', 'BUS', 'bus'], ['middle-route', 'TRAM', 'tram'], ['last-route', 'RAIL', 'train'],
+  ] as const) timetable.routes.set(id, { name: id, mode, transportType });
+  const addTrip = (routeId: string, tripId: string, stopIds: string[], startSeconds: number, stepSeconds: number) => {
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: destination });
+    timetable.stopTimes.set(tripId, stopIds.map((stopId, index) => ({
+      stopId, sequence: index + 1, arrivalSeconds: startSeconds + index * stepSeconds,
+      departureSeconds: startSeconds + index * stepSeconds, pickupType: 0, dropOffType: 0,
+    })));
+  };
+  const serviceStart = 8 * 3600;
+  addTrip('first-route', 'first-trip', [origin, firstHub], serviceStart, 20 * 60);
+  addTrip('middle-route', 'middle-trip', [firstHub, ...middleStops, lastHub], serviceStart + 25 * 60, 60);
+  addTrip('last-route', 'last-trip', [lastHub, destination], serviceStart + 49 * 60, 16 * 60);
+
+  // Make each interior middle-route stop a valid interchange without adding
+  // another usable ride; this creates more than twenty eligible stop events.
+  middleStops.forEach((stopId, index) => {
+    const routeId = `branch-route-${index}`;
+    const tripId = `branch-trip-${index}`;
+    const terminalId = `branch-terminal-${index}`;
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.stops.set(terminalId, {
+      id: terminalId, name: terminalId, lon: 24.0500 + (index + 1) * (0.0500 / 21), lat: 50.1,
+    });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: terminalId });
+    timetable.stopTimes.set(tripId, [
+      { stopId, sequence: 1, arrivalSeconds: serviceStart + 25 * 60, departureSeconds: serviceStart + 25 * 60, pickupType: 1, dropOffType: 0 },
+      { stopId: terminalId, sequence: 2, arrivalSeconds: serviceStart + 45 * 60, departureSeconds: serviceStart + 45 * 60, pickupType: 0, dropOffType: 1 },
+    ]);
+  });
+  for (const [tripId, stopTimes] of timetable.stopTimes) stopTimes.forEach((stopTime, index) => {
+    timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index },
+    ]);
+  });
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    ...request('2026-10-12T04:55:00Z', '2026-10-12T05:10:00Z'),
+    origin: [24.0200, 49.84], destination: [24.1300, 49.84], maximumTransfers: 2,
+    maximumStopDistanceMeters: 100, maximumAccessWalkingMeters: 100,
+    maximumEgressWalkingMeters: 100, maximumTransferWalkingMeters: 100,
+  });
+  assert.ok(result.itineraries.some((journey) => journey.segments.map((segment) => segment.tripId).join('>')
+    === 'first-trip>middle-trip>last-trip'),
+  'the fixture’s feasible three-leg chain must retain its >20-stop middle ride');
+});
+
 test('bounds stop-pair alternatives by the requested page and reports objective sampling', () => {
   const timetable = feed({ withIntermediate: true });
   const stops = [
