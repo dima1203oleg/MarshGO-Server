@@ -2658,9 +2658,19 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     // connectivity even when its route pattern is represented elsewhere.
     // Without proving graph equivalence, report the capped stop set as partial.
     if (selected.size < ranked.length) stopSelectionTruncated = true;
+    const unrepresentedRoutePatterns = debugEnabled ? new Set<string>() : undefined;
+    if (unrepresentedRoutePatterns) {
+      for (const item of ranked) {
+        if (selected.has(item.stop.id)) continue;
+        for (const pattern of routePatternsAtStop(item.stop.id)) {
+          if (!selectedByRoutePattern.has(pattern)) unrepresentedRoutePatterns.add(pattern);
+        }
+      }
+    }
     return {
       stops: [...selected.values()], nearestMeters, reachedWithinRadius,
       candidateCount: ranked.length, selectedRoutePatternCount: selectedByRoutePattern.size,
+      unrepresentedRoutePatternCount: unrepresentedRoutePatterns?.size ?? 0,
     };
   };
   const originReach = closestStops(input.origin, accessRadius);
@@ -2678,8 +2688,10 @@ function findGtfsItinerariesAtWalkingReachWithStats(
   debugStage('stops-selected', {
     originStops: originStops.length, originStopCandidates: originReach.candidateCount,
     originSelectedRoutePatterns: originReach.selectedRoutePatternCount,
+    originUnrepresentedRoutePatterns: originReach.unrepresentedRoutePatternCount,
     destinationStops: destinationStops.length, destinationStopCandidates: destinationReach.candidateCount,
     destinationSelectedRoutePatterns: destinationReach.selectedRoutePatternCount,
+    destinationUnrepresentedRoutePatterns: destinationReach.unrepresentedRoutePatternCount,
   });
   if (!originStops.length || !destinationStops.length) {
     return { itineraries: [], searchTruncated: false, resultLimitReached: false, candidateGraphTruncated: false,
