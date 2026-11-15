@@ -4,6 +4,25 @@ export type TransportFeedSmokeScope = 'all' | 'lviv-route' | 'lviv-budget-diagno
   | 'lviv-north-baseline-diagnostic' | 'lviv-north-trip-fairness-diagnostic'
   | 'lviv-north-final-arrival-diagnostic' | 'ukraine-rail-route';
 
+export interface RouteSmokeAcceptanceCase {
+  count: number;
+  searchTruncated: boolean;
+  resultLimitReached: boolean;
+  confirmedShapeGeometry?: boolean;
+}
+
+/** Require a real route and its promised evidence for focused transport acceptance scopes. */
+export function routeSmokeAcceptancePassed(scope: TransportFeedSmokeScope, cases: readonly RouteSmokeAcceptanceCase[]): boolean {
+  if (scope === 'lviv-route') {
+    return cases.some((routeCase) => routeCase.count > 0 && !routeCase.searchTruncated);
+  }
+  if (scope === 'ukraine-rail-route') {
+    return cases.some((routeCase) => routeCase.count > 0 && !routeCase.searchTruncated
+      && !routeCase.resultLimitReached && routeCase.confirmedShapeGeometry === true);
+  }
+  return true;
+}
+
 export function parseTransportFeedSmokeScope(args: readonly string[]): TransportFeedSmokeScope {
   const values = args.filter((argument) => argument.startsWith('--scope='))
     .map((argument) => argument.slice('--scope='.length));

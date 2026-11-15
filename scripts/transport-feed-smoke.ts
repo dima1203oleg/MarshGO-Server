@@ -4,7 +4,7 @@ import { testGbfsConnection } from '../server/mobility/gbfs';
 import { fetchJson } from '../server/mobility/safeFetch';
 import { cachedGtfsTimetable, clearGtfsCandidateGraphCache, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
 import type { GtfsGraphBudgetLimits, GtfsItinerary } from '../server/journey/gtfsTimetable';
-import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
+import { parseTransportFeedSmokeScope, routeSmokeAcceptancePassed, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
 import { selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
 import { serializeSmokeJourney, summarizeSmokeItineraries, withOptionalSourceFingerprint } from './transport-feed-smoke-summary';
 
@@ -408,8 +408,9 @@ async function main() {
   };
   console.log(JSON.stringify({ checkedAt: new Date().toISOString(), summary, catalog: results, routePlanner,
     ...(finalArrivalDiagnostic ? { finalArrivalDiagnostic } : {}), supplementary }, null, 2));
-  if (scope === 'lviv-route' && !routePlanner.cases.some((routeCase) =>
-    routeCase.count > 0 && !routeCase.searchTruncated)) {
+  if (!routeSmokeAcceptancePassed(scope, routePlanner.cases)) {
+    console.error(`${scope} acceptance requires at least one untruncated route${scope === 'ukraine-rail-route'
+      ? ' with confirmed shape geometry and no result-page truncation' : ''}`);
     process.exitCode = 1;
   }
 }

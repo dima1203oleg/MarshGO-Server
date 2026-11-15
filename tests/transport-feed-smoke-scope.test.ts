@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from '../scripts/transport-feed-smoke-scope';
+import { parseTransportFeedSmokeScope, routeSmokeAcceptancePassed, selectTransportFeedSmokeEntries } from '../scripts/transport-feed-smoke-scope';
 import type { CatalogEntry } from '../server/mobility/ukraineCatalog';
 
 const lvivStatic = {
@@ -47,4 +47,28 @@ test('Ukraine rail route scope selects only the cataloged ODbL rail GTFS', () =>
   const catalog = [kyivStatic, ukraineRail, lvivStatic];
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'ukraine-rail-route'), [ukraineRail]);
   assert.throws(() => selectTransportFeedSmokeEntries([kyivStatic], 'ukraine-rail-route'), /required/);
+});
+
+test('focused route acceptance fails without an untruncated route and promised geometry evidence', () => {
+  assert.equal(routeSmokeAcceptancePassed('ukraine-rail-route', []), false);
+  assert.equal(routeSmokeAcceptancePassed('ukraine-rail-route', [{
+    count: 1, searchTruncated: false, resultLimitReached: false, confirmedShapeGeometry: false,
+  }]), false);
+  assert.equal(routeSmokeAcceptancePassed('ukraine-rail-route', [{
+    count: 1, searchTruncated: true, resultLimitReached: false, confirmedShapeGeometry: true,
+  }]), false);
+  assert.equal(routeSmokeAcceptancePassed('ukraine-rail-route', [{
+    count: 1, searchTruncated: false, resultLimitReached: true, confirmedShapeGeometry: true,
+  }]), false);
+  assert.equal(routeSmokeAcceptancePassed('ukraine-rail-route', [{
+    count: 1, searchTruncated: false, resultLimitReached: false, confirmedShapeGeometry: true,
+  }]), true);
+  assert.equal(routeSmokeAcceptancePassed('lviv-route', [{
+    count: 1, searchTruncated: false,
+  }]), true);
+  assert.equal(routeSmokeAcceptancePassed('lviv-route', [{
+    count: 1, searchTruncated: true,
+  }]), false);
+  assert.equal(routeSmokeAcceptancePassed('lviv-north-final-arrival-diagnostic', []), true,
+    'diagnostic sweeps must remain evidence gathering, not be treated as acceptance gates');
 });
