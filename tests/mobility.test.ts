@@ -231,6 +231,25 @@ describe('JSON vehicle feeds', () => {
     const fresh = summarizeVehicles([{ latitude: 49.84, longitude: 24.03, time: '2026-10-19 11:58:30' }], now);
     assert.equal(stale.ageSeconds, 91);
     assert.equal(stale.newestTimestampMs, now - 91_000);
+    assert.equal(stale.allPositionsFresh, false);
+    assert.equal(stale.staleVehicles, 1);
     assert.equal(fresh.newestTimestampMs, now - 90_000);
+    assert.equal(fresh.allPositionsFresh, true);
+    assert.equal(fresh.freshVehicles, 1);
+  });
+  it('marks a JSON feed stale when any valid vehicle position is stale or has no timestamp', () => {
+    const now = Date.parse('2026-10-19T09:00:00.000Z');
+    const summary = summarizeVehicles([
+      { latitude: 49.84, longitude: 24.03, timestamp: now - 10_000 },
+      { latitude: 49.85, longitude: 24.04, timestamp: now - 91_000 },
+      { latitude: 49.86, longitude: 24.05 },
+      { latitude: 0, longitude: 0, timestamp: now - 500_000 },
+    ], now);
+    assert.equal(summary.valid, 3);
+    assert.equal(summary.freshVehicles, 1);
+    assert.equal(summary.staleVehicles, 1);
+    assert.equal(summary.missingTimestamps, 1);
+    assert.equal(summary.timestamped, 2);
+    assert.equal(summary.allPositionsFresh, false);
   });
 });
