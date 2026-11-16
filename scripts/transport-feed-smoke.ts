@@ -372,8 +372,16 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
         counts.set(route.transportType, (counts.get(route.transportType) ?? 0) + 1);
         return counts;
       }, new Map<string, number>())),
+      sourceRouteTypes: Object.fromEntries([...directTripFeed.routes.values()].reduce((counts, route) => {
+        const sourceType = String(route.sourceRouteType ?? 'missing');
+        counts.set(sourceType, (counts.get(sourceType) ?? 0) + 1);
+        return counts;
+      }, new Map<string, number>())),
       activeTrips: 0, activeBusTrips: 0, activeBusTripsWithShapes: 0,
-      activeBusTripsWithOrderedStops: 0, activeBusTripsInDaylightWindow: 0, eligibleTrips: 0,
+      activeBusTripsWithOrderedStops: 0, activeBusTripsInDaylightWindow: 0,
+      activeRoadTransitTrips: 0, activeRoadTransitTripsWithShapes: 0,
+      activeRoadTransitTripsWithOrderedStops: 0, activeRoadTransitTripsInDaylightWindow: 0,
+      eligibleTrips: 0,
     } : null;
     const directTripCandidate = directTripFeed ? [...directTripFeed.trips.entries()].flatMap(([tripId, trip]) => {
       if (!isGtfsServiceActiveOnDate(directTripFeed, trip.serviceId, serviceDate)) return [];
@@ -387,6 +395,10 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
       const lastStop = lastStopTime ? directTripFeed.stops.get(lastStopTime.stopId) : undefined;
       const durationSeconds = firstStopTime && lastStopTime ? lastStopTime.arrivalSeconds - firstStopTime.departureSeconds : 0;
       const isBus = route?.transportType === 'bus';
+      // Generic GTFS route_type=3 intentionally remains bus_unspecified unless
+      // the publisher distinguishes bus from marshrutka. The public bus filter
+      // accepts that neutral alias; the routeability probe must do so too.
+      const isRoadTransit = isBus || route?.transportType === 'bus_unspecified';
       const hasShape = shapePointCount >= 2;
       const hasOrderedStops = stopTimes.length >= 2 && Boolean(firstStopTime && lastStopTime);
       const inDaylightWindow = Boolean(firstStopTime && firstStopTime.departureSeconds >= 8 * 60 * 60
@@ -395,16 +407,22 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
       if (isBus && hasShape) directTripDiagnostics!.activeBusTripsWithShapes += 1;
       if (isBus && hasOrderedStops) directTripDiagnostics!.activeBusTripsWithOrderedStops += 1;
       if (isBus && hasShape && hasOrderedStops && inDaylightWindow) directTripDiagnostics!.activeBusTripsInDaylightWindow += 1;
-      if (!isBus || !hasShape || !firstStopTime || !lastStopTime || !firstStop || !lastStop
+      if (isRoadTransit) directTripDiagnostics!.activeRoadTransitTrips += 1;
+      if (isRoadTransit && hasShape) directTripDiagnostics!.activeRoadTransitTripsWithShapes += 1;
+      if (isRoadTransit && hasOrderedStops) directTripDiagnostics!.activeRoadTransitTripsWithOrderedStops += 1;
+      if (isRoadTransit && hasShape && hasOrderedStops && inDaylightWindow) directTripDiagnostics!.activeRoadTransitTripsInDaylightWindow += 1;
+      if (!isRoadTransit || !route || !hasShape || !firstStopTime || !lastStopTime || !firstStop || !lastStop
         || !hasOrderedStops || !inDaylightWindow || durationSeconds < 1 || durationSeconds > 6 * 60 * 60) return [];
       directTripDiagnostics!.eligibleTrips += 1;
-      return [{ tripId, routeId: trip.routeId, routeName: route?.name ?? trip.routeId, departureSeconds: firstStopTime.departureSeconds,
-        durationSeconds, shapePointCount, originStop: firstStop, destinationStop: lastStop }];
+      return [{ tripId, routeId: trip.routeId, routeName: route.name, departureSeconds: firstStopTime.departureSeconds,
+        durationSeconds, shapePointCount, originStop: firstStop, destinationStop: lastStop,
+        transportType: route.transportType, sourceRouteType: route.sourceRouteType ?? null,
+        routeClassification: route.classification ?? null }];
     }).sort((left, right) => left.departureSeconds - right.departureSeconds || left.tripId.localeCompare(right.tripId))[0] ?? null : null;
     if (directTripSource && !directTripCandidate) {
       outputs.push({ id: routeCase.id, status: 'NO_ACTIVE_SHAPED_TRIP', serviceDate,
         directTripDiagnostics,
-        limitations: ['No upcoming active Stryi bus trip with ordered stops and a shape was available inside the sampled service window.'] });
+        limitations: ['No upcoming active Stryi scheduled road-transit trip with ordered stops and a shape was available inside the sampled service window.'] });
       continue;
     }
     const queryOrigin: [number, number] = directTripCandidate
@@ -462,6 +480,8 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
         providerId: `intermodal-${directTripSource}`, tripId: directTripCandidate.tripId, routeId: directTripCandidate.routeId,
         routeName: directTripCandidate.routeName, departureSecondsAfterServiceDayStart: directTripCandidate.departureSeconds,
         durationSeconds: directTripCandidate.durationSeconds, shapePointCount: directTripCandidate.shapePointCount,
+        transportType: directTripCandidate.transportType, sourceRouteType: directTripCandidate.sourceRouteType,
+        routeClassification: directTripCandidate.routeClassification,
         originStop: directTripCandidate.originStop.name, destinationStop: directTripCandidate.destinationStop.name,
         providerRouteReturned: directFeedRouteFound,
       } } : {}),
