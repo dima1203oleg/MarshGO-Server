@@ -4,7 +4,7 @@ import { testGbfsConnection } from '../server/mobility/gbfs';
 import { fetchJson } from '../server/mobility/safeFetch';
 import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables } from '../server/journey/gtfsTimetable';
 import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
-import { selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
+import { isGtfsServiceActiveOnDate, selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
 import { serializeSmokeJourney, summarizeSmokeItineraries, withOptionalSourceFingerprint } from './transport-feed-smoke-summary';
 
 /**
@@ -301,6 +301,7 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
     { id: 'lviv', url: 'https://track.ua-gis.com/gtfs/lviv/static.zip', city: 'Львів' },
     { id: 'kyiv', url: 'https://jbb.ghsq.de/gtfs/ua-kyiv.gtfs.zip', city: 'Київ' },
     { id: 'uzhhorod', url: 'https://track.ua-gis.com/gtfs/uzhhorod/static.zip', city: 'Ужгород' },
+    { id: 'stryi', url: 'https://track.ua-gis.com/gtfs/stryi/static.zip', city: 'Стрий' },
   ];
   const feeds = new Map<string, Awaited<ReturnType<typeof cachedGtfsTimetable>>>();
   const railEntry = byUrl.get(railUrl);
@@ -322,6 +323,7 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
     { id: 'odesa-to-lviv-station-pins', origin: [0, 0] as [number, number], destination: [0, 0] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: true, stationPins: ['Одеса-Головна', 'Львів-Головний'] as const },
     { id: 'kyiv-to-odesa-station-pins', origin: [0, 0] as [number, number], destination: [0, 0] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 14 * 60 * 60, compareRailOnly: true, stationPins: ['Київ-Пасажирський', 'Одеса-Головна'] as const },
     { id: 'lviv-to-uzhhorod-station-pins', origin: [0, 0] as [number, number], destination: [0, 0] as [number, number], cities: ['lviv', 'uzhhorod'], maximumJourneySeconds: 12 * 60 * 60, compareRailOnly: true, stationPins: ['Львів-Головний', 'Ужгород'] as const },
+    { id: 'stryi-shaped-bus-trip-control', origin: [0, 0] as [number, number], destination: [0, 0] as [number, number], cities: ['stryi'], maximumJourneySeconds: 6 * 60 * 60, compareRailOnly: false, stationPins: null, probeDirectTripFrom: 'stryi' },
   ];
   const outputs = [];
   for (const routeCase of cases) {
@@ -357,16 +359,47 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
     }
     const origin: [number, number] = pinnedOrigin ? [pinnedOrigin.lon, pinnedOrigin.lat] : routeCase.origin;
     const destination: [number, number] = pinnedDestination ? [pinnedDestination.lon, pinnedDestination.lat] : routeCase.destination;
+    const directTripSource = 'probeDirectTripFrom' in routeCase ? routeCase.probeDirectTripFrom : null;
     const { earliestDeparture, latestDeparture, serviceDate } = selectUpcomingSmokeServiceWindow(merged, new Date(), {
-      localHour: 8, windowMinutes: 3 * 60, minimumLeadMinutes: 120, horizonDays: 14,
+      localHour: 8, windowMinutes: directTripSource ? 12 * 60 : 3 * 60, minimumLeadMinutes: 120, horizonDays: 14,
     });
+    const directTripFeed = directTripSource ? feeds.get(cityFeeds.find((city) => city.id === directTripSource)!.url)! : null;
+    const directTripCandidate = directTripFeed ? [...directTripFeed.trips.entries()].flatMap(([tripId, trip]) => {
+      if (!isGtfsServiceActiveOnDate(directTripFeed, trip.serviceId, serviceDate)) return [];
+      const route = directTripFeed.routes.get(trip.routeId);
+      const shapePointCount = trip.shapeId ? directTripFeed.shapes?.get(trip.shapeId)?.length ?? 0 : 0;
+      const stopTimes = directTripFeed.stopTimes.get(tripId) ?? [];
+      const firstStopTime = stopTimes[0];
+      const lastStopTime = stopTimes.at(-1);
+      const firstStop = firstStopTime ? directTripFeed.stops.get(firstStopTime.stopId) : undefined;
+      const lastStop = lastStopTime ? directTripFeed.stops.get(lastStopTime.stopId) : undefined;
+      const durationSeconds = firstStopTime && lastStopTime ? lastStopTime.arrivalSeconds - firstStopTime.departureSeconds : 0;
+      if (route?.transportType !== 'bus' || shapePointCount < 2 || !firstStopTime || !lastStopTime
+        || !firstStop || !lastStop || stopTimes.length < 2 || firstStopTime.departureSeconds < 8 * 60 * 60
+        || firstStopTime.departureSeconds >= 20 * 60 * 60 || durationSeconds < 1 || durationSeconds > 6 * 60 * 60) return [];
+      return [{ tripId, routeId: trip.routeId, routeName: route.name, departureSeconds: firstStopTime.departureSeconds,
+        durationSeconds, shapePointCount, originStop: firstStop, destinationStop: lastStop }];
+    }).sort((left, right) => left.departureSeconds - right.departureSeconds || left.tripId.localeCompare(right.tripId))[0] ?? null : null;
+    if (directTripSource && !directTripCandidate) {
+      outputs.push({ id: routeCase.id, status: 'NO_ACTIVE_SHAPED_TRIP', serviceDate,
+        limitations: ['No upcoming active Stryi bus trip with ordered stops and a shape was available inside the sampled service window.'] });
+      continue;
+    }
+    const queryOrigin: [number, number] = directTripCandidate
+      ? [directTripCandidate.originStop.lon, directTripCandidate.originStop.lat] : origin;
+    const queryDestination: [number, number] = directTripCandidate
+      ? [directTripCandidate.destinationStop.lon, directTripCandidate.destinationStop.lat] : destination;
     const searchInput = {
       providerId: 'ukraine-intermodal-smoke', providerName: 'MARSHGO merged municipal + national GTFS acceptance', providerCity: 'Україна',
-      origin, destination, earliestDeparture, latestDeparture,
+      origin: queryOrigin, destination: queryDestination, earliestDeparture, latestDeparture,
       maximumJourneySeconds: routeCase.maximumJourneySeconds, maximumWaitSeconds: 3 * 60 * 60,
-      maximumTransfers: 2, maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1_000,
-      maximumTransferWalkingMeters: 400, maximumStopDistanceMeters: 1_000,
-      limit: RAIL_ROUTE_SMOKE_RESULT_LIMIT, allowedTransportTypes: ['bus', 'tram', 'trolleybus', 'train'],
+      maximumTransfers: directTripCandidate ? 0 : 2,
+      maximumAccessWalkingMeters: directTripCandidate ? 100 : 900,
+      maximumEgressWalkingMeters: directTripCandidate ? 100 : 1_000,
+      maximumTransferWalkingMeters: 400,
+      maximumStopDistanceMeters: directTripCandidate ? 100 : 1_000,
+      limit: RAIL_ROUTE_SMOKE_RESULT_LIMIT,
+      allowedTransportTypes: directTripCandidate ? ['bus'] : ['bus', 'tram', 'trolleybus', 'train'],
     } as const;
     const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(merged, searchInput));
     const railOnlyControl = routeCase.compareRailOnly
@@ -377,6 +410,8 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
       : null;
     const multiProvider = search.itineraries.filter((journey) => journey.segments.some((segment) => segment.providerId === 'intermodal-ukraine-rail')
       && journey.segments.some((segment) => segment.providerId !== 'intermodal-ukraine-rail'));
+    const directFeedRouteFound = directTripCandidate ? search.itineraries.some((journey) => journey.segments.some((segment) =>
+      segment.providerId === `intermodal-${directTripSource}`)) : false;
     const tripShape = (tripId: string) => {
       const trip = merged.trips.get(tripId);
       const points = trip?.shapeId ? merged.shapes?.get(trip.shapeId)?.length ?? 0 : 0;
@@ -396,9 +431,18 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
       endpointWalkStreetGeometryVerified: false,
     }));
     outputs.push({
-      id: routeCase.id, status: multiProvider.length ? 'MULTI_PROVIDER_CHAIN_FOUND' : search.itineraries.length ? 'SCHEDULED_ROUTES_FOUND_NO_MULTI_PROVIDER_CHAIN' : 'NO_ROUTE_IN_QUERY_WINDOW',
+      id: routeCase.id,
+      acceptanceKind: directTripCandidate ? 'LOCAL_SHAPED_SCHEDULED_ROUTE_CONTROL' : 'CROSS_PROVIDER_ROUTE_CHAIN',
+      status: directFeedRouteFound ? 'SOURCE_ROUTE_FOUND' : multiProvider.length ? 'MULTI_PROVIDER_CHAIN_FOUND' : search.itineraries.length ? 'SCHEDULED_ROUTES_FOUND_NO_MULTI_PROVIDER_CHAIN' : 'NO_ROUTE_IN_QUERY_WINDOW',
       serviceDate, queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
-      origin, destination,
+      origin: queryOrigin, destination: queryDestination,
+      ...(directTripCandidate ? { directTripControl: {
+        providerId: `intermodal-${directTripSource}`, tripId: directTripCandidate.tripId, routeId: directTripCandidate.routeId,
+        routeName: directTripCandidate.routeName, departureSecondsAfterServiceDayStart: directTripCandidate.departureSeconds,
+        durationSeconds: directTripCandidate.durationSeconds, shapePointCount: directTripCandidate.shapePointCount,
+        originStop: directTripCandidate.originStop.name, destinationStop: directTripCandidate.destinationStop.name,
+        providerRouteReturned: directFeedRouteFound,
+      } } : {}),
       ...(routeCase.stationPins ? { stationPins: { requested: routeCase.stationPins, resolved: [pinnedOrigin?.name, pinnedDestination?.name] } } : {}),
       feedFingerprints: sources.map((source) => ({ providerId: source.providerId, providerName: source.providerName, providerCity: source.providerCity,
         feedUrl: source.feedUrl, license: source.license, sourceRef: source.sourceRef,
@@ -415,7 +459,7 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
         plannerDiagnostics: railOnlyControl.diagnostics,
         examples: railOnlyControl.result.itineraries.slice(0, 3).map(serializeSmokeJourney),
       } } : {}),
-      limitations: ['Scheduled timetable only; no live positions or fares implied.', 'Initial/last-mile and transfer walking are lower-bound distances; street-network geometry has not been verified.', 'Three sampled corridors do not establish Ukraine-wide coverage.'],
+      limitations: ['Scheduled timetable only; no live positions or fares implied.', 'Initial/last-mile and transfer walking are lower-bound distances; street-network geometry has not been verified.', 'Selected corridors plus one feed-derived Stryi bus control do not establish area-wide or Ukraine-wide coverage.'],
     });
   }
   return { provider: 'Current municipal GTFS + national ODbL rail GTFS merged by the production timetable merger', cases: outputs };
@@ -483,8 +527,10 @@ async function main() {
       },
       catalog: [], routePlanner, supplementary: [],
     }, null, 2));
-    if (routePlanner.cases.some((routeCase) => routeCase.multiProviderChainCount === 0
-      || routeCase.searchTruncated || routeCase.resultLimitReached || !routeCase.allReturnedLegsHaveShapes)) process.exitCode = 1;
+    if (routePlanner.cases.some((routeCase) => {
+      const routeFound = routeCase.status === 'SOURCE_ROUTE_FOUND' || routeCase.status === 'MULTI_PROVIDER_CHAIN_FOUND';
+      return !routeFound || routeCase.searchTruncated || routeCase.resultLimitReached || !routeCase.allReturnedLegsHaveShapes;
+    })) process.exitCode = 1;
     return;
   }
 

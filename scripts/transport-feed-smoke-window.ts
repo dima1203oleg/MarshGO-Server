@@ -33,7 +33,7 @@ function addDays(date: string, amount: number): string {
   return `${value.getUTCFullYear()}${String(value.getUTCMonth() + 1).padStart(2, '0')}${String(value.getUTCDate()).padStart(2, '0')}`;
 }
 
-function activeService(feed: GtfsTimetableFeed, serviceId: string, date: string): boolean {
+export function isGtfsServiceActiveOnDate(feed: GtfsTimetableFeed, serviceId: string, date: string): boolean {
   const exception = feed.exceptions.get(serviceId)?.get(date);
   if (exception !== undefined) return exception === 1;
   const calendar = feed.calendars.get(serviceId);
@@ -93,7 +93,7 @@ export function selectUpcomingSmokeServiceWindow(
   const earliestAllowed = now.getTime() + minimumLeadMinutes * 60_000;
   for (let offset = 0; offset < horizonDays; offset++) {
     const serviceDate = addDays(today, offset);
-    if (![...serviceIds].some((serviceId) => activeService(feed, serviceId, serviceDate))) continue;
+    if (![...serviceIds].some((serviceId) => isGtfsServiceActiveOnDate(feed, serviceId, serviceDate))) continue;
     const earliestDeparture = localWallTimeToUtc(serviceDate, localHour, timezone);
     if (!earliestDeparture || earliestDeparture.getTime() < earliestAllowed) continue;
     return {

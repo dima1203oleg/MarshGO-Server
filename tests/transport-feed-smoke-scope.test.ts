@@ -19,6 +19,10 @@ const ukraineRail = {
   ...lvivStatic, name: 'Ukraine rail GTFS', city: 'Україна',
   feedUrl: 'https://jbb.ghsq.de/gtfs/ua-ukrzaliznytsya.gtfs.zip', sourceRef: 'ukraine-rail',
 };
+const stryiStatic = {
+  ...lvivStatic, name: 'Stryi GTFS', city: 'Стрий',
+  feedUrl: 'https://track.ua-gis.com/gtfs/stryi/static.zip', sourceRef: 'stryi-static',
+};
 
 test('transport feed smoke defaults to the complete catalog and accepts focused Lviv route scope', () => {
   assert.equal(parseTransportFeedSmokeScope([]), 'all');
@@ -42,13 +46,14 @@ test('Ukraine rail route scope selects only the cataloged ODbL rail GTFS', () =>
   assert.throws(() => selectTransportFeedSmokeEntries([kyivStatic], 'ukraine-rail-route'), /required/);
 });
 
-test('Ukraine intermodal route scope requires the open rail and four city GTFS schedules', () => {
+test('Ukraine intermodal route scope requires the open rail and five city GTFS schedules', () => {
   const catalog = [
     { ...ukraineRail, access: 'open' },
     { ...lvivStatic, feedUrl: 'https://files.mobilitydatabase.org/mdb-2946/latest.zip', city: 'Одеса' },
     { ...lvivStatic, feedUrl: 'https://track.ua-gis.com/gtfs/lviv/static.zip' },
     { ...kyivStatic, feedUrl: 'https://jbb.ghsq.de/gtfs/ua-kyiv.gtfs.zip' },
     { ...lvivStatic, feedUrl: 'https://track.ua-gis.com/gtfs/uzhhorod/static.zip', city: 'Ужгород' },
+    stryiStatic,
   ] satisfies CatalogEntry[];
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'ukraine-intermodal-route'), catalog);
   assert.throws(() => selectTransportFeedSmokeEntries(catalog.slice(1), 'ukraine-intermodal-route'), /requires the open rail/);

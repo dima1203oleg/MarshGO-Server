@@ -32,10 +32,11 @@ export function selectTransportFeedSmokeEntries(
       'https://track.ua-gis.com/gtfs/lviv/static.zip',
       'https://jbb.ghsq.de/gtfs/ua-kyiv.gtfs.zip',
       'https://track.ua-gis.com/gtfs/uzhhorod/static.zip',
+      'https://track.ua-gis.com/gtfs/stryi/static.zip',
     ];
     const selected = sources.map((feedUrl) => catalog.find((entry) => entry.sourceType === 'gtfs'
       && entry.access === 'open' && entry.feedUrl === feedUrl));
-    if (selected.some((entry) => !entry)) throw new Error('Ukraine intermodal route acceptance requires the open rail, Odesa, Lviv, Kyiv and Uzhhorod GTFS feeds');
+    if (selected.some((entry) => !entry)) throw new Error('Ukraine intermodal route acceptance requires the open rail, Odesa, Lviv, Kyiv, Uzhhorod and Stryi GTFS feeds');
     return selected as CatalogEntry[];
   }
   const staticFeed = catalog.find((entry) => entry.city === 'Львів'

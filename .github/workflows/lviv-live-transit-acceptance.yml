@@ -40,9 +40,9 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - name: Lint route acceptance harness
-        run: npm exec -- eslint scripts/transport-feed-smoke.ts scripts/transport-feed-smoke-scope.ts tests/transport-feed-smoke-scope.test.ts
-      - name: Verify route acceptance scope selection
-        run: npm exec -- tsx --test tests/transport-feed-smoke-scope.test.ts
+        run: npm exec -- eslint scripts/transport-feed-smoke.ts scripts/transport-feed-smoke-scope.ts scripts/transport-feed-smoke-window.ts tests/transport-feed-smoke-scope.test.ts tests/transport-feed-smoke-window.test.ts
+      - name: Verify route acceptance scopes and service-date controls
+        run: npm exec -- tsx --test tests/transport-feed-smoke-scope.test.ts tests/transport-feed-smoke-window.test.ts
       - name: Run selected read-only route acceptance
         env:
           ROUTE_SCOPE: ${{ inputs.scope || 'lviv-route' }}

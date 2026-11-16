@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
-import { selectUpcomingSmokeServiceWindow } from '../scripts/transport-feed-smoke-window';
+import { isGtfsServiceActiveOnDate, selectUpcomingSmokeServiceWindow } from '../scripts/transport-feed-smoke-window';
 
 function feed(options: {
   timezone?: string;
@@ -45,6 +45,18 @@ test('calendar exceptions can add service on a non-service day', () => {
   });
   const result = selectUpcomingSmokeServiceWindow(addedService, new Date('2026-06-06T07:00:00Z'));
   assert.equal(result.serviceDate, '20260607');
+});
+
+test('service-date control honors calendar dates and date exceptions', () => {
+  const candidate = feed({
+    weekdays: [true, false, false, false, false, false, false],
+    exceptions: new Map([['service', new Map([['20260607', 1], ['20260608', 2]])]]),
+  });
+  assert.equal(isGtfsServiceActiveOnDate(candidate, 'service', '20260601'), true);
+  assert.equal(isGtfsServiceActiveOnDate(candidate, 'service', '20260602'), false);
+  assert.equal(isGtfsServiceActiveOnDate(candidate, 'service', '20260607'), true);
+  assert.equal(isGtfsServiceActiveOnDate(candidate, 'service', '20260608'), false);
+  assert.equal(isGtfsServiceActiveOnDate(candidate, 'missing-service', '20260601'), false);
 });
 
 test('calendar exceptions can remove a weekly service day', () => {
