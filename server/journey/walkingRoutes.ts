@@ -252,21 +252,8 @@ export function resolveWalkingEndpoint(
   to?: [number, number],
   fallbackEndpoint?: string,
 ): string | null {
-  const rawUrls = process.env.WALKING_ROUTING_URLS?.trim();
-  if (rawUrls && from && to) {
-    try {
-      const entries = JSON.parse(rawUrls) as Array<{ bbox?: [number, number, number, number]; url: string }>;
-      for (const entry of entries) {
-        if (!entry.url) continue;
-        if (!entry.bbox) return entry.url;
-        const [minLng, minLat, maxLng, maxLat] = entry.bbox;
-        const fromIn = from[0] >= minLng && from[0] <= maxLng && from[1] >= minLat && from[1] <= maxLat;
-        const toIn = to[0] >= minLng && to[0] <= maxLng && to[1] >= minLat && to[1] <= maxLat;
-        if (fromIn || toIn) return entry.url;
-      }
-    } catch {
-      // ignore JSON parse error
-    }
+  if (from && to && walkingEndpointRules().length > 0) {
+    return walkingEndpointFor(from, to) ?? null;
   }
   return fallbackEndpoint || process.env.WALKING_ROUTING_URL?.trim() || null;
 }

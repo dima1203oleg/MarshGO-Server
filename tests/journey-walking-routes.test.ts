@@ -154,6 +154,38 @@ test('caps external foot-route requests per search without caching a budget miss
   assert.equal(fetchCount, 1);
 });
 
+test('zero budget, NoRoute and timeout never produce pedestrian geometry', async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return new Response(JSON.stringify({ code: 'NoRoute', routes: [] }), { status: 200 });
+  };
+  const zero = createWalkingRouteBudget(0);
+  assert.equal(await routePedestrianPath([28, 49], [28.01, 49], 'https://zero-budget.example', zero), null);
+  assert.equal(requests, 0);
+  assert.equal(zero.exhausted, true);
+  assert.equal(zero.spent, 0);
+  assert.equal(await routePedestrianPath([28, 49], [28.01, 49], 'https://no-route.example'), null);
+  assert.equal(requests, 1);
+
+  let abortReason: unknown;
+  globalThis.fetch = async (_input, init) => new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    assert.ok(signal);
+    const deadline = setTimeout(() => reject(new Error('foot request did not honor its timeout')), 5000);
+    signal.addEventListener('abort', () => {
+      clearTimeout(deadline);
+      abortReason = signal.reason;
+      reject(signal.reason);
+    }, { once: true });
+  });
+  assert.equal(await routePedestrianPath([28, 49], [28.01, 49], 'https://timeout-route.example'), null);
+  assert.ok(abortReason instanceof Error);
+  assert.equal(abortReason.name, 'TimeoutError');
+});
+
 test('the foot-route budget covers a real candidate pool and stays hard-bounded', (t) => {
   t.diagnostic('regression: a live Lviv search generated 73 candidates; a 32-request budget left displayed journeys with estimated walks');
   const original = process.env.WALKING_ROUTE_MAX_REQUESTS_PER_SEARCH;
@@ -225,6 +257,87 @@ test('bounds concurrent provider work and drops excess queued walking paths', as
   assert.equal(routes.filter(Boolean).length, 36);
   assert.equal(fetchCount, 36);
   assert.equal(peakActive, 12);
+});
+
+test('default foot routing never sends uncovered or straddling pairs to a regional or fallback graph', async (t) => {
+  const originalUrl = process.env.WALKING_ROUTING_URL;
+  const originalUrls = process.env.WALKING_ROUTING_URLS;
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    if (originalUrl === undefined) delete process.env.WALKING_ROUTING_URL; else process.env.WALKING_ROUTING_URL = originalUrl;
+    if (originalUrls === undefined) delete process.env.WALKING_ROUTING_URLS; else process.env.WALKING_ROUTING_URLS = originalUrls;
+    globalThis.fetch = originalFetch;
+  });
+  process.env.WALKING_ROUTING_URL = 'https://mixed-fallback.example/route/v1/foot';
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([
+    { bbox: [23.9, 49.75, 24.2, 49.95], url: 'https://mixed-lviv.example/route/v1/foot' },
+    { bbox: [30.2, 50.25, 30.8, 50.62], url: 'https://mixed-kyiv.example/route/v1/foot' },
+  ]);
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return new Response(JSON.stringify({ code: 'NoRoute', routes: [] }), { status: 200 });
+  };
+  const budget = createWalkingRouteBudget(4);
+  for (const [from, to] of [
+    [[24.03, 49.84], [30.48, 50.44]],
+    [[24.03, 49.84], [24.3, 49.84]],
+    [[24.3, 49.84], [24.03, 49.84]],
+    [[36.2, 50], [36.21, 50.01]],
+  ] as Array<[[number, number], [number, number]]>) {
+    assert.equal(await routePedestrianPath(from, to, undefined, budget), null);
+  }
+  assert.equal(requests, 0);
+  assert.equal(budget.spent, 0);
+  assert.equal(budget.remaining, 4);
+});
+
+test('mixed regional coverage retains measured transfer and egress without inventing access geometry', async (t) => {
+  const originalUrl = process.env.WALKING_ROUTING_URL;
+  const originalUrls = process.env.WALKING_ROUTING_URLS;
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    if (originalUrl === undefined) delete process.env.WALKING_ROUTING_URL; else process.env.WALKING_ROUTING_URL = originalUrl;
+    if (originalUrls === undefined) delete process.env.WALKING_ROUTING_URLS; else process.env.WALKING_ROUTING_URLS = originalUrls;
+    globalThis.fetch = originalFetch;
+  });
+  delete process.env.WALKING_ROUTING_URL;
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([
+    { bbox: [23.9, 49.75, 24.2, 49.95], url: 'https://mixed-egress.example/route/v1/foot' },
+    { bbox: [30.2, 50.25, 30.8, 50.62], url: 'https://mixed-transfer.example/route/v1/foot' },
+  ]);
+  const requests: string[] = [];
+  globalThis.fetch = async (input) => {
+    requests.push(String(input));
+    return new Response(JSON.stringify({
+      code: 'Ok', routes: [{ distance: 250, duration: 200, geometry: geometryForRequest(input), legs: [] }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const candidate = itinerary();
+  candidate.segments[0].originStop.coordinates = [36.2, 50];
+  candidate.segments[0].destinationStop.coordinates = [30.5, 50.44];
+  candidate.segments[1].originStop.coordinates = [30.51, 50.44];
+  candidate.segments[1].destinationStop.coordinates = [24.03, 49.84];
+  const budget = createWalkingRouteBudget(3);
+  const access = await routePedestrianPath([36.21, 50.01], candidate.segments[0].originStop.coordinates, undefined, budget);
+  const egress = await routePedestrianPath(candidate.segments[1].destinationStop.coordinates, [24.04, 49.84], undefined, budget);
+  const transfer = await routePedestrianPath(candidate.segments[0].destinationStop.coordinates, candidate.segments[1].originStop.coordinates, undefined, budget);
+  const routed = applyRoutedWalkingPaths(candidate, { access, egress, transfers: [transfer] }, limits);
+  assert.ok(routed);
+  assert.equal(requests.length, 2);
+  assert.equal(budget.spent, 2);
+  assert.equal(routed.accessWalk, null);
+  assert.ok(egress && transfer);
+  assert.deepEqual(routed.egressWalk?.geometry, egress.geometry);
+  assert.deepEqual(routed.transferWalkingGeometries[0], transfer.geometry);
+  assert.equal(routed.walkingRoutesVerified, false);
+  assert.equal(routed.walkingRoutesUnconfirmed, true);
+  assert.equal(routed.walkingMeters, 600);
+  assert.equal(routed.durationSeconds, 3200);
+  assert.equal(routed.waitingSeconds, 920);
+  assert.deepEqual(routed.segments.map(segment => [segment.departureAt, segment.arrivalAt]),
+    candidate.segments.map(segment => [segment.departureAt, segment.arrivalAt]));
+  assert.equal(routed.fare, null);
 });
 
 test('selects the foot graph that covers both endpoints and refuses cross-city or unknown pairs', (t) => {
