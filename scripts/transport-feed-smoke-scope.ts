@@ -2,7 +2,7 @@ import type { CatalogEntry } from '../server/mobility/ukraineCatalog';
 
 export type TransportFeedSmokeScope = 'all' | 'lviv-route' | 'lviv-budget-diagnostic'
   | 'lviv-north-baseline-diagnostic' | 'lviv-north-trip-fairness-diagnostic'
-  | 'lviv-north-final-arrival-diagnostic' | 'ukraine-rail-route';
+  | 'lviv-north-final-arrival-diagnostic' | 'lviv-wide-page-diagnostic' | 'ukraine-rail-route';
 
 export function parseTransportFeedSmokeScope(args: readonly string[]): TransportFeedSmokeScope {
   const values = args.filter((argument) => argument.startsWith('--scope='))
@@ -12,6 +12,7 @@ export function parseTransportFeedSmokeScope(args: readonly string[]): Transport
   if (value !== 'all' && value !== 'lviv-route' && value !== 'lviv-budget-diagnostic'
     && value !== 'lviv-north-baseline-diagnostic' && value !== 'lviv-north-trip-fairness-diagnostic'
     && value !== 'lviv-north-final-arrival-diagnostic'
+    && value !== 'lviv-wide-page-diagnostic'
     && value !== 'ukraine-rail-route') {
     throw new Error(`Unsupported transport feed smoke scope: ${value}`);
   }

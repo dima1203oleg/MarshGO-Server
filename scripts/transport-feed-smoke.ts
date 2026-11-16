@@ -160,7 +160,7 @@ async function main() {
   // probe the realtime endpoint here to avoid downloading/parsing the static archive twice.
   const isLvivDiagnosticScope = scope === 'lviv-route' || scope === 'lviv-budget-diagnostic'
     || scope === 'lviv-north-baseline-diagnostic' || scope === 'lviv-north-trip-fairness-diagnostic'
-    || scope === 'lviv-north-final-arrival-diagnostic';
+    || scope === 'lviv-north-final-arrival-diagnostic' || scope === 'lviv-wide-page-diagnostic';
   const providerProbeEntries = isLvivDiagnosticScope
     ? selectedEntries.filter((entry) => entry.sourceType === 'gtfs_rt')
     : scope === 'ukraine-rail-route' ? [] : selectedEntries;
@@ -203,7 +203,7 @@ async function main() {
     ? lvivRouteCases.filter((routeCase) => routeCase.id === 'north-to-sykhiv') : lvivRouteCases;
   const selectedGraphLimits: GtfsGraphBudgetLimits = scope === 'lviv-north-trip-fairness-diagnostic'
     ? { transferCandidateOrder: 'trip-round-robin' } : {};
-  const createLvivSearchInput = (routeCase: typeof lvivRouteCases[number]) => ({
+  const createLvivSearchInput = (routeCase: typeof lvivRouteCases[number], resultLimit = ROUTE_SMOKE_RESULT_LIMIT) => ({
     providerId: 'live-lviv-route-smoke',
     providerName: 'Львівавтодор GTFS',
     providerCity: 'Львів',
@@ -215,11 +215,14 @@ async function main() {
     maximumWaitSeconds: 3 * 60 * 60,
     maximumTransfers: 2,
     maximumStopDistanceMeters: 1800,
-    limit: ROUTE_SMOKE_RESULT_LIMIT,
+    limit: resultLimit,
     allowedTransportTypes: ['bus', 'tram', 'trolleybus'] as const,
   });
-  const runLvivSearch = (routeCase: typeof lvivRouteCases[number], graphLimits: GtfsGraphBudgetLimits = {}) =>
-    findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(lvivFeed, createLvivSearchInput(routeCase), graphLimits));
+  const runLvivSearch = (
+    routeCase: typeof lvivRouteCases[number],
+    graphLimits: GtfsGraphBudgetLimits = {},
+    resultLimit = ROUTE_SMOKE_RESULT_LIMIT,
+  ) => findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(lvivFeed, createLvivSearchInput(routeCase, resultLimit), graphLimits));
   const standardRuns = selectedLvivRouteCases.map((routeCase) => runLvivSearch(routeCase, selectedGraphLimits));
   const itinerarySignature = (itinerary: GtfsItinerary) => itinerary.segments.map((segment) =>
     `${segment.transportType}:${segment.routeId}:${segment.tripId}:${segment.originStop.id}>${segment.destinationStop.id}`).join('|');
@@ -282,6 +285,56 @@ async function main() {
         tripRoundRobinOnly: summarizeVariant(tripRoundRobinOnly),
         tripRoundRobin50kLookahead: summarizeVariant(tripRoundRobin50kLookahead),
         graphAndStopSelection: summarizeVariant(graphAndStops),
+      };
+    }),
+  } : undefined;
+  const widePageDiagnostic = scope === 'lviv-wide-page-diagnostic' ? {
+    mode: 'test-only compare response pages at 40 and 100 with identical expanded graph, endpoint, candidate-pool and chronological-search limits; production defaults are unchanged',
+    sharedDiagnosticLimits: {
+      totalSegments: 250_000,
+      segmentsPerRoute: 30_000,
+      maxStopsPerSide: 112,
+      maxStopsPerRoutePattern: 16,
+      maxSearchResults: 2_500,
+      maxObjectiveReservoirSearchSteps: 200_000,
+      transferCandidateOrder: 'chronological',
+    },
+    pageLimitsCompared: [40, 100],
+    cases: selectedLvivRouteCases.map((routeCase) => {
+      const sharedLimits: GtfsGraphBudgetLimits = {
+        totalSegments: 250_000,
+        segmentsPerRoute: 30_000,
+        maxStopsPerSide: 112,
+        maxStopsPerRoutePattern: 16,
+        maxSearchResults: 2_500,
+        maxObjectiveReservoirSearchSteps: 200_000,
+      };
+      clearGtfsCandidateGraphCache();
+      const page40 = runLvivSearch(routeCase, sharedLimits, 40);
+      clearGtfsCandidateGraphCache();
+      const page100 = runLvivSearch(routeCase, sharedLimits, 100);
+      const signatures40 = page40.result.itineraries.map(itinerarySignature);
+      const signatures100 = page100.result.itineraries.map(itinerarySignature);
+      const threeLegJourneys = page100.result.itineraries.filter((itinerary) => itinerary.segments.length === 3);
+      const summarizePage = (variant: typeof page40) => ({
+        resultCount: variant.result.itineraries.length,
+        searchTruncated: variant.result.searchTruncated,
+        resultLimitReached: variant.result.resultLimitReached,
+        truncation: variant.result.truncation,
+        plannerDiagnostics: variant.diagnostics,
+      });
+      return {
+        id: routeCase.id,
+        page40: summarizePage(page40),
+        page100: summarizePage(page100),
+        sameTopForty: JSON.stringify(signatures40) === JSON.stringify(signatures100.slice(0, 40)),
+        page100LegCountDistribution: summarizeSmokeItineraries(page100.result.itineraries).modeChainCounts,
+        threeTransitLegCountInPage100: threeLegJourneys.length,
+        threeTransitLegExamples: threeLegJourneys.slice(0, 3).map(serializeSmokeJourney),
+        threeTransitLegsBeyondDefaultPage: page100.result.itineraries.slice(10)
+          .filter((itinerary) => itinerary.segments.length === 3).slice(0, 3).map(serializeSmokeJourney),
+        threeTransitLegsBeyondPage40: page100.result.itineraries.slice(40)
+          .filter((itinerary) => itinerary.segments.length === 3).slice(0, 3).map(serializeSmokeJourney),
       };
     }),
   } : undefined;
@@ -357,6 +410,7 @@ async function main() {
       };
     }),
     ...(budgetDiagnostic ? { budgetDiagnostic } : {}),
+    ...(widePageDiagnostic ? { widePageDiagnostic } : {}),
   };
 
   const supplementary = scope !== 'all' ? [] : await Promise.all([

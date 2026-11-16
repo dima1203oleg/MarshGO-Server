@@ -27,6 +27,7 @@ test('transport feed smoke defaults to the complete catalog and accepts focused 
   assert.equal(parseTransportFeedSmokeScope(['--scope=lviv-north-baseline-diagnostic']), 'lviv-north-baseline-diagnostic');
   assert.equal(parseTransportFeedSmokeScope(['--scope=lviv-north-trip-fairness-diagnostic']), 'lviv-north-trip-fairness-diagnostic');
   assert.equal(parseTransportFeedSmokeScope(['--scope=lviv-north-final-arrival-diagnostic']), 'lviv-north-final-arrival-diagnostic');
+  assert.equal(parseTransportFeedSmokeScope(['--scope=lviv-wide-page-diagnostic']), 'lviv-wide-page-diagnostic');
   assert.equal(parseTransportFeedSmokeScope(['--scope=ukraine-rail-route']), 'ukraine-rail-route');
   assert.throws(() => parseTransportFeedSmokeScope(['--scope=unknown']), /Unsupported/);
   assert.throws(() => parseTransportFeedSmokeScope(['--scope=all', '--scope=lviv-route']), /only once/);
@@ -40,6 +41,7 @@ test('focused Lviv route scope selects only static schedule and vehicle position
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'lviv-north-baseline-diagnostic'), [lvivStatic, lvivVehiclePositions]);
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'lviv-north-trip-fairness-diagnostic'), [lvivStatic, lvivVehiclePositions]);
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'lviv-north-final-arrival-diagnostic'), [lvivStatic, lvivVehiclePositions]);
+  assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'lviv-wide-page-diagnostic'), [lvivStatic, lvivVehiclePositions]);
   assert.throws(() => selectTransportFeedSmokeEntries([kyivStatic], 'lviv-route'), /required/);
 });
 
