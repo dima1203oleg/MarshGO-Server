@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { providerServices, selectTileProviders, transportTileDefinitions, type TransportTileDefinition, type TransportTileProviderRow } from '../server/mobility/transportTileAvailability';
 
 const serverSource = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
@@ -24,6 +25,35 @@ const tileOf = (id: string): TransportTileDefinition => {
 const row = (overrides: Partial<TransportTileProviderRow>): TransportTileProviderRow => ({
   name: 'Київ — метро (геометрія ліній)', city: 'Київ', provider_type: 'public_transit', source_type: 'geojson',
   last_report: { counts: {} }, ...overrides,
+});
+
+describe('scooter catalog SQL eligibility', () => {
+  const scooterBranch = providerEndpoint.slice(providerEndpoint.indexOf("if (tile.id === 'scooter')"));
+  const predicate = scooterBranch.match(/WHERE ([\s\S]*?)ORDER BY/);
+  assert.ok(predicate, 'scooter catalog must expose its SQL eligibility predicate');
+
+  for (const [health, expected] of [['healthy', 1], ['degraded', 0], ['offline', 0], ['unknown', 0], [null, 0]] as const) {
+    it(`advertises ${health ?? 'unset'} health only when nearby inventory accepts it`, () => {
+      const db = new DatabaseSync(':memory:');
+      try {
+        db.exec(`CREATE TABLE mp(provider_type TEXT, source_type TEXT, status TEXT, health TEXT);
+          CREATE TABLE n(compatibility_status TEXT, return_rule TEXT);
+          INSERT INTO n VALUES ('CONFIRMED','FREE_FLOATING_ZONE');`);
+        db.prepare('INSERT INTO mp VALUES (?,?,?,?)').run('scooter', 'gbfs', 'enabled', health);
+        // Execute the production scalar predicate, not the PostgreSQL joins or spatial query.
+        const rows = db.prepare(`SELECT 1 FROM mp CROSS JOIN n WHERE ${predicate[1]}`).all();
+        assert.equal(rows.length, expected);
+        if (expected) {
+          db.exec("UPDATE mp SET status='disabled'");
+          assert.equal(db.prepare(`SELECT 1 FROM mp CROSS JOIN n WHERE ${predicate[1]}`).all().length, 0);
+          db.exec("UPDATE mp SET status='enabled'; UPDATE n SET compatibility_status='UNKNOWN'");
+          assert.equal(db.prepare(`SELECT 1 FROM mp CROSS JOIN n WHERE ${predicate[1]}`).all().length, 0);
+        }
+      } finally {
+        db.close();
+      }
+    });
+  }
 });
 
 const kyiv = { lat: 50.4501, lon: 30.5234 };
