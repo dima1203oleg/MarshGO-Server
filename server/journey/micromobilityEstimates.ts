@@ -1,4 +1,5 @@
 import { geofenceRulesAt, type GbfsGeofence, type GbfsGeofenceRule } from '../mobility/gbfsGeofences';
+import { enrichMicromobilityLegGeometry } from './micromobilityGeometry';
 
 export type MicromobilityMode = 'BICYCLE' | 'SCOOTER';
 export type Point = [number, number];
@@ -323,6 +324,7 @@ export interface RoadRoutedPath { geometry: Point[]; distanceMeters: number; dur
 export interface RoadRouteDeps {
   /** A real street path from a bicycle-profile graph, or null when no graph covers the ride. */
   routeRide: (from: Point, to: Point) => Promise<RoadRoutedPath | null>;
+  routeFoot?: (from: Point, to: Point) => Promise<RoadRoutedPath | null>;
   /** GBFS ride-through check for scooters; evaluated on the routed streets, not a straight line. */
   rideThroughAllowed?: (estimate: MicromobilityRouteEstimate, point: Point) => boolean;
   /** Segment-level GBFS ride-through check: an edge can cross a narrow zone without any sampled vertex inside it. */
@@ -330,13 +332,13 @@ export interface RoadRouteDeps {
 }
 export type RoadRouteOutcome =
   | { estimate: MicromobilityRouteEstimate; rejected: null }
-  | { estimate: null; rejected: 'no-road-router' | 'ride-through-forbidden' | 'rental-duration-exceeded' };
+  | { estimate: null; rejected: 'no-road-router' | 'ride-through-forbidden' | 'rental-duration-exceeded' | 'walking-limit-exceeded' };
 
 /** Replace the straight ride line with a routed bicycle-profile path; without one the candidate is dropped. */
 export async function roadRouteMicromobilityEstimate(
   estimate: MicromobilityRouteEstimate,
   deps: RoadRouteDeps,
-  options: Pick<RouteEstimateOptions, 'maxRentalDurationSeconds'>,
+  options: Partial<Pick<RouteEstimateOptions, 'maxRentalDurationSeconds' | 'maxWalkToRentalMeters' | 'maxWalkingMeters'>>,
 ): Promise<RoadRouteOutcome> {
   const rideIndex = estimate.legs.findIndex((leg) => leg.mode === estimate.mode);
   const ride = estimate.legs[rideIndex];
@@ -362,14 +364,34 @@ export async function roadRouteMicromobilityEstimate(
     ...ride, distanceMeters: rideMeters, durationSeconds: rideSeconds, routeGeometry: path.geometry,
     metadata: { ...ride.metadata, routeAccuracy: 'SOURCE_GEOMETRY', geometryMethod: 'osrm-bicycle-profile', routeGeometrySource: source },
   };
-  const legs = estimate.legs.map((leg, index) => index === rideIndex ? routedRide : leg);
+  const legs: RentalRouteLeg[] = [];
+  for (const [index, leg] of estimate.legs.entries()) {
+    if (index === rideIndex) {
+      legs.push(routedRide);
+    } else if (leg.mode === 'WALK' && deps.routeFoot) {
+      const enriched = await enrichMicromobilityLegGeometry(leg, { routeFoot: deps.routeFoot, routeBike: deps.routeRide });
+      legs.push(enriched.source === 'osrm-foot-route' ? {
+        ...leg, distanceMeters: enriched.distanceMeters, durationSeconds: enriched.durationSeconds,
+        routeGeometry: enriched.routeGeometry,
+        metadata: { ...leg.metadata, routeAccuracy: 'SOURCE_GEOMETRY', geometryMethod: enriched.source, routeGeometrySource: enriched.source },
+      } : leg);
+    } else {
+      legs.push(leg);
+    }
+  }
+  const walks = legs.filter(leg => leg.mode === 'WALK');
+  const walkingMeters = walks.reduce((sum, leg) => sum + leg.distanceMeters, 0);
+  if ((options.maxWalkToRentalMeters !== undefined && walks.some(leg => leg.distanceMeters > options.maxWalkToRentalMeters!))
+    || (options.maxWalkingMeters !== undefined && walkingMeters > options.maxWalkingMeters)) {
+    return { estimate: null, rejected: 'walking-limit-exceeded' };
+  }
   const durationSeconds = legs.reduce((sum, leg) => sum + leg.durationSeconds, 0);
   return {
     rejected: null,
     estimate: {
-      ...estimate, legs, durationSeconds,
+      ...estimate, legs, durationSeconds, walkingMeters,
       arrivalAt: new Date(estimate.departureAt.getTime() + durationSeconds * 1000),
-      distanceMeters: estimate.distanceMeters - ride.distanceMeters + rideMeters,
+      distanceMeters: legs.reduce((sum, leg) => sum + leg.distanceMeters, 0),
       routeAccuracy: 'SOURCE_GEOMETRY',
     },
   };

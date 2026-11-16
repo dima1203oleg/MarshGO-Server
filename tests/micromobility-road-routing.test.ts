@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import {
   buildBicycleRouteEstimates, roadRouteMicromobilityEstimate,
   type MicromobilityRouteEstimate, type RentalRouteNetwork, type RentalRoutePoint,
@@ -44,6 +47,127 @@ test('a bike ride is rebuilt on the routed street path and its timings follow th
   assert.equal(outcome.estimate!.durationSeconds, outcome.estimate!.legs.reduce((sum, leg) => sum + leg.durationSeconds, 0));
   assert.equal(outcome.estimate!.arrivalAt.getTime() - outcome.estimate!.departureAt.getTime(), outcome.estimate!.durationSeconds * 1000);
   assert.ok(trustedRouteGeometry({ mode: 'BICYCLE', source: 'osrm-bike-route', routeGeometry: ride.routeGeometry }));
+});
+
+test('bike and scooter totals include measured walking connectors before transit departure is selected', async () => {
+  for (const mode of ['BICYCLE', 'SCOOTER'] as const) {
+    const straight = mode === 'BICYCLE' ? straightEstimate() : scooterEstimate();
+    const outcome = await roadRouteMicromobilityEstimate(straight, {
+      routeRide: async () => streetPath,
+      routeFoot: async (from, to) => ({ geometry: [from, to], distanceMeters: 500, durationSeconds: 400 }),
+    }, { maxWalkToRentalMeters: 900, maxWalkingMeters: 1100 });
+    assert.ok(outcome.estimate);
+    const routed = outcome.estimate;
+    assert.equal(routed.walkingMeters, 1000);
+    assert.equal(routed.distanceMeters, 7350);
+    assert.equal(routed.durationSeconds, 2877);
+    assert.equal(routed.arrivalAt.getTime(), routed.departureAt.getTime() + 2877_000);
+    assert.equal(routed.legs.reduce((sum, leg) => sum + leg.durationSeconds, 0), routed.durationSeconds);
+    for (const leg of routed.legs.filter(leg => leg.mode === 'WALK')) {
+      assert.equal(leg.metadata.routeGeometrySource, 'osrm-foot-route');
+      assert.ok(trustedRouteGeometry({ mode: 'WALK', source: 'osrm-foot-route', routeGeometry: leg.routeGeometry }));
+    }
+    const trainDeparture = new Date(routed.departureAt.getTime() + 2500_000);
+    assert.ok(straight.arrivalAt < trainDeparture, 'the straight estimate incorrectly catches this train');
+    assert.ok(routed.arrivalAt > trainDeparture, 'candidate routing must know the measured walk misses this train');
+  }
+});
+
+test('measured rental connector distances enforce individual and total walking caps', async () => {
+  for (const [distanceMeters, options] of [
+    [901, { maxWalkToRentalMeters: 900 }],
+    [500, { maxWalkToRentalMeters: 900, maxWalkingMeters: 900 }],
+  ] as const) {
+    const outcome = await roadRouteMicromobilityEstimate(straightEstimate(), {
+      routeRide: async () => streetPath,
+      routeFoot: async (from, to) => ({ geometry: [from, to], distanceMeters, durationSeconds: 400 }),
+    }, options);
+    assert.equal(outcome.estimate, null);
+    assert.equal(outcome.rejected, 'walking-limit-exceeded');
+  }
+});
+
+test('an unavailable foot router keeps honest connector estimates without changing the ride graph', async () => {
+  const straight = straightEstimate();
+  const outcome = await roadRouteMicromobilityEstimate(straight, {
+    routeRide: async () => streetPath, routeFoot: async () => null,
+  }, { maxWalkToRentalMeters: 900 });
+  assert.ok(outcome.estimate);
+  const walks = outcome.estimate.legs.filter(leg => leg.mode === 'WALK');
+  assert.deepEqual(walks, straight.legs.filter(leg => leg.mode === 'WALK'));
+  assert.equal(outcome.estimate.walkingMeters, walks.reduce((sum, leg) => sum + leg.distanceMeters, 0));
+  assert.ok(walks.every(leg => leg.metadata.routeAccuracy === 'STRAIGHT_LINE_ESTIMATE'));
+});
+
+test('production candidate evaluation routes only covered connectors with the shared walking budget', async () => {
+  const source = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('const estimateMicromobility = async');
+  const end = source.indexOf('const pushMicromobilityCandidate =', start);
+  assert.ok(start >= 0 && end > start);
+  const compiled = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  for (const covered of [true, false]) {
+    const estimate = straightEstimate();
+    const budget = { remaining: 2 };
+    let footCalls = 0;
+    const routed = await runInNewContext(`(async () => { ${compiled}; return estimateMicromobility('BICYCLE', origin, destination, departureAt); })()`, {
+      origin: estimate.legs[0].origin, destination: estimate.legs.at(-1)!.destination, departureAt: estimate.departureAt,
+      straightMicromobilityEstimates: () => [estimate], roadRouteMicromobilityEstimate,
+      roadRoutedRides: new Map(), routeBicyclePath: async () => streetPath,
+      walkingEndpointFor: () => covered ? 'fixture-foot' : undefined,
+      walkingRouteBudget: budget, micromobilityOptions: { maxWalkToRentalMeters: 900 },
+      micromobilityRoadRejections: new Set(),
+      routePedestrianPath: async (from: [number, number], to: [number, number], endpoint: string, receivedBudget: unknown) => {
+        assert.equal(endpoint, 'fixture-foot');
+        assert.equal(receivedBudget, budget);
+        footCalls++;
+        return { geometry: [from, to], distanceMeters: 500, durationSeconds: 400 };
+      },
+    }) as MicromobilityRouteEstimate[];
+    assert.equal(footCalls, covered ? 2 : 0);
+    assert.equal(routed.length, 1);
+    assert.equal(routed[0].walkingMeters, covered ? 1000 : 52);
+    assert.equal(routed[0].arrivalAt.getTime(), estimate.departureAt.getTime() + routed[0].durationSeconds * 1000);
+  }
+});
+
+test('the production serializer preserves evaluated metrics and never asks a router again', async () => {
+  const source = readFileSync(new URL('../server/index.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('const insertMicromobility = async () => {');
+  const end = source.indexOf('const insertTransit = async', start);
+  assert.ok(start >= 0 && end > start);
+  const compiled = ts.transpileModule(source.slice(start, end), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  for (const measured of [true, false]) {
+    const outcome = await roadRouteMicromobilityEstimate(straightEstimate(), {
+      routeRide: async () => streetPath,
+      routeFoot: async (from, to) => measured ? { geometry: [from, to], distanceMeters: 500, durationSeconds: 400 } : null,
+    }, {});
+    assert.ok(outcome.estimate);
+    const inserted: Array<{ durationSeconds: number; distanceMeters: number; departureAt: Date; source: string; routeGeometry: unknown }> = [];
+    const forbiddenRouter = () => assert.fail('serialization must not perform routing after selection');
+    await runInNewContext(`(async () => { ${compiled}; await insertMicromobility(); })()`, {
+      route: { estimate: outcome.estimate }, Date,
+      insertEstimatedLeg: async (leg: typeof inserted[number]) => { inserted.push(leg); },
+      routePedestrianPath: forbiddenRouter, routeBicyclePath: forbiddenRouter,
+      walkingRoutingConfiguredFor: () => true, walkingEndpointFor: () => 'fixture-foot',
+      enrichMicromobilityLegGeometry: forbiddenRouter,
+    });
+    assert.equal(inserted.length, outcome.estimate.legs.length);
+    let departureAt = outcome.estimate.departureAt.getTime();
+    for (const [index, leg] of inserted.entries()) {
+      const evaluated: MicromobilityRouteEstimate['legs'][number] = outcome.estimate.legs[index];
+      assert.equal(leg.departureAt.getTime(), departureAt);
+      assert.equal(leg.durationSeconds, evaluated.durationSeconds);
+      assert.equal(leg.distanceMeters, evaluated.distanceMeters);
+      assert.equal(leg.routeGeometry, evaluated.routeGeometry);
+      assert.equal(leg.source, evaluated.metadata.routeGeometrySource ?? 'walking-straight-line-estimate');
+      departureAt += leg.durationSeconds * 1000;
+    }
+    assert.equal(departureAt, outcome.estimate.arrivalAt.getTime());
+  }
 });
 
 test('negative control: without a road router the bike candidate is dropped, never kept as a straight line', async () => {

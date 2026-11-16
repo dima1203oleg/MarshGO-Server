@@ -28,8 +28,7 @@ import { priceStatusFor, scaleGtfsFareForPassengers } from './journey/gtfsFares'
 import { scaleCashFareForPassengers } from './mobility/transportTariffs';
 import { cachedGtfsTimetable, DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, effectiveGtfsSourceFreshAt, effectiveWalkingReachMeters, MAX_PREFERENCE_WALKING_RADIUS_METERS, resolveTransitCandidateBudget, summarizeGtfsWalkReach, MAX_GTFS_TRANSFERS, maximumGtfsWaitWithinJourney, selectGtfsCandidatesForCrossProviderSearch, type GtfsItinerary, type GtfsItinerarySearchTruncation, type GtfsTimetableFeed, type TransitJourneyMode } from './journey/gtfsTimetable';
 import { gtfsSearchWorker, type GtfsWorkerMetroSources, type GtfsWorkerGroup } from './journey/gtfsSearchWorkerClient';
-import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, routePedestrianPath, STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingConfiguredFor, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
-import { enrichMicromobilityLegGeometry } from './journey/micromobilityGeometry';
+import { applyRoutedWalkingPaths, createWalkingRejectionReasons, createWalkingRouteBudget, routePedestrianPath, STREET_WALKING_DETOUR_ALLOWANCE, walkingEndpointFor, walkingRouteCandidateBatchSize, walkingRoutingEnabled, type WalkingRoutedItinerary } from './journey/walkingRoutes';
 import { routeBicyclePath } from './journey/bicycleRoutes';
 import { geofenceRulesAt, rideThroughForbiddenOnSegment } from './mobility/gbfsGeofences';
 import { createDirectWalkingCandidate, directWalkingGeometryConnectsEndpoints, MAX_DIRECT_WALK_CANDIDATE_STRAIGHT_LINE_METERS, type DirectWalkingCandidate } from './journey/directWalkingCandidate';
@@ -3835,6 +3834,10 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           if (!roadRoutedRides.has(key)) roadRoutedRides.set(key, routeBicyclePath(from, to));
           return roadRoutedRides.get(key)!;
         },
+        routeFoot: (from, to) => {
+          const endpoint = walkingEndpointFor(from, to);
+          return endpoint ? routePedestrianPath(from, to, endpoint, walkingRouteBudget) : Promise.resolve(null);
+        },
         ...(mode === 'SCOOTER' ? { rideThroughAllowed: scooterRideThrough, rideThroughSegmentAllowed: scooterRideThroughSegment } : {}),
       }, micromobilityOptions);
       if (outcome.estimate) routed.push(outcome.estimate);
@@ -3970,7 +3973,7 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       }
     }
   }
-  if (walkingRouteBudget.exhausted && micromobilityCandidates.some((candidate) => candidate.itinerary)) {
+  if (walkingRouteBudget.exhausted && requestedMicromobilityModes.length > 0) {
     candidateGenerationTruncated = true;
     providerErrors.push(`Пішохідний маршрутизатор обмежив перевірку мікромобільних пересадок ${walkingRouteBudget.limit} шляхами.`);
   }
@@ -4532,26 +4535,21 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
         };
         const insertMicromobility = async () => {
           let departureAt = route.estimate.departureAt;
-          const microGeometryDeps = {
-            routeFoot: async (from: [number, number], to: [number, number]) =>
-              walkingRoutingConfiguredFor(from, to) ? routePedestrianPath(from, to, walkingEndpointFor(from, to)) : Promise.resolve(null),
-            routeBike: (from: [number, number], to: [number, number]) => routeBicyclePath(from, to),
-          };
           for (const leg of route.estimate.legs) {
-            const enriched = await enrichMicromobilityLegGeometry(leg, microGeometryDeps);
-            const routed = enriched.source === 'osrm-bike-route' || enriched.source === 'osrm-foot-route';
+            const source = typeof leg.metadata.routeGeometrySource === 'string' ? leg.metadata.routeGeometrySource
+              : leg.mode === 'WALK' ? 'walking-straight-line-estimate'
+                : leg.mode === 'BICYCLE' ? 'static-bike-network-estimate' : 'gbfs-geofence-scooter-estimate';
             await insertEstimatedLeg({
-              mode: leg.mode, from: leg.origin, to: leg.destination, departureAt, durationSeconds: enriched.durationSeconds,
-              distanceMeters: enriched.distanceMeters, providerId: leg.providerId, providerName: leg.providerName,
-              source: enriched.source,
-              routeGeometry: enriched.routeGeometry, metadata: {
+              mode: leg.mode, from: leg.origin, to: leg.destination, departureAt, durationSeconds: leg.durationSeconds,
+              distanceMeters: leg.distanceMeters, providerId: leg.providerId, providerName: leg.providerName,
+              source,
+              routeGeometry: leg.routeGeometry, metadata: {
                 ...leg.metadata,
-                ...(routed ? { routeGeometrySource: enriched.source, geometryMethod: enriched.source } : {}),
                 networkId: route.estimate.mode === 'BICYCLE'
                   ? leg.metadata.networkId ?? route.estimate.diversityKey.split(':').at(-1) : leg.metadata.networkId,
                 availabilityStatus: leg.mode === 'WALK' ? 'AVAILABLE' : 'UNKNOWN', bookingAvailable: false },
             });
-            departureAt = new Date(departureAt.getTime() + enriched.durationSeconds * 1000);
+            departureAt = new Date(departureAt.getTime() + leg.durationSeconds * 1000);
           }
         };
         const insertTransit = async (path: SearchItinerary) => {
