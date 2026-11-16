@@ -342,7 +342,7 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
       return [...merged.stops.values()].find((stop) => stop.name.trim().toLocaleLowerCase('uk-UA') === normalized
         && (merged.stopTimesByStop.get(stop.id) ?? []).some(({ tripId }) => {
           const trip = merged.trips.get(tripId);
-          return trip && merged.routes.get(trip.routeId)?.mode === 'train';
+          return trip && merged.routes.get(trip.routeId)?.mode === 'RAIL';
         })) ?? null;
     };
     const pinnedOrigin = routeCase.stationPins ? stationStop(routeCase.stationPins[0]) : null;
