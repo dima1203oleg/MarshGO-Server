@@ -12,6 +12,10 @@ on:
         default: lviv-route
         options:
           - lviv-route
+          - lviv-budget-diagnostic
+          - lviv-north-baseline-diagnostic
+          - lviv-north-trip-fairness-diagnostic
+          - lviv-north-final-arrival-diagnostic
           - ukraine-rail-route
 permissions:
   contents: read
@@ -44,7 +48,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          npm exec -- tsx scripts/transport-feed-smoke.ts --scope="$ROUTE_SCOPE" | tee artifacts/route-acceptance.json
+          if [[ "$ROUTE_SCOPE" == 'lviv-budget-diagnostic' || "$ROUTE_SCOPE" == 'lviv-north-trip-fairness-diagnostic' || "$ROUTE_SCOPE" == 'lviv-north-final-arrival-diagnostic' ]]; then
+            CI=true NODE_ENV=test MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS=1 npm exec -- tsx scripts/transport-feed-smoke.ts --scope="$ROUTE_SCOPE" | tee artifacts/route-acceptance.json
+          else
+            npm exec -- tsx scripts/transport-feed-smoke.ts --scope="$ROUTE_SCOPE" | tee artifacts/route-acceptance.json
+          fi
       - name: Write run provenance
         if: always()
         run: |

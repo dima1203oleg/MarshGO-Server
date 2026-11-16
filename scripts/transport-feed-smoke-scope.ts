@@ -1,13 +1,37 @@
 import type { CatalogEntry } from '../server/mobility/ukraineCatalog';
 
-export type TransportFeedSmokeScope = 'all' | 'lviv-route' | 'ukraine-rail-route';
+export type TransportFeedSmokeScope = 'all' | 'lviv-route' | 'lviv-budget-diagnostic'
+  | 'lviv-north-baseline-diagnostic' | 'lviv-north-trip-fairness-diagnostic'
+  | 'lviv-north-final-arrival-diagnostic' | 'ukraine-rail-route';
+
+export interface RouteSmokeAcceptanceCase {
+  count: number;
+  searchTruncated: boolean;
+  resultLimitReached?: boolean;
+  confirmedShapeGeometry?: boolean;
+}
+
+/** Require a real route and its promised evidence for focused transport acceptance scopes. */
+export function routeSmokeAcceptancePassed(scope: TransportFeedSmokeScope, cases: readonly RouteSmokeAcceptanceCase[]): boolean {
+  if (scope === 'lviv-route') {
+    return cases.some((routeCase) => routeCase.count > 0 && !routeCase.searchTruncated);
+  }
+  if (scope === 'ukraine-rail-route') {
+    return cases.some((routeCase) => routeCase.count > 0 && !routeCase.searchTruncated
+      && routeCase.resultLimitReached === false && routeCase.confirmedShapeGeometry === true);
+  }
+  return true;
+}
 
 export function parseTransportFeedSmokeScope(args: readonly string[]): TransportFeedSmokeScope {
   const values = args.filter((argument) => argument.startsWith('--scope='))
     .map((argument) => argument.slice('--scope='.length));
   if (values.length > 1) throw new Error('Specify --scope only once');
   const value = values[0] ?? 'all';
-  if (value !== 'all' && value !== 'lviv-route' && value !== 'ukraine-rail-route') {
+  if (value !== 'all' && value !== 'lviv-route' && value !== 'lviv-budget-diagnostic'
+    && value !== 'lviv-north-baseline-diagnostic' && value !== 'lviv-north-trip-fairness-diagnostic'
+    && value !== 'lviv-north-final-arrival-diagnostic'
+    && value !== 'ukraine-rail-route') {
     throw new Error(`Unsupported transport feed smoke scope: ${value}`);
   }
   return value;

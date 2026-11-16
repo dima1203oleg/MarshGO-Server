@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_PREFERENCE_WALKING_RADIUS_METERS, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch, shouldOmitGtfsStopPairBeyondLocalWindow } from '../server/journey/gtfsTimetable';
+import { DEFAULT_MAX_ACCESS_WALKING_METERS, DEFAULT_MAX_EGRESS_WALKING_METERS, DEFAULT_MAX_TRANSFER_WALKING_METERS, DEFAULT_MINIMUM_TRANSFER_BUFFER_SECONDS, MAX_PREFERENCE_WALKING_RADIUS_METERS, clearGtfsCandidateGraphCache, createGtfsTransferDecisionContext, eligibleTripInstanceStopEvents, findDirectGtfsJourneys, findGtfsItineraries, findGtfsItinerariesWithStats, findGtfsStopArrivals, getGtfsCandidateGraphCacheStats, maximumGtfsWaitWithinJourney, mergeGtfsTimetables, parseGtfsTimetable, rankGtfsItinerariesForCandidateSampling, retainGtfsBalancedObjectiveSample, sampleGtfsRouteChainCandidates, sampleGtfsTripChainCandidates, selectGtfsCandidatesForCrossProviderSearch, shouldOmitGtfsStopPairBeyondLocalWindow } from '../server/journey/gtfsTimetable';
 import { scoreJourneys } from '../server/journey/scoring';
 import type { GtfsCandidateGraphSnapshot, GtfsDirectJourney, GtfsItinerary, GtfsTimetableFeed } from '../server/journey/gtfsTimetable';
 import { queryDirectedEventIndexPrototype, validateEventIndexCandidatesWithProductionTransfers } from './helpers/gtfs-event-label-prototype';
@@ -66,6 +66,177 @@ test('GTFS graph budget and materialization share the transfer-window rule', () 
     'a requested destination remains eligible beyond the local transfer window');
   assert.equal(shouldOmitGtfsStopPairBeyondLocalWindow(1, 0, 21, false, true), false,
     'a long first or last leg of a query-frontier transfer remains eligible');
+});
+
+test('expanded GTFS graph, endpoint selector, and candidate-pool limits require exact test-only diagnostic opt-in', () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousCi = process.env.CI;
+  const previousDiagnosticOptIn = process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+  const timetable = feed({ withIntermediate: true });
+  const searchInput = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0, limit: 10 };
+  const expandedLimits = {
+    totalSegments: 100_001, segmentsPerRoute: 5_001,
+    maxStopsPerSide: 57, maxStopsPerRoutePattern: 9,
+    maxSearchResults: searchInput.limit * 25 + 1,
+    maxObjectiveReservoirSearchSteps: 25_001,
+  };
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits), /bounds are invalid/,
+      'an environment opt-in outside NODE_ENV=test cannot raise either bound');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      transferCandidateOrder: 'trip-round-robin',
+    }), /bounds are invalid/, 'alternate transfer ordering is unavailable outside the isolated diagnostic runner');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      finalLegCandidateOrder: 'earliest-door-arrival',
+    }), /bounds are invalid/, 'final-leg objective ordering is unavailable outside the isolated diagnostic runner');
+
+    process.env.NODE_ENV = 'test';
+    delete process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits), /bounds are invalid/,
+      'NODE_ENV=test alone cannot raise either bound');
+
+    process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
+    process.env.CI = 'false';
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits), /bounds are invalid/,
+      'the diagnostic is unavailable outside CI even with its explicit opt-in');
+
+    process.env.CI = 'true';
+    assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, expandedLimits),
+      'the isolated diagnostic runner can use its explicitly enabled bounded graph and endpoint limits');
+    assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      maxSearchResults: searchInput.limit * 100,
+    }), 'the isolated diagnostic runner can test a 100x candidate pool without changing the response page');
+    assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      maxObjectiveReservoirSearchSteps: 200_000,
+    }), 'the isolated diagnostic runner can test a larger objective lookahead');
+    assert.doesNotThrow(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      finalLegCandidateOrder: 'earliest-door-arrival',
+    }), 'the isolated diagnostic runner can test final-leg door-arrival ordering');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      ...expandedLimits, maxStopsPerSide: 113,
+    }), /bounds are invalid/, 'endpoint diagnostics remain capped at 112 stops per side');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      ...expandedLimits, maxStopsPerRoutePattern: 17,
+    }), /bounds are invalid/, 'endpoint diagnostics remain capped at 16 stops per route pattern');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      ...expandedLimits, maxSearchResults: searchInput.limit * 100 + 1,
+    }), /bounds are invalid/, 'candidate-pool diagnostics remain capped at 100 results per requested page item');
+    assert.throws(() => findGtfsItinerariesWithStats(timetable, searchInput, {
+      ...expandedLimits, maxObjectiveReservoirSearchSteps: 200_001,
+    }), /bounds are invalid/, 'objective lookahead diagnostics remain capped at 200,000 steps');
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousCi === undefined) delete process.env.CI;
+    else process.env.CI = previousCi;
+    if (previousDiagnosticOptIn === undefined) delete process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+    else process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = previousDiagnosticOptIn;
+  }
+});
+
+test('isolated diagnostics can diversify onward and final-leg candidates without changing default order', () => {
+  const timetable = connectingFeed({ secondRouteType: '3' });
+  // The scheduled stop is about 700 m from the requested destination. A later
+  // stop on the same trip is at the destination, so its door arrival is earlier
+  // even though its vehicle arrival is five minutes later.
+  timetable.stops.set('finish', { id: 'finish', name: 'Finish', lon: 24.0400, lat: 49.8500 });
+  for (const stopTimes of timetable.stopTimes.values()) {
+    for (const stopTime of stopTimes) {
+      if (stopTime.stopId === 'finish') stopTime.sourceStopCoordinates = [24.0400, 49.8500];
+    }
+  }
+  const addTrip = (routeId: string, tripId: string, departure: string, arrival: string) => {
+    timetable.routes.set(routeId, { name: routeId, mode: 'BUS', transportType: 'bus' });
+    timetable.trips.set(tripId, { routeId, serviceId: 'weekday', headsign: 'Finish' });
+    const toSeconds = (value: string) => {
+      const [hours, minutes] = value.split(':').map(Number);
+      return hours! * 3600 + minutes! * 60;
+    };
+    const stopTimes = [
+      { stopId: 'hub', sequence: 1, arrivalSeconds: toSeconds(departure), departureSeconds: toSeconds(departure), pickupType: 0, dropOffType: 0 },
+      { stopId: 'finish', sequence: 2, arrivalSeconds: toSeconds(arrival), departureSeconds: toSeconds(arrival), pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set(tripId, stopTimes);
+    stopTimes.forEach((stopTime, index) => timetable.stopTimesByStop.set(stopTime.stopId,
+      [...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId, index }]));
+  };
+  addTrip('rail', 'r2', '08:36', '09:01');
+  addTrip('bus-next', 'n1', '08:36:30', '09:02');
+  timetable.stops.set('finish-near', { id: 'finish-near', name: 'Finish nearby', lon: 24.0301, lat: 49.8501 });
+  const railFirstTrip = timetable.stopTimes.get('r1')!;
+  railFirstTrip.push({ stopId: 'finish-near', sequence: 3, arrivalSeconds: 9 * 3600 + 5 * 60,
+    departureSeconds: 9 * 3600 + 5 * 60, pickupType: 0, dropOffType: 0 });
+  timetable.stopTimesByStop.set('finish-near', [{ tripId: 'r1', index: railFirstTrip.length - 1 }]);
+  const query = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 1 };
+  const captureOnwardRoutes = (limits: Parameters<typeof findGtfsItinerariesWithStats>[2] = {}) => {
+    let observed: GtfsCandidateGraphSnapshot | undefined;
+    findGtfsItinerariesWithStats(timetable, query, limits, (snapshot) => { observed = snapshot; });
+    assert.ok(observed);
+    const firstLeg = observed.segments.find(({ journey }) => journey.tripId === 'b1' && journey.originStop.id === 'start');
+    assert.ok(firstLeg);
+    return observed.successors(firstLeg.id, 1).map((id) => {
+      const journey = observed!.segments.find((segment) => segment.id === id)!.journey;
+      return {
+        id: `${journey.tripId}:${journey.destinationStop.id}`,
+        arrivalAt: journey.arrivalAt.toISOString(),
+        egressMeters: journey.distanceFromDestinationStopMeters,
+      };
+    });
+  };
+
+  const defaultOrder = captureOnwardRoutes();
+  assert.deepEqual(defaultOrder.map(({ id }) => id), ['r1:finish', 'r1:finish-near', 'r2:finish', 'n1:finish'],
+    'default traversal keeps all onward candidates in their existing chronology');
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousCi = process.env.CI;
+  const previousDiagnosticOptIn = process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+  try {
+    process.env.NODE_ENV = 'test';
+    process.env.CI = 'true';
+    process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
+    assert.deepEqual(captureOnwardRoutes({ transferCandidateOrder: 'trip-round-robin' }).map(({ id }) => id), ['r1:finish', 'r2:finish', 'n1:finish', 'r1:finish-near'],
+      'the opt-in diagnostic visits distinct scheduled runs before repeated stop-pair variants of the same run');
+    const doorArrivalOrder = captureOnwardRoutes({ finalLegCandidateOrder: 'earliest-door-arrival' });
+    assert.deepEqual(doorArrivalOrder.map(({ id }) => id),
+      ['r1:finish-near', 'r1:finish', 'r2:finish', 'n1:finish'],
+      `final-leg diagnostic accounts for the destination walk; candidates=${JSON.stringify(doorArrivalOrder)}; default=${JSON.stringify(defaultOrder)}`);
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousCi === undefined) delete process.env.CI;
+    else process.env.CI = previousCi;
+    if (previousDiagnosticOptIn === undefined) delete process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+    else process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = previousDiagnosticOptIn;
+  }
+});
+
+test('candidate graph cache keys distinguish bounded endpoint-selection diagnostics', () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousCi = process.env.CI;
+  const previousDiagnosticOptIn = process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+  const timetable = feed({ withIntermediate: true });
+  const searchInput = { ...request('2026-10-12T04:55:00Z', '2026-10-12T05:30:00Z'), maximumTransfers: 0 };
+  try {
+    process.env.NODE_ENV = 'test';
+    process.env.CI = 'true';
+    process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = '1';
+    clearGtfsCandidateGraphCache();
+    findGtfsItinerariesWithStats(timetable, searchInput);
+    findGtfsItinerariesWithStats(timetable, searchInput, { maxStopsPerSide: 112, maxStopsPerRoutePattern: 16 });
+    assert.equal(getGtfsCandidateGraphCacheStats().hits, 0,
+      'a graph selected under a different endpoint cap cannot be reused');
+    assert.equal(getGtfsCandidateGraphCacheStats().misses, 2);
+  } finally {
+    clearGtfsCandidateGraphCache();
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousCi === undefined) delete process.env.CI;
+    else process.env.CI = previousCi;
+    if (previousDiagnosticOptIn === undefined) delete process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS;
+    else process.env.MARSHGO_ENABLE_GTFS_GRAPH_BUDGET_DIAGNOSTICS = previousDiagnosticOptIn;
+  }
 });
 
 test('a rail GTFS route remains a train when its public name contains intercity', () => {
