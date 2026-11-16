@@ -133,6 +133,7 @@ async function buildUkraineRailRouteAcceptance(entry: typeof catalog[number]) {
     { id: 'sevastopol', pattern: /севастополь|sevastopol/i },
   ] as const;
   const kyivHub = cityStation(/київ-пасажирський|киев-пассажирский|kyiv passenger/i);
+  const oblastLatestDeparture = new Date(earliestDeparture.getTime() + 24 * 60 * 60 * 1000);
   const oblastRailConnections = [
     {
       oblastCenter: 'kyiv-city',
@@ -162,7 +163,7 @@ async function buildUkraineRailRouteAcceptance(entry: typeof catalog[number]) {
       origin: [origin.lon, origin.lat],
       destination: [kyivHub.lon, kyivHub.lat],
       earliestDeparture,
-      latestDeparture,
+      latestDeparture: oblastLatestDeparture,
       maximumJourneySeconds: 36 * 60 * 60,
       maximumWaitSeconds: 8 * 60 * 60,
       maximumTransfers: 2,
@@ -282,7 +283,12 @@ async function buildUkraineRailRouteAcceptance(entry: typeof catalog[number]) {
     serviceDate,
     queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
     cases,
-    oblastRailCoverageScope: { areaCells: 27, queriedRegionalCenters: regionalRailCities.length, kyivHubRows: 2 },
+    oblastRailCoverageScope: {
+      areaCells: 27,
+      queriedRegionalCenters: regionalRailCities.length,
+      kyivHubRows: 2,
+      queryWindow: [earliestDeparture.toISOString(), oblastLatestDeparture.toISOString()],
+    },
     oblastRailConnections,
   };
 }
