@@ -337,12 +337,14 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
     ];
     const merged = mergeGtfsTimetables(sources);
     if (!merged) throw new Error(`Unable to merge scheduled feeds for ${routeCase.id}`);
+    const railFeed = feeds.get(railUrl)!;
     const stationStop = (name: string) => {
       const normalized = name.trim().toLocaleLowerCase('uk-UA');
-      return [...merged.stops.values()].find((stop) => stop.name.trim().toLocaleLowerCase('uk-UA') === normalized
-        && (merged.stopTimesByStop.get(stop.id) ?? []).some(({ tripId }) => {
-          const trip = merged.trips.get(tripId);
-          return trip && merged.routes.get(trip.routeId)?.mode === 'RAIL';
+      return [...railFeed.stops.values()].find((stop) => stop.name.trim().toLocaleLowerCase('uk-UA') === normalized
+        && (railFeed.stopTimesByStop.get(stop.id) ?? []).some(({ tripId }) => {
+          const trip = railFeed.trips.get(tripId);
+          const transportType = trip && railFeed.routes.get(trip.routeId)?.transportType;
+          return transportType === 'train' || transportType === 'suburban_train' || transportType === 'city_train';
         })) ?? null;
     };
     const pinnedOrigin = routeCase.stationPins ? stationStop(routeCase.stationPins[0]) : null;
