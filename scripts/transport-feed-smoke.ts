@@ -68,39 +68,106 @@ async function buildUkraineRailRouteAcceptance(entry: typeof catalog[number]) {
     minimumLeadMinutes: 120,
     horizonDays: 14,
   });
-  const routeCase = {
-    id: 'kyiv-to-lviv',
-    origin: [30.4897, 50.4408] as [number, number],
-    destination: [23.9937, 49.8408] as [number, number],
-  };
-  const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(feed, {
-    providerId,
-    providerName: entry.name,
-    providerCity: entry.city,
-    origin: routeCase.origin,
-    destination: routeCase.destination,
-    earliestDeparture,
-    latestDeparture,
-    maximumJourneySeconds: 16 * 60 * 60,
-    maximumWaitSeconds: 4 * 60 * 60,
-    maximumTransfers: 0,
-    maximumStopDistanceMeters: 2500,
-    limit: RAIL_ROUTE_SMOKE_RESULT_LIMIT,
-    allowedTransportTypes: ['train'],
-  }));
-  const journeys = search.itineraries.map(serializeSmokeJourney);
-  const geometryEvidence = search.itineraries.map((journey) => journey.segments.map((segment) => {
-    const shapeId = feed.trips.get(segment.tripId)?.shapeId;
-    const shapePoints = shapeId ? feed.shapes?.get(shapeId) : undefined;
+  const cityStation = (pattern: RegExp) => [...feed.stops.values()]
+    .filter((stop) => pattern.test(stop.name.normalize('NFKC')))
+    .map((stop) => ({
+      stop,
+      stationNamePriority: /пасажир|вокзал|головн|station/i.test(stop.name) ? 1 : 0,
+      scheduledCalls: feed.stopTimesByStop.get(stop.id)?.length ?? 0,
+    }))
+    .sort((left, right) => right.stationNamePriority - left.stationNamePriority
+      || right.scheduledCalls - left.scheduledCalls
+      || left.stop.name.localeCompare(right.stop.name)
+      || left.stop.id.localeCompare(right.stop.id))[0]?.stop ?? null;
+  const kharkivStation = cityStation(/харків|харков|kharkiv/i);
+  const uzhhorodStation = cityStation(/ужгород|uzhhorod/i);
+  const routeCases = [
+    {
+      id: 'kyiv-to-lviv',
+      origin: [30.4897, 50.4408] as [number, number],
+      destination: [23.9937, 49.8408] as [number, number],
+      originLabel: 'Київ-Пасажирський, station-area pin',
+      destinationLabel: 'Львів-Головний, station-area pin',
+      maximumJourneySeconds: 16 * 60 * 60,
+      maximumWaitSeconds: 4 * 60 * 60,
+      maximumTransfers: 0,
+      maximumStopDistanceMeters: 2500,
+    },
+    {
+      id: 'kharkiv-to-uzhhorod',
+      origin: kharkivStation ? [kharkivStation.lon, kharkivStation.lat] as [number, number] : null,
+      destination: uzhhorodStation ? [uzhhorodStation.lon, uzhhorodStation.lat] as [number, number] : null,
+      originLabel: kharkivStation?.name ?? 'Харків-Пасажирський',
+      destinationLabel: uzhhorodStation?.name ?? 'Ужгород',
+      maximumJourneySeconds: 36 * 60 * 60,
+      maximumWaitSeconds: 8 * 60 * 60,
+      maximumTransfers: 2,
+      maximumStopDistanceMeters: 1000,
+    },
+  ];
+  const cases = routeCases.map((routeCase) => {
+    if (!routeCase.origin || !routeCase.destination) {
+      return {
+        id: routeCase.id,
+        origin: { label: routeCase.originLabel, coordinates: routeCase.origin },
+        destination: { label: routeCase.destinationLabel, coordinates: routeCase.destination },
+        status: 'STATION_NOT_FOUND_IN_FEED',
+        count: 0,
+        maximumLegCount: 0,
+        multiLegCount: 0,
+        searchTruncated: null,
+        resultLimitReached: null,
+        confirmedShapeGeometry: false,
+        examples: [],
+        itineraries: [],
+      };
+    }
+    const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(feed, {
+      providerId,
+      providerName: entry.name,
+      providerCity: entry.city,
+      origin: routeCase.origin,
+      destination: routeCase.destination,
+      earliestDeparture,
+      latestDeparture,
+      maximumJourneySeconds: routeCase.maximumJourneySeconds,
+      maximumWaitSeconds: routeCase.maximumWaitSeconds,
+      maximumTransfers: routeCase.maximumTransfers,
+      maximumStopDistanceMeters: routeCase.maximumStopDistanceMeters,
+      limit: RAIL_ROUTE_SMOKE_RESULT_LIMIT,
+      allowedTransportTypes: ['train'],
+    }));
+    const journeys = search.itineraries.map(serializeSmokeJourney);
+    const geometryEvidence = search.itineraries.map((journey) => journey.segments.map((segment) => {
+      const shapeId = feed.trips.get(segment.tripId)?.shapeId;
+      const shapePoints = shapeId ? feed.shapes?.get(shapeId) : undefined;
+      return {
+        tripId: segment.tripId,
+        routeId: segment.routeId,
+        shapeId: shapeId ?? null,
+        shapePointCount: shapePoints?.length ?? 0,
+        confirmedShape: (shapePoints?.length ?? 0) >= 2,
+      };
+    }));
+    const geometryConfirmed = geometryEvidence.length > 0 && geometryEvidence.every((chain) => chain.every((item) => item.confirmedShape));
     return {
-      tripId: segment.tripId,
-      routeId: segment.routeId,
-      shapeId: shapeId ?? null,
-      shapePointCount: shapePoints?.length ?? 0,
-      confirmedShape: (shapePoints?.length ?? 0) >= 2,
+      id: routeCase.id,
+      origin: { label: routeCase.originLabel, coordinates: routeCase.origin },
+      destination: { label: routeCase.destinationLabel, coordinates: routeCase.destination },
+      status: journeys.length ? 'ROUTES_FOUND' : 'NO_ROUTE_IN_QUERY_WINDOW',
+      count: journeys.length,
+      ...summarizeSmokeItineraries(search.itineraries),
+      resultLimit: RAIL_ROUTE_SMOKE_RESULT_LIMIT,
+      searchTruncated: search.searchTruncated,
+      resultLimitReached: search.resultLimitReached,
+      truncation: search.truncation,
+      confirmedShapeGeometry: geometryConfirmed,
+      geometryEvidence: geometryEvidence.slice(0, 5),
+      plannerDiagnostics: diagnostics,
+      examples: journeys.slice(0, 5),
+      itineraries: journeys,
     };
-  }));
-  const geometryConfirmed = geometryEvidence.length > 0 && geometryEvidence.every((chain) => chain.every((item) => item.confirmedShape));
+  });
   return {
     provider: entry.name,
     source: { feedUrl: entry.feedUrl, sourceRef: entry.sourceRef, access: entry.access, license: entry.license ?? null,
@@ -114,23 +181,7 @@ async function buildUkraineRailRouteAcceptance(entry: typeof catalog[number]) {
     }, 'staticFeedSha256', feed.staticFeedSha256),
     serviceDate,
     queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
-    cases: [{
-      id: routeCase.id,
-      origin: { label: 'Київ-Пасажирський, station-area pin', coordinates: routeCase.origin },
-      destination: { label: 'Львів, station-area pin', coordinates: routeCase.destination },
-      status: journeys.length ? 'ROUTES_FOUND' : 'NO_ROUTE_IN_QUERY_WINDOW',
-      count: journeys.length,
-      ...summarizeSmokeItineraries(search.itineraries),
-      resultLimit: RAIL_ROUTE_SMOKE_RESULT_LIMIT,
-      searchTruncated: search.searchTruncated,
-      resultLimitReached: search.resultLimitReached,
-      truncation: search.truncation,
-      confirmedShapeGeometry: geometryConfirmed,
-      geometryEvidence: geometryEvidence.slice(0, 5),
-      plannerDiagnostics: diagnostics,
-      examples: journeys.slice(0, 5),
-      itineraries: journeys,
-    }],
+    cases,
   };
 }
 
@@ -179,8 +230,8 @@ async function main() {
       routePlanner,
       supplementary: [],
     }, null, 2));
-    const routeCase = routePlanner.cases[0]!;
-    if (routeCase.count === 0 || routeCase.searchTruncated || routeCase.resultLimitReached || !routeCase.confirmedShapeGeometry) {
+    if (routePlanner.cases.some((routeCase) => routeCase.count === 0 || routeCase.searchTruncated
+      || routeCase.resultLimitReached || !routeCase.confirmedShapeGeometry)) {
       process.exitCode = 1;
     }
     return;
