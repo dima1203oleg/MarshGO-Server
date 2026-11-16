@@ -548,7 +548,7 @@ app.get('/api/v1/mobility/providers', optionalAuth, asyncHandler(async (req, res
            JOIN mobility_operators mo ON mo.provider_id=mp.operator_id
            JOIN mobility_networks n ON mo.provider_id=ANY(n.provider_ids)
           WHERE mp.provider_type='scooter' AND mp.source_type='gbfs'
-            AND mp.status='enabled' AND mp.health IN ('healthy','degraded')
+            AND mp.status='enabled' AND mp.health='healthy'
             AND n.compatibility_status='CONFIRMED' AND n.return_rule='FREE_FLOATING_ZONE'
           ORDER BY mo.provider_name,mp.city`,
       ).then(({ rows: scooterRows }) => {
