@@ -2,7 +2,7 @@ import { ukraineCatalog, ukraineCatalogWave2, ukraineCatalogWave3, kyivOpenDataC
 import { testProviderConnection } from '../server/mobility/connection';
 import { testGbfsConnection } from '../server/mobility/gbfs';
 import { fetchJson } from '../server/mobility/safeFetch';
-import { cachedGtfsTimetable, findGtfsItinerariesWithStats } from '../server/journey/gtfsTimetable';
+import { cachedGtfsTimetable, findGtfsItinerariesWithStats, mergeGtfsTimetables } from '../server/journey/gtfsTimetable';
 import { parseTransportFeedSmokeScope, selectTransportFeedSmokeEntries } from './transport-feed-smoke-scope';
 import { selectUpcomingSmokeServiceWindow } from './transport-feed-smoke-window';
 import { serializeSmokeJourney, summarizeSmokeItineraries, withOptionalSourceFingerprint } from './transport-feed-smoke-summary';
@@ -293,6 +293,94 @@ async function buildUkraineRailRouteAcceptance(entry: typeof catalog[number]) {
   };
 }
 
+async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
+  const byUrl = new Map(entries.map((entry) => [entry.feedUrl, entry]));
+  const railUrl = 'https://jbb.ghsq.de/gtfs/ua-ukrzaliznytsya.gtfs.zip';
+  const cityFeeds = [
+    { id: 'odesa', url: 'https://files.mobilitydatabase.org/mdb-2946/latest.zip', city: 'Одеса' },
+    { id: 'lviv', url: 'https://track.ua-gis.com/gtfs/lviv/static.zip', city: 'Львів' },
+    { id: 'kyiv', url: 'https://jbb.ghsq.de/gtfs/ua-kyiv.gtfs.zip', city: 'Київ' },
+    { id: 'uzhhorod', url: 'https://track.ua-gis.com/gtfs/uzhhorod/static.zip', city: 'Ужгород' },
+  ];
+  const feeds = new Map<string, Awaited<ReturnType<typeof cachedGtfsTimetable>>>();
+  const railEntry = byUrl.get(railUrl);
+  if (!railEntry) throw new Error('Ukraine intermodal route acceptance is missing the national rail feed');
+  const cityEntries = cityFeeds.map(({ id, url }) => {
+    const entry = byUrl.get(url);
+    if (!entry) throw new Error(`Ukraine intermodal route acceptance is missing the ${id} GTFS feed`);
+    return entry;
+  });
+  for (const entry of [railEntry, ...cityEntries]) {
+    feeds.set(entry.feedUrl, await cachedGtfsTimetable(`intermodal-${entry.sourceRef}`, entry.feedUrl));
+  }
+
+  const cases = [
+    { id: 'odesa-to-lviv', origin: [30.7233, 46.4825] as [number, number], destination: [24.0297, 49.8397] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 36 * 60 * 60 },
+    { id: 'kyiv-to-odesa', origin: [30.5234, 50.4501] as [number, number], destination: [30.7233, 46.4825] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 36 * 60 * 60 },
+    { id: 'lviv-to-uzhhorod', origin: [24.0297, 49.8397] as [number, number], destination: [22.3000, 48.6208] as [number, number], cities: ['lviv', 'uzhhorod'], maximumJourneySeconds: 18 * 60 * 60 },
+  ];
+  const outputs = [];
+  for (const routeCase of cases) {
+    const sources = [
+      ...routeCase.cities.map((id) => {
+        const city = cityFeeds.find((candidate) => candidate.id === id)!;
+        const entry = byUrl.get(city.url)!;
+        return { providerId: `intermodal-${id}`, providerName: entry.name, providerCity: city.city, feed: feeds.get(city.url)!,
+          feedUrl: entry.feedUrl, license: entry.license ?? null, sourceRef: entry.sourceRef };
+      }),
+      { providerId: 'intermodal-ukraine-rail', providerName: railEntry.name, providerCity: railEntry.city, feed: feeds.get(railUrl)!,
+        feedUrl: railEntry.feedUrl, license: railEntry.license ?? null, sourceRef: railEntry.sourceRef },
+    ];
+    const merged = mergeGtfsTimetables(sources);
+    if (!merged) throw new Error(`Unable to merge scheduled feeds for ${routeCase.id}`);
+    const { earliestDeparture, latestDeparture, serviceDate } = selectUpcomingSmokeServiceWindow(merged, new Date(), {
+      localHour: 8, windowMinutes: 24 * 60, minimumLeadMinutes: 120, horizonDays: 14,
+    });
+    const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(merged, {
+      providerId: 'ukraine-intermodal-smoke', providerName: 'MARSHGO merged municipal + national GTFS acceptance', providerCity: 'Україна',
+      origin: routeCase.origin, destination: routeCase.destination, earliestDeparture, latestDeparture,
+      maximumJourneySeconds: routeCase.maximumJourneySeconds, maximumWaitSeconds: 8 * 60 * 60,
+      maximumTransfers: 3, maximumAccessWalkingMeters: 1_000, maximumEgressWalkingMeters: 1_000,
+      maximumTransferWalkingMeters: 400, maximumStopDistanceMeters: 1_000,
+      limit: RAIL_ROUTE_SMOKE_RESULT_LIMIT, allowedTransportTypes: ['bus', 'tram', 'trolleybus', 'train'],
+    }));
+    const multiProvider = search.itineraries.filter((journey) => journey.segments.some((segment) => segment.providerId === 'intermodal-ukraine-rail')
+      && journey.segments.some((segment) => segment.providerId !== 'intermodal-ukraine-rail'));
+    const tripShape = (tripId: string) => {
+      const trip = merged.trips.get(tripId);
+      const points = trip?.shapeId ? merged.shapes?.get(trip.shapeId)?.length ?? 0 : 0;
+      return { tripId, shapePointCount: points, shapePresent: points >= 2 };
+    };
+    const serialized = search.itineraries.map((journey) => ({
+      ...serializeSmokeJourney(journey),
+      providerChain: journey.segments.map((segment) => ({ providerId: segment.providerId, providerName: segment.providerName, city: segment.providerCity ?? null })),
+      legs: journey.segments.map((segment) => ({
+        providerId: segment.providerId, providerName: segment.providerName, mode: segment.transportType,
+        routeName: segment.routeName, from: segment.originStop.name, to: segment.destinationStop.name,
+        departureAt: segment.departureAt, arrivalAt: segment.arrivalAt, ...tripShape(segment.tripId),
+      })),
+      transferWalkingMeters: journey.transferWalkingMeters,
+      transferWalkingSeconds: journey.transferWalkingSeconds,
+      transferWalkStreetGeometryVerified: false,
+      endpointWalkStreetGeometryVerified: false,
+    }));
+    outputs.push({
+      id: routeCase.id, status: multiProvider.length ? 'MULTI_PROVIDER_CHAIN_FOUND' : search.itineraries.length ? 'SCHEDULED_ROUTES_FOUND_NO_MULTI_PROVIDER_CHAIN' : 'NO_ROUTE_IN_QUERY_WINDOW',
+      serviceDate, queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
+      origin: routeCase.origin, destination: routeCase.destination,
+      feedFingerprints: sources.map((source) => ({ providerId: source.providerId, providerName: source.providerName, providerCity: source.providerCity,
+        feedUrl: source.feedUrl, license: source.license, sourceRef: source.sourceRef,
+        staticFeedSha256: source.feed.staticFeedSha256 ?? null, stops: source.feed.stops.size, routes: source.feed.routes.size, trips: source.feed.trips.size })),
+      count: search.itineraries.length, multiProviderChainCount: multiProvider.length,
+      allReturnedLegsHaveShapes: search.itineraries.length > 0 && search.itineraries.every((journey) => journey.segments.every((segment) => tripShape(segment.tripId).shapePresent)),
+      searchTruncated: search.searchTruncated, resultLimitReached: search.resultLimitReached, truncation: search.truncation,
+      plannerDiagnostics: diagnostics, examples: serialized.slice(0, 5),
+      limitations: ['Scheduled timetable only; no live positions or fares implied.', 'Initial/last-mile and transfer walking are lower-bound distances; street-network geometry has not been verified.', 'Three sampled corridors do not establish Ukraine-wide coverage.'],
+    });
+  }
+  return { provider: 'Current municipal GTFS + national ODbL rail GTFS merged by the production timetable merger', cases: outputs };
+}
+
 async function probe(entry: typeof catalog[number]) {
   if (entry.access !== 'open') {
     return { name: entry.name, city: entry.city, sourceType: entry.sourceType, state: 'SKIPPED', reason: entry.access };
@@ -318,7 +406,7 @@ async function main() {
   // probe the realtime endpoint here to avoid downloading/parsing the static archive twice.
   const providerProbeEntries = scope === 'lviv-route'
     ? selectedEntries.filter((entry) => entry.sourceType === 'gtfs_rt')
-    : scope === 'ukraine-rail-route' ? [] : selectedEntries;
+    : scope === 'ukraine-rail-route' || scope === 'ukraine-intermodal-route' ? [] : selectedEntries;
   const results = await mapLimit(providerProbeEntries, scope === 'lviv-route' ? 1 : CONCURRENCY, probe);
 
   if (scope === 'ukraine-rail-route') {
@@ -342,6 +430,21 @@ async function main() {
       || routeCase.resultLimitReached || !routeCase.confirmedShapeGeometry)) {
       process.exitCode = 1;
     }
+    return;
+  }
+
+  if (scope === 'ukraine-intermodal-route') {
+    const routePlanner = await buildUkraineIntermodalRouteAcceptance(selectedEntries);
+    console.log(JSON.stringify({
+      checkedAt: new Date().toISOString(),
+      summary: {
+        scope, catalogRows: catalog.length, selectedSources: selectedEntries.length, providerSourcesProbed: 0,
+        note: 'Read-only dated multi-provider GTFS routing with the production feed merger; a found sample is corridor evidence only, never nationwide coverage.',
+      },
+      catalog: [], routePlanner, supplementary: [],
+    }, null, 2));
+    if (routePlanner.cases.some((routeCase) => routeCase.multiProviderChainCount === 0
+      || routeCase.searchTruncated || routeCase.resultLimitReached || !routeCase.allReturnedLegsHaveShapes)) process.exitCode = 1;
     return;
   }
 

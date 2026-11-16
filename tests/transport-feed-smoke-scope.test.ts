@@ -24,6 +24,7 @@ test('transport feed smoke defaults to the complete catalog and accepts focused 
   assert.equal(parseTransportFeedSmokeScope([]), 'all');
   assert.equal(parseTransportFeedSmokeScope(['--scope=lviv-route']), 'lviv-route');
   assert.equal(parseTransportFeedSmokeScope(['--scope=ukraine-rail-route']), 'ukraine-rail-route');
+  assert.equal(parseTransportFeedSmokeScope(['--scope=ukraine-intermodal-route']), 'ukraine-intermodal-route');
   assert.throws(() => parseTransportFeedSmokeScope(['--scope=unknown']), /Unsupported/);
   assert.throws(() => parseTransportFeedSmokeScope(['--scope=all', '--scope=lviv-route']), /only once/);
 });
@@ -39,4 +40,16 @@ test('Ukraine rail route scope selects only the cataloged ODbL rail GTFS', () =>
   const catalog = [kyivStatic, ukraineRail, lvivStatic];
   assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'ukraine-rail-route'), [ukraineRail]);
   assert.throws(() => selectTransportFeedSmokeEntries([kyivStatic], 'ukraine-rail-route'), /required/);
+});
+
+test('Ukraine intermodal route scope requires the open rail and four city GTFS schedules', () => {
+  const catalog = [
+    { ...ukraineRail, access: 'open' },
+    { ...lvivStatic, feedUrl: 'https://files.mobilitydatabase.org/mdb-2946/latest.zip', city: 'Одеса' },
+    { ...lvivStatic, feedUrl: 'https://track.ua-gis.com/gtfs/lviv/static.zip' },
+    { ...kyivStatic, feedUrl: 'https://jbb.ghsq.de/gtfs/ua-kyiv.gtfs.zip' },
+    { ...lvivStatic, feedUrl: 'https://track.ua-gis.com/gtfs/uzhhorod/static.zip', city: 'Ужгород' },
+  ] satisfies CatalogEntry[];
+  assert.deepEqual(selectTransportFeedSmokeEntries(catalog, 'ukraine-intermodal-route'), catalog);
+  assert.throws(() => selectTransportFeedSmokeEntries(catalog.slice(1), 'ukraine-intermodal-route'), /requires the open rail/);
 });

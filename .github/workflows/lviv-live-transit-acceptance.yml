@@ -13,6 +13,7 @@ on:
         options:
           - lviv-route
           - ukraine-rail-route
+          - ukraine-intermodal-route
 permissions:
   contents: read
 concurrency:
@@ -38,6 +39,10 @@ jobs:
           node-version: 24.21.0
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - name: Lint route acceptance harness
+        run: npm exec -- eslint scripts/transport-feed-smoke.ts scripts/transport-feed-smoke-scope.ts tests/transport-feed-smoke-scope.test.ts
+      - name: Verify route acceptance scope selection
+        run: npm exec -- tsx --test tests/transport-feed-smoke-scope.test.ts
       - name: Run selected read-only route acceptance
         env:
           ROUTE_SCOPE: ${{ inputs.scope || 'lviv-route' }}
