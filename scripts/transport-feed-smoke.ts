@@ -315,9 +315,10 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
   }
 
   const cases = [
-    { id: 'odesa-to-lviv', origin: [30.7233, 46.4825] as [number, number], destination: [24.0297, 49.8397] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 16 * 60 * 60 },
-    { id: 'kyiv-to-odesa', origin: [30.5234, 50.4501] as [number, number], destination: [30.7233, 46.4825] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 14 * 60 * 60 },
-    { id: 'lviv-to-uzhhorod', origin: [24.0297, 49.8397] as [number, number], destination: [22.3000, 48.6208] as [number, number], cities: ['lviv', 'uzhhorod'], maximumJourneySeconds: 12 * 60 * 60 },
+    { id: 'odesa-to-lviv', origin: [30.7233, 46.4825] as [number, number], destination: [24.0297, 49.8397] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: false },
+    { id: 'kyiv-to-odesa', origin: [30.5234, 50.4501] as [number, number], destination: [30.7233, 46.4825] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 14 * 60 * 60, compareRailOnly: false },
+    { id: 'lviv-to-uzhhorod', origin: [24.0297, 49.8397] as [number, number], destination: [22.3000, 48.6208] as [number, number], cities: ['lviv', 'uzhhorod'], maximumJourneySeconds: 12 * 60 * 60, compareRailOnly: false },
+    { id: 'kyiv-to-lviv-station-pins', origin: [30.4897, 50.4408] as [number, number], destination: [23.9937, 49.8408] as [number, number], cities: ['kyiv', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: true },
   ];
   const outputs = [];
   for (const routeCase of cases) {
@@ -336,14 +337,21 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
     const { earliestDeparture, latestDeparture, serviceDate } = selectUpcomingSmokeServiceWindow(merged, new Date(), {
       localHour: 8, windowMinutes: 3 * 60, minimumLeadMinutes: 120, horizonDays: 14,
     });
-    const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(merged, {
+    const searchInput = {
       providerId: 'ukraine-intermodal-smoke', providerName: 'MARSHGO merged municipal + national GTFS acceptance', providerCity: 'Україна',
       origin: routeCase.origin, destination: routeCase.destination, earliestDeparture, latestDeparture,
       maximumJourneySeconds: routeCase.maximumJourneySeconds, maximumWaitSeconds: 3 * 60 * 60,
       maximumTransfers: 2, maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1_000,
       maximumTransferWalkingMeters: 400, maximumStopDistanceMeters: 1_000,
       limit: RAIL_ROUTE_SMOKE_RESULT_LIMIT, allowedTransportTypes: ['bus', 'tram', 'trolleybus', 'train'],
-    }));
+    } as const;
+    const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(merged, searchInput));
+    const railOnlyControl = routeCase.compareRailOnly
+      ? findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(merged, {
+        ...searchInput, providerName: 'National rail only control', maximumTransfers: 0,
+        allowedTransportTypes: ['train'],
+      }))
+      : null;
     const multiProvider = search.itineraries.filter((journey) => journey.segments.some((segment) => segment.providerId === 'intermodal-ukraine-rail')
       && journey.segments.some((segment) => segment.providerId !== 'intermodal-ukraine-rail'));
     const tripShape = (tripId: string) => {
@@ -375,6 +383,14 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
       allReturnedLegsHaveShapes: search.itineraries.length > 0 && search.itineraries.every((journey) => journey.segments.every((segment) => tripShape(segment.tripId).shapePresent)),
       searchTruncated: search.searchTruncated, resultLimitReached: search.resultLimitReached, truncation: search.truncation,
       plannerDiagnostics: diagnostics, examples: serialized.slice(0, 5),
+      ...(railOnlyControl ? { railOnlyControl: {
+        count: railOnlyControl.result.itineraries.length,
+        searchTruncated: railOnlyControl.result.searchTruncated,
+        resultLimitReached: railOnlyControl.result.resultLimitReached,
+        allReturnedLegsHaveShapes: railOnlyControl.result.itineraries.length > 0 && railOnlyControl.result.itineraries.every((journey) => journey.segments.every((segment) => tripShape(segment.tripId).shapePresent)),
+        plannerDiagnostics: railOnlyControl.diagnostics,
+        examples: railOnlyControl.result.itineraries.slice(0, 3).map(serializeSmokeJourney),
+      } } : {}),
       limitations: ['Scheduled timetable only; no live positions or fares implied.', 'Initial/last-mile and transfer walking are lower-bound distances; street-network geometry has not been verified.', 'Three sampled corridors do not establish Ukraine-wide coverage.'],
     });
   }
