@@ -105,6 +105,106 @@ async function buildUkraineRailRouteAcceptance(entry: typeof catalog[number]) {
       maximumStopDistanceMeters: 1000,
     },
   ];
+  const regionalRailCities = [
+    { id: 'vinnytsia', pattern: /вінниця|винница|vinnitsa|vinnytsia/i },
+    { id: 'lutsk', pattern: /луцьк|луцк|lutsk/i },
+    { id: 'dnipro', pattern: /дніпро|днепр|dnipro/i },
+    { id: 'zhytomyr', pattern: /житомир|zhytomyr/i },
+    { id: 'uzhhorod', pattern: /ужгород|uzhhorod/i },
+    { id: 'zaporizhzhia', pattern: /запоріжжя|запорожье|zaporizhzhia/i },
+    { id: 'ivano-frankivsk', pattern: /івано-франківськ|ивано-франковск|ivano-frankivsk/i },
+    { id: 'kropyvnytskyi', pattern: /кропивницький|кировоград|kropyvnytskyi/i },
+    { id: 'luhansk', pattern: /луганськ|луганск|luhansk/i },
+    { id: 'lviv', pattern: /львів|львов|lviv/i },
+    { id: 'mykolaiv', pattern: /миколаїв|николаев|mykolaiv/i },
+    { id: 'odesa', pattern: /одеса|одесса|odesa/i },
+    { id: 'poltava', pattern: /полтава|poltava/i },
+    { id: 'rivne', pattern: /рівне|ровно|rivne/i },
+    { id: 'sumy', pattern: /суми|sumy/i },
+    { id: 'ternopil', pattern: /тернопіль|тернополь|ternopil/i },
+    { id: 'kharkiv', pattern: /харків|харьков|kharkiv/i },
+    { id: 'kherson', pattern: /херсон|kherson/i },
+    { id: 'khmelnytskyi', pattern: /хмельницький|хмельницкий|khmelnytskyi/i },
+    { id: 'cherkasy', pattern: /черкаси|черкассы|cherkasy/i },
+    { id: 'chernivtsi', pattern: /чернівці|черновцы|chernivtsi/i },
+    { id: 'chernihiv', pattern: /чернігів|чернигов|chernihiv/i },
+    { id: 'donetsk', pattern: /донецьк|донецк|donetsk/i },
+    { id: 'simferopol', pattern: /сімферополь|симферополь|simferopol/i },
+    { id: 'sevastopol', pattern: /севастополь|sevastopol/i },
+  ] as const;
+  const kyivHub = cityStation(/київ-пасажирський|киев-пассажирский|kyiv passenger/i);
+  const oblastRailConnections = [
+    {
+      oblastCenter: 'kyiv-city',
+      status: kyivHub ? 'HUB_USED_AS_DESTINATION' : 'KYIV_HUB_NOT_FOUND_IN_FEED',
+      hubStop: kyivHub ? { id: kyivHub.id, name: kyivHub.name, coordinates: [kyivHub.lon, kyivHub.lat] } : null,
+    },
+    {
+      oblastCenter: 'kyiv-oblast',
+      status: 'ADMINISTRATIVE_CENTER_SHARES_KYIV_HUB_ANCHOR',
+      hubStop: kyivHub ? { id: kyivHub.id, name: kyivHub.name, coordinates: [kyivHub.lon, kyivHub.lat] } : null,
+    },
+  ] as Array<Record<string, unknown>>;
+  for (const city of regionalRailCities) {
+    const origin = cityStation(city.pattern);
+    if (!origin || !kyivHub) {
+      oblastRailConnections.push({
+        oblastCenter: city.id,
+        status: !origin ? 'STATION_NOT_FOUND_IN_FEED' : 'KYIV_HUB_NOT_FOUND_IN_FEED',
+        originStop: origin ? { id: origin.id, name: origin.name, coordinates: [origin.lon, origin.lat] } : null,
+      });
+      continue;
+    }
+    const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(feed, {
+      providerId,
+      providerName: entry.name,
+      providerCity: entry.city,
+      origin: [origin.lon, origin.lat],
+      destination: [kyivHub.lon, kyivHub.lat],
+      earliestDeparture,
+      latestDeparture,
+      maximumJourneySeconds: 36 * 60 * 60,
+      maximumWaitSeconds: 8 * 60 * 60,
+      maximumTransfers: 2,
+      maximumStopDistanceMeters: 1000,
+      limit: RAIL_ROUTE_SMOKE_RESULT_LIMIT,
+      allowedTransportTypes: ['train'],
+    }));
+    const hasShapes = search.itineraries.length > 0 && search.itineraries.every((journey) => journey.segments.every((segment) => {
+      const shapeId = feed.trips.get(segment.tripId)?.shapeId;
+      return (shapeId ? feed.shapes?.get(shapeId)?.length ?? 0 : 0) >= 2;
+    }));
+    const example = search.itineraries[0];
+    oblastRailConnections.push({
+      oblastCenter: city.id,
+      status: search.itineraries.length ? 'ROUTES_FOUND_IN_QUERY_WINDOW' : 'NO_ROUTE_IN_QUERY_WINDOW',
+      originStop: { id: origin.id, name: origin.name, coordinates: [origin.lon, origin.lat] },
+      destinationStop: { id: kyivHub.id, name: kyivHub.name, coordinates: [kyivHub.lon, kyivHub.lat] },
+      count: search.itineraries.length,
+      ...summarizeSmokeItineraries(search.itineraries),
+      searchTruncated: search.searchTruncated,
+      resultLimitReached: search.resultLimitReached,
+      allReturnedLegsHaveShapes: hasShapes,
+      sample: example ? {
+        departureAt: example.departureAt,
+        arrivalAt: example.arrivalAt,
+        transfers: example.transfers,
+        legs: example.segments.map((segment) => {
+          const shapeId = feed.trips.get(segment.tripId)?.shapeId;
+          const pointCount = shapeId ? feed.shapes?.get(shapeId)?.length ?? 0 : 0;
+          return {
+            routeName: segment.routeName,
+            tripId: segment.tripId,
+            from: segment.originStop.name,
+            to: segment.destinationStop.name,
+            shapePointCount: pointCount,
+            confirmedShape: pointCount >= 2,
+          };
+        }),
+      } : null,
+      plannerDiagnostics: diagnostics,
+    });
+  }
   const cases = routeCases.map((routeCase) => {
     if (!routeCase.origin || !routeCase.destination) {
       return {
@@ -182,6 +282,8 @@ async function buildUkraineRailRouteAcceptance(entry: typeof catalog[number]) {
     serviceDate,
     queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
     cases,
+    oblastRailCoverageScope: { areaCells: 27, queriedRegionalCenters: regionalRailCities.length, kyivHubRows: 2 },
+    oblastRailConnections,
   };
 }
 
