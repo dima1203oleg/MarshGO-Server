@@ -273,7 +273,9 @@ export function parseJsonVehicles(
 ): LiveVehicle[] {
   const out: LiveVehicle[] = [];
   for (const vehicle of extractVehicleList(body)) {
-    const lat = Number(vehicle.latitude ?? vehicle.lat), lon = Number(vehicle.longitude ?? vehicle.lon ?? vehicle.lng);
+    const rawLat = vehicle.latitude ?? vehicle.lat, rawLon = vehicle.longitude ?? vehicle.lon ?? vehicle.lng;
+    const lat = typeof rawLat === 'number' || (typeof rawLat === 'string' && rawLat.trim() !== '') ? Number(rawLat) : Number.NaN;
+    const lon = typeof rawLon === 'number' || (typeof rawLon === 'string' && rawLon.trim() !== '') ? Number(rawLon) : Number.NaN;
     if (!Number.isFinite(lat) || Math.abs(lat) > 90 || !Number.isFinite(lon) || Math.abs(lon) > 180 || (lat === 0 && lon === 0)) continue;
     const route = matchJsonVehicleRoute(vehicle, routeNames);
     const bearing = Number(vehicle.bearing ?? vehicle.course ?? vehicle.azimuth);
