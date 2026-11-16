@@ -289,7 +289,7 @@ async function main() {
     }),
   } : undefined;
   const widePageDiagnostic = scope === 'lviv-wide-page-diagnostic' ? {
-    mode: 'test-only compare response pages at 40 and 100 with identical expanded graph, endpoint, candidate-pool and chronological-search limits; production defaults are unchanged',
+    mode: 'test-only compare response pages at 40 and 100 under shared expanded bounds, plus page 10/100 under production default bounds; production defaults are unchanged',
     sharedDiagnosticLimits: {
       totalSegments: 250_000,
       segmentsPerRoute: 30_000,
@@ -335,6 +335,31 @@ async function main() {
           .filter((itinerary) => itinerary.segments.length === 3).slice(0, 3).map(serializeSmokeJourney),
         threeTransitLegsBeyondPage40: page100.result.itineraries.slice(40)
           .filter((itinerary) => itinerary.segments.length === 3).slice(0, 3).map(serializeSmokeJourney),
+      };
+    }),
+    productionDefaultPageComparison: selectedLvivRouteCases.map((routeCase, index) => {
+      const page10 = standardRuns[index]!;
+      clearGtfsCandidateGraphCache();
+      const page100 = runLvivSearch(routeCase, {}, 100);
+      const signatures10 = page10.result.itineraries.map(itinerarySignature);
+      const signatures100 = page100.result.itineraries.map(itinerarySignature);
+      const threeLegJourneys = page100.result.itineraries.filter((itinerary) => itinerary.segments.length === 3);
+      const summarizePage = (variant: typeof page10) => ({
+        resultCount: variant.result.itineraries.length,
+        searchTruncated: variant.result.searchTruncated,
+        resultLimitReached: variant.result.resultLimitReached,
+        truncation: variant.result.truncation,
+        plannerDiagnostics: variant.diagnostics,
+      });
+      return {
+        id: routeCase.id,
+        bounds: 'planner defaults; only requested itinerary result limit changes from 10 to 100',
+        page10: summarizePage(page10),
+        page100: summarizePage(page100),
+        sameTopTen: JSON.stringify(signatures10) === JSON.stringify(signatures100.slice(0, 10)),
+        page100LegCountDistribution: summarizeSmokeItineraries(page100.result.itineraries).modeChainCounts,
+        threeTransitLegCountInPage100: threeLegJourneys.length,
+        threeTransitLegExamples: threeLegJourneys.slice(0, 3).map(serializeSmokeJourney),
       };
     }),
   } : undefined;
