@@ -315,9 +315,9 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
   }
 
   const cases = [
-    { id: 'odesa-to-lviv', origin: [30.7233, 46.4825] as [number, number], destination: [24.0297, 49.8397] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: false, stationPins: null },
-    { id: 'kyiv-to-odesa', origin: [30.5234, 50.4501] as [number, number], destination: [30.7233, 46.4825] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 14 * 60 * 60, compareRailOnly: false, stationPins: null },
-    { id: 'lviv-to-uzhhorod', origin: [24.0297, 49.8397] as [number, number], destination: [22.3000, 48.6208] as [number, number], cities: ['lviv', 'uzhhorod'], maximumJourneySeconds: 12 * 60 * 60, compareRailOnly: false, stationPins: null },
+    { id: 'odesa-to-lviv', origin: [30.7233, 46.4825] as [number, number], destination: [24.0297, 49.8397] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: true, stationPins: null },
+    { id: 'kyiv-to-odesa', origin: [30.5234, 50.4501] as [number, number], destination: [30.7233, 46.4825] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 14 * 60 * 60, compareRailOnly: true, stationPins: null },
+    { id: 'lviv-to-uzhhorod', origin: [24.0297, 49.8397] as [number, number], destination: [22.3000, 48.6208] as [number, number], cities: ['lviv', 'uzhhorod'], maximumJourneySeconds: 12 * 60 * 60, compareRailOnly: true, stationPins: null },
     { id: 'kyiv-to-lviv-station-pins', origin: [30.4897, 50.4408] as [number, number], destination: [23.9937, 49.8408] as [number, number], cities: ['kyiv', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: true, stationPins: ['Київ-Пасажирський', 'Львів-Головний'] as const },
     { id: 'odesa-to-lviv-station-pins', origin: [0, 0] as [number, number], destination: [0, 0] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: true, stationPins: ['Одеса-Головна', 'Львів-Головний'] as const },
     { id: 'kyiv-to-odesa-station-pins', origin: [0, 0] as [number, number], destination: [0, 0] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 14 * 60 * 60, compareRailOnly: true, stationPins: ['Київ-Пасажирський', 'Одеса-Головна'] as const },
