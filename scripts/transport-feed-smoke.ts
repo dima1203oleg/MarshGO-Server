@@ -364,8 +364,20 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
       localHour: 8, windowMinutes: directTripSource ? 12 * 60 : 3 * 60, minimumLeadMinutes: 120, horizonDays: 14,
     });
     const directTripFeed = directTripSource ? feeds.get(cityFeeds.find((city) => city.id === directTripSource)!.url)! : null;
+    const directTripDiagnostics = directTripFeed ? {
+      feed: { staticFeedSha256: directTripFeed.staticFeedSha256 ?? null, stops: directTripFeed.stops.size,
+        routes: directTripFeed.routes.size, trips: directTripFeed.trips.size,
+        calendars: directTripFeed.calendars.size, exceptionServices: directTripFeed.exceptions.size },
+      routeTransportTypes: Object.fromEntries([...directTripFeed.routes.values()].reduce((counts, route) => {
+        counts.set(route.transportType, (counts.get(route.transportType) ?? 0) + 1);
+        return counts;
+      }, new Map<string, number>())),
+      activeTrips: 0, activeBusTrips: 0, activeBusTripsWithShapes: 0,
+      activeBusTripsWithOrderedStops: 0, activeBusTripsInDaylightWindow: 0, eligibleTrips: 0,
+    } : null;
     const directTripCandidate = directTripFeed ? [...directTripFeed.trips.entries()].flatMap(([tripId, trip]) => {
       if (!isGtfsServiceActiveOnDate(directTripFeed, trip.serviceId, serviceDate)) return [];
+      directTripDiagnostics!.activeTrips += 1;
       const route = directTripFeed.routes.get(trip.routeId);
       const shapePointCount = trip.shapeId ? directTripFeed.shapes?.get(trip.shapeId)?.length ?? 0 : 0;
       const stopTimes = directTripFeed.stopTimes.get(tripId) ?? [];
@@ -374,14 +386,24 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
       const firstStop = firstStopTime ? directTripFeed.stops.get(firstStopTime.stopId) : undefined;
       const lastStop = lastStopTime ? directTripFeed.stops.get(lastStopTime.stopId) : undefined;
       const durationSeconds = firstStopTime && lastStopTime ? lastStopTime.arrivalSeconds - firstStopTime.departureSeconds : 0;
-      if (route?.transportType !== 'bus' || shapePointCount < 2 || !firstStopTime || !lastStopTime
-        || !firstStop || !lastStop || stopTimes.length < 2 || firstStopTime.departureSeconds < 8 * 60 * 60
-        || firstStopTime.departureSeconds >= 20 * 60 * 60 || durationSeconds < 1 || durationSeconds > 6 * 60 * 60) return [];
-      return [{ tripId, routeId: trip.routeId, routeName: route.name, departureSeconds: firstStopTime.departureSeconds,
+      const isBus = route?.transportType === 'bus';
+      const hasShape = shapePointCount >= 2;
+      const hasOrderedStops = stopTimes.length >= 2 && Boolean(firstStopTime && lastStopTime);
+      const inDaylightWindow = Boolean(firstStopTime && firstStopTime.departureSeconds >= 8 * 60 * 60
+        && firstStopTime.departureSeconds < 20 * 60 * 60);
+      if (isBus) directTripDiagnostics!.activeBusTrips += 1;
+      if (isBus && hasShape) directTripDiagnostics!.activeBusTripsWithShapes += 1;
+      if (isBus && hasOrderedStops) directTripDiagnostics!.activeBusTripsWithOrderedStops += 1;
+      if (isBus && hasShape && hasOrderedStops && inDaylightWindow) directTripDiagnostics!.activeBusTripsInDaylightWindow += 1;
+      if (!isBus || !hasShape || !firstStopTime || !lastStopTime || !firstStop || !lastStop
+        || !hasOrderedStops || !inDaylightWindow || durationSeconds < 1 || durationSeconds > 6 * 60 * 60) return [];
+      directTripDiagnostics!.eligibleTrips += 1;
+      return [{ tripId, routeId: trip.routeId, routeName: route?.name ?? trip.routeId, departureSeconds: firstStopTime.departureSeconds,
         durationSeconds, shapePointCount, originStop: firstStop, destinationStop: lastStop }];
     }).sort((left, right) => left.departureSeconds - right.departureSeconds || left.tripId.localeCompare(right.tripId))[0] ?? null : null;
     if (directTripSource && !directTripCandidate) {
       outputs.push({ id: routeCase.id, status: 'NO_ACTIVE_SHAPED_TRIP', serviceDate,
+        directTripDiagnostics,
         limitations: ['No upcoming active Stryi bus trip with ordered stops and a shape was available inside the sampled service window.'] });
       continue;
     }
@@ -443,6 +465,7 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
         originStop: directTripCandidate.originStop.name, destinationStop: directTripCandidate.destinationStop.name,
         providerRouteReturned: directFeedRouteFound,
       } } : {}),
+      ...(directTripDiagnostics ? { directTripDiagnostics } : {}),
       ...(routeCase.stationPins ? { stationPins: { requested: routeCase.stationPins, resolved: [pinnedOrigin?.name, pinnedDestination?.name] } } : {}),
       feedFingerprints: sources.map((source) => ({ providerId: source.providerId, providerName: source.providerName, providerCity: source.providerCity,
         feedUrl: source.feedUrl, license: source.license, sourceRef: source.sourceRef,
