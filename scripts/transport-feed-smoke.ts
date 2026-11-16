@@ -334,13 +334,13 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
     const merged = mergeGtfsTimetables(sources);
     if (!merged) throw new Error(`Unable to merge scheduled feeds for ${routeCase.id}`);
     const { earliestDeparture, latestDeparture, serviceDate } = selectUpcomingSmokeServiceWindow(merged, new Date(), {
-      localHour: 8, windowMinutes: 24 * 60, minimumLeadMinutes: 120, horizonDays: 14,
+      localHour: 8, windowMinutes: 3 * 60, minimumLeadMinutes: 120, horizonDays: 14,
     });
     const { result: search, diagnostics } = findWithSearchDiagnostics(() => findGtfsItinerariesWithStats(merged, {
       providerId: 'ukraine-intermodal-smoke', providerName: 'MARSHGO merged municipal + national GTFS acceptance', providerCity: 'Україна',
       origin: routeCase.origin, destination: routeCase.destination, earliestDeparture, latestDeparture,
-      maximumJourneySeconds: routeCase.maximumJourneySeconds, maximumWaitSeconds: 8 * 60 * 60,
-      maximumTransfers: 3, maximumAccessWalkingMeters: 1_000, maximumEgressWalkingMeters: 1_000,
+      maximumJourneySeconds: routeCase.maximumJourneySeconds, maximumWaitSeconds: 3 * 60 * 60,
+      maximumTransfers: 2, maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1_000,
       maximumTransferWalkingMeters: 400, maximumStopDistanceMeters: 1_000,
       limit: RAIL_ROUTE_SMOKE_RESULT_LIMIT, allowedTransportTypes: ['bus', 'tram', 'trolleybus', 'train'],
     }));
