@@ -315,10 +315,13 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
   }
 
   const cases = [
-    { id: 'odesa-to-lviv', origin: [30.7233, 46.4825] as [number, number], destination: [24.0297, 49.8397] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: false },
-    { id: 'kyiv-to-odesa', origin: [30.5234, 50.4501] as [number, number], destination: [30.7233, 46.4825] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 14 * 60 * 60, compareRailOnly: false },
-    { id: 'lviv-to-uzhhorod', origin: [24.0297, 49.8397] as [number, number], destination: [22.3000, 48.6208] as [number, number], cities: ['lviv', 'uzhhorod'], maximumJourneySeconds: 12 * 60 * 60, compareRailOnly: false },
-    { id: 'kyiv-to-lviv-station-pins', origin: [30.4897, 50.4408] as [number, number], destination: [23.9937, 49.8408] as [number, number], cities: ['kyiv', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: true },
+    { id: 'odesa-to-lviv', origin: [30.7233, 46.4825] as [number, number], destination: [24.0297, 49.8397] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: false, stationPins: null },
+    { id: 'kyiv-to-odesa', origin: [30.5234, 50.4501] as [number, number], destination: [30.7233, 46.4825] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 14 * 60 * 60, compareRailOnly: false, stationPins: null },
+    { id: 'lviv-to-uzhhorod', origin: [24.0297, 49.8397] as [number, number], destination: [22.3000, 48.6208] as [number, number], cities: ['lviv', 'uzhhorod'], maximumJourneySeconds: 12 * 60 * 60, compareRailOnly: false, stationPins: null },
+    { id: 'kyiv-to-lviv-station-pins', origin: [30.4897, 50.4408] as [number, number], destination: [23.9937, 49.8408] as [number, number], cities: ['kyiv', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: true, stationPins: ['Київ-Пасажирський', 'Львів-Головний'] as const },
+    { id: 'odesa-to-lviv-station-pins', origin: [0, 0] as [number, number], destination: [0, 0] as [number, number], cities: ['odesa', 'lviv'], maximumJourneySeconds: 16 * 60 * 60, compareRailOnly: true, stationPins: ['Одеса-Головна', 'Львів-Головний'] as const },
+    { id: 'kyiv-to-odesa-station-pins', origin: [0, 0] as [number, number], destination: [0, 0] as [number, number], cities: ['kyiv', 'odesa'], maximumJourneySeconds: 14 * 60 * 60, compareRailOnly: true, stationPins: ['Київ-Пасажирський', 'Одеса-Головна'] as const },
+    { id: 'lviv-to-uzhhorod-station-pins', origin: [0, 0] as [number, number], destination: [0, 0] as [number, number], cities: ['lviv', 'uzhhorod'], maximumJourneySeconds: 12 * 60 * 60, compareRailOnly: true, stationPins: ['Львів-Головний', 'Ужгород'] as const },
   ];
   const outputs = [];
   for (const routeCase of cases) {
@@ -334,12 +337,30 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
     ];
     const merged = mergeGtfsTimetables(sources);
     if (!merged) throw new Error(`Unable to merge scheduled feeds for ${routeCase.id}`);
+    const stationStop = (name: string) => {
+      const normalized = name.trim().toLocaleLowerCase('uk-UA');
+      return [...merged.stops.values()].find((stop) => stop.name.trim().toLocaleLowerCase('uk-UA') === normalized
+        && (merged.stopTimesByStop.get(stop.id) ?? []).some(({ tripId }) => {
+          const trip = merged.trips.get(tripId);
+          return trip && merged.routes.get(trip.routeId)?.mode === 'train';
+        })) ?? null;
+    };
+    const pinnedOrigin = routeCase.stationPins ? stationStop(routeCase.stationPins[0]) : null;
+    const pinnedDestination = routeCase.stationPins ? stationStop(routeCase.stationPins[1]) : null;
+    if (routeCase.stationPins && (!pinnedOrigin || !pinnedDestination)) {
+      outputs.push({ id: routeCase.id, status: 'RAIL_STATION_PIN_NOT_FOUND', stationPins: routeCase.stationPins,
+        resolved: [pinnedOrigin?.name ?? null, pinnedDestination?.name ?? null],
+        limitations: ['Station pins must resolve to exact GTFS stops served by a rail trip.'] });
+      continue;
+    }
+    const origin: [number, number] = pinnedOrigin ? [pinnedOrigin.lon, pinnedOrigin.lat] : routeCase.origin;
+    const destination: [number, number] = pinnedDestination ? [pinnedDestination.lon, pinnedDestination.lat] : routeCase.destination;
     const { earliestDeparture, latestDeparture, serviceDate } = selectUpcomingSmokeServiceWindow(merged, new Date(), {
       localHour: 8, windowMinutes: 3 * 60, minimumLeadMinutes: 120, horizonDays: 14,
     });
     const searchInput = {
       providerId: 'ukraine-intermodal-smoke', providerName: 'MARSHGO merged municipal + national GTFS acceptance', providerCity: 'Україна',
-      origin: routeCase.origin, destination: routeCase.destination, earliestDeparture, latestDeparture,
+      origin, destination, earliestDeparture, latestDeparture,
       maximumJourneySeconds: routeCase.maximumJourneySeconds, maximumWaitSeconds: 3 * 60 * 60,
       maximumTransfers: 2, maximumAccessWalkingMeters: 900, maximumEgressWalkingMeters: 1_000,
       maximumTransferWalkingMeters: 400, maximumStopDistanceMeters: 1_000,
@@ -375,7 +396,8 @@ async function buildUkraineIntermodalRouteAcceptance(entries: typeof catalog) {
     outputs.push({
       id: routeCase.id, status: multiProvider.length ? 'MULTI_PROVIDER_CHAIN_FOUND' : search.itineraries.length ? 'SCHEDULED_ROUTES_FOUND_NO_MULTI_PROVIDER_CHAIN' : 'NO_ROUTE_IN_QUERY_WINDOW',
       serviceDate, queryWindow: [earliestDeparture.toISOString(), latestDeparture.toISOString()],
-      origin: routeCase.origin, destination: routeCase.destination,
+      origin, destination,
+      ...(routeCase.stationPins ? { stationPins: { requested: routeCase.stationPins, resolved: [pinnedOrigin?.name, pinnedDestination?.name] } } : {}),
       feedFingerprints: sources.map((source) => ({ providerId: source.providerId, providerName: source.providerName, providerCity: source.providerCity,
         feedUrl: source.feedUrl, license: source.license, sourceRef: source.sourceRef,
         staticFeedSha256: source.feed.staticFeedSha256 ?? null, stops: source.feed.stops.size, routes: source.feed.routes.size, trips: source.feed.trips.size })),
