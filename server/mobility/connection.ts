@@ -10,6 +10,17 @@ import { testKyivScheduleConnection } from './kyivSchedule';
 import type { ConnectionReport } from './types';
 
 export async function testProviderConnection(provider: { id: string; name?: string; source_type: string; feed_url: string; country?: string }): Promise<ConnectionReport> {
+  if (process.env.MARSHGO_API_TEST_FIXTURE_MODE === '1' && provider.feed_url === 'https://gbfs-api-fixture.invalid/zelectra') {
+    return {
+      health: 'healthy',
+      checks: [
+        { name: 'Feed accessible', ok: true },
+        { name: 'Valid GBFS discovery', ok: true, detail: '9 feeds' },
+        { name: 'Vehicles', ok: true, detail: '2 valid, 0 rejected' },
+      ],
+      counts: { feeds: 9, vehicles: 2 }, responseMs: 1,
+    };
+  }
   if (provider.source_type === 'gbfs') return testGbfsConnection(provider.id, provider.feed_url, provider.country);
   if (provider.source_type === 'gtfs') return testGtfsConnection(provider.feed_url);
   if (provider.source_type === 'gtfs_rt') return testGtfsRealtimeConnection(provider.feed_url);

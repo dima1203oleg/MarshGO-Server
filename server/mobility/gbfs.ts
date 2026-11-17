@@ -78,21 +78,21 @@ export function assetTypeFor(formFactor: unknown, propulsion: unknown): Mobility
   }
 }
 
-export function normalizeVehicles(providerId: string, vehicleTypes: unknown, status: unknown, expectedCountry?: string): { assets: MobilityAsset[]; rejected: number } {
+export function normalizeVehicles(providerId: string, vehicleTypes: unknown, status: unknown, expectedCountry?: string): { assets: MobilityAsset[]; rejected: number; outOfCountry: number } {
   const typeById = new Map<string, MobilityAssetType>();
   const typeList = isObject(vehicleTypes) && isObject(vehicleTypes.data) && Array.isArray(vehicleTypes.data.vehicle_types) ? vehicleTypes.data.vehicle_types : [];
   for (const type of typeList) if (isObject(type) && typeof type.vehicle_type_id === 'string') { const mapped = assetTypeFor(type.form_factor, type.propulsion_type); if (mapped) typeById.set(type.vehicle_type_id, mapped); }
   const data = isObject(status) && isObject(status.data) ? status.data : {};
   const list = Array.isArray(data.vehicles) ? data.vehicles : Array.isArray(data.bikes) ? data.bikes : [];
-  const assets: MobilityAsset[] = []; let rejected = 0;
+  const assets: MobilityAsset[] = []; let rejected = 0; let outOfCountry = 0;
   for (const item of list) {
     if (!isObject(item)) { rejected++; continue; }
     const id = typeof item.vehicle_id === 'string' ? item.vehicle_id : typeof item.bike_id === 'string' ? item.bike_id : null;
     const typeId = typeof item.vehicle_type_id === 'string' ? item.vehicle_type_id : undefined;
     const type = (typeId && typeById.get(typeId)) || (item.is_reserved === undefined && !typeId ? 'BIKE' : null);
     const lon = item.lon, lat = item.lat;
-    if (!id || !type || !validPoint(lon, lat)
-      || (expectedCountry === 'UA' && !pointIsInsideUkraine([lon as number, lat as number]))) { rejected++; continue; }
+    const outsideCountry = expectedCountry === 'UA' && Boolean(id) && Boolean(type) && validPoint(lon, lat) && !pointIsInsideUkraine([lon as number, lat as number]);
+    if (!id || !type || !validPoint(lon, lat) || outsideCountry) { rejected++; if (outsideCountry) outOfCountry++; continue; }
     const asset: MobilityAsset = { id, providerId, type, location: [lon, lat as number], available: item.is_reserved !== true && item.is_disabled !== true };
     if (typeof item.current_fuel_percent === 'number' && Number.isFinite(item.current_fuel_percent) && item.current_fuel_percent >= 0 && item.current_fuel_percent <= 100) asset.batteryPercent = item.current_fuel_percent;
     if (typeof item.current_range_meters === 'number') asset.rangeMeters = item.current_range_meters;
@@ -114,18 +114,18 @@ export function normalizeVehicles(providerId: string, vehicleTypes: unknown, sta
     if (updatedAt !== null) asset.lastUpdated = new Date(updatedAt).toISOString();
     assets.push(asset);
   }
-  return { assets, rejected };
+  return { assets, rejected, outOfCountry };
 }
 
-export function normalizeStations(providerId: string, info: unknown, status: unknown, expectedCountry?: string): { stations: MobilityStation[]; rejected: number } {
+export function normalizeStations(providerId: string, info: unknown, status: unknown, expectedCountry?: string): { stations: MobilityStation[]; rejected: number; outOfCountry: number } {
   const infoList = isObject(info) && isObject(info.data) && Array.isArray(info.data.stations) ? info.data.stations : [];
   const statusList = isObject(status) && isObject(status.data) && Array.isArray(status.data.stations) ? status.data.stations : [];
   const statusById = new Map<string, Json>();
   for (const item of statusList) if (isObject(item) && typeof item.station_id === 'string') statusById.set(item.station_id, item);
-  const stations: MobilityStation[] = []; let rejected = 0;
+  const stations: MobilityStation[] = []; let rejected = 0; let outOfCountry = 0;
   for (const item of infoList) {
-    if (!isObject(item) || typeof item.station_id !== 'string' || !validPoint(item.lon, item.lat)
-      || (expectedCountry === 'UA' && !pointIsInsideUkraine([item.lon as number, item.lat as number]))) { rejected++; continue; }
+    const outsideCountry = expectedCountry === 'UA' && isObject(item) && typeof item.station_id === 'string' && validPoint(item.lon, item.lat) && !pointIsInsideUkraine([item.lon as number, item.lat as number]);
+    if (!isObject(item) || typeof item.station_id !== 'string' || !validPoint(item.lon, item.lat) || outsideCountry) { rejected++; if (outsideCountry) outOfCountry++; continue; }
     const live = statusById.get(item.station_id);
     const rawName = isObject(item) ? item.name : undefined;
     const name = typeof rawName === 'string' ? rawName : Array.isArray(rawName) && isObject(rawName[0]) && typeof rawName[0].text === 'string' ? rawName[0].text : item.station_id;
@@ -137,7 +137,7 @@ export function normalizeStations(providerId: string, info: unknown, status: unk
     if (live && typeof live.is_returning === 'boolean') station.returnAllowed = live.is_returning;
     stations.push(station);
   }
-  return { stations, rejected };
+  return { stations, rejected, outOfCountry };
 }
 
 /** Full connection test: discovery → feeds present → payload validation → freshness → coordinate sanity. */
@@ -157,9 +157,10 @@ export async function testGbfsConnection(providerId: string, discoveryUrl: strin
   const [vehicleTypes, vehicleStatus, freeBikes, stationInfo, stationStatus] = await Promise.all([load('vehicle_types'), load('vehicle_status'), load('free_bike_status'), load('station_information'), load('station_status')]);
   const statusFeed = vehicleStatus ?? freeBikes;
   let rejected = 0;
+  let outOfCountry = 0;
   const points: Array<[number, number]> = [];
-  if (statusFeed) { const { assets, rejected: bad } = normalizeVehicles(providerId, vehicleTypes ?? undefined, statusFeed, expectedCountry); counts.vehicles = assets.length; rejected += bad; for (const asset of assets) points.push(asset.location); checks.push({ name: 'Vehicles', ok: assets.length > 0, detail: `${assets.length} valid, ${bad} rejected` }); }
-  if (stationInfo) { const { stations, rejected: bad } = normalizeStations(providerId, stationInfo, stationStatus ?? undefined, expectedCountry); counts.stations = stations.length; rejected += bad; for (const station of stations) points.push(station.location); checks.push({ name: 'Stations', ok: stations.length > 0 || (counts.vehicles ?? 0) > 0, detail: `${stations.length} valid, ${bad} rejected` }); }
+  if (statusFeed) { const { assets, rejected: bad, outOfCountry: outside } = normalizeVehicles(providerId, vehicleTypes ?? undefined, statusFeed, expectedCountry); counts.vehicles = assets.length; rejected += bad; outOfCountry += outside; if (outside > 0) counts.outOfCountryVehicles = outside; for (const asset of assets) points.push(asset.location); checks.push({ name: 'Vehicles', ok: assets.length > 0, detail: `${assets.length} valid, ${bad} rejected${outside > 0 ? ` (${outside} outside declared country)` : ''}` }); }
+  if (stationInfo) { const { stations, rejected: bad, outOfCountry: outside } = normalizeStations(providerId, stationInfo, stationStatus ?? undefined, expectedCountry); counts.stations = stations.length; rejected += bad; outOfCountry += outside; if (outside > 0) counts.outOfCountryStations = outside; for (const station of stations) points.push(station.location); checks.push({ name: 'Stations', ok: stations.length > 0 || (counts.vehicles ?? 0) > 0, detail: `${stations.length} valid, ${bad} rejected${outside > 0 ? ` (${outside} outside declared country)` : ''}` }); }
   if (!statusFeed && !stationInfo) { checks.push({ name: 'Vehicle or station data', ok: false }); return fail('No vehicle or station feed'); }
   if (expectedCountry === 'UA') {
     const localPoints = points.filter(pointIsInsideUkraine).length;
@@ -175,7 +176,9 @@ export async function testGbfsConnection(providerId: string, discoveryUrl: strin
   if (ageSeconds !== null) { counts.ageSeconds = ageSeconds; checks.push({ name: 'Freshness', ok: ageSeconds < 600, detail: `${ageSeconds}s old` }); }
   const allOk = checks.every((check) => check.ok);
   const coveragePoints = expectedCountry === 'UA' ? points.filter(pointIsInsideUkraine) : points;
-  return { health: allOk && rejected === 0 ? 'healthy' : 'degraded', checks, counts, responseMs: Date.now() - started, ...(bboxOf(coveragePoints) ? { bbox: bboxOf(coveragePoints) } : {}) };
+  // Out-of-country records are the declared coverage filter working as intended, not a data-quality defect;
+  // only malformed records may keep an otherwise fully valid feed out of healthy.
+  return { health: allOk && rejected - outOfCountry === 0 ? 'healthy' : 'degraded', checks, counts, responseMs: Date.now() - started, ...(bboxOf(coveragePoints) ? { bbox: bboxOf(coveragePoints) } : {}) };
 }
 
 export interface GbfsSnapshot {

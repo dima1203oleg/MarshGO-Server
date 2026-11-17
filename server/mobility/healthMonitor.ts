@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import { probeProviderReachability } from './connection';
+import { probeProviderReachability, testProviderConnection } from './connection';
 import type { ConnectionReport } from './types';
 
 interface StoredProviderReport {
@@ -26,8 +26,9 @@ export function mergeProbeReport(stored: StoredProviderReport | null, probe: Con
 }
 
 /**
- * Performs a bounded reachability pass for enabled sources. It never downloads and parses full static feeds in the API
- * request process; full schema validation is an explicit admin action. It never changes `status`, which is an
+ * Performs a bounded health pass for enabled sources. It never downloads and parses full static feeds in the API
+ * request process; full static-archive validation is an explicit admin action. Lightweight GBFS feeds are validated
+ * fully here so a recovered rental source can return to healthy on its own. It never changes `status`, which is an
  * administrator's decision. A reachable source with a previous validated report stays healthy; otherwise it stays
  * degraded until a full validation is completed. Offline sources are skipped until a later probe finds them again.
  */
@@ -51,10 +52,21 @@ export async function refreshProviderHealth(
   for (let offset = 0; offset < rows.length; offset += concurrency) {
     await Promise.all(rows.slice(offset, offset + concurrency).map(async (provider) => {
       try {
-        const report = await probeProviderReachability(provider);
+        // GBFS feeds are lightweight JSON already fetched per nearby request, so the scheduled pass
+        // validates them fully; otherwise a recovered rental source could never leave degraded and
+        // nearby inventory (healthy-only) would stay empty without an explicit admin validation.
+        const report = provider.source_type === 'gbfs'
+          ? await testProviderConnection({ id: provider.id, name: provider.name, source_type: provider.source_type, feed_url: provider.feed_url })
+          : await probeProviderReachability(provider);
+        const gbfsValidated = provider.source_type === 'gbfs' && report.health === 'healthy' && Object.keys(report.counts ?? {}).length > 0;
         const hasValidatedReport = Boolean(provider.last_report?.counts && Object.keys(provider.last_report.counts).length > 0);
-        const health = report.health === 'offline' ? 'offline' : provider.health === 'healthy' && hasValidatedReport ? 'healthy' : 'degraded';
+        const health = report.health === 'offline' ? 'offline' : gbfsValidated || (provider.health === 'healthy' && hasValidatedReport) ? 'healthy' : 'degraded';
         const nextReport = mergeProbeReport(provider.last_report, report);
+        if (gbfsValidated) {
+          // A successful full GBFS validation is authoritative evidence, not a side probe.
+          nextReport.checks = report.checks;
+          nextReport.counts = report.counts;
+        }
         await pool.query(
           `UPDATE mobility_providers SET health=$2,last_checked_at=now(),last_error=$3,
              last_report=$4::jsonb || jsonb_build_object('last_probe_at',now()),
