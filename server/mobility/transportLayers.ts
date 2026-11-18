@@ -1,10 +1,13 @@
+import { createHmac, randomBytes } from 'node:crypto';
 import { unzipSync, strFromU8 } from 'fflate';
 import bindings from 'gtfs-realtime-bindings';
 import { z } from 'zod';
 import { cacheKey, smartCache } from '../cache/cacheService';
 import { fetchBinary, fetchJson, UnsafeUrlError } from './safeFetch';
 import { parseCsvLine, routeTypeLabel } from './gtfs';
+import { fetchGtfsFiles } from './gtfsComponents';
 import { extractVehicleList, vehicleTransportLabel } from './jsonVehicles';
+import { pointIsInsideUkraine } from './gbfs';
 import { bboxOf, type Bbox } from './types';
 import { isFreshMobilityTimestamp, LIVE_MOBILITY_MAX_AGE_MS, parseMobilityTimestamp } from './timestamps';
 
@@ -15,6 +18,23 @@ import { isFreshMobilityTimestamp, LIVE_MOBILITY_MAX_AGE_MS, parseMobilityTimest
 export type LineType = 'bus' | 'marshrutka' | 'trolleybus' | 'tram' | 'metro' | 'train' | 'suburban' | 'city_train' | 'funicular';
 const LINE_TYPES = new Set<string>(['bus', 'marshrutka', 'trolleybus', 'tram', 'metro', 'train', 'suburban', 'city_train', 'funicular']);
 export const isLineType = (value: string): value is LineType => LINE_TYPES.has(value);
+
+// Stable source identifiers (including fleet IMEI/registration values) must
+// never be returned to clients. Production's SESSION_SECRET gives stable IDs
+// across restarts; local environments use a process-scoped key.
+const vehicleIdKey = process.env.SESSION_SECRET
+  ? createHmac('sha256', process.env.SESSION_SECRET).update('marshgo-live-vehicle-id:v1').digest()
+  : randomBytes(32);
+export function publicJsonVehicleId(providerId: string, vehicle: Record<string, unknown>): string | null {
+  const raw = [vehicle.vehicle_id, vehicle.id, vehicle.license_plate, vehicle.gov_number, vehicle.imei]
+    .find((value) => (typeof value === 'string' || typeof value === 'number') && String(value).trim().length > 0);
+  if (raw === undefined) return null;
+  const opaque = createHmac('sha256', vehicleIdKey)
+    .update(`${providerId}\0${String(raw).trim()}`)
+    .digest('hex')
+    .slice(0, 24);
+  return `${providerId}:${opaque}`;
+}
 
 export interface NetworkStop { id: string; name: string; lon: number; lat: number; types: LineType[]; routes: string[] }
 export interface NetworkRoute { id: string; name: string; type: LineType; direction: string; directionId?: string; geometrySource?: 'gtfs_shape' | 'stop_sequence' | 'provider_geojson'; stopCount: number; coordinates: Array<[number, number]> }
@@ -199,10 +219,9 @@ export function cachedNetwork(providerId: string, url: string, sourceVersion?: s
     maxL2Bytes: 8 * 1024 * 1024,
     shared: Boolean(version),
   }, async () => {
-    const { data } = await fetchBinary(url, 60 * 1024 * 1024);
-    const unzipped = unzipSync(data, { filter: (file) => WANTED.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
     const files: Record<string, string> = {};
-    for (const [name, content] of Object.entries(unzipped)) files[name.split('/').pop() as string] = strFromU8(content);
+    const gtfsFiles = await fetchGtfsFiles(url, 60 * 1024 * 1024);
+    for (const [name, content] of Object.entries(gtfsFiles)) if (WANTED.test(name)) files[name] = strFromU8(content);
     return buildNetwork(files);
   });
 }
@@ -246,6 +265,11 @@ export interface LiveVehicle {
   bearing: number | null; speed: number | null; timestamp: Date | null; providerId: string;
   /** Present only for GTFS-Realtime VehiclePositions with an identified scheduled trip. */
   tripId?: string; routeId?: string; startDate?: string; currentStopSequence?: number; currentStopId?: string;
+}
+
+/** Keep feeds registered for one country from leaking out-of-country vehicle positions into unrelated map viewports. */
+export function filterVehiclesToCountry(vehicles: LiveVehicle[], expectedCountry?: string): LiveVehicle[] {
+  return expectedCountry === 'UA' ? vehicles.filter((vehicle) => pointIsInsideUkraine([vehicle.lon, vehicle.lat])) : vehicles;
 }
 
 export function parseVehicleTimestamp(value: unknown): Date | null {
@@ -340,10 +364,10 @@ export function parseGtfsRealtimeVehicles(
   return out;
 }
 
-async function loadVehicles(providerId: string, sourceType: string, url: string, routeNames: Map<string, { name: string; type: LineType }>): Promise<LiveVehicle[]> {
+async function loadVehicles(providerId: string, sourceType: string, url: string, routeNames: Map<string, { name: string; type: LineType }>, expectedCountry?: string): Promise<LiveVehicle[]> {
   if (sourceType === 'gtfs_rt') {
     const { data } = await fetchBinary(url, 10 * 1024 * 1024);
-    return parseGtfsRealtimeVehicles(providerId, data, routeNames);
+    return filterVehiclesToCountry(parseGtfsRealtimeVehicles(providerId, data, routeNames), expectedCountry);
   }
   const body = (await fetchJson(url, 12000)).data;
   const out: LiveVehicle[] = [];
@@ -353,21 +377,21 @@ async function loadVehicles(providerId: string, sourceType: string, url: string,
     const label = vehicleTransportLabel(vehicle);
     const bearing = Number(vehicle.bearing ?? vehicle.course ?? vehicle.azimuth);
     const speed = Number(vehicle.speed ?? vehicle.speed_mps);
-    out.push({ id: `${providerId}:${String(vehicle.vehicle_id ?? vehicle.id ?? vehicle.license_plate ?? `${lat},${lon}`)}`, lon, lat, type: asLineType(label) ?? 'other',
+    out.push({ id: publicJsonVehicleId(providerId, vehicle) ?? `${providerId}:${lat},${lon}`, lon, lat, type: asLineType(label) ?? 'other',
       route: String(vehicle.route_name ?? vehicle.route ?? vehicle.route_short_name ?? ''), bearing: Number.isFinite(bearing) ? bearing : null,
       speed: Number.isFinite(speed) && speed >= 0 ? speed : null, timestamp: parseVehicleTimestamp(vehicle.timestamp ?? vehicle.updated_at ?? vehicle.last_update ?? vehicle.time), providerId });
   }
-  return out;
+  return filterVehiclesToCountry(out, expectedCountry);
 }
 
 /** Positions are shared between users for ten seconds so a busy map never multiplies requests to city feeds. */
 export function cachedVehicles(
   providerId: string, sourceType: string, url: string,
-  routeNames: Map<string, { name: string; type: LineType }>,
+  routeNames: Map<string, { name: string; type: LineType }>, expectedCountry?: string,
 ): Promise<LiveVehicle[]> {
   const hit = vehicleCache.get(providerId);
   if (hit && Date.now() - hit.at < VEHICLE_TTL_MS) return hit.promise;
-  const promise = loadVehicles(providerId, sourceType, url, routeNames);
+  const promise = loadVehicles(providerId, sourceType, url, routeNames, expectedCountry);
   vehicleCache.set(providerId, { at: Date.now(), promise });
   promise.catch(() => vehicleCache.delete(providerId));
   return promise;
@@ -394,9 +418,8 @@ export function buildRouteTypeEntries(routesText: string | undefined): RouteType
 const ROUTES_ONLY = /(^|\/)routes\.txt$/;
 
 async function loadGtfsRouteTypes(url: string): Promise<RouteTypeEntry[]> {
-  const { data } = await fetchBinary(url, 60 * 1024 * 1024);
-  const unzipped = unzipSync(data, { filter: (file) => ROUTES_ONLY.test(file.name) && file.originalSize < 64 * 1024 * 1024 });
-  const entry = Object.entries(unzipped).find(([name]) => ROUTES_ONLY.test(name));
+  const files = await fetchGtfsFiles(url, 60 * 1024 * 1024);
+  const entry = Object.entries(files).find(([name]) => ROUTES_ONLY.test(name));
   return buildRouteTypeEntries(entry ? strFromU8(entry[1]) : undefined);
 }
 

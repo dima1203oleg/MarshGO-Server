@@ -1,3 +1,6 @@
+import { isPublicPhotonEvaluationEndpoint } from './geocodingPolicy';
+import { getBuildInfo } from './buildInfo';
+
 type RuntimeEnvironment = NodeJS.ProcessEnv;
 
 const MAX_TRUSTED_PROXY_HOPS = 5;
@@ -40,19 +43,26 @@ function validateProductionOrigins(value: string): void {
   }
 }
 
-function requireHttpsUrl(environment: RuntimeEnvironment, name: string): void {
+function requireHttpsUrl(environment: RuntimeEnvironment, name: string): URL {
   const raw = requireValue(environment, name);
   let url: URL;
   try { url = new URL(raw); } catch { throw new Error(`${name} must be a valid HTTPS URL in production`); }
   if (url.protocol !== 'https:' || ['localhost', '127.0.0.1', '::1'].includes(url.hostname) || url.username || url.password) {
     throw new Error(`${name} must be a public HTTPS URL in production`);
   }
+  return url;
 }
 
 /** Fail closed before listening if production could silently use dev auth or default CORS. */
 export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   getTrustedProxyHops(environment);
   if (environment.NODE_ENV !== 'production') return;
+
+  const build = getBuildInfo(environment);
+  if (!build.buildId || !build.commitSha || !/^[a-f0-9]{40}$/i.test(build.commitSha)
+    || !build.builtAt || build.sourceState !== 'clean') {
+    throw new Error('clean, SHA-pinned MARSHGO build metadata is required in production');
+  }
 
   const secret = requireValue(environment, 'SESSION_SECRET');
   if (Buffer.byteLength(secret, 'utf8') < 32) {
@@ -81,8 +91,12 @@ export function validateRuntimeConfig(environment: RuntimeEnvironment): void {
   if ((environment.TRAFFIC_PROVIDER ?? 'none') !== 'none') throw new Error('TRAFFIC_PROVIDER=none is the only configured traffic provider');
   requireHttpsUrl({ ...environment, OSRM_URL: environment.OSRM_URL || environment.ROUTING_ENGINE_URL }, 'OSRM_URL');
   if (environment.WALKING_ROUTING_URL?.trim()) requireHttpsUrl(environment, 'WALKING_ROUTING_URL');
-  requireHttpsUrl(environment, 'GEOCODING_ENGINE_URL');
-  requireHttpsUrl(environment, 'GEOCODING_REVERSE_URL');
+  for (const name of ['GEOCODING_ENGINE_URL', 'GEOCODING_REVERSE_URL']) {
+    const endpoint = requireHttpsUrl(environment, name);
+    if (isPublicPhotonEvaluationEndpoint(endpoint)) {
+      throw new Error(`${name} must not use the public Photon evaluation endpoint in production`);
+    }
+  }
   requireHttpsUrl(environment, 'MAP_STYLE_MANIFEST_URL');
   requireHttpsUrl(environment, 'MAP_DATA_MANIFEST_URL');
   for (const name of ['HERE_ROUTING_ENABLED', 'HERE_TRAFFIC_ENABLED', 'TOMTOM_ROUTING_ENABLED', 'TOMTOM_TRAFFIC_ENABLED']) {

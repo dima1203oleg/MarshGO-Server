@@ -1,5 +1,6 @@
-import { unzipSync, strFromU8 } from 'fflate';
-import { fetchBinary } from '../mobility/safeFetch';
+import { createHash } from 'node:crypto';
+import { strFromU8 } from 'fflate';
+import { fetchGtfsFiles } from '../mobility/gtfsComponents';
 import { parseCsvLine, routeTypeLabel } from '../mobility/gtfs';
 import { pointIsInsideUkraine } from '../mobility/gbfs';
 import { journeyTransportTypeSelected, type JourneyTransportType } from './types';
@@ -3748,11 +3749,17 @@ function estimateGtfsFeedCacheBytes(feed: GtfsTimetableFeed): number {
   return Math.max(1, retainedRecords + ancillary);
 }
 
+export function gtfsTimetableCacheKey(providerId: string, url: string, defaultTimezone = 'Europe/Kyiv'): string {
+  // Provider feeds can be repointed without changing provider_id. Include the
+  // source URL and timezone so a catalog update cannot keep serving the old
+  // parsed feed until the previous URL's TTL expires. Hash the tuple so URLs
+  // that contain credentials in query parameters are not retained as cache keys.
+  return createHash('sha256').update(JSON.stringify([providerId, url, defaultTimezone])).digest('hex');
+}
+
 export function cachedGtfsTimetable(providerId: string, url: string, now = Date.now(), defaultTimezone = 'Europe/Kyiv'): Promise<GtfsTimetableFeed> {
-  return feedCache.getOrLoad(providerId, async () => {
-    const { data } = await fetchBinary(url, MAX_FEED_BYTES, 45_000);
-    const unzipped = unzipSync(data, { filter: (file) => /(^|\/)(agency|routes|stops|trips|stop_times|calendar|calendar_dates|shapes|transfers|pathways|levels|fare_attributes|fare_rules|fare_media|fare_products|fare_leg_rules|fare_leg_join_rules|fare_transfer_rules|rider_categories|timeframes|networks|route_networks|areas|stop_areas)\.txt$/.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
-    const files = Object.fromEntries(Object.entries(unzipped).map(([name, content]) => [name.split('/').pop() as string, content]));
+  return feedCache.getOrLoad(gtfsTimetableCacheKey(providerId, url, defaultTimezone), async () => {
+    const files = await fetchGtfsFiles(url, MAX_FEED_BYTES);
     return parseGtfsTimetable(files, new Date(now), defaultTimezone);
   }, estimateGtfsFeedCacheBytes, now);
 }

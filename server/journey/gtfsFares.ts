@@ -46,6 +46,9 @@ export interface GtfsFareAllocation {
 
 export interface GtfsItineraryFare {
   priceMinor: number;
+  /** Lower/upper published fare bounds when payment media can change the charged price. */
+  priceMinMinor?: number;
+  priceMaxMinor?: number;
   currency: string;
   allocations: GtfsFareAllocation[];
   source: 'gtfs-v1' | 'city-tariff-registry';
@@ -59,12 +62,16 @@ export function scaleGtfsFareForPassengers(
   if (!fare) return null;
   if (!Number.isInteger(passengerCount) || passengerCount < 1 || passengerCount > 20) return null;
   const priceMinor = fare.priceMinor * passengerCount;
+  const priceMinMinor = (fare.priceMinMinor ?? fare.priceMinor) * passengerCount;
+  const priceMaxMinor = (fare.priceMaxMinor ?? fare.priceMinor) * passengerCount;
   const allocations = fare.allocations.map((allocation) => ({
     ...allocation, priceMinor: allocation.priceMinor * passengerCount,
   }));
   if (!Number.isSafeInteger(priceMinor) || priceMinor < 0
+    || !Number.isSafeInteger(priceMinMinor) || priceMinMinor < 0
+    || !Number.isSafeInteger(priceMaxMinor) || priceMaxMinor < priceMinMinor
     || allocations.some((allocation) => !Number.isSafeInteger(allocation.priceMinor) || allocation.priceMinor < 0)) return null;
-  return { ...fare, priceMinor, allocations };
+  return { ...fare, priceMinor, priceMinMinor, priceMaxMinor, allocations };
 }
 
 const V2_FILES = [
@@ -244,5 +251,6 @@ export function calculateGtfsItineraryFare(
   };
 
   const result = solve(0).sort((a, b) => a.priceMinor - b.priceMinor || a.currency.localeCompare(b.currency))[0];
-  return result?.currency ? { ...result, source: 'gtfs-v1' } : null;
+  return result?.currency ? { ...result, priceMinMinor: result.priceMinor,
+    priceMaxMinor: result.priceMinor, source: 'gtfs-v1' } : null;
 }

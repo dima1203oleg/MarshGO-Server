@@ -44,7 +44,18 @@ test('Lviv LeoCard fare estimates apply a 40-minute transfer once, then charge a
     leg({ city: 'Львів', departure: '2026-10-13T08:44:01Z', arrival: '2026-10-13T08:56:00Z', type: 'trolleybus' }),
   ]);
   assert.equal(fare?.priceMinor, 4_600);
+  assert.equal(fare?.priceMinMinor, 4_600);
+  assert.equal(fare?.priceMaxMinor, 9_000, 'cash fare is the upper bound when the user has not chosen a payment medium');
   assert.deepEqual(fare?.allocations.map((item) => item.priceMinor), [2_300, 0, 2_300]);
+});
+
+test('Lviv single-ride estimate reports LeoCard-to-cash range without claiming one payment method', () => {
+  const fare = calculateCityTariffFare([
+    leg({ city: 'Львів', departure: '2026-10-13T08:00:00Z', arrival: '2026-10-13T08:20:00Z' }),
+  ]);
+  assert.equal(fare?.priceMinor, 2_300);
+  assert.equal(fare?.priceMinMinor, 2_300);
+  assert.equal(fare?.priceMaxMinor, 3_000);
 });
 
 test('Lviv does not assign its integrated public transport tariff to a private minibus', () => {
@@ -58,7 +69,7 @@ test('Lviv ATP-1 single fares and transfer rule record the current source verifi
   const records = getTransportFareCatalog({ city: 'Львів' })
     .filter((record) => ['lviv-leocard-adult', 'lviv-bank-card-adult', 'lviv-cash-adult', 'lviv-student-leocard', 'lviv-leocard-40-minute-transfer'].includes(record.id));
   assert.equal(records.length, 5);
-  assert.ok(records.every((record) => record.status === 'verified_static' && record.lastVerifiedAt === '2026-10-25'));
+  assert.ok(records.every((record) => record.status === 'verified_static' && record.lastVerifiedAt === '2026-11-13'));
 });
 
 test('Dnipro metro is priced at 10 UAH and Kharkiv metro at the published free fare', () => {

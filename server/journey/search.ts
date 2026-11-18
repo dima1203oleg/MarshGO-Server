@@ -1,5 +1,6 @@
 import { canonicalJourneyTransportType, JOURNEY_STRATEGIES, JOURNEY_TRANSPORT_TYPES, journeyTransportTypeSelected, type JourneyPreferences, type JourneyStrategy } from './types';
 import type { TransitJourneyMode } from './gtfsTimetable';
+import type { RouteEstimateOptions } from './micromobilityEstimates';
 
 export interface JourneySearchRequest {
   origin: { name: string; coordinates: [number, number] };
@@ -14,6 +15,20 @@ export interface JourneySearchTruncationState {
   resultsTruncated: boolean;
   candidateGenerationTruncated: boolean;
   resultSamplingTruncated: boolean;
+}
+
+/**
+ * Spatially eligible, authorized timetables must be considered at any route
+ * length. The timetable engine applies separate bounded intercity graph
+ * rules; an urban-distance cutoff here silently skipped national rail/bus.
+ */
+export function shouldSearchGtfsTimetables(input: {
+  routeDistanceMeters: number;
+  eligibleProviderCount: number;
+  hasMetroSource: boolean;
+}): boolean {
+  return Number.isFinite(input.routeDistanceMeters) && input.routeDistanceMeters >= 0
+    && (input.eligibleProviderCount > 0 || input.hasMetroSource);
 }
 
 export function getJourneySearchTruncationState(input: {
@@ -63,6 +78,26 @@ export function getJourneySearchPartialReasons(input: {
 export const JOURNEY_SEARCH_TRANSIT_MODES: readonly TransitJourneyMode[] = [
   'BUS', 'MINIBUS', 'RAIL', 'TRAM', 'TROLLEYBUS', 'METRO',
 ];
+
+const gtfsRouteTypesByJourneyMode: Record<TransitJourneyMode, readonly string[]> = {
+  BUS: ['bus', 'intercity_bus'],
+  MINIBUS: ['marshrutka'],
+  RAIL: ['train', 'suburban', 'city_train'],
+  TRAM: ['tram'],
+  TROLLEYBUS: ['trolleybus'],
+  METRO: ['metro'],
+  FERRY: ['ferry'],
+  FUNICULAR: ['funicular'],
+};
+
+/** A feed URL/reachability probe is not proof that the feed contains a searchable route. */
+export function hasGtfsRouteEvidence(
+  mode: TransitJourneyMode,
+  counts: Readonly<Record<string, number>> | null | undefined,
+): boolean {
+  if (!counts) return false;
+  return gtfsRouteTypesByJourneyMode[mode].some((type) => Number(counts[`routes_${type}`] ?? 0) > 0);
+}
 
 /**
  * One bound for every place label a journey can carry — search, offers, demands
@@ -123,7 +158,7 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
   if (!isRecord(rawPreferences)) throw new TypeError('preferences must be an object');
   const allowedPreferences = new Set([
     ...Object.keys(preferenceBounds), 'minDriverRating','preferredVehicleClass',
-    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowBicycle','allowScooter','requireVerifiedReturn','allowStaticRentalDiscovery','allowedProviderIds','blockedProviderIds','allowedTransportTypes','allowedTransitProviders','allowedTransitProvidersByType',
+    'allowCommunity','allowTaxi','allowBus','allowMinibus','allowRail','allowPublicTransport','allowCarsharing','allowTransfer','allowBicycle','allowScooter','requireVerifiedReturn','allowStaticRentalDiscovery','allowedProviderIds','allowedProviderIdsByType','blockedProviderIds','allowedTransportTypes','allowedTransitProviders','allowedTransitProvidersByType',
   ]);
   const unknownPreference = Object.keys(rawPreferences).find((key) => !allowedPreferences.has(key));
   if (unknownPreference) throw new TypeError(`unsupported preference: ${unknownPreference}`);
@@ -156,6 +191,22 @@ export function parseJourneySearchRequest(value: unknown, now = new Date()): Jou
       || raw.some((provider) => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9_-]{1,79}$/.test(provider))
       || new Set(raw).size !== raw.length) throw new TypeError(`${key} is invalid`);
     preferences[key] = raw as string[];
+  }
+  if (rawPreferences.allowedProviderIdsByType !== undefined) {
+    const rawByType = rawPreferences.allowedProviderIdsByType;
+    if (!isRecord(rawByType) || Object.keys(rawByType).some((type) => type !== 'bike' && type !== 'scooter')) {
+      throw new TypeError('allowedProviderIdsByType is invalid');
+    }
+    const normalized: NonNullable<JourneyPreferences['allowedProviderIdsByType']> = {};
+    for (const type of ['bike', 'scooter'] as const) {
+      const providers = rawByType[type];
+      if (providers === undefined) continue;
+      if (!Array.isArray(providers) || providers.length > 100
+        || providers.some((provider) => typeof provider !== 'string' || !/^[a-z0-9][a-z0-9_-]{1,79}$/.test(provider))
+        || new Set(providers).size !== providers.length) throw new TypeError('allowedProviderIdsByType is invalid');
+      normalized[type] = providers as string[];
+    }
+    preferences.allowedProviderIdsByType = normalized;
   }
   if (rawPreferences.allowedTransportTypes !== undefined) {
     const types = rawPreferences.allowedTransportTypes;
@@ -209,6 +260,19 @@ export function transitProviderAllowed(preferences: JourneyPreferences, transpor
   const selectedForType = category ? preferences.allowedTransitProvidersByType?.[category] : undefined;
   if (selectedForType !== undefined) return selectedForType.includes(operator);
   return !preferences.allowedTransitProviders?.length || preferences.allowedTransitProviders.includes(operator);
+}
+
+/** Per-rental-mode choices take precedence; an explicit empty list excludes that mode. */
+export function micromobilityEstimateOptions(
+  preferences: JourneyPreferences,
+  mode: 'bike' | 'scooter',
+  options: RouteEstimateOptions,
+): RouteEstimateOptions | null {
+  const selectedForMode = preferences.allowedProviderIdsByType?.[mode];
+  if (selectedForMode?.length === 0) return null;
+  if (selectedForMode !== undefined) return { ...options, allowedProviderIds: selectedForMode };
+  if (preferences.allowedProviderIds?.length) return { ...options, allowedProviderIds: preferences.allowedProviderIds };
+  return options;
 }
 
 const transportTypesByTransitMode: Record<TransitJourneyMode, readonly NonNullable<JourneyPreferences['allowedTransportTypes']>[number][]> = {

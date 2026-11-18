@@ -7,6 +7,7 @@ import {
   type RentalRouteNetwork,
   type RentalRoutePoint,
 } from '../server/journey/micromobilityEstimates';
+import { micromobilityEstimateOptions, parseJourneySearchRequest } from '../server/journey/search';
 
 const departureAt = new Date('2026-10-16T08:00:00+03:00');
 const bicycleNetwork: RentalRouteNetwork = {
@@ -34,6 +35,32 @@ test('bike estimates only use one owner-confirmed provider network and keep inve
   assert.equal(estimates[0]?.priceMinor, null);
   assert.equal(estimates[0]?.legs.find((leg) => leg.mode === 'BICYCLE')?.metadata.bookingAvailable, false);
   assert.deepEqual(estimates[0]?.legs.find((leg) => leg.mode === 'BICYCLE')?.routeGeometry, [[30.5, 50.45], [30.52, 50.45]]);
+});
+
+test('per-mode request provider choices reach the matching rental estimators', () => {
+  const parsed = parseJourneySearchRequest({
+    origin: { name: 'A', coordinates: [30.50, 50.45] },
+    destination: { name: 'B', coordinates: [30.52, 50.45] },
+    departureAt: '2026-10-16T08:00:00+03:00', passengers: 1, strategy: 'BALANCED',
+    preferences: { allowedProviderIdsByType: { bike: ['nextbike_ua'], scooter: ['zelectra'] } },
+  }, new Date('2026-09-30T08:00:00Z'));
+  const baseOptions = { departureAt, maxWalkToRentalMeters: 500, maxCandidates: 6 };
+  const bikeOptions = micromobilityEstimateOptions(parsed.preferences, 'bike', baseOptions);
+  const scooterOptions = micromobilityEstimateOptions(parsed.preferences, 'scooter', baseOptions);
+  assert.ok(bikeOptions);
+  assert.ok(scooterOptions);
+
+  const bikeEstimates = buildBicycleRouteEstimates({
+    origin: { name: 'A', coordinates: [30.50, 50.45] }, destination: { name: 'B', coordinates: [30.52, 50.45] },
+    points, networks: new Map([['nextbike-ua', bicycleNetwork]]), options: bikeOptions,
+  });
+  const scooterEstimates = buildScooterRouteEstimates({
+    origin: { name: 'A', coordinates: [30.50, 50.45] }, destination: { name: 'B', coordinates: [30.52, 50.45] },
+    providers: [{ providerId: 'zelectra', providerName: 'Zelectra', networkId: 'zelectra-66', snapshot: allowedZone() }],
+    options: scooterOptions, now: Date.parse('2026-10-16T05:00:00Z'),
+  });
+  assert.deepEqual(bikeEstimates.map((estimate) => estimate.providerId), ['nextbike_ua']);
+  assert.deepEqual(scooterEstimates.map((estimate) => estimate.providerId), ['zelectra']);
 });
 
 const allowedZone = (rideThroughAllowed: boolean | null = null): GeofenceSnapshotForRouting => ({

@@ -71,6 +71,15 @@ export async function requestOsrmRoute(
   options: { timeoutMs?: number; profile: string; priority?: RoutingPriority; cacheParameters?: unknown; cacheService?: CacheService },
 ): Promise<RoadRoute & { calculatedAt?: string }> {
   routingMetrics.requests += 1;
+  if (options.profile === 'FOOT') {
+    let parsedEndpoint: URL;
+    try { parsedEndpoint = new URL(endpoint ?? ''); }
+    catch { throw new RoutingUnavailableError('Walking routing endpoint must be a valid OSRM foot-profile URL'); }
+    const endpointPath = parsedEndpoint.pathname.replace(/\/+$/, '');
+    if (parsedEndpoint.search || parsedEndpoint.hash || !/(?:^|\/)route\/v1\/foot$/i.test(endpointPath)) {
+      throw new RoutingUnavailableError('Walking routing endpoint must target the OSRM foot profile');
+    }
+  }
   const cache = options.cacheService ?? smartCache;
   const graphVersion = options.profile === 'FOOT'
     ? process.env.WALKING_GRAPH_VERSION || process.env.OSRM_GRAPH_VERSION

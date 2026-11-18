@@ -83,6 +83,21 @@ test('preserves unknown price and ranks a faster connected itinerary ahead of a 
   assert.equal(routes[1].priceMinor, 10000);
 });
 
+test('CHEAPEST excludes unknown-fare paths and is empty when no comparable fare exists', () => {
+  const known = option('known', 'A', 'B', 0, 3600, 5000);
+  const unknown = option('unknown', 'A', 'B', 0, 3000, 0);
+  unknown.priceMinor = null;
+  unknown.priceMinMinor = 1000;
+  unknown.priceMaxMinor = 9000;
+  const input = {
+    options: [known, unknown], originNodeId: 'A', destinationNodeId: 'B', departureAt: at(0),
+    strategy: 'CHEAPEST' as const, connections: new Map<string, RouteConnection>(), minimumTransferBufferSeconds: 0,
+  };
+
+  assert.deepEqual(planJourneys(input).map((route) => route.legs[0]?.id), ['known']);
+  assert.deepEqual(planJourneys({ ...input, options: [unknown] }), []);
+});
+
 test('does not continue past the requested destination to append extra legs', () => {
   const direct = option('direct', 'A', 'B', 0, 3600, 5000);
   const onward = option('onward', 'B', 'C', 3900, 5000, 1000);

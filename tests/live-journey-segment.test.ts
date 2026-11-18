@@ -127,6 +127,18 @@ describe('live journey segment assembly', () => {
     assert.deepEqual(result.vehicles, []);
   });
 
+  it('does not label a segment live when its only route vehicle positions are stale', () => {
+    const result = buildLiveJourneySegment(leg, {
+      vehicles: [vehicle('stale-only', 'trip-selected', 1, { timestamp: new Date(now - 90_001) })],
+      network: network(), timetable: feed(),
+    }, now);
+
+    assert.equal(result.status, 'SCHEDULED');
+    assert.equal(result.vehiclePositionStatus, 'UNAVAILABLE');
+    assert.deepEqual(result.vehicles, []);
+    assert.deepEqual(result.lineRoutes.map(({ directionId }) => directionId), ['0', '1']);
+  });
+
   it('uses provenance-marked official route geometry as scheduled context without inventing live vehicles', () => {
     const coordinates: Array<[number, number]> = [[30.598, 50.452], [30.57, 50.455], [30.526, 50.459]];
     const result = buildLiveJourneySegment({

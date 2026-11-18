@@ -99,4 +99,9 @@ describe('OSRM-compatible routing adapter', () => {
     delete process.env.WALKING_ROUTING_URL;
     await assert.rejects(() => getWalkingRoute([24,49],[24.001,49.001]), RoutingUnavailableError);
   });
+
+  it('rejects a non-foot OSRM endpoint before sending a walking request', async () => {
+    process.env.WALKING_ROUTING_URL = 'https://routing.example/route/v1/driving';
+    await assert.rejects(() => getWalkingRoute([24,49],[24.001,49.001]), RoutingUnavailableError);
+  });
 });

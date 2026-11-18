@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { unzipSync, strFromU8 } from 'fflate';
-import { fetchBinary } from './safeFetch';
+import { strFromU8 } from 'fflate';
+import { fetchGtfsFiles } from './gtfsComponents';
 import { pointIsInsideUkraine } from './gbfs';
 import { bboxOf, type ConnectionReport } from './types';
 
@@ -11,6 +11,8 @@ export function routeTypeLabel(routeType: number, routeName = ''): string {
   const isRailRoute = routeType === 2 || (routeType >= 100 && routeType < 200);
   if (isRailRoute && (name.includes('міська електричка') || name.includes('city train') || name.includes('city express') || name.includes('кільцева'))) return 'city_train';
   if (name.includes('маршрутка') || name.includes('маршрутн') || name.includes('minibus')) return 'marshrutka';
+  // Preserve an operator's explicit label when GTFS encodes trolleybus as generic route_type=3.
+  if (name.includes('тролейбус') || name.includes('trolleybus') || /(?:^|\s)тр\.?\s*\d/.test(name)) return 'trolleybus';
   if (routeType === 0 || (routeType >= 900 && routeType < 1000)) return 'tram';
   if (routeType === 1 || (routeType >= 400 && routeType < 500)) return 'metro';
   if (routeType === 106 || routeType === 109) return 'suburban';
@@ -126,16 +128,10 @@ const MAX_GTFS_BYTES = 60 * 1024 * 1024;
 export async function testGtfsConnection(url: string): Promise<ConnectionReport> {
   const checks: ConnectionReport['checks'] = [];
   const started = Date.now();
-  let data: Uint8Array;
-  try { data = (await fetchBinary(url, MAX_GTFS_BYTES)).data; checks.push({ name: 'Feed accessible', ok: true, detail: `${(data.byteLength / 1024).toFixed(0)} KB` }); }
-  catch (error) { const detail = error instanceof Error ? error.message : 'unknown'; checks.push({ name: 'Feed accessible', ok: false, detail }); return { health: 'offline', checks, counts: {}, responseMs: Date.now() - started, error: detail }; }
   let files: Record<string, Uint8Array>;
-  try {
-    files = unzipSync(data, { filter: (file) => /(^|\/)(agency|stops|routes|trips|stop_times|calendar|calendar_dates|shapes)\.txt$/.test(file.name) && file.originalSize < 200 * 1024 * 1024 });
-    // Feeds sometimes nest files in a folder; flatten to base names.
-    files = Object.fromEntries(Object.entries(files).map(([name, content]) => [name.split('/').pop() as string, content]));
-    checks.push({ name: 'Valid GTFS zip', ok: true });
-  } catch { checks.push({ name: 'Valid GTFS zip', ok: false, detail: 'Not a zip archive' }); return { health: 'offline', checks, counts: {}, responseMs: Date.now() - started, error: 'Feed is not a valid GTFS zip' }; }
+  try { files = await fetchGtfsFiles(url, MAX_GTFS_BYTES); checks.push({ name: 'Feed accessible', ok: true, detail: `${Object.keys(files).length} GTFS tables` }); }
+  catch (error) { const detail = error instanceof Error ? error.message : 'unknown'; checks.push({ name: 'Feed accessible', ok: false, detail }); return { health: 'offline', checks, counts: {}, responseMs: Date.now() - started, error: detail }; }
+  checks.push({ name: 'Valid GTFS tables', ok: true });
   const summary = summarizeGtfs(files);
   checks.push({ name: 'Required files', ok: summary.missingFiles.length === 0, detail: summary.missingFiles.length ? `missing: ${summary.missingFiles.join(', ')}` : 'all present' });
   const stopTolerance = Math.max(2, Math.floor(summary.stops * 0.02));
@@ -156,7 +152,9 @@ export async function testGtfsConnection(url: string): Promise<ConnectionReport>
     : !summary.hasUpcomingService
       ? 'GTFS feed has no service scheduled in the next 7 days'
       : 'GTFS feed is incomplete';
+  const sourceVersion = Object.entries(files).sort(([left], [right]) => left.localeCompare(right))
+    .reduce((hash, [name, content]) => hash.update(name).update(content), createHash('sha256')).digest('hex');
   return { health: healthy ? 'healthy' : !summary.hasUpcomingService || !summary.hasValidTimezone ? 'offline' : critical ? 'degraded' : 'offline', checks, counts,
-    responseMs: Date.now() - started, sourceVersion: createHash('sha256').update(data).digest('hex'),
+    responseMs: Date.now() - started, sourceVersion,
     ...(bboxOf(summary.stopPoints) ? { bbox: bboxOf(summary.stopPoints) } : {}), ...(healthy ? {} : { error }) };
 }

@@ -160,7 +160,14 @@ export function planJourneys(input: JourneyPlannerInput): PlannedJourney[] {
   }
 
   const unique = [...new Map(routes.map((route) => [pathSignature(route.legs), route])).values()];
-  return scoreJourneys(paretoFrontier(unique), input.strategy).slice(0, maximumResults).map(({ journey }) => journey);
+  // CHEAPEST is a promise about comparable, known fares. Unknown-fare paths
+  // remain useful under other strategies, but must not be presented as cheap.
+  const strategyCandidates = input.strategy === 'CHEAPEST'
+    ? unique.filter((journey) => journey.priceMinor !== null)
+    : unique;
+  return scoreJourneys(paretoFrontier(strategyCandidates), input.strategy)
+    .slice(0, maximumResults)
+    .map(({ journey }) => journey);
 }
 
 function summarize(legs: JourneyPlanLeg[], requestedDepartureAt: Date): PlannedJourney {

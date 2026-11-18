@@ -11,6 +11,76 @@ import {
 import { evaluateTransfer } from '../server/journey/transferEngine';
 import type { JourneyOption } from '../server/journey/types';
 import type { ProviderOption } from '../server/providers/types';
+import type { JourneyStrategy } from '../server/journey/types';
+
+type OraclePath = ProviderOption[];
+
+/** Independent bounded DFS for tiny, hand-built provider graphs. */
+function exhaustivePlannerPaths(input: {
+  options: readonly ProviderOption[];
+  origin: string;
+  destination: string;
+  departureAt: Date;
+  connections: ReadonlyMap<string, { walkingSeconds: number; walkingMeters: number }>;
+  minimumTransferBufferSeconds: number;
+  maximumLegs: number;
+}): OraclePath[] {
+  const result: OraclePath[] = [];
+  const search = (path: OraclePath, visited: ReadonlySet<string>) => {
+    const previous = path.at(-1)!;
+    if (previous.destinationNodeId === input.destination) {
+      result.push(path);
+      return;
+    }
+    if (path.length >= input.maximumLegs) return;
+    for (const next of input.options) {
+      if (path.some((leg) => leg.providerId === next.providerId && leg.id === next.id)
+        || next.originNodeId !== previous.destinationNodeId
+        || visited.has(next.destinationNodeId!)
+        || next.departureAt!.getTime() < previous.arrivalAt!.getTime()) continue;
+      const measured = input.connections.get(`${previous.destinationNodeId}\u0000${next.originNodeId}`);
+      if (!measured) continue;
+      const waitSeconds = (next.departureAt!.getTime() - previous.arrivalAt!.getTime()) / 1000;
+      const requiredSeconds = previous.etaUncertaintySeconds + measured.walkingSeconds + input.minimumTransferBufferSeconds;
+      if (waitSeconds < requiredSeconds || waitSeconds > 4 * 60 * 60) continue;
+      search([...path, next], new Set([...visited, next.originNodeId!, next.destinationNodeId!]));
+    }
+  };
+
+  for (const first of input.options) {
+    if (first.originNodeId !== input.origin || first.departureAt!.getTime() < input.departureAt.getTime()
+      || first.departureAt!.getTime() > input.departureAt.getTime() + 4 * 60 * 60 * 1000) continue;
+    search([first], new Set([input.origin, first.destinationNodeId!]));
+  }
+  return result;
+}
+
+function oraclePathSignature(path: OraclePath): string {
+  return path.map((leg) => `${leg.providerId}:${leg.id}`).join('|');
+}
+
+function oracleJourney(path: OraclePath, departureAt: Date, transferBufferSeconds: number): JourneyOption {
+  const last = path.at(-1)!;
+  const transfers = path.slice(1).map((leg, index) => {
+    const previous = path[index];
+    const wait = (leg.departureAt!.getTime() - previous.arrivalAt!.getTime()) / 1000;
+    const required = previous.etaUncertaintySeconds + transferBufferSeconds;
+    const slack = wait - required;
+    return slack < 0 ? 1 : slack < 300 ? 0.7 : slack < 900 ? 0.3 : 0.05;
+  });
+  const prices = path.map((leg) => leg.priceMinor);
+  return {
+    id: oraclePathSignature(path),
+    durationSeconds: (last.arrivalAt!.getTime() - departureAt.getTime()) / 1000,
+    priceMinor: prices.some((price) => price === null) ? null : prices.reduce<number>((sum, price) => sum + (price ?? 0), 0),
+    transfers: Math.max(0, path.filter((leg) => leg.mode !== 'WALK').length - 1),
+    walkingMeters: 0,
+    reliability: Math.min(...path.map((leg) => leg.reliability ?? 0)),
+    transferRisk: Math.max(0, ...transfers),
+    comfort: Math.min(...path.map((leg) => leg.comfort ?? 0)),
+    legs: path.map((leg) => ({ mode: leg.mode })),
+  };
+}
 
 describe('Section 20.3 Route Engine Oracle & Strategy Trade-off Fixtures', () => {
   const baseOption: JourneyOption = {
@@ -295,7 +365,7 @@ describe('Section 20.3 Route Engine Oracle & Strategy Trade-off Fixtures', () =>
     assert.equal(journey.durationSeconds, 45 * 60, 'Duration is from departureAt to final arrival');
   });
 
-  it('7. Small benchmark graph with reference exhaustive search: retains feasible 3-segment chain', () => {
+  it('7. Small benchmark fixture retains the feasible 3-segment chain', () => {
     const baseDate = new Date('2026-10-26T08:00:00Z');
 
     // Leg 1: Stop A -> Stop B (Bus, 15m, 10 UAH)
@@ -426,14 +496,59 @@ describe('Section 20.3 Route Engine Oracle & Strategy Trade-off Fixtures', () =>
     });
 
     // CHEAPEST must retain the 3-segment option (28 UAH vs 150 UAH)
-    assert.ok(planned.length >= 1, 'Exhaustive planner must return feasible candidates');
+    assert.ok(planned.length >= 1, 'Planner must return feasible candidates');
     const cheapest = planned[0];
     assert.equal(cheapest.legs.length, 3, '3-segment route must be assembled across 2 transfers');
     assert.equal(cheapest.transfers, 2, 'Must have exactly 2 transfers');
     assert.equal(cheapest.priceMinor, 2800, 'Sum of 1000 + 800 + 1000 = 2800 minor UAH (28 UAH)');
   });
 
-  it('8. Partial/truncated searches are explicitly marked and never claim completeness', () => {
+  it('8. Small-graph exhaustive reference preserves every feasible direct and 3-leg journey and strategy winner', () => {
+    const departureAt = new Date('2026-10-26T08:00:00Z');
+    const minute = (value: number) => new Date(departureAt.getTime() + value * 60_000);
+    const makeOption = (id: string, providerId: string, mode: ProviderOption['mode'], from: string, to: string,
+      depart: number, arrive: number, price: number): ProviderOption => ({
+      id, providerId, providerType: 'PUBLIC_TRANSIT', mode,
+      originNodeId: from, destinationNodeId: to,
+      origin: { name: from, coordinates: [24, 49] }, destination: { name: to, coordinates: [24.01, 49.01] },
+      departureAt: minute(depart), arrivalAt: minute(arrive), durationSeconds: (arrive - depart) * 60,
+      etaUncertaintySeconds: 0, priceMinor: price, priceMinMinor: price, priceMaxMinor: price,
+      currency: 'UAH', priceStatus: 'LOCKED', distanceMeters: 1000, availability: 'AVAILABLE',
+      reliability: 0.95, comfort: 0.8, dataSource: 'tiny-oracle-fixture', sourceFreshAt: departureAt, metadata: {},
+    });
+
+    const options = [
+      makeOption('ab-bus', 'bus-operator', 'BUS', 'A', 'B', 0, 10, 100),
+      makeOption('bc-tram', 'tram-operator', 'TRAM', 'B', 'C', 12, 20, 100),
+      makeOption('cd-rail', 'rail-operator', 'RAIL', 'C', 'D', 22, 30, 100),
+      makeOption('ad-taxi', 'taxi-operator', 'TAXI', 'A', 'D', 1, 35, 12000),
+    ];
+    const connections = createConnectionMap([
+      { fromNodeId: 'B', toNodeId: 'B', connection: { walkingSeconds: 0, walkingMeters: 0, source: 'fixture', measuredAt: departureAt } },
+      { fromNodeId: 'C', toNodeId: 'C', connection: { walkingSeconds: 0, walkingMeters: 0, source: 'fixture', measuredAt: departureAt } },
+    ]);
+    const referencePaths = exhaustivePlannerPaths({
+      options, origin: 'A', destination: 'D', departureAt, connections, minimumTransferBufferSeconds: 60, maximumLegs: 4,
+    });
+    const referenceIds = referencePaths.map(oraclePathSignature).sort();
+    assert.deepEqual(referenceIds, [
+      'bus-operator:ab-bus|tram-operator:bc-tram|rail-operator:cd-rail',
+      'taxi-operator:ad-taxi',
+    ].sort(), 'the independent DFS enumerates the only two feasible paths in the tiny graph');
+
+    for (const strategy of ['FASTEST', 'CHEAPEST', 'BALANCED'] as const satisfies readonly JourneyStrategy[]) {
+      const actual = planJourneys({
+        options, originNodeId: 'A', destinationNodeId: 'D', departureAt, strategy, connections,
+        minimumTransferBufferSeconds: 60, maximumLegs: 4,
+      });
+      assert.deepEqual(actual.map((journey) => journey.id).sort(), referenceIds,
+        `${strategy}: planner candidate set must match exhaustive feasible paths`);
+      const expectedWinner = scoreJourneys(referencePaths.map((path) => oracleJourney(path, departureAt, 60)), strategy)[0].journey.id;
+      assert.equal(actual[0]?.id, expectedWinner, `${strategy}: selected winner must match the exhaustively enumerated set`);
+    }
+  });
+
+  it('9. Partial/truncated searches are explicitly marked and never claim completeness', () => {
     // When search is truncated by depth or candidate pool, it must flag truncation
     const truncatedCandidate: JourneyOption = {
       ...baseOption,

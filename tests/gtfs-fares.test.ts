@@ -24,6 +24,8 @@ test('prices a multi-leg itinerary with one ticket when the GTFS transfer limit 
   ]);
   assert.ok(result);
   assert.equal(result.priceMinor, 4200);
+  assert.equal(result.priceMinMinor, 4200);
+  assert.equal(result.priceMaxMinor, 4200);
   assert.deepEqual(result.allocations.map((part) => [part.priceMinor, part.includedByPreviousFare]), [[4200, false], [0, true]]);
 });
 
@@ -43,7 +45,7 @@ test('chooses two single-ride fares when a transfer ticket is more expensive', (
 
 test('scales a known itinerary fare and each segment allocation by passenger count', () => {
   const fare = {
-    priceMinor: 4200, currency: 'UAH', source: 'gtfs-v1' as const,
+    priceMinor: 4200, priceMinMinor: 4000, priceMaxMinor: 5000, currency: 'UAH', source: 'gtfs-v1' as const,
     allocations: [
       { priceMinor: 4200, currency: 'UAH', fareProductId: 'through', includedByPreviousFare: false },
       { priceMinor: 0, currency: 'UAH', fareProductId: 'through', includedByPreviousFare: true },
@@ -51,6 +53,8 @@ test('scales a known itinerary fare and each segment allocation by passenger cou
   };
   const scaled = scaleGtfsFareForPassengers(fare, 3);
   assert.equal(scaled?.priceMinor, 12_600);
+  assert.equal(scaled?.priceMinMinor, 12_000);
+  assert.equal(scaled?.priceMaxMinor, 15_000);
   assert.deepEqual(scaled?.allocations.map((part) => part.priceMinor), [12_600, 0]);
   assert.equal(scaleGtfsFareForPassengers(fare, 0), null);
 });

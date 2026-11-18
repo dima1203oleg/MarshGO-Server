@@ -4,6 +4,10 @@ import { getTrustedProxyHops, validateRuntimeConfig } from '../server/config';
 
 const validProductionConfig: NodeJS.ProcessEnv = {
   NODE_ENV: 'production',
+  MARSHGO_BUILD_ID: 'release-test.1',
+  MARSHGO_BUILD_SHA: 'a'.repeat(40),
+  MARSHGO_BUILD_TIME: '2026-10-29T09:30:00Z',
+  MARSHGO_SOURCE_STATE: 'clean',
   TRUST_PROXY_HOPS: '1',
   SESSION_SECRET: 'a'.repeat(64),
   CORS_ORIGINS: 'https://marshgo.example,capacitor://localhost',
@@ -25,6 +29,13 @@ const validProductionConfig: NodeJS.ProcessEnv = {
 describe('runtime production configuration', () => {
   it('accepts explicit production origins and configured real SMS provider', () => {
     assert.doesNotThrow(() => validateRuntimeConfig(validProductionConfig));
+  });
+
+  it('fails closed when production build metadata is missing, malformed, or dirty', () => {
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, MARSHGO_BUILD_SHA: undefined }), /clean, SHA-pinned MARSHGO build metadata/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, MARSHGO_BUILD_SHA: 'a'.repeat(39) }), /clean, SHA-pinned MARSHGO build metadata/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, MARSHGO_BUILD_TIME: 'not-a-time' }), /clean, SHA-pinned MARSHGO build metadata/);
+    assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, MARSHGO_SOURCE_STATE: 'dirty' }), /clean, SHA-pinned MARSHGO build metadata/);
   });
 
   it('does not apply production restrictions to development', () => {
@@ -66,5 +77,14 @@ describe('runtime production configuration', () => {
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, HERE_TRAFFIC_ENABLED: 'true' }), /provider adapter is implemented/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, TRAFFIC_PROVIDER: 'tomtom' }), /only configured traffic provider/);
     assert.throws(() => validateRuntimeConfig({ ...validProductionConfig, GEOCODING_PROVIDER: 'unknown' }), /GEOCODING_PROVIDER must be nominatim or photon/);
+  });
+
+  it('rejects the public Photon evaluation endpoint before production startup', () => {
+    for (const name of ['GEOCODING_ENGINE_URL', 'GEOCODING_REVERSE_URL'] as const) {
+      assert.throws(
+        () => validateRuntimeConfig({ ...validProductionConfig, [name]: 'https://photon.komoot.io/api/' }),
+        new RegExp(`${name} must not use the public Photon evaluation endpoint`),
+      );
+    }
   });
 });

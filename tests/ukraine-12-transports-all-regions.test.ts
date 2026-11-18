@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-  UKRAINE_REGIONS,
   getAllRegions,
   findRegion,
   findRegionByCoordinates,
@@ -170,6 +169,24 @@ describe('Ukraine 12 Canonical Transports across all 26 Regions', () => {
     const lvivTram = findRegion('lviv-oblast')?.transportModes.tram;
     assert.equal(lvivTram?.available, true);
     assert.ok(lvivTram?.sources.some((s) => s.name.includes('Львівавтодор') || s.name.includes('Львівелектротранс')));
+
+    const lvivCatalog = getTransportCatalogForCity('Львів');
+    for (const mode of ['bus', 'tram'] as const) {
+      const entry = lvivCatalog.find((item) => item.id === mode);
+      assert.equal(entry?.enabled, true, `${mode} should be enabled from the verified Lviv static GTFS feed`);
+      assert.equal(entry?.availability, 'LIMITED', `${mode} must not imply live positions, fares, or booking`);
+    }
+
+    const lvivMarshrutka = lvivCatalog.find((item) => item.id === 'marshrutka');
+    assert.equal(lvivMarshrutka?.enabled, false, 'Unverified minibus services must not be advertised as searchable routes');
+    assert.equal(lvivMarshrutka?.availability, 'LIMITED', 'Other regional geometry does not prove a Lviv timetable');
+
+    const lvivTrolleybus = lvivCatalog.find((item) => item.id === 'trolleybus');
+    assert.equal(lvivTrolleybus?.enabled, false, 'GTFS-RT alone cannot establish a routeable Lviv trolleybus schedule');
+    assert.equal(lvivTrolleybus?.availability, 'NOT_AVAILABLE_IN_CITY');
+    assert.ok(findRegion('lviv-oblast')?.transportModes.trolleybus.sources.every((source) =>
+      source.type !== 'GTFS' || source.url !== 'https://track.ua-gis.com/gtfs/lviv/static.zip'),
+    'The verified Lviv static feed does not contain a trolleybus route type');
 
     const odesaTram = findRegion('odesa-oblast')?.transportModes.tram;
     assert.equal(odesaTram?.available, true);

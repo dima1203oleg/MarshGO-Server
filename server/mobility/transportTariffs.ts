@@ -29,7 +29,7 @@ export interface TransportFareRecord {
 }
 
 const VERIFIED_AT = '2026-10-13';
-const LVIV_ATP1_VERIFIED_AT = '2026-10-25';
+const LVIV_ATP1_VERIFIED_AT = '2026-11-13';
 
 /** Audited tariff facts. Price is stored in minor units (kopiyky); source values remain visible. */
 export const transportFareCatalog: TransportFareRecord[] = [
@@ -224,9 +224,17 @@ function validLegs(legs: readonly FareLegInput[]): boolean {
     && (index === 0 || leg.departureAt >= legs[index - 1]!.arrivalAt));
 }
 
-function fareResult(priceMinor: number, allocations: GtfsItineraryFare['allocations']): GtfsItineraryFare | null {
-  if (!Number.isSafeInteger(priceMinor) || priceMinor < 0 || allocations.length === 0) return null;
-  return { priceMinor, currency: 'UAH', allocations, source: 'city-tariff-registry' };
+function fareResult(
+  priceMinor: number,
+  allocations: GtfsItineraryFare['allocations'],
+  priceMinMinor = priceMinor,
+  priceMaxMinor = priceMinor,
+): GtfsItineraryFare | null {
+  if (!Number.isSafeInteger(priceMinor) || priceMinor < 0
+    || !Number.isSafeInteger(priceMinMinor) || priceMinMinor < 0
+    || !Number.isSafeInteger(priceMaxMinor) || priceMaxMinor < priceMinMinor
+    || priceMinor < priceMinMinor || priceMinor > priceMaxMinor || allocations.length === 0) return null;
+  return { priceMinor, priceMinMinor, priceMaxMinor, currency: 'UAH', allocations, source: 'city-tariff-registry' };
 }
 
 function perRideFare(legs: readonly FareLegInput[], priceMinor: number, fareProductId: string): GtfsItineraryFare | null {
@@ -253,7 +261,9 @@ export function calculateCityTariffFare(legs: readonly FareLegInput[]): GtfsItin
       total += 2_300;
       return { priceMinor: 2_300, currency: 'UAH', fareProductId: 'lviv-leocard-adult', includedByPreviousFare: false };
     });
-    return fareResult(total, allocations);
+    // The itinerary price is the lowest adult option (LeoCard). Without a
+    // selected payment medium, the published cash fare is the upper bound.
+    return fareResult(total, allocations, total, legs.length * 3_000);
   }
 
   if (city === 'kyiv') {

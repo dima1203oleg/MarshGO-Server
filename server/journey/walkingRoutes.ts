@@ -59,13 +59,18 @@ export function resolveWalkingEndpoint(
         const [minLng, minLat, maxLng, maxLat] = entry.bbox;
         const fromIn = from[0] >= minLng && from[0] <= maxLng && from[1] >= minLat && from[1] <= maxLat;
         const toIn = to[0] >= minLng && to[0] <= maxLng && to[1] >= minLat && to[1] <= maxLat;
-        if (fromIn || toIn) return entry.url;
+        if (fromIn && toIn) return entry.url;
       }
     } catch {
       // ignore JSON parse error
     }
   }
   return fallbackEndpoint || process.env.WALKING_ROUTING_URL?.trim() || null;
+}
+
+/** True only when every required pedestrian link is covered by a regional or global router. */
+export function hasPedestrianRouterCoverage(connections: ReadonlyArray<{ from: [number, number]; to: [number, number] }>): boolean {
+  return connections.every(({ from, to }) => Boolean(resolveWalkingEndpoint(from, to)));
 }
 
 /**

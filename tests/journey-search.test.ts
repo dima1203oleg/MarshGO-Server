@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { parseJourneySearchRequest, transitProviderAllowed } from '../server/journey/search';
+import { hasGtfsRouteEvidence, micromobilityEstimateOptions, parseJourneySearchRequest, shouldSearchGtfsTimetables, transitProviderAllowed } from '../server/journey/search';
 import { JOURNEY_TRANSPORT_TYPES } from '../server/journey/types';
 
 const now = new Date('2026-09-30T08:00:00.000Z');
@@ -14,6 +14,25 @@ const request = {
 };
 
 describe('Journey search request validation', () => {
+  it('keeps spatially eligible timetable search enabled for intercity and nationwide distances', () => {
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: 5_000, eligibleProviderCount: 1, hasMetroSource: false }), true);
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: 468_000, eligibleProviderCount: 2, hasMetroSource: false }), true);
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: 0, eligibleProviderCount: 0, hasMetroSource: true }), true);
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: 468_000, eligibleProviderCount: 0, hasMetroSource: false }), false);
+    assert.equal(shouldSearchGtfsTimetables({ routeDistanceMeters: Number.NaN, eligibleProviderCount: 2, hasMetroSource: false }), false);
+  });
+
+  it('requires validated route counts for the requested mode before admitting a GTFS provider', () => {
+    assert.equal(hasGtfsRouteEvidence('BUS', undefined), false, 'a reachability-only report is not a route');
+    assert.equal(hasGtfsRouteEvidence('BUS', { vehicles_bus: 4 }), false, 'live positions alone do not create a timetable route');
+    assert.equal(hasGtfsRouteEvidence('BUS', { routes_tram: 2 }), false, 'another mode cannot enable bus search');
+    assert.equal(hasGtfsRouteEvidence('BUS', { routes_bus: 3 }), true);
+    assert.equal(hasGtfsRouteEvidence('BUS', { routes_intercity_bus: 1 }), true);
+    assert.equal(hasGtfsRouteEvidence('RAIL', { routes_train: 12 }), true);
+    assert.equal(hasGtfsRouteEvidence('RAIL', { routes_suburban: 2 }), true);
+    assert.equal(hasGtfsRouteEvidence('TRAM', { routes_tram: 0 }), false);
+  });
+
   it('exposes only the twelve canonical categories and normalizes legacy transit subtypes', () => {
     assert.deepEqual(JOURNEY_TRANSPORT_TYPES, ['bus','marshrutka','trolleybus','tram','metro','carpool','taxi','train','bike','scooter','carsharing','transfer']);
     const parsed = parseJourneySearchRequest({ ...request, preferences: { allowedTransportTypes: ['intercity_bus', 'city_train'] } }, now);
@@ -43,6 +62,25 @@ describe('Journey search request validation', () => {
     assert.equal(transitProviderAllowed(canonicalRailProvider.preferences, 'city_train', 'УЗ — міська електричка'), true);
   });
 
+  it('keeps per-mode rental provider choices separate and preserves the legacy shared allowlist', () => {
+    const parsed = parseJourneySearchRequest({ ...request, preferences: {
+      allowedProviderIds: ['shared-provider'],
+      allowedProviderIdsByType: { bike: ['bike-provider'], scooter: [] },
+    } }, now);
+    const sharedOptions = { departureAt: now, maxWalkToRentalMeters: 500, allowedProviderIds: ['shared-provider'] };
+    assert.deepEqual(micromobilityEstimateOptions(parsed.preferences, 'bike', sharedOptions), {
+      ...sharedOptions, allowedProviderIds: ['bike-provider'],
+    });
+    assert.equal(micromobilityEstimateOptions(parsed.preferences, 'scooter', sharedOptions), null, 'an explicit empty mode selection excludes that mode');
+
+    const legacy = parseJourneySearchRequest({ ...request, preferences: { allowedProviderIds: ['shared-provider'] } }, now);
+    assert.deepEqual(micromobilityEstimateOptions(legacy.preferences, 'bike', sharedOptions), sharedOptions);
+    assert.deepEqual(micromobilityEstimateOptions(legacy.preferences, 'scooter', sharedOptions), sharedOptions);
+
+    const unfiltered = parseJourneySearchRequest(request, now);
+    assert.deepEqual(micromobilityEstimateOptions(unfiltered.preferences, 'bike', sharedOptions), sharedOptions);
+  });
+
   it('rejects invalid points, missing time zone, past departure, and unsupported preferences', () => {
     assert.throws(() => parseJourneySearchRequest({ ...request, origin: { ...request.origin, coordinates: [181, 0] } }, now), /valid WGS84/);
     assert.throws(() => parseJourneySearchRequest({ ...request, departureAt: '2026-09-30T11:00:00' }, now), /explicit timezone/);
@@ -53,6 +91,8 @@ describe('Journey search request validation', () => {
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransitProviders: [''] } }, now), /allowedTransitProviders is invalid/);
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransitProvidersByType: { ufo: ['Provider'] } } }, now), /allowedTransitProvidersByType is invalid/);
     assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedTransitProvidersByType: { plane: ['Provider'] } } }, now), /allowedTransitProvidersByType is invalid/);
+    assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedProviderIdsByType: { bus: ['provider'] } } }, now), /allowedProviderIdsByType is invalid/);
+    assert.throws(() => parseJourneySearchRequest({ ...request, preferences: { allowedProviderIdsByType: { bike: ['invalid provider'] } } }, now), /allowedProviderIdsByType is invalid/);
     assert.throws(() => parseJourneySearchRequest({ ...request, strategy: 'FAKEST' }, now), /not supported/);
   });
 });

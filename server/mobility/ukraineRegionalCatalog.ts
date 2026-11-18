@@ -357,9 +357,10 @@ export const UKRAINE_REGIONS: UkraineOblast[] = [
         ],
       },
       marshrutka: {
-        available: true,
-        status: 'AVAILABLE',
-        capabilities: ['SEARCH', 'SCHEDULE', 'REALTIME_POSITION', 'TRANSIT_ROUTES', 'PROVIDER_ATTRIBUTION'],
+        available: false,
+        status: 'LIMITED',
+        reason: 'Окремий фід маршруток для Львова не підтверджений. Перевірений міський GTFS містить автобуси й трамваї; геометрію з інших міст області не плануємо як рейс зі зупинками.',
+        capabilities: [],
         sources: [
           {
             name: 'Червоноград — позиції (EasyWay JSON)',
@@ -368,19 +369,13 @@ export const UKRAINE_REGIONS: UkraineOblast[] = [
             access: 'OPEN',
             sourceRef: 'data.gov.ua:chervonograd',
           },
-          {
-            name: 'Львівські міські та приміські маршрутні таксі (Львівавтодор)',
-            type: 'GTFS',
-            url: 'https://track.ua-gis.com/gtfs/lviv/static.zip',
-            access: 'OPEN',
-            sourceRef: 'opendata.city-adm.lviv.ua:minibus',
-          },
         ],
       },
       trolleybus: {
-        available: true,
-        status: 'AVAILABLE',
-        capabilities: ['SEARCH', 'SCHEDULE', 'REALTIME_POSITION', 'TRANSIT_ROUTES', 'TRANSIT_STOPS'],
+        available: false,
+        status: 'LIMITED',
+        reason: 'У перевіреному статичному GTFS Львова є 64 автобусні та 8 трамвайних маршрутів, але немає підтверджених тролейбусних рейсів. GTFS-RT без відповідного розкладу не використовується для побудови маршруту.',
+        capabilities: [],
         sources: [
           {
             name: 'Львівелектротранс — тролейбуси (GTFS / GTFS-RT)',
@@ -396,6 +391,13 @@ export const UKRAINE_REGIONS: UkraineOblast[] = [
         status: 'AVAILABLE',
         capabilities: ['SEARCH', 'SCHEDULE', 'REALTIME_POSITION', 'TRANSIT_ROUTES', 'TRANSIT_STOPS'],
         sources: [
+          {
+            name: 'Львівавтодор — трамвайні рейси (GTFS)',
+            type: 'GTFS',
+            url: 'https://track.ua-gis.com/gtfs/lviv/static.zip',
+            access: 'OPEN',
+            sourceRef: 'opendata.city-adm.lviv.ua:lvivavtodor-gtfs',
+          },
           {
             name: 'Львівелектротранс — трамваї (GTFS / GTFS-RT)',
             type: 'GTFS_RT',

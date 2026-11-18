@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { GtfsItinerary } from '../server/journey/gtfsTimetable';
-import { applyRoutedWalkingPaths, createWalkingRouteBudget, routePedestrianPath, type WalkingRoutePath } from '../server/journey/walkingRoutes';
+import { applyRoutedWalkingPaths, createWalkingRouteBudget, hasPedestrianRouterCoverage, resolveWalkingEndpoint, routePedestrianPath, type WalkingRoutePath } from '../server/journey/walkingRoutes';
 
 const start = Date.parse('2026-10-01T08:00:00Z');
 const at = (seconds: number) => new Date(start + seconds * 1000);
@@ -71,6 +71,57 @@ test('does not fabricate a route when the pedestrian provider is unconfigured', 
   assert.equal(await routePedestrianPath([24, 49], [24.01, 49.01], ''), null);
 });
 
+test('selects a regional pedestrian router only when both endpoints are within its coverage', (t) => {
+  const originalUrls = process.env.WALKING_ROUTING_URLS;
+  t.after(() => {
+    if (originalUrls === undefined) delete process.env.WALKING_ROUTING_URLS;
+    else process.env.WALKING_ROUTING_URLS = originalUrls;
+  });
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([{ bbox: [23, 48, 25, 50], url: 'https://regional.example/route/v1/foot' }]);
+
+  assert.equal(resolveWalkingEndpoint([24, 49], [24.5, 49.5], 'https://national.example/route/v1/foot'), 'https://regional.example/route/v1/foot');
+  assert.equal(resolveWalkingEndpoint([24, 49], [26, 49], 'https://national.example/route/v1/foot'), 'https://national.example/route/v1/foot');
+});
+
+test('selects the correct regional pedestrian graph for each city without cross-city fallback', (t) => {
+  const prior = process.env.WALKING_ROUTING_URLS;
+  const priorFallback = process.env.WALKING_ROUTING_URL;
+  t.after(() => {
+    if (prior === undefined) delete process.env.WALKING_ROUTING_URLS; else process.env.WALKING_ROUTING_URLS = prior;
+    if (priorFallback === undefined) delete process.env.WALKING_ROUTING_URL; else process.env.WALKING_ROUTING_URL = priorFallback;
+  });
+  delete process.env.WALKING_ROUTING_URL;
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([
+    { bbox: [23.9, 49.75, 24.2, 49.95], url: 'http://127.0.0.1:3013/route/v1/foot' },
+    { bbox: [30.2, 50.25, 30.8, 50.62], url: 'http://127.0.0.1:3014/route/v1/foot' },
+  ]);
+  assert.equal(resolveWalkingEndpoint([24.0297, 49.8397], [24.06, 49.84]), 'http://127.0.0.1:3013/route/v1/foot');
+  assert.equal(resolveWalkingEndpoint([30.489, 50.44], [30.5234, 50.4501]), 'http://127.0.0.1:3014/route/v1/foot');
+  assert.equal(resolveWalkingEndpoint([24.0297, 49.8397], [30.5234, 50.4501]), null);
+});
+
+test('a regional router list does not claim pedestrian coverage in an unconfigured city', (t) => {
+  const prior = process.env.WALKING_ROUTING_URLS;
+  const priorFallback = process.env.WALKING_ROUTING_URL;
+  t.after(() => {
+    if (prior === undefined) delete process.env.WALKING_ROUTING_URLS; else process.env.WALKING_ROUTING_URLS = prior;
+    if (priorFallback === undefined) delete process.env.WALKING_ROUTING_URL; else process.env.WALKING_ROUTING_URL = priorFallback;
+  });
+  delete process.env.WALKING_ROUTING_URL;
+  process.env.WALKING_ROUTING_URLS = JSON.stringify([
+    { bbox: [23.9, 49.75, 24.2, 49.95], url: 'http://127.0.0.1:3013/route/v1/foot' },
+    { bbox: [30.2, 50.25, 30.8, 50.62], url: 'http://127.0.0.1:3014/route/v1/foot' },
+  ]);
+
+  assert.equal(hasPedestrianRouterCoverage([
+    { from: [23.8391363, 49.255416], to: [23.849, 49.259] },
+    { from: [23.867, 49.268], to: [23.8734769, 49.2670035] },
+  ]), false);
+  assert.equal(hasPedestrianRouterCoverage([
+    { from: [24.0297, 49.8397], to: [24.06, 49.84] },
+  ]), true);
+});
+
 test('uses the configured OSRM foot profile and preserves its routed geometry', async (t) => {
   const originalFetch = globalThis.fetch;
   let requestedUrl = '';
@@ -88,6 +139,19 @@ test('uses the configured OSRM foot profile and preserves its routed geometry', 
   assert.deepEqual(routed, {
     distanceMeters: 1481, durationSeconds: 501, geometry: [[24, 49], [24.01, 49.01]],
   });
+});
+
+test('rejects a driving-profile URL for pedestrian geometry without making a request', async (t) => {
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount++;
+    throw new Error('invalid foot endpoint should fail before fetch');
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  assert.equal(await routePedestrianPath([24, 49], [24.01, 49.01], 'https://routing.example/route/v1/driving'), null);
+  assert.equal(fetchCount, 0);
 });
 
 test('caps external foot-route requests per search without caching a budget miss', async (t) => {
