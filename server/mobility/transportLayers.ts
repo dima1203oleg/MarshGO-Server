@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import { unzipSync, strFromU8 } from 'fflate';
+import { strFromU8 } from 'fflate';
 import bindings from 'gtfs-realtime-bindings';
 import { z } from 'zod';
 import { cacheKey, smartCache } from '../cache/cacheService';
