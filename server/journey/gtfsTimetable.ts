@@ -1822,7 +1822,12 @@ export function findGtfsItinerariesWithStats(
       .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]) }))
       .filter(({ distance }) => distance <= radius)
       .sort((a, b) => a.distance - b.distance);
-    const ranked = distances.slice(0, MAX_ENDPOINT_CANDIDATE_STOPS);
+    // Keep the full walk-shed ranked by distance. Truncating before the mode
+    // guarantee below would let a dense surface network hide the railway
+    // station of a city (Lviv has ~1000 stops within 15 km and the station sits
+    // 2.5 km away), so the count bound applies only to the route-pattern pass.
+    const ranked = distances;
+    const routePatternWindow = Math.min(ranked.length, MAX_ENDPOINT_CANDIDATE_STOPS);
     const selected = new Map<string, typeof ranked[number]>();
     const selectedByRoutePattern = new Map<string, number>();
     const routePatternsByStop = new Map<string, Set<string>>();
@@ -1882,7 +1887,8 @@ export function findGtfsItinerariesWithStats(
       }
     }
 
-    for (const item of ranked) {
+    for (let index = 0; index < routePatternWindow; index += 1) {
+      const item = ranked[index]!;
       if (selected.has(item.stop.id)) continue;
       const addsRoutePatternCoverage = [...routePatternsAtStop(item.stop.id)]
         .some((pattern) => (selectedByRoutePattern.get(pattern) ?? 0) < MAX_STOPS_PER_ROUTE_PATTERN);
@@ -1931,6 +1937,27 @@ export function findGtfsItinerariesWithStats(
   // endpoint. Keep the urban graph around endpoints and actual rail/intercity
   // bus stops, while national feeds continue to use the full route corridor.
   const intercitySearch = routeDistance > 30_000;
+  // National long-distance feeds (railways, intercity coaches) are sparse by
+  // construction — the whole national rail timetable is a few hundred stops —
+  // while their useful transfer stations frequently sit far outside the
+  // origin-destination corridor. Rivne has no direct train to Lviv at all; every
+  // real itinerary changes in Kyiv, which the corridor band excludes. Admit the
+  // complete stop set of national providers so genuine detour itineraries stay
+  // discoverable. Dense city feeds keep the corridor bound that protects memory.
+  const nationalFeedStopIds = new Set<string>();
+  if (intercitySearch) {
+    for (const [stopId, entries] of feed.stopTimesByStop) {
+      for (const entry of entries) {
+        const trip = feed.trips.get(entry.tripId);
+        if (trip && feed.providersByRoute?.get(trip.routeId)?.city === 'Україна') {
+          nationalFeedStopIds.add(stopId);
+          break;
+        }
+      }
+    }
+  }
+  const nationalEligibleStops = nationalFeedStopIds.size
+    ? new Set([...corridorStops, ...nationalFeedStopIds]) : corridorStops;
   const localCityCatchmentStops = new Set<string>([
     ...originStops.map(({ stop }) => stop.id),
     ...destinationStops.map(({ stop }) => stop.id),
@@ -2105,6 +2132,7 @@ export function findGtfsItinerariesWithStats(
   const tripSegmentsOfferedByRetentionTier = debugEnabled ? [0, 0, 0, 0, 0] : undefined;
   let tripInstanceSegmentCandidatesGenerated = 0;
   let tripInstanceSegmentCandidatesRetained = 0;
+  for (const stopId of nationalFeedStopIds) interchangeStopIds.add(stopId);
   for (const [stopId, routeIds] of routesByStop) {
     if (!interchangeStopIds.has(stopId)) continue;
     for (const routeId of routeIds) {
@@ -2114,7 +2142,7 @@ export function findGtfsItinerariesWithStats(
       const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
       if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
       const eligibleStops = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
-        ? localCityCatchmentStops : corridorStops;
+        ? localCityCatchmentStops : nationalEligibleStops;
       if (!eligibleStops.has(stopId)) continue;
       candidateStopCountByRoute.set(routeId, (candidateStopCountByRoute.get(routeId) ?? 0) + 1);
     }
@@ -2228,7 +2256,7 @@ export function findGtfsItinerariesWithStats(
     if (!stops || stops.length < 2) continue;
     const providerCity = feed.providersByRoute?.get(trip.routeId)?.city ?? input.providerCity;
     const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
-      ? localCityCatchmentStops : corridorStops;
+      ? localCityCatchmentStops : nationalEligibleStops;
     const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
       && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
@@ -2625,7 +2653,7 @@ export function findGtfsItinerariesWithStats(
     const graphSegmentLimitPerRoute = graphSegmentBudgetByRoute.get(trip.routeId) ?? 0;
     if (graphSegmentLimitPerRoute === 0) continue;
     const localFeedInIntercitySearch = intercitySearch && providerCity !== undefined && providerCity !== 'Україна';
-    const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : corridorStops;
+    const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : nationalEligibleStops;
     const eligibleIndexes = stops.flatMap((stop, index) => eligibleStopIds.has(stop.stopId)
       && interchangeStopIds.has(stop.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;

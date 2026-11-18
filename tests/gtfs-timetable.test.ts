@@ -3525,3 +3525,127 @@ test('the interchange ride guard still bounds a leg that merely passes an interc
   });
   assert.equal(result.itineraries.length, 1, 'a normal-length leg still works with transfers enabled');
 });
+
+const nationalDetourFeed = () => parseGtfsTimetable({
+  // National rail feed: the only scheduled link between the two oblast centres
+  // changes at a hub that lies far outside the origin-destination corridor.
+  'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\na,National Rail,https://example.test,Europe/Kyiv'),
+  'routes.txt': new TextEncoder().encode([
+    'route_id,agency_id,route_short_name,route_long_name,route_type',
+    'west,a,101,Westbound long distance train,2',
+    'east,a,102,Eastbound long distance train,2',
+  ].join('\n')),
+  'stops.txt': new TextEncoder().encode([
+    'stop_id,stop_name,stop_lat,stop_lon',
+    'west_hub,West Centre,49.8400,24.0200',
+    'south_hub,Remote Hub,47.5000,28.5000',
+    'east_hub,East Centre,50.4500,30.5200',
+  ].join('\n')),
+  'trips.txt': new TextEncoder().encode([
+    'route_id,service_id,trip_id,trip_headsign',
+    'west,weekday,t1,Remote Hub',
+    'east,weekday,t2,East Centre',
+  ].join('\n')),
+  'stop_times.txt': new TextEncoder().encode([
+    'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
+    't1,08:30:00,08:30:00,west_hub,1,0,0',
+    't1,13:30:00,13:30:00,south_hub,2,0,0',
+    't2,15:30:00,15:30:00,south_hub,1,0,0',
+    't2,20:30:00,20:30:00,east_hub,2,0,0',
+  ].join('\n')),
+  'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,1,1,1,1,1,1,20261001,20261231'),
+});
+
+test('a national feed transfer beyond the corridor band still produces the itinerary', () => {
+  // Rivne-Lviv style query: no direct train exists, every real trip changes in
+  // a distant hub that the origin-destination corridor band never contains.
+  const timetable = mergeGtfsTimetables([{
+    providerId: 'national', providerName: 'National Rail', providerCity: 'Україна', feed: nationalDetourFeed(),
+  }])!;
+  const result = findGtfsItinerariesWithStats(timetable, {
+    providerId: 'p1', providerName: 'National Rail',
+    origin: [24.0350, 49.8480] as [number, number],
+    destination: [30.5230, 50.4500] as [number, number],
+    earliestDeparture: new Date('2026-10-12T08:00:00+03:00'),
+    latestDeparture: new Date('2026-10-13T08:00:00+03:00'),
+    now: new Date('2026-10-08T00:00:00Z'),
+    maximumJourneySeconds: 24 * 60 * 60,
+    maximumTransfers: 1,
+    maximumAccessWalkingMeters: 15_000,
+    maximumEgressWalkingMeters: 15_000,
+  });
+  assert.equal(result.itineraries.length, 1, 'the remote national hub is an eligible interchange');
+  assert.equal(result.itineraries[0]?.segments.filter((segment) => segment.mode === 'RAIL').length, 2);
+});
+
+const denseCityRailFeed = () => {
+  // A dense urban surface network plus one national railway station 4 km from
+  // the requested centre: further away than every one of the 320 tram stops.
+  const stops = ['stop_id,stop_name,stop_lat,stop_lon'];
+  const routes = ['route_id,agency_id,route_short_name,route_long_name,route_type'];
+  const trips = ['route_id,service_id,trip_id,trip_headsign'];
+  const stopTimes = ['trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type'];
+  for (let route = 0; route < 8; route++) {
+    routes.push(`t${route},c,${route + 1},Tram ${route + 1},0`);
+    trips.push(`t${route},weekday,city_t${route},Centre`);
+    for (let index = 0; index < 40; index++) {
+      const id = `tram_${route}_${index}`;
+      const lat = 49.8400 + index * 0.00004;
+      const lon = 24.0300 + route * 0.00002;
+      stops.push(`${id},Tram ${route} ${index},${lat.toFixed(6)},${lon.toFixed(6)}`);
+      const minutes = 8 * 60 + index * 2;
+      const time = `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}:00`;
+      stopTimes.push(`city_t${route},${time},${time},${id},${index + 1},0,0`);
+    }
+  }
+  return {
+    city: parseGtfsTimetable({
+      'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\nc,City Tram,https://example.test,Europe/Kyiv'),
+      'routes.txt': new TextEncoder().encode(routes.join('\n')),
+      'stops.txt': new TextEncoder().encode(stops.join('\n')),
+      'trips.txt': new TextEncoder().encode(trips.join('\n')),
+      'stop_times.txt': new TextEncoder().encode(stopTimes.join('\n')),
+      'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,1,1,1,1,1,1,20261001,20261231'),
+    }),
+    rail: parseGtfsTimetable({
+      'agency.txt': new TextEncoder().encode('agency_id,agency_name,agency_url,agency_timezone\na,National Rail,https://example.test,Europe/Kyiv'),
+      'routes.txt': new TextEncoder().encode('route_id,agency_id,route_short_name,route_long_name,route_type\nr,a,101,Long distance train,2'),
+      'stops.txt': new TextEncoder().encode([
+        'stop_id,stop_name,stop_lat,stop_lon',
+        'city_station,City Station,49.8700,24.0300',
+        'far_station,Far Station,50.4500,30.5200',
+      ].join('\n')),
+      'trips.txt': new TextEncoder().encode('route_id,service_id,trip_id,trip_headsign\nr,weekday,t1,Far Station'),
+      'stop_times.txt': new TextEncoder().encode([
+        'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
+        't1,10:00:00,10:00:00,city_station,1,0,0',
+        't1,16:30:00,16:30:00,far_station,2,0,0',
+      ].join('\n')),
+      'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,1,1,1,1,1,1,20261001,20261231'),
+    }),
+  };
+};
+
+test('a dense city stop set cannot hide the railway station from endpoint access', () => {
+  const { city, rail } = denseCityRailFeed();
+  const timetable = mergeGtfsTimetables([
+    { providerId: 'city', providerName: 'City Tram', providerCity: 'Львів', feed: city },
+    { providerId: 'national', providerName: 'National Rail', providerCity: 'Україна', feed: rail },
+  ])!;
+  const result = findGtfsItinerariesWithStats(timetable, {
+    providerId: 'p1', providerName: 'Mixed',
+    origin: [24.0300, 49.8400] as [number, number],
+    destination: [30.5230, 50.4500] as [number, number],
+    earliestDeparture: new Date('2026-10-12T07:00:00+03:00'),
+    latestDeparture: new Date('2026-10-13T08:00:00+03:00'),
+    now: new Date('2026-10-08T00:00:00Z'),
+    maximumJourneySeconds: 24 * 60 * 60,
+    maximumTransfers: 2,
+    maximumAccessWalkingMeters: 15_000,
+    maximumEgressWalkingMeters: 15_000,
+  });
+  const railItineraries = result.itineraries.filter((itinerary) =>
+    itinerary.segments.some((segment) => segment.mode === 'RAIL'));
+  assert.ok(railItineraries.length >= 1,
+    'the station 4 km out must stay reachable behind 320 closer tram stops');
+});
