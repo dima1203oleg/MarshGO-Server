@@ -4170,7 +4170,12 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     const egressSeconds = walkingSeconds(egressMeters);
     const arrivalAt = new Date(last.arrivalAt.getTime() + egressSeconds * 1000);
     const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
-    if (durationSeconds > maximumJourneySeconds) return;
+    // The horizon bounds vehicle travel, not the last pedestrian metre: a
+    // vehicle that arrives inside the window is a real ride even when the walk
+    // from its stop to the door crosses the boundary. Without this allowance a
+    // 23 h 50 min intercity arrival was discarded over a 12-minute walk.
+    const vehicleArrivalSeconds = Math.ceil((last.arrivalAt.getTime() - departureAt.getTime()) / 1000);
+    if (vehicleArrivalSeconds > maximumJourneySeconds) return;
     const initialWaitSeconds = Math.max(0, Math.ceil((first.departureAt.getTime()
       - departureAt.getTime() - walkingSeconds(accessMeters) * 1000) / 1000));
     const transferWaitingSeconds = path.slice(1).reduce((total, segment, index) => {

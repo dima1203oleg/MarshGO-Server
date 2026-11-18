@@ -4008,3 +4008,41 @@ test('a national transfer hub outside the origin-destination corridor still prod
   assert.ok(national.itineraries.some((journey) => journey.segments.length === 2),
     'national provider stops outside the corridor band must stay usable as a transfer hub');
 });
+
+test('a ride inside the horizon survives a trailing walk that spills just past it', () => {
+  const station = { id: 'station', name: 'Station', lon: 24.0200, lat: 49.8400 };
+  const townCentre: [number, number] = [24.0200, 49.8805];
+  const timetable = feed();
+  timetable.routes.clear();
+  timetable.trips.clear();
+  timetable.stopTimes.clear();
+  timetable.stopTimesByStop.clear();
+  timetable.stops.clear();
+  timetable.stops.set(station.id, station);
+  timetable.routes.set('r', { name: 'Rail', mode: 'RAIL', transportType: 'train' });
+  timetable.trips.set('t', { routeId: 'r', serviceId: 'weekday', headsign: 'Station' });
+  const stopTimes = [
+    { stopId: station.id, sequence: 1, arrivalSeconds: 8 * 3600, departureSeconds: 8 * 3600, pickupType: 0, dropOffType: 0 },
+  ];
+  timetable.stopTimes.set('t', stopTimes);
+  timetable.stopTimesByStop.set(station.id, [{ tripId: 't', index: 0 }]);
+  // Two-stop trip: A -> station, so the passenger rides 1 h and lands 4.5 km
+  // from the destination pin (about 1 h of walking on top of a 5 h horizon).
+  const boarding = { id: 'boarding', name: 'Boarding', lon: 24.0200, lat: 49.7500 };
+  timetable.stops.set(boarding.id, boarding);
+  timetable.stopTimes.set('t', [
+    { stopId: boarding.id, sequence: 1, arrivalSeconds: 7 * 3600, departureSeconds: 7 * 3600, pickupType: 0, dropOffType: 0 },
+    { stopId: station.id, sequence: 2, arrivalSeconds: 11 * 3600 + 30 * 60, departureSeconds: 11 * 3600 + 30 * 60, pickupType: 0, dropOffType: 0 },
+  ]);
+  timetable.stopTimesByStop.set(boarding.id, [{ tripId: 't', index: 0 }]);
+  timetable.stopTimesByStop.set(station.id, [{ tripId: 't', index: 1 }]);
+
+  const result = findGtfsItinerariesWithStats(timetable, {
+    providerId: 'p1', providerName: 'Test Rail', origin: [boarding.lon, boarding.lat], destination: townCentre,
+    earliestDeparture: new Date('2026-10-12T04:00:00Z'), latestDeparture: new Date('2026-10-12T06:00:00Z'),
+    now: new Date('2026-10-08T00:00:00Z'), maximumTransfers: 0,
+    maximumAccessWalkingMeters: 1_000, maximumEgressWalkingMeters: 6_000, maximumJourneySeconds: 5 * 3600,
+  });
+  assert.ok(result.itineraries.length > 0,
+    'the vehicle arrives inside the horizon; only the trailing walk crosses it');
+});
