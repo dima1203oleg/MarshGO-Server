@@ -23,6 +23,9 @@ const MERGED_FEED_CACHE_TTL_MS = 60_000;
 const MAX_MERGED_FEED_CACHE_ENTRIES = 2;
 const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
+// Upper bound on raw endpoint candidates after the walk-shed filter. Sparse
+// feeds (national rail) are unaffected; dense city feeds stay near the centre.
+const MAX_ENDPOINT_CANDIDATE_STOPS = 300;
 const MAX_STOPS_PER_SIDE = 48;
 const MAX_STOPS_PER_ROUTE_PATTERN = 8;
 const EARTH_RADIUS_M = 6_371_000;
@@ -39,8 +42,19 @@ export const DEFAULT_MAXIMUM_WAIT_SECONDS = 4 * 60 * 60;
 export const DEFAULT_MAX_ACCESS_WALKING_METERS = 900;
 export const DEFAULT_MAX_EGRESS_WALKING_METERS = 1000;
 export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
+// Endpoint access/egress may cover the real walk from an oblast centre to its
+// railway station (up to ~9 km today); transfer walking stays tightly bounded.
+export const MAX_ENDPOINT_WALKING_METERS = 15_000;
+// A trailing walk from the final stop to the destination may extend past the
+// journey horizon by at most this much (covers a 15 km egress at walking pace).
+const MAX_EGRESS_SPILL_SECONDS = 4 * 60 * 60;
 const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
 const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
+// Pair-materialisation guard between interchange stops. Ukrainian long-distance
+// rail rides routinely exceed half a day (Дніпро-Головний → Івано-Франківськ is
+// 18 h 06 m), so the guard must not apply to a leg that alights at the requested
+// destination: the journey horizon already bounds that arrival.
+const MAX_INTERCHANGE_RIDE_SECONDS = 12 * 60 * 60;
 const MAX_IMPLICIT_INTERMODAL_STATION_WALK_METERS = 150;
 const isNamedRailwayStation = (name: string) => /(?:залізничн\p{L}*|вокзал\p{L}*|двірцев\p{L}*|пасажирськ\p{L}*|підзамч\p{L}*|дарниц\p{L}*|автовокзал\p{L}*|автостанці\p{L}*|\bас[- ]?\d+\b|railway station|train station|bus station|bus terminal)/u.test(
   name.normalize('NFKC').toLocaleLowerCase('uk-UA').replace(/[^\p{L}\p{N}]+/gu, ' ').trim(),
@@ -1467,7 +1481,7 @@ export function visitTripInstanceLegs(
         const omittedArrivalAt = toEvent.scheduledArrivalAt;
         if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
           && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
-          && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
+          && omittedArrivalAt.getTime() - departureAt.getTime() <= MAX_INTERCHANGE_RIDE_SECONDS * 1000) {
           onOmittedBeyondWindow?.();
         }
         continue;
@@ -1475,7 +1489,8 @@ export function visitTripInstanceLegs(
       if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds
         || !toEvent.scheduledArrivalAt || !toEvent.arrivalAt
         || toEvent.arrivalAt < departureAt || toEvent.arrivalAt > options.journeyEnd
-        || toEvent.arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000
+        || (toEvent.arrivalAt.getTime() - departureAt.getTime() > MAX_INTERCHANGE_RIDE_SECONDS * 1000
+          && !options.destinationStopIds.has(to.stopId))
         || !options.canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
       onLeg(fromCursor, toCursor, fromEvent, toEvent);
     }
@@ -1512,7 +1527,7 @@ export function* materializeTripInstanceLegs(
         const omittedArrivalAt = toEvent.scheduledArrivalAt;
         if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
           && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
-          && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
+          && omittedArrivalAt.getTime() - departureAt.getTime() <= MAX_INTERCHANGE_RIDE_SECONDS * 1000) {
           yield { kind: 'omitted-beyond-window' };
         }
         continue;
@@ -1520,7 +1535,8 @@ export function* materializeTripInstanceLegs(
       if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds
         || !toEvent.scheduledArrivalAt || !toEvent.arrivalAt
         || toEvent.arrivalAt < departureAt || toEvent.arrivalAt > options.journeyEnd
-        || toEvent.arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000
+        || (toEvent.arrivalAt.getTime() - departureAt.getTime() > MAX_INTERCHANGE_RIDE_SECONDS * 1000
+          && !options.destinationStopIds.has(to.stopId))
         || !options.canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
       yield { kind: 'leg', fromCursor, toCursor, fromEvent, toEvent };
     }
@@ -1782,8 +1798,8 @@ export function findGtfsItinerariesWithStats(
     || !Number.isInteger(maximumTransfers) || maximumTransfers < 0 || maximumTransfers > MAX_GTFS_TRANSFERS
     || !Number.isInteger(minimumTransferBufferSeconds) || minimumTransferBufferSeconds < 0 || minimumTransferBufferSeconds > 7200
     || !Number.isInteger(maximumWaitSeconds) || maximumWaitSeconds < 0 || maximumWaitSeconds > maximumJourneySeconds
-    || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > 10_000
-    || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > 10_000
+    || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > MAX_ENDPOINT_WALKING_METERS
+    || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > MAX_ENDPOINT_WALKING_METERS
     || !Number.isFinite(transferRadius) || transferRadius < 0 || transferRadius > 10_000
     || !Number.isInteger(limit) || limit < 1 || limit > 100
     || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > MAX_GTFS_GRAPH_SEGMENTS
@@ -1796,11 +1812,22 @@ export function findGtfsItinerariesWithStats(
 
   let stopSelectionTruncated = false;
   const closestStops = (point: [number, number], radius: number) => {
-    const ranked = [...feed.stops.values()]
+    // An intercity endpoint budget (15 km) lets an oblast centre reach its
+    // railway station, but an unbounded walk-shed in a dense city puts
+    // thousands of surface stops into the candidate graph and exhausts the
+    // search steps before a long-distance trip can form. Keep the full budget
+    // ordered by distance and bound only the number of candidates considered.
+    const distances = [...feed.stops.values()]
       .filter((stop) => feed.stopTimesByStop.has(stop.id))
       .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]) }))
       .filter(({ distance }) => distance <= radius)
       .sort((a, b) => a.distance - b.distance);
+    // Keep the full walk-shed ranked by distance. Truncating before the mode
+    // guarantee below would let a dense surface network hide the railway
+    // station of a city (Lviv has ~1000 stops within 15 km and the station sits
+    // 2.5 km away), so the count bound applies only to the route-pattern pass.
+    const ranked = distances;
+    const routePatternWindow = Math.min(ranked.length, MAX_ENDPOINT_CANDIDATE_STOPS);
     const selected = new Map<string, typeof ranked[number]>();
     const selectedByRoutePattern = new Map<string, number>();
     const routePatternsByStop = new Map<string, Set<string>>();
@@ -1860,7 +1887,8 @@ export function findGtfsItinerariesWithStats(
       }
     }
 
-    for (const item of ranked) {
+    for (let index = 0; index < routePatternWindow; index += 1) {
+      const item = ranked[index]!;
       if (selected.has(item.stop.id)) continue;
       const addsRoutePatternCoverage = [...routePatternsAtStop(item.stop.id)]
         .some((pattern) => (selectedByRoutePattern.get(pattern) ?? 0) < MAX_STOPS_PER_ROUTE_PATTERN);
@@ -1909,6 +1937,27 @@ export function findGtfsItinerariesWithStats(
   // endpoint. Keep the urban graph around endpoints and actual rail/intercity
   // bus stops, while national feeds continue to use the full route corridor.
   const intercitySearch = routeDistance > 30_000;
+  // National long-distance feeds (railways, intercity coaches) are sparse by
+  // construction — the whole national rail timetable is a few hundred stops —
+  // while their useful transfer stations frequently sit far outside the
+  // origin-destination corridor. Rivne has no direct train to Lviv at all; every
+  // real itinerary changes in Kyiv, which the corridor band excludes. Admit the
+  // complete stop set of national providers so genuine detour itineraries stay
+  // discoverable. Dense city feeds keep the corridor bound that protects memory.
+  const nationalFeedStopIds = new Set<string>();
+  if (intercitySearch) {
+    for (const [stopId, entries] of feed.stopTimesByStop) {
+      for (const entry of entries) {
+        const trip = feed.trips.get(entry.tripId);
+        if (trip && feed.providersByRoute?.get(trip.routeId)?.city === 'Україна') {
+          nationalFeedStopIds.add(stopId);
+          break;
+        }
+      }
+    }
+  }
+  const nationalEligibleStops = nationalFeedStopIds.size
+    ? new Set([...corridorStops, ...nationalFeedStopIds]) : corridorStops;
   const localCityCatchmentStops = new Set<string>([
     ...originStops.map(({ stop }) => stop.id),
     ...destinationStops.map(({ stop }) => stop.id),
@@ -2083,6 +2132,7 @@ export function findGtfsItinerariesWithStats(
   const tripSegmentsOfferedByRetentionTier = debugEnabled ? [0, 0, 0, 0, 0] : undefined;
   let tripInstanceSegmentCandidatesGenerated = 0;
   let tripInstanceSegmentCandidatesRetained = 0;
+  for (const stopId of nationalFeedStopIds) interchangeStopIds.add(stopId);
   for (const [stopId, routeIds] of routesByStop) {
     if (!interchangeStopIds.has(stopId)) continue;
     for (const routeId of routeIds) {
@@ -2092,7 +2142,7 @@ export function findGtfsItinerariesWithStats(
       const transportType = route.transportType === 'bus' && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
       if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
       const eligibleStops = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
-        ? localCityCatchmentStops : corridorStops;
+        ? localCityCatchmentStops : nationalEligibleStops;
       if (!eligibleStops.has(stopId)) continue;
       candidateStopCountByRoute.set(routeId, (candidateStopCountByRoute.get(routeId) ?? 0) + 1);
     }
@@ -2206,7 +2256,7 @@ export function findGtfsItinerariesWithStats(
     if (!stops || stops.length < 2) continue;
     const providerCity = feed.providersByRoute?.get(trip.routeId)?.city ?? input.providerCity;
     const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
-      ? localCityCatchmentStops : corridorStops;
+      ? localCityCatchmentStops : nationalEligibleStops;
     const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
       && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
@@ -2240,7 +2290,8 @@ export function findGtfsItinerariesWithStats(
           if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds) continue;
           const arrivalAt = toEvent.arrivalAt;
           if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
-            || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
+            || (arrivalAt.getTime() - departureAt.getTime() > MAX_INTERCHANGE_RIDE_SECONDS * 1000
+              && !destinationStopIds.has(to.stopId))) continue;
           if (!canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
           if (originStopIds.has(from.stopId) && interchangeStopIds.has(to.stopId)) {
             const fromStop = feed.stops.get(from.stopId);
@@ -2602,7 +2653,7 @@ export function findGtfsItinerariesWithStats(
     const graphSegmentLimitPerRoute = graphSegmentBudgetByRoute.get(trip.routeId) ?? 0;
     if (graphSegmentLimitPerRoute === 0) continue;
     const localFeedInIntercitySearch = intercitySearch && providerCity !== undefined && providerCity !== 'Україна';
-    const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : corridorStops;
+    const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : nationalEligibleStops;
     const eligibleIndexes = stops.flatMap((stop, index) => eligibleStopIds.has(stop.stopId)
       && interchangeStopIds.has(stop.stopId) ? [index] : []);
     if (eligibleIndexes.length < 2) continue;
@@ -3247,7 +3298,13 @@ export function findGtfsItinerariesWithStats(
     const egressSeconds = walkingSeconds(egressMeters);
     const arrivalAt = new Date(last.arrivalAt.getTime() + egressSeconds * 1000);
     const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
-    if (durationSeconds > maximumJourneySeconds) return;
+    // The vehicle must arrive inside the journey horizon. Only the trailing
+    // last-mile walk may spill past it: an overnight train arriving at 07:15
+    // next day is inside a 24 h horizon, but walking 8 km to the town centre
+    // pushed the door-to-door total just over and the whole journey vanished.
+    const vehicleSeconds = Math.ceil((last.arrivalAt.getTime() - departureAt.getTime()) / 1000);
+    if (vehicleSeconds > maximumJourneySeconds) return;
+    if (durationSeconds > maximumJourneySeconds + MAX_EGRESS_SPILL_SECONDS) return;
     const initialWaitSeconds = Math.max(0, Math.ceil((first.departureAt.getTime()
       - departureAt.getTime() - walkingSeconds(accessMeters) * 1000) / 1000));
     const transferWaitingSeconds = path.slice(1).reduce((total, segment, index) => {
