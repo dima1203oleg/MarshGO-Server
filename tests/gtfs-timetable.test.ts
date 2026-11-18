@@ -3385,3 +3385,83 @@ test('narrows timezone fallback to geographically confirmed Ukrainian feeds and 
     'stops.txt': enc('stop_id,stop_name,stop_lat,stop_lon\ns1,Khmelnytskyi Stop,49.4200,26.9800\n'),
   }), /agency_timezone/);
 });
+
+function distantStationFeed() {
+  // Origin stop sits ~9 km from the requested city centre, mirroring an oblast
+  // centre whose railway station is outside the old 5 km endpoint cap.
+  const files: Record<string, Uint8Array> = {
+    'agency.txt': new TextEncoder().encode(['agency_id,agency_name,agency_url,agency_timezone', 'a,Test Rail,https://example.test,Europe/Kyiv'].join('\n')),
+    'routes.txt': new TextEncoder().encode(['route_id,agency_id,route_short_name,route_long_name,route_type', 'r,a,101,Intercity train,2'].join('\n')),
+    'stops.txt': new TextEncoder().encode([
+      'stop_id,stop_name,stop_lat,stop_lon',
+      'origin_station,Origin Station,49.9210,24.0200',
+      'destination_station,Destination Station,50.4110,30.0200',
+    ].join('\n')),
+    'trips.txt': new TextEncoder().encode('route_id,service_id,trip_id,trip_headsign\nr,weekday,t1,Destination Station'),
+    'stop_times.txt': new TextEncoder().encode([
+      'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
+      't1,22:02:00,22:02:00,origin_station,1,0,0',
+      't1,27:30:00,27:30:00,destination_station,2,0,0',
+    ].join('\n')),
+    'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,1,1,1,1,1,1,20261001,20261231'),
+  };
+  return parseGtfsTimetable(files);
+}
+
+test('intercity endpoint walking budget reaches a station beyond the old 5 km cap', () => {
+  const timetable = distantStationFeed();
+  const base = {
+    providerId: 'p1', providerName: 'Test Rail',
+    // City centre in Lviv, roughly 9 km from the fixture station.
+    origin: [24.0300, 49.8420] as [number, number],
+    destination: [30.0201, 50.4111] as [number, number],
+    earliestDeparture: new Date('2026-10-12T08:00:00+03:00'),
+    latestDeparture: new Date('2026-10-13T08:00:00+03:00'),
+    now: new Date('2026-10-08T00:00:00Z'),
+    maximumJourneySeconds: 24 * 60 * 60,
+    maximumTransfers: 0,
+  };
+  const capped = findGtfsItinerariesWithStats(timetable, {
+    ...base, maximumAccessWalkingMeters: 5_000, maximumEgressWalkingMeters: 5_000,
+  });
+  assert.equal(capped.itineraries.length, 0, 'the 5 km cap cannot reach a 9 km station');
+
+  const extended = findGtfsItinerariesWithStats(timetable, {
+    ...base, maximumAccessWalkingMeters: 15_000, maximumEgressWalkingMeters: 15_000,
+  });
+  assert.equal(extended.itineraries.length, 1, 'the intercity endpoint budget reaches the station');
+});
+
+test('an overnight arrival inside the horizon survives a trailing walk that spills past it', () => {
+  const timetable = distantStationFeed();
+  const result = findGtfsItinerariesWithStats(timetable, {
+    providerId: 'p1', providerName: 'Test Rail',
+    origin: [24.0290, 49.8410] as [number, number],
+    destination: [30.0300, 50.4120] as [number, number],
+    earliestDeparture: new Date('2026-10-12T08:00:00+03:00'),
+    latestDeparture: new Date('2026-10-13T08:00:00+03:00'),
+    now: new Date('2026-10-08T00:00:00Z'),
+    maximumJourneySeconds: 20 * 60 * 60,
+    maximumTransfers: 0,
+    maximumAccessWalkingMeters: 15_000,
+    maximumEgressWalkingMeters: 15_000,
+  });
+  assert.equal(result.itineraries.length, 1,
+    'vehicle arrival (19 h 30 m) is inside a 20 h horizon and only the 8 km egress walk spills over');
+});
+
+test('endpoint walking budget stays bounded and rejects an oversized radius', () => {
+  const timetable = distantStationFeed();
+  assert.throws(() => findGtfsItinerariesWithStats(timetable, {
+    providerId: 'p1', providerName: 'Test Rail',
+    origin: [24.0300, 49.8420] as [number, number],
+    destination: [30.0201, 50.4111] as [number, number],
+    earliestDeparture: new Date('2026-10-12T08:00:00+03:00'),
+    latestDeparture: new Date('2026-10-12T12:00:00+03:00'),
+    now: new Date('2026-10-08T00:00:00Z'),
+    maximumJourneySeconds: 24 * 60 * 60,
+    maximumTransfers: 0,
+    maximumAccessWalkingMeters: 40_000,
+    maximumEgressWalkingMeters: 1_000,
+  }), /bounds are invalid/, 'walk-shed stays capped at the intercity endpoint budget');
+});

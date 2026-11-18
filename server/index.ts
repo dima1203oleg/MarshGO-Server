@@ -75,6 +75,12 @@ import {
 } from './objectStorage';
 import { createPartnerPlatformRouter } from './partner/router';
 
+// Intercity access/egress walking budget. Oblast centres routinely sit several
+// kilometres from their railway station (Zaporizhzhia 9.1 km, Vinnytsia 6.4 km),
+// and the previous 5 km cap silently dropped those served regions from the
+// graph instead of offering the real walk-to-station connection.
+const INTERCITY_MAX_ENDPOINT_WALKING_METERS = 15_000;
+
 const app = express();
 const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
 eventLoopDelay.enable();
@@ -3357,8 +3363,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
           ? maximumSearchDurationSeconds
           : maximumGtfsWaitWithinJourney(maximumSearchDurationSeconds),
         minimumTransferBufferSeconds: configuredTransferBufferSeconds,
-        maximumAccessWalkingMeters: routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS,
-        maximumEgressWalkingMeters: routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS,
+        maximumAccessWalkingMeters: routeDistanceMeters > 30_000 ? INTERCITY_MAX_ENDPOINT_WALKING_METERS : DEFAULT_MAX_ACCESS_WALKING_METERS,
+        maximumEgressWalkingMeters: routeDistanceMeters > 30_000 ? INTERCITY_MAX_ENDPOINT_WALKING_METERS : DEFAULT_MAX_EGRESS_WALKING_METERS,
         maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
         allowedModes: allowedTransitModes, allowedTransportTypes: search.preferences.allowedTransportTypes,
       }, eligibleGtfsProviders.map((provider) => ({ id: provider.id, name: provider.name, city: provider.city,
@@ -3433,8 +3439,8 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
       || itinerary.transferWalkingMeters.some((meters, index) => meters > 0 && !itinerary.transferInSeat[index]
         && !itinerary.transferWalkingGeometries[index] && !transfers[index]);
     if (missingRequiredPath) return null;
-    const effectiveMaxAccessMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS;
-    const effectiveMaxEgressMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS;
+    const effectiveMaxAccessMeters = routeDistanceMeters > 30_000 ? INTERCITY_MAX_ENDPOINT_WALKING_METERS : DEFAULT_MAX_ACCESS_WALKING_METERS;
+    const effectiveMaxEgressMeters = routeDistanceMeters > 30_000 ? INTERCITY_MAX_ENDPOINT_WALKING_METERS : DEFAULT_MAX_EGRESS_WALKING_METERS;
     return applyRoutedWalkingPaths(itinerary, { access, egress, transfers }, {
       maximumAccessMeters: effectiveMaxAccessMeters,
       maximumEgressMeters: effectiveMaxEgressMeters,

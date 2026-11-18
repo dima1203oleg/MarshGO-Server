@@ -23,6 +23,9 @@ const MERGED_FEED_CACHE_TTL_MS = 60_000;
 const MAX_MERGED_FEED_CACHE_ENTRIES = 2;
 const MAX_DIRECT_STOPS_PER_SIDE = 20;
 const MAX_NEAREST_STOPS_PER_SIDE = 20;
+// Upper bound on raw endpoint candidates after the walk-shed filter. Sparse
+// feeds (national rail) are unaffected; dense city feeds stay near the centre.
+const MAX_ENDPOINT_CANDIDATE_STOPS = 300;
 const MAX_STOPS_PER_SIDE = 48;
 const MAX_STOPS_PER_ROUTE_PATTERN = 8;
 const EARTH_RADIUS_M = 6_371_000;
@@ -39,6 +42,12 @@ export const DEFAULT_MAXIMUM_WAIT_SECONDS = 4 * 60 * 60;
 export const DEFAULT_MAX_ACCESS_WALKING_METERS = 900;
 export const DEFAULT_MAX_EGRESS_WALKING_METERS = 1000;
 export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
+// Endpoint access/egress may cover the real walk from an oblast centre to its
+// railway station (up to ~9 km today); transfer walking stays tightly bounded.
+export const MAX_ENDPOINT_WALKING_METERS = 15_000;
+// A trailing walk from the final stop to the destination may extend past the
+// journey horizon by at most this much (covers a 15 km egress at walking pace).
+const MAX_EGRESS_SPILL_SECONDS = 4 * 60 * 60;
 const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
 const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
 const MAX_IMPLICIT_INTERMODAL_STATION_WALK_METERS = 150;
@@ -1782,8 +1791,8 @@ export function findGtfsItinerariesWithStats(
     || !Number.isInteger(maximumTransfers) || maximumTransfers < 0 || maximumTransfers > MAX_GTFS_TRANSFERS
     || !Number.isInteger(minimumTransferBufferSeconds) || minimumTransferBufferSeconds < 0 || minimumTransferBufferSeconds > 7200
     || !Number.isInteger(maximumWaitSeconds) || maximumWaitSeconds < 0 || maximumWaitSeconds > maximumJourneySeconds
-    || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > 10_000
-    || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > 10_000
+    || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > MAX_ENDPOINT_WALKING_METERS
+    || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > MAX_ENDPOINT_WALKING_METERS
     || !Number.isFinite(transferRadius) || transferRadius < 0 || transferRadius > 10_000
     || !Number.isInteger(limit) || limit < 1 || limit > 100
     || !Number.isSafeInteger(maximumGraphSegments) || maximumGraphSegments < 1 || maximumGraphSegments > MAX_GTFS_GRAPH_SEGMENTS
@@ -1796,11 +1805,17 @@ export function findGtfsItinerariesWithStats(
 
   let stopSelectionTruncated = false;
   const closestStops = (point: [number, number], radius: number) => {
-    const ranked = [...feed.stops.values()]
+    // An intercity endpoint budget (15 km) lets an oblast centre reach its
+    // railway station, but an unbounded walk-shed in a dense city puts
+    // thousands of surface stops into the candidate graph and exhausts the
+    // search steps before a long-distance trip can form. Keep the full budget
+    // ordered by distance and bound only the number of candidates considered.
+    const distances = [...feed.stops.values()]
       .filter((stop) => feed.stopTimesByStop.has(stop.id))
       .map((stop) => ({ stop, distance: distanceMeters(point, [stop.lon, stop.lat]) }))
       .filter(({ distance }) => distance <= radius)
       .sort((a, b) => a.distance - b.distance);
+    const ranked = distances.slice(0, MAX_ENDPOINT_CANDIDATE_STOPS);
     const selected = new Map<string, typeof ranked[number]>();
     const selectedByRoutePattern = new Map<string, number>();
     const routePatternsByStop = new Map<string, Set<string>>();
@@ -3247,7 +3262,13 @@ export function findGtfsItinerariesWithStats(
     const egressSeconds = walkingSeconds(egressMeters);
     const arrivalAt = new Date(last.arrivalAt.getTime() + egressSeconds * 1000);
     const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
-    if (durationSeconds > maximumJourneySeconds) return;
+    // The vehicle must arrive inside the journey horizon. Only the trailing
+    // last-mile walk may spill past it: an overnight train arriving at 07:15
+    // next day is inside a 24 h horizon, but walking 8 km to the town centre
+    // pushed the door-to-door total just over and the whole journey vanished.
+    const vehicleSeconds = Math.ceil((last.arrivalAt.getTime() - departureAt.getTime()) / 1000);
+    if (vehicleSeconds > maximumJourneySeconds) return;
+    if (durationSeconds > maximumJourneySeconds + MAX_EGRESS_SPILL_SECONDS) return;
     const initialWaitSeconds = Math.max(0, Math.ceil((first.departureAt.getTime()
       - departureAt.getTime() - walkingSeconds(accessMeters) * 1000) / 1000));
     const transferWaitingSeconds = path.slice(1).reduce((total, segment, index) => {
