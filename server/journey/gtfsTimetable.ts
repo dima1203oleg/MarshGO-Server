@@ -65,6 +65,13 @@ export const DEFAULT_MAX_ACCESS_WALKING_METERS = 900;
 export const DEFAULT_MAX_EGRESS_WALKING_METERS = 1000;
 export const DEFAULT_MAX_TRANSFER_WALKING_METERS = 400;
 /**
+ * Upper bound for an endpoint stop-reach radius. Intercity searches need a reach
+ * wide enough to admit an oblast centre's railway station (Zaporizhzhia 9.1 km,
+ * Vinnytsia 6.4 km); the wider bound is never applied to city searches, which use
+ * the 900 m/1 km defaults.
+ */
+export const MAX_STOP_REACH_RADIUS_METERS = 15_000;
+/**
  * Ceiling for widening a stop-reach radius from the `maxWalkingMeters` request preference.
  * Measured on the Lviv feed (2026-11-02): missed pins sit 1.2-1.3 km from the nearest stop,
  * while a radius beyond 2 km admits most of the city as candidates without unlocking them.
@@ -2531,8 +2538,8 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     || !Number.isInteger(maximumTransfers) || maximumTransfers < 0 || maximumTransfers > MAX_GTFS_TRANSFERS
     || !Number.isInteger(minimumTransferBufferSeconds) || minimumTransferBufferSeconds < 0 || minimumTransferBufferSeconds > 7200
     || !Number.isInteger(maximumWaitSeconds) || maximumWaitSeconds < 0 || maximumWaitSeconds > maximumJourneySeconds
-    || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > 10_000
-    || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > 10_000
+    || !Number.isFinite(accessRadius) || accessRadius < 100 || accessRadius > MAX_STOP_REACH_RADIUS_METERS
+    || !Number.isFinite(egressRadius) || egressRadius < 100 || egressRadius > MAX_STOP_REACH_RADIUS_METERS
     || !Number.isFinite(transferRadius) || transferRadius < 0 || transferRadius > 10_000
     || (input.maximumTotalWalkingMeters !== undefined
       && (!Number.isInteger(input.maximumTotalWalkingMeters) || input.maximumTotalWalkingMeters < 0 || input.maximumTotalWalkingMeters > 100_000))
@@ -2744,6 +2751,27 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     // endpoint. Keep the urban graph around endpoints and actual rail/intercity
     // bus stops, while national feeds continue to use the full route corridor.
     const intercitySearch = routeDistance > 30_000;
+    // National long-distance feeds (railways, intercity coaches) are sparse by
+    // construction, while their useful transfer stations frequently sit far
+    // outside the origin-destination corridor band. Rivne has no direct train to
+    // Lviv at all: every real itinerary changes in Kyiv, which the band excludes.
+    // Admit the complete stop set of national providers so genuine detour
+    // itineraries stay discoverable. Dense city feeds keep the corridor bound
+    // that protects memory.
+    const nationalFeedStopIds = new Set<string>();
+    if (intercitySearch) {
+      for (const [stopId, entries] of feed.stopTimesByStop) {
+        for (const entry of entries) {
+          const trip = feed.trips.get(entry.tripId);
+          if (trip && feed.providersByRoute?.get(trip.routeId)?.city === 'Україна') {
+            nationalFeedStopIds.add(stopId);
+            break;
+          }
+        }
+      }
+    }
+    const nationalEligibleStops = nationalFeedStopIds.size
+      ? new Set([...corridorStops, ...nationalFeedStopIds]) : corridorStops;
     const localCityCatchmentStops = new Set<string>([
       ...originStops.map(({ stop }) => stop.id),
       ...destinationStops.map(({ stop }) => stop.id),
@@ -2836,6 +2864,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     const routesByStop = new Map<string, Set<string>>();
     const routesByParentStation = new Map<string, Set<string>>();
     const interchangeStopIds = new Set<string>([...originStopIds, ...destinationStopIds]);
+    for (const stopId of nationalFeedStopIds) interchangeStopIds.add(stopId);
     for (const [stopId, entries] of feed.stopTimesByStop) {
       const routeIds = new Set<string>();
       const stop = feed.stops.get(stopId);
@@ -2924,7 +2953,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
         const transportType = (route.transportType === 'bus' || route.transportType === 'bus_unspecified') && providerCity === 'Україна' ? 'intercity_bus' : route.transportType;
         if (input.allowedTransportTypes && !journeyTransportTypeSelected(transportType, input.allowedTransportTypes)) continue;
         const eligibleStops = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
-          ? localCityCatchmentStops : corridorStops;
+          ? localCityCatchmentStops : nationalEligibleStops;
         if (!eligibleStops.has(stopId)) continue;
         candidateStopCountByRoute.set(routeId, (candidateStopCountByRoute.get(routeId) ?? 0) + 1);
       }
@@ -3038,7 +3067,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
       if (!stops || stops.length < 2) continue;
       const providerCity = feed.providersByRoute?.get(trip.routeId)?.city ?? input.providerCity;
       const eligibleStopIds = intercitySearch && providerCity !== undefined && providerCity !== 'Україна'
-        ? localCityCatchmentStops : corridorStops;
+        ? localCityCatchmentStops : nationalEligibleStops;
       const eligibleIndexes = stops.flatMap((stopTime, index) => eligibleStopIds.has(stopTime.stopId)
         && interchangeStopIds.has(stopTime.stopId) ? [index] : []);
       if (eligibleIndexes.length < 2) continue;
@@ -3432,7 +3461,7 @@ function findGtfsItinerariesAtWalkingReachWithStats(
       const graphSegmentLimitPerRoute = graphSegmentBudgetByRoute.get(trip.routeId) ?? 0;
       if (graphSegmentLimitPerRoute === 0) continue;
       const localFeedInIntercitySearch = intercitySearch && providerCity !== undefined && providerCity !== 'Україна';
-      const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : corridorStops;
+      const eligibleStopIds = localFeedInIntercitySearch ? localCityCatchmentStops : nationalEligibleStops;
       const eligibleIndexes = stops.flatMap((stop, index) => eligibleStopIds.has(stop.stopId)
         && interchangeStopIds.has(stop.stopId) ? [index] : []);
       if (eligibleIndexes.length < 2) continue;
@@ -4141,7 +4170,12 @@ function findGtfsItinerariesAtWalkingReachWithStats(
     const egressSeconds = walkingSeconds(egressMeters);
     const arrivalAt = new Date(last.arrivalAt.getTime() + egressSeconds * 1000);
     const durationSeconds = Math.ceil((arrivalAt.getTime() - departureAt.getTime()) / 1000);
-    if (durationSeconds > maximumJourneySeconds) return;
+    // The horizon bounds vehicle travel, not the last pedestrian metre: a
+    // vehicle that arrives inside the window is a real ride even when the walk
+    // from its stop to the door crosses the boundary. Without this allowance a
+    // 23 h 50 min intercity arrival was discarded over a 12-minute walk.
+    const vehicleArrivalSeconds = Math.ceil((last.arrivalAt.getTime() - departureAt.getTime()) / 1000);
+    if (vehicleArrivalSeconds > maximumJourneySeconds) return;
     const initialWaitSeconds = Math.max(0, Math.ceil((first.departureAt.getTime()
       - departureAt.getTime() - walkingSeconds(accessMeters) * 1000) / 1000));
     const transferWaitingSeconds = path.slice(1).reduce((total, segment, index) => {

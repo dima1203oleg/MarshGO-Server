@@ -85,6 +85,11 @@ import {
 } from './objectStorage';
 import { createPartnerPlatformRouter } from './partner/router';
 
+// A nationwide long-distance query may only connect on the next service day and
+// may need the sparse national feeds on their own; both bounds live here so the
+// fallback search and its tests read the same numbers.
+const LONG_DISTANCE_FALLBACK_HORIZON_SECONDS = 36 * 60 * 60;
+const LONG_DISTANCE_FALLBACK_MIN_METERS = 300_000;
 const app = express();
 const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
 eventLoopDelay.enable();
@@ -3351,14 +3356,18 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   let gtfsWorkerSearch: Awaited<ReturnType<typeof gtfsSearchWorker.search>> = { descriptors: [], errors: [], searches: [] };
   let transitSearchFailed = false;
   const transitCandidateBudget = resolveTransitCandidateBudget(process.env.JOURNEY_TRANSIT_CANDIDATE_LIMIT);
-  const standardTransitAccessWalkingMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS;
-  const standardTransitEgressWalkingMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS;
+  // Oblast centres routinely sit several kilometres from their railway station
+  // (Zaporizhzhia 9.1 km, Vinnytsia 6.4 km). A 5 km intercity reach dropped
+  // every such region from the timetable graph even where a direct train exists.
+  const intercityEndpointWalkingMeters = routeDistanceMeters > 30_000 ? 15_000 : undefined;
+  const standardTransitAccessWalkingMeters = intercityEndpointWalkingMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
+  const standardTransitEgressWalkingMeters = intercityEndpointWalkingMeters ?? DEFAULT_MAX_EGRESS_WALKING_METERS;
   // The walking preference is a reach bound too: a pin in the middle of a block must not read
   // as "no routes" while a stop sits 1.2 km away. Capped expansion, never a shrink.
   const transitAccessWalkingMeters = effectiveWalkingReachMeters(
-    routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS, search.preferences.maxWalkingMeters);
+    intercityEndpointWalkingMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS, search.preferences.maxWalkingMeters);
   const transitEgressWalkingMeters = effectiveWalkingReachMeters(
-    routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS, search.preferences.maxWalkingMeters);
+    intercityEndpointWalkingMeters ?? DEFAULT_MAX_EGRESS_WALKING_METERS, search.preferences.maxWalkingMeters);
   // Those two numbers are straight-line stop-reach radii: they decide which stops the timetable
   // search may look at. The legs they then cap are street paths, and a confirmed foot route leaves
   // a block at more than the crow-flight line. Without the allowance the Lviv search measured at
@@ -3414,6 +3423,37 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   try {
     if (shouldRunWorkerSearch) {
       gtfsWorkerSearch = await gtfsSearchWorker.search(gtfsSearchInput, gtfsWorkerProviders, metroSources);
+      // A long intercity timetable may only be reachable on the next service day:
+      // the earliest departure inside 24 h can be a connection that the 24 h
+      // journey horizon still cuts off, and a nationwide rail query can exhaust
+      // the shared segment budget before its sparse long-distance trips are
+      // admitted. Retry once, with national feeds only and a 36 h window, when
+      // the first pass produced nothing at all — an answered corridor never pays
+      // for a second search, and city feeds cannot multiply the retry graph.
+      const primaryItineraryCount = gtfsWorkerSearch.searches.reduce((total, entry) => total + entry.itineraries.length, 0);
+      if (!transitSearchFailed && primaryItineraryCount === 0 && routeDistanceMeters >= LONG_DISTANCE_FALLBACK_MIN_METERS) {
+        const nationalProviders = gtfsWorkerProviders.filter((provider) => {
+          const source = eligibleGtfsProviders.find((item) => item.id === provider.id);
+          const box = source?.last_report?.bbox;
+          return Boolean(box && (box[2] - box[0] > 3 || box[3] - box[1] > 3));
+        });
+        if (nationalProviders.length) {
+          const fallbackInput = {
+            ...gtfsSearchInput,
+            latestDeparture: new Date(search.departureAt.getTime() + LONG_DISTANCE_FALLBACK_HORIZON_SECONDS * 1000),
+            maximumJourneySeconds: LONG_DISTANCE_FALLBACK_HORIZON_SECONDS,
+            maximumWaitSeconds: LONG_DISTANCE_FALLBACK_HORIZON_SECONDS,
+          };
+          const fallback = await gtfsSearchWorker.search(fallbackInput, nationalProviders, metroSources);
+          if (fallback.searches.some((entry) => entry.itineraries.length > 0)) {
+            gtfsWorkerSearch = {
+              descriptors: fallback.descriptors,
+              errors: [...gtfsWorkerSearch.errors, ...fallback.errors],
+              searches: fallback.searches,
+            };
+          }
+        }
+      }
     }
   } catch (error) {
     // The worker rejecting means no transit provider was searched at all; the corridor says
