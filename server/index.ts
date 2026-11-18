@@ -80,6 +80,12 @@ import { createPartnerPlatformRouter } from './partner/router';
 // and the previous 5 km cap silently dropped those served regions from the
 // graph instead of offering the real walk-to-station connection.
 const INTERCITY_MAX_ENDPOINT_WALKING_METERS = 15_000;
+// A domestic overnight rail connection can legitimately run 30 h door to door
+// (Дніпро → Ужгород is 18 h 45 m on the train plus the last-mile walk), which a
+// 24 h horizon hides. Only an empty long-distance search retries on national
+// feeds with this wider horizon, so the graph stays bounded.
+const LONG_DISTANCE_FALLBACK_HORIZON_SECONDS = 36 * 60 * 60;
+const LONG_DISTANCE_FALLBACK_MIN_METERS = 300_000;
 
 const app = express();
 const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
@@ -3372,6 +3378,39 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
     }
   } catch (error) {
     providerErrors.push(`GTFS-пошук тимчасово недоступний${error instanceof Error && error.message.includes('capacity') ? ': черга заповнена' : ''}; інші типи маршрутів перевіряються окремо`);
+  }
+  // Long-distance overnight connections may not fit a 24 h horizon. Retry once,
+  // on national feeds only, so an empty 300 km+ search can still surface a real
+  // 30 h journey without letting city feeds multiply the candidate graph.
+  const primaryItineraryCount = gtfsWorkerSearch.searches.reduce((total, search) => total + search.itineraries.length, 0);
+  if (shouldRunWorkerSearch && primaryItineraryCount === 0 && routeDistanceMeters >= LONG_DISTANCE_FALLBACK_MIN_METERS) {
+    const nationalProviders = eligibleGtfsProviders.filter((provider) => {
+      const box = provider.last_report?.bbox;
+      return Boolean(box && (box[2] - box[0] > 3 || box[3] - box[1] > 3));
+    });
+    if (nationalProviders.length) {
+      try {
+        const extended = await gtfsSearchWorker.search({
+          providerId: 'worker', providerName: 'worker', origin: search.origin.coordinates, destination: search.destination.coordinates,
+          earliestDeparture: search.departureAt,
+          latestDeparture: new Date(search.departureAt.getTime() + LONG_DISTANCE_FALLBACK_HORIZON_SECONDS * 1000),
+          limit: 100,
+          maximumJourneySeconds: LONG_DISTANCE_FALLBACK_HORIZON_SECONDS,
+          maximumTransfers: Math.min(search.preferences.maxTransfers ?? MAX_GTFS_TRANSFERS, MAX_GTFS_TRANSFERS),
+          maximumWaitSeconds: LONG_DISTANCE_FALLBACK_HORIZON_SECONDS,
+          minimumTransferBufferSeconds: configuredTransferBufferSeconds,
+          maximumAccessWalkingMeters: INTERCITY_MAX_ENDPOINT_WALKING_METERS,
+          maximumEgressWalkingMeters: INTERCITY_MAX_ENDPOINT_WALKING_METERS,
+          maximumTransferWalkingMeters: DEFAULT_MAX_TRANSFER_WALKING_METERS,
+          allowedModes: allowedTransitModes, allowedTransportTypes: search.preferences.allowedTransportTypes,
+        }, nationalProviders.map((provider) => ({ id: provider.id, name: provider.name, city: provider.city,
+          feedUrl: provider.feed_url, ...(provider.realtime_url ? { realtimeUrl: provider.realtime_url } : {}) })), metroSources);
+        if (extended.searches.some((entry) => entry.itineraries.length > 0)) gtfsWorkerSearch = extended;
+      } catch {
+        // Keep the primary (empty) result: an unavailable fallback must not turn
+        // "no connection within 24 h" into an error.
+      }
+    }
   }
   const mergedFeedGroups: GtfsWorkerGroup[] = gtfsWorkerSearch.descriptors;
   for (const error of gtfsWorkerSearch.errors) {

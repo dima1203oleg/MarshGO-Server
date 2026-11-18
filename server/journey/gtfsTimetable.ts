@@ -50,6 +50,11 @@ export const MAX_ENDPOINT_WALKING_METERS = 15_000;
 const MAX_EGRESS_SPILL_SECONDS = 4 * 60 * 60;
 const MINIMUM_INTERCITY_TRANSFER_BUFFER_SECONDS = 600;
 const MINIMUM_SUBURBAN_TRANSFER_BUFFER_SECONDS = 300;
+// Pair-materialisation guard between interchange stops. Ukrainian long-distance
+// rail rides routinely exceed half a day (Дніпро-Головний → Івано-Франківськ is
+// 18 h 06 m), so the guard must not apply to a leg that alights at the requested
+// destination: the journey horizon already bounds that arrival.
+const MAX_INTERCHANGE_RIDE_SECONDS = 12 * 60 * 60;
 const MAX_IMPLICIT_INTERMODAL_STATION_WALK_METERS = 150;
 const isNamedRailwayStation = (name: string) => /(?:залізничн\p{L}*|вокзал\p{L}*|двірцев\p{L}*|пасажирськ\p{L}*|підзамч\p{L}*|дарниц\p{L}*|автовокзал\p{L}*|автостанці\p{L}*|\bас[- ]?\d+\b|railway station|train station|bus station|bus terminal)/u.test(
   name.normalize('NFKC').toLocaleLowerCase('uk-UA').replace(/[^\p{L}\p{N}]+/gu, ' ').trim(),
@@ -1476,7 +1481,7 @@ export function visitTripInstanceLegs(
         const omittedArrivalAt = toEvent.scheduledArrivalAt;
         if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
           && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
-          && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
+          && omittedArrivalAt.getTime() - departureAt.getTime() <= MAX_INTERCHANGE_RIDE_SECONDS * 1000) {
           onOmittedBeyondWindow?.();
         }
         continue;
@@ -1484,7 +1489,8 @@ export function visitTripInstanceLegs(
       if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds
         || !toEvent.scheduledArrivalAt || !toEvent.arrivalAt
         || toEvent.arrivalAt < departureAt || toEvent.arrivalAt > options.journeyEnd
-        || toEvent.arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000
+        || (toEvent.arrivalAt.getTime() - departureAt.getTime() > MAX_INTERCHANGE_RIDE_SECONDS * 1000
+          && !options.destinationStopIds.has(to.stopId))
         || !options.canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
       onLeg(fromCursor, toCursor, fromEvent, toEvent);
     }
@@ -1521,7 +1527,7 @@ export function* materializeTripInstanceLegs(
         const omittedArrivalAt = toEvent.scheduledArrivalAt;
         if (toEvent.canAlight && to.arrivalSeconds >= from.departureSeconds
           && omittedArrivalAt && omittedArrivalAt >= departureAt && omittedArrivalAt <= options.journeyEnd
-          && omittedArrivalAt.getTime() - departureAt.getTime() <= 12 * 60 * 60_000) {
+          && omittedArrivalAt.getTime() - departureAt.getTime() <= MAX_INTERCHANGE_RIDE_SECONDS * 1000) {
           yield { kind: 'omitted-beyond-window' };
         }
         continue;
@@ -1529,7 +1535,8 @@ export function* materializeTripInstanceLegs(
       if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds
         || !toEvent.scheduledArrivalAt || !toEvent.arrivalAt
         || toEvent.arrivalAt < departureAt || toEvent.arrivalAt > options.journeyEnd
-        || toEvent.arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000
+        || (toEvent.arrivalAt.getTime() - departureAt.getTime() > MAX_INTERCHANGE_RIDE_SECONDS * 1000
+          && !options.destinationStopIds.has(to.stopId))
         || !options.canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
       yield { kind: 'leg', fromCursor, toCursor, fromEvent, toEvent };
     }
@@ -2255,7 +2262,8 @@ export function findGtfsItinerariesWithStats(
           if (!toEvent.canAlight || to.arrivalSeconds < from.departureSeconds) continue;
           const arrivalAt = toEvent.arrivalAt;
           if (!arrivalAt || arrivalAt < departureAt || arrivalAt > journeyEnd
-            || arrivalAt.getTime() - departureAt.getTime() > 12 * 60 * 60_000) continue;
+            || (arrivalAt.getTime() - departureAt.getTime() > MAX_INTERCHANGE_RIDE_SECONDS * 1000
+              && !destinationStopIds.has(to.stopId))) continue;
           if (!canBelongToDirectOnlyJourney(from.stopId, to.stopId)) continue;
           if (originStopIds.has(from.stopId) && interchangeStopIds.has(to.stopId)) {
             const fromStop = feed.stops.get(from.stopId);

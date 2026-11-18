@@ -3465,3 +3465,63 @@ test('endpoint walking budget stays bounded and rejects an oversized radius', ()
     maximumEgressWalkingMeters: 1_000,
   }), /bounds are invalid/, 'walk-shed stays capped at the intercity endpoint budget');
 });
+
+function longRideFeed() {
+  // A single overnight train: boarding 22:10 and alighting 17:15 next day is an
+  // 19 h 05 m ride, which Ukrainian long-distance rail regularly exceeds.
+  const files: Record<string, Uint8Array> = {
+    'agency.txt': new TextEncoder().encode(['agency_id,agency_name,agency_url,agency_timezone', 'a,Test Rail,https://example.test,Europe/Kyiv'].join('\n')),
+    'routes.txt': new TextEncoder().encode(['route_id,agency_id,route_short_name,route_long_name,route_type', 'r,a,81,Overnight,2'].join('\n')),
+    'stops.txt': new TextEncoder().encode([
+      'stop_id,stop_name,stop_lat,stop_lon',
+      'departure_city,Departure City,49.8400,24.0200',
+      'interchange,Town Halt,49.1200,27.0000',
+      'final_city,Final City,48.4700,35.0400',
+    ].join('\n')),
+    'trips.txt': new TextEncoder().encode('route_id,service_id,trip_id,trip_headsign\nr,weekday,t1,Final City'),
+    'stop_times.txt': new TextEncoder().encode([
+      'trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type',
+      't1,22:10:00,22:10:00,departure_city,1,0,0',
+      't1,28:40:00,28:45:00,interchange,2,0,0',
+      't1,41:15:00,41:15:00,final_city,3,0,0',
+    ].join('\n')),
+    'calendar.txt': new TextEncoder().encode('service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nweekday,1,1,1,1,1,1,1,20261001,20261231'),
+  };
+  return parseGtfsTimetable(files);
+}
+
+test('a 19 h ride that ends at the requested destination is not dropped by the interchange ride guard', () => {
+  const timetable = longRideFeed();
+  const result = findGtfsItinerariesWithStats(timetable, {
+    providerId: 'p1', providerName: 'Test Rail',
+    origin: [24.0201, 49.8401] as [number, number],
+    destination: [35.0401, 48.4701] as [number, number],
+    earliestDeparture: new Date('2026-10-12T20:00:00+03:00'),
+    latestDeparture: new Date('2026-10-14T08:00:00+03:00'),
+    now: new Date('2026-10-08T00:00:00Z'),
+    maximumJourneySeconds: 30 * 60 * 60,
+    maximumTransfers: 0,
+    maximumAccessWalkingMeters: 15_000,
+    maximumEgressWalkingMeters: 15_000,
+  });
+  assert.equal(result.itineraries.length, 1,
+    'the leg alights at the query destination, so only the journey horizon bounds it');
+});
+
+test('the interchange ride guard still bounds a leg that merely passes an interchange', () => {
+  const timetable = longRideFeed();
+  const result = findGtfsItinerariesWithStats(timetable, {
+    providerId: 'p1', providerName: 'Test Rail',
+    origin: [24.0201, 49.8401] as [number, number],
+    // Ask for the intermediate halt 6 h 30 m after boarding: inside the guard.
+    destination: [27.0001, 49.1201] as [number, number],
+    earliestDeparture: new Date('2026-10-12T20:00:00+03:00'),
+    latestDeparture: new Date('2026-10-13T08:00:00+03:00'),
+    now: new Date('2026-10-08T00:00:00Z'),
+    maximumJourneySeconds: 24 * 60 * 60,
+    maximumTransfers: 1,
+    maximumAccessWalkingMeters: 15_000,
+    maximumEgressWalkingMeters: 15_000,
+  });
+  assert.equal(result.itineraries.length, 1, 'a normal-length leg still works with transfers enabled');
+});
