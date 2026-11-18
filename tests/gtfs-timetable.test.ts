@@ -3915,3 +3915,96 @@ test('narrows timezone fallback to geographically confirmed Ukrainian feeds and 
     'stops.txt': enc('stop_id,stop_name,stop_lat,stop_lon\ns1,Khmelnytskyi Stop,49.4200,26.9800\n'),
   }), /agency_timezone/);
 });
+
+test('an intercity endpoint reach admits a railway station 9 km from the town centre', () => {
+  // Zaporizhzhia's station sits 9.1 km from the city centre; the historical 5 km
+  // intercity reach dropped the whole region from the timetable graph.
+  const originPin: [number, number] = [35.1390, 47.8388];
+  const station = { id: 'station', name: 'Zaporizhzhia-Pasazhyrskyi', lon: 35.0600, lat: 47.8290 };
+  const destination = { id: 'destination', name: 'Kyiv-Pasazhyrskyi', lon: 30.4890, lat: 50.4400 };
+  const build = () => {
+    const timetable = feed();
+    timetable.routes.clear();
+    timetable.trips.clear();
+    timetable.stopTimes.clear();
+    timetable.stopTimesByStop.clear();
+    timetable.stops.clear();
+    timetable.stops.set(station.id, station);
+    timetable.stops.set(destination.id, destination);
+    timetable.routes.set('rail', { name: 'Інтерсіті', mode: 'RAIL', transportType: 'train' });
+    timetable.trips.set('rail-trip', { routeId: 'rail', serviceId: 'weekday', headsign: 'Kyiv' });
+    const stopTimes = [
+      { stopId: station.id, sequence: 1, arrivalSeconds: 11 * 3600, departureSeconds: 11 * 3600, pickupType: 0, dropOffType: 0 },
+      { stopId: destination.id, sequence: 2, arrivalSeconds: 17 * 3600, departureSeconds: 17 * 3600, pickupType: 0, dropOffType: 0 },
+    ];
+    timetable.stopTimes.set('rail-trip', stopTimes);
+    stopTimes.forEach((stopTime, index) => timetable.stopTimesByStop.set(stopTime.stopId, [
+      ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId: 'rail-trip', index },
+    ]));
+    return timetable;
+  };
+  const query = (reach: number) => ({
+    providerId: 'p1', providerName: 'Test Rail', origin: originPin, destination: [destination.lon, destination.lat] as [number, number],
+    earliestDeparture: new Date('2026-10-12T04:55:00Z'), latestDeparture: new Date('2026-10-12T20:00:00Z'),
+    now: new Date('2026-10-08T00:00:00Z'), maximumTransfers: 0, maximumAccessWalkingMeters: reach, maximumEgressWalkingMeters: reach,
+  });
+
+  const narrow = findGtfsItinerariesWithStats(build(), query(5_000));
+  assert.equal(narrow.itineraries.length, 0, 'the 5 km reach cannot see the station 9.1 km away');
+  const widened = findGtfsItinerariesWithStats(build(), query(15_000));
+  assert.ok(widened.itineraries.some((journey) => journey.segments[0]?.tripId === 'rail-trip'),
+    'the 15 km intercity reach must admit the station and produce the direct ride');
+});
+
+test('a national transfer hub outside the origin-destination corridor still produces the itinerary', () => {
+  // Rivne has no direct train to Lviv: every real itinerary changes in Kyiv,
+  // which lies outside the corridor band between the two cities.
+  const origin = { id: 'origin', name: 'Rivne', lon: 26.2516, lat: 50.6199 };
+  const hub = { id: 'hub', name: 'Kyiv-Pasazhyrskyi', lon: 30.4890, lat: 50.4400 };
+  const destination = { id: 'destination', name: 'Lviv', lon: 24.0297, lat: 49.8397 };
+
+  const build = (providerCity: string) => {
+    const timetable = feed();
+    timetable.routes.clear();
+    timetable.trips.clear();
+    timetable.stopTimes.clear();
+    timetable.stopTimesByStop.clear();
+    timetable.stops.clear();
+    if (!timetable.providersByRoute) timetable.providersByRoute = new Map();
+    timetable.providersByRoute.clear();
+    for (const stop of [origin, hub, destination]) timetable.stops.set(stop.id, stop);
+    const legs = [
+      { routeId: 'leg-1', tripId: 'trip-1', from: origin, to: hub, departure: 8 * 3600, arrival: 12 * 3600 },
+      { routeId: 'leg-2', tripId: 'trip-2', from: hub, to: destination, departure: 13 * 3600, arrival: 19 * 3600 },
+    ];
+    for (const leg of legs) {
+      timetable.routes.set(leg.routeId, { name: leg.routeId, mode: 'RAIL', transportType: 'train' });
+      timetable.trips.set(leg.tripId, { routeId: leg.routeId, serviceId: 'weekday', headsign: leg.to.name });
+      timetable.providersByRoute.set(leg.routeId, {
+        id: 'national', name: 'National rail', city: providerCity, fetchedAt: new Date('2026-10-08T00:00:00Z'),
+      });
+      const stopTimes = [
+        { stopId: leg.from.id, sequence: 1, arrivalSeconds: leg.departure, departureSeconds: leg.departure, pickupType: 0, dropOffType: 0 },
+        { stopId: leg.to.id, sequence: 2, arrivalSeconds: leg.arrival, departureSeconds: leg.arrival, pickupType: 0, dropOffType: 0 },
+      ];
+      timetable.stopTimes.set(leg.tripId, stopTimes);
+      stopTimes.forEach((stopTime, index) => timetable.stopTimesByStop.set(stopTime.stopId, [
+        ...(timetable.stopTimesByStop.get(stopTime.stopId) ?? []), { tripId: leg.tripId, index },
+      ]));
+    }
+    return timetable;
+  };
+  const query = {
+    providerId: 'national', providerName: 'National rail', origin: [origin.lon, origin.lat] as [number, number],
+    destination: [destination.lon, destination.lat] as [number, number],
+    earliestDeparture: new Date('2026-10-12T04:55:00Z'), latestDeparture: new Date('2026-10-13T04:55:00Z'),
+    now: new Date('2026-10-08T00:00:00Z'), maximumTransfers: 1, maximumAccessWalkingMeters: 3_000, maximumEgressWalkingMeters: 3_000,
+  };
+
+  const corridorOnly = findGtfsItinerariesWithStats(build('Львів'), query);
+  assert.equal(corridorOnly.itineraries.length, 0,
+    'a city provider keeps the corridor bound, so the far hub is not a candidate');
+  const national = findGtfsItinerariesWithStats(build('Україна'), query);
+  assert.ok(national.itineraries.some((journey) => journey.segments.length === 2),
+    'national provider stops outside the corridor band must stay usable as a transfer hub');
+});

@@ -3351,14 +3351,18 @@ app.post('/api/v1/journeys/search', requireAuth, asyncHandler(async (req, res) =
   let gtfsWorkerSearch: Awaited<ReturnType<typeof gtfsSearchWorker.search>> = { descriptors: [], errors: [], searches: [] };
   let transitSearchFailed = false;
   const transitCandidateBudget = resolveTransitCandidateBudget(process.env.JOURNEY_TRANSIT_CANDIDATE_LIMIT);
-  const standardTransitAccessWalkingMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS;
-  const standardTransitEgressWalkingMeters = routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS;
+  // Oblast centres routinely sit several kilometres from their railway station
+  // (Zaporizhzhia 9.1 km, Vinnytsia 6.4 km). A 5 km intercity reach dropped
+  // every such region from the timetable graph even where a direct train exists.
+  const intercityEndpointWalkingMeters = routeDistanceMeters > 30_000 ? 15_000 : undefined;
+  const standardTransitAccessWalkingMeters = intercityEndpointWalkingMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS;
+  const standardTransitEgressWalkingMeters = intercityEndpointWalkingMeters ?? DEFAULT_MAX_EGRESS_WALKING_METERS;
   // The walking preference is a reach bound too: a pin in the middle of a block must not read
   // as "no routes" while a stop sits 1.2 km away. Capped expansion, never a shrink.
   const transitAccessWalkingMeters = effectiveWalkingReachMeters(
-    routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_ACCESS_WALKING_METERS, search.preferences.maxWalkingMeters);
+    intercityEndpointWalkingMeters ?? DEFAULT_MAX_ACCESS_WALKING_METERS, search.preferences.maxWalkingMeters);
   const transitEgressWalkingMeters = effectiveWalkingReachMeters(
-    routeDistanceMeters > 30_000 ? 5_000 : DEFAULT_MAX_EGRESS_WALKING_METERS, search.preferences.maxWalkingMeters);
+    intercityEndpointWalkingMeters ?? DEFAULT_MAX_EGRESS_WALKING_METERS, search.preferences.maxWalkingMeters);
   // Those two numbers are straight-line stop-reach radii: they decide which stops the timetable
   // search may look at. The legs they then cap are street paths, and a confirmed foot route leaves
   // a block at more than the crow-flight line. Without the allowance the Lviv search measured at
